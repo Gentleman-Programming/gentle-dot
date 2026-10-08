@@ -8,3 +8,6 @@ apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/gen/
 *.log
 .DS_Store
+
+# Declarations emitted next to sources by accident
+packages/*/src/**/*.d.ts

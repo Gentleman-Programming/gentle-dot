@@ -70,7 +70,14 @@ export function AccountsPanel({ auth, send, dispatch, openUrl }: AccountsPanelPr
 							</button>
 						) : null}
 						{flow.done ? (
-							<button type="button" onClick={() => dispatch({ type: "accounts", open: true })}>
+							<button
+								type="button"
+								onClick={() => {
+									setMethod(undefined);
+									setFilter("");
+									dispatch({ type: "accounts", open: true });
+								}}
+							>
 								Back to accounts
 							</button>
 						) : null}

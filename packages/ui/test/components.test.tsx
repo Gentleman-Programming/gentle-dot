@@ -172,7 +172,7 @@ describe("ChatSurface", () => {
 				dismiss={vi.fn()}
 			/>,
 		);
-		expect(screen.getByRole("status")).toHaveTextContent("open the link the assistant printed");
+		expect(screen.getByRole("status")).toHaveTextContent("Open the page again from the Gentle Dot menu");
 	});
 
 	it("shows notices that can be dismissed", () => {

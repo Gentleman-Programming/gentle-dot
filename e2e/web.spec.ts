@@ -104,9 +104,8 @@ test("opens accounts with /login, offers subscriptions without Claude, and conne
 	await key.fill("sk-e2e-not-real");
 	await accounts.getByRole("button", { name: "Continue" }).click();
 	await expect(accounts.getByRole("status")).toHaveText("Connected to OpenAI.");
+	// "Back to accounts" returns to the first step, which lists connected accounts.
 	await accounts.getByRole("button", { name: "Back to accounts" }).click();
-	// Back to the API key list; connected accounts are listed on the first step.
-	await accounts.getByRole("button", { name: "Back", exact: true }).click();
 	const signOut = accounts
 		.getByRole("region", { name: "Connected" })
 		.getByRole("button", { name: "Sign out of OpenAI" });
@@ -167,10 +166,10 @@ test("creates a profile with /profiles, edits a role, and switches to it", async
 
 test("explains a rejected access key", async ({ page }) => {
 	await page.goto("/#token=wrong-token");
-	await expect(page.getByRole("status")).toContainText("This link is not valid anymore");
+	await expect(page.getByRole("status")).toContainText("This access key is not valid anymore");
 });
 
-test("asks for the printed link when there is no access key", async ({ page }) => {
+test("asks for the access key when there is none", async ({ page }) => {
 	await page.goto("/");
-	await expect(page.getByRole("status")).toContainText("Open the link the assistant printed");
+	await expect(page.getByRole("status")).toContainText("This page needs your access key");
 });

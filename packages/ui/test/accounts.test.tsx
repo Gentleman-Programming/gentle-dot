@@ -89,6 +89,28 @@ describe("AccountsPanel", () => {
 			],
 		}).auth;
 
+	it("returns to the method choice after a finished sign-in", async () => {
+		const dispatch = vi.fn();
+		const { rerender } = render(
+			<AccountsPanel auth={mixed()} send={vi.fn()} dispatch={dispatch} openUrl={vi.fn()} />,
+		);
+		await userEvent.click(screen.getByRole("button", { name: /Use an API key/ }));
+		let s = reduce({ ...base(), auth: mixed() }, { type: "auth_started", providerId: "openai" });
+		s = apply(s, { type: "auth_done", flowId: "f1", providerId: "openai", ok: true });
+		rerender(<AccountsPanel auth={s.auth} send={vi.fn()} dispatch={dispatch} openUrl={vi.fn()} />);
+		await userEvent.click(screen.getByRole("button", { name: "Back to accounts" }));
+		expect(dispatch).toHaveBeenCalledWith({ type: "accounts", open: true });
+		rerender(
+			<AccountsPanel
+				auth={reduce(s, { type: "accounts", open: true }).auth}
+				send={vi.fn()}
+				dispatch={dispatch}
+				openUrl={vi.fn()}
+			/>,
+		);
+		expect(screen.getByRole("button", { name: /Use a subscription/ })).toBeInTheDocument();
+	});
+
 	it("asks for the method first, like Pi's /login", () => {
 		render(<AccountsPanel auth={mixed()} send={vi.fn()} dispatch={vi.fn()} openUrl={vi.fn()} />);
 		expect(screen.getByRole("button", { name: /Use a subscription/ })).toBeInTheDocument();

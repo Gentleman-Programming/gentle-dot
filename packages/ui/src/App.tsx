@@ -86,7 +86,7 @@ export function App() {
 		return (
 			<div className="chat chat-web">
 				<div className="status" role="status">
-					Open the link the assistant printed when it started; it includes your access key.
+					This page needs your access key. Open it from the Gentle Dot menu (Open in browser).
 				</div>
 			</div>
 		);

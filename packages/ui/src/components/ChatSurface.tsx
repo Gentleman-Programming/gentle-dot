@@ -23,7 +23,7 @@ const CONTINUE_TEXT = "Continue where you left off.";
 
 function statusText(state: DotState): string | undefined {
 	if (state.connection === "unauthorized") {
-		return "This link is not valid anymore. Please open the link the assistant printed when it started.";
+		return "This access key is not valid anymore. Open the page again from the Gentle Dot menu (Open in browser).";
 	}
 	if (state.connection === "closed") return "Reconnecting to the assistant…";
 	if (state.connection === "connecting") return "Connecting…";

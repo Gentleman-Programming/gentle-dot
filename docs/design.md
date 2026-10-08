@@ -61,7 +61,9 @@ docs/               design, deployment guide, security checklist
 
 ## 3. Agent supervisor
 
-- Spawns `gentle-shell --mode rpc --session-dir <dataDir>/sessions --append-system-prompt <identity file>` with `cwd` = configured workspace (default: home directory).
+- Spawns the bundled engine (`node <gentle-pi>/bin/gentle-shell.mjs --home <dataDir>/agent --mode rpc --session-dir <dataDir>/sessions --append-system-prompt <identity file>`) with `cwd` = configured workspace (default: `<dataDir>/workspace`, so the engine never reads a `.pi` project config from the user's home).
+- Isolation (S12): the child runs with its own `HOME=<dataDir>/home` (0700) and `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, and `XDG_STATE_HOME` under it, plus `GENTLE_PI_CONFIG_HOME=<dataDir>/gentle-ai`. `PATH` is kept, and `GIT_CONFIG_GLOBAL` points at the user's real `~/.gitconfig` when it exists, to keep their git identity. Inherited `PI_CODING_AGENT_DIR`, `GENTLE_PI_AGENT_HOME`, `GENTLE_SHELL_CONFIG`, and `ENGRAM_URL` are removed. The engine's first run otherwise writes into the real `~` (`~/.gentle-shell`, `~/.pi/agent/pi-pretty`, `~/.gentle-ai`), which `--home` alone does not prevent.
+- Memory: with its own HOME, the engine's memory plugin treats the user's Engram server as foreign, so the assistant runs its own Engram on `ENGRAM_PORT=7438` (override `GENTLE_DOT_ENGRAM_PORT`), with its memory stored under `<dataDir>/home/.engram`. The user's Engram on 7437 is never touched.
 - Parses stdout with strict LF framing on a byte stream. Never Node `readline` (it splits on U+2028/U+2029, which are valid inside JSON).
 - Correlates commands by `id`; stdout records without `id` are session events.
 - Reads stderr only as diagnostics (logged, never parsed).
@@ -177,7 +179,7 @@ Every daemon message carries `seq` (monotonic per connection) so the UI can dete
 
 - Pi sessions persist under `~/.gentle-dot/sessions`, and the daemon reopens the last active one after any restart.
 - After a crash, the turn that was in flight is lost. The conversation history remains, and the UI shows "I was interrupted. Continue?" with a Continue button that sends "Continue where you left off."
-- Engram keeps decisions and progress across conversations; the Gentle workflow already consults it when resuming.
+- The assistant's own Engram (port 7438) keeps decisions and progress across conversations; the Gentle workflow already consults it when resuming.
 - Pi Durable is reconsidered only for unattended or scheduled work.
 
 ## 8. Security (local)
@@ -194,7 +196,7 @@ The desktop app bundles the built UI (`packages/ui/dist/app`) as its frontend, s
 
 | Label | Size | URL | Properties |
 |---|---|---|---|
-| `dot` | 64 × 84 (the rose's aspect) | `index.html?surface=dot` | transparent, no decorations, always on top, not resizable, skip taskbar, visible on all workspaces, shadow off |
+| `dot` | 72 × 72 pt (the rose in a 66 pt black disc) | `index.html?surface=dot` | transparent outside the disc, no decorations, always on top, not resizable, skip taskbar, visible on all workspaces, shadow off; placed in logical points |
 | `panel` | 420 × 640 | `index.html?surface=panel` | transparent with macOS vibrancy (`HudWindow`), no decorations, always on top, hidden at start, skip taskbar |
 
 When the panel opens, it is placed next to the Dot on the side with more room, and it stays inside the monitor.
@@ -230,7 +232,9 @@ On launch, the app checks `GET /health`. If the daemon does not answer, the app 
 `~/.gentle-dot/config.json`, all optional:
 
 ```json
-{ "port": 4317, "workspace": "~", "shortcut": "Alt+Space", "launchAtLogin": false }
+{ "port": 4317, "workspace": "~/Documents", "shortcut": "Alt+Space", "launchAtLogin": false }
 ```
 
-Environment overrides: `GENTLE_DOT_AGENT_HOME` (default `~/.gentle-dot/agent`), `GENTLE_DOT_PORT`, `GENTLE_DOT_HOST` (default `127.0.0.1`; `0.0.0.0` only inside a container), `GENTLE_DOT_DATA_DIR`, `GENTLE_DOT_WORKSPACE`, `GENTLE_DOT_UI_DIR`, `GENTLE_DOT_AGENT_BIN`, `GENTLE_DOT_AGENT_ARGS` (JSON array), `GENTLE_DOT_ALLOWED_ORIGINS` (JSON array).
+All keys are optional; `workspace` defaults to `<dataDir>/workspace`.
+
+Environment overrides: `GENTLE_DOT_AGENT_HOME` (default `~/.gentle-dot/agent`), `GENTLE_DOT_ENGRAM_PORT` (default `7438`), `GENTLE_DOT_PORT`, `GENTLE_DOT_HOST` (default `127.0.0.1`; `0.0.0.0` only inside a container), `GENTLE_DOT_DATA_DIR`, `GENTLE_DOT_WORKSPACE`, `GENTLE_DOT_UI_DIR`, `GENTLE_DOT_AGENT_BIN`, `GENTLE_DOT_AGENT_ARGS` (JSON array), `GENTLE_DOT_ALLOWED_ORIGINS` (JSON array).
