@@ -119,6 +119,32 @@ mod tests {
     }
 
     #[test]
+    fn panic_turns_yolo_off_with_or_without_a_session() {
+        let (control, states) = control();
+        let dialogs = FakeDialogs::new(true, true);
+        control.set_yolo(true, NOW, &dialogs);
+        control.grant(NOW);
+        control.end(Reason::Panic);
+        assert!(!control.yolo(NOW));
+        let last = states.lock().unwrap().last().cloned().unwrap();
+        assert!(!last.active && !last.yolo, "{last:?}");
+
+        control.set_yolo(true, NOW, &dialogs);
+        control.end(Reason::Panic);
+        assert!(!control.yolo(NOW));
+        assert!(!states.lock().unwrap().last().unwrap().yolo);
+    }
+
+    #[test]
+    fn stop_ends_the_session_but_leaves_yolo_on() {
+        let (control, _states) = control();
+        control.set_yolo(true, NOW, &FakeDialogs::new(true, true));
+        control.grant(NOW);
+        control.end(Reason::Stopped);
+        assert!(control.yolo(NOW));
+    }
+
+    #[test]
     fn yolo_expiry_turns_it_off_and_reports_it() {
         let (control, states) = control();
         control.set_yolo(true, NOW, &FakeDialogs::new(true, true));

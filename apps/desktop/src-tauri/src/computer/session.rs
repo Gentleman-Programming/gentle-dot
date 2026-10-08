@@ -86,7 +86,11 @@ impl Session {
 
     /// Ends the session for `reason`. `None` when there was none to end.
     pub fn end(&mut self, reason: Reason) -> Option<StateEvent> {
-        self.ends_at.take()?;
+        // The panic shortcut is the emergency stop, so it also turns yolo mode off (L74).
+        let yolo_off = matches!(reason, Reason::Panic) && self.yolo_ends_at.take().is_some();
+        if self.ends_at.take().is_none() {
+            return yolo_off.then(|| self.event(None));
+        }
         self.epoch += 1;
         Some(self.event(Some(reason)))
     }
@@ -210,11 +214,14 @@ mod tests {
     }
 
     #[test]
-    fn stop_and_panic_end_the_session_but_leave_yolo_to_its_switch() {
+    fn stop_leaves_yolo_to_its_switch_but_panic_turns_it_off() {
         let mut session = Session::default();
         session.set_yolo(true, NOW);
         session.grant(NOW);
-        let ended = session.end(Reason::Panic).unwrap();
-        assert!(ended.yolo && session.yolo(NOW));
+        let stopped = session.end(Reason::Stopped).unwrap();
+        assert!(stopped.yolo && session.yolo(NOW));
+        session.grant(NOW);
+        let panicked = session.end(Reason::Panic).unwrap();
+        assert!(!panicked.yolo && !session.yolo(NOW));
     }
 }
