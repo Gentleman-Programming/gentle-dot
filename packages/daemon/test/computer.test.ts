@@ -154,10 +154,12 @@ describe("computer control registration (S24.7)", () => {
 			builtin: true,
 		});
 		// Direct exposure, nothing hidden, and the key only in the header the engine sends.
+		// The timeout leaves the user five minutes to answer the helper's native dialogs.
 		expect(servers().computer).toEqual({
 			url: HELPER,
 			headers: { Authorization: `Bearer ${KEY}` },
 			exposure: "direct",
+			timeout: 300,
 		});
 		expect(statSync(mcpFile).mode & 0o777).toBe(0o600);
 		// The engine restarts to read it, and its guard lets the computer's tools run without cards.
@@ -282,6 +284,7 @@ describe("computer control registration (S24.7)", () => {
 			url: HELPER,
 			headers: { Authorization: `Bearer ${KEY}` },
 			exposure: "direct",
+			timeout: 300,
 		});
 	});
 

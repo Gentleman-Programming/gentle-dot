@@ -308,6 +308,8 @@ export interface ComputerEndpoint {
 
 /** The built-in server's name in `mcp.json`; no connector can take it. */
 export const COMPUTER_ID = "computer";
+/** Seconds the engine waits for one helper call: enough to answer its grant or confirmation dialog. */
+const COMPUTER_TIMEOUT_SECONDS = 300;
 
 const COMPUTER_INFO = {
 	id: COMPUTER_ID,
@@ -470,11 +472,13 @@ export function renderMcpJson(state: ConnectorsState, computer?: ComputerEndpoin
 		};
 	}
 	// The helper checks its own key and asks the user itself, so all of its tools are direct.
+	// Its calls wait while the user answers a native dialog, so the engine's 30 s default would cut them.
 	if (computer)
 		servers[COMPUTER_ID] = {
 			url: computer.url,
 			headers: { Authorization: `Bearer ${literal(computer.token)}` },
 			exposure: "direct",
+			timeout: COMPUTER_TIMEOUT_SECONDS,
 		};
 	return `${JSON.stringify({ mcpServers: servers }, null, 2)}\n`;
 }
