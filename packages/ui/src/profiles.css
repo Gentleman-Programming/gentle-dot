@@ -1,0 +1,131 @@
+/* Profiles screen (ProfilesPanel). Uses the shared tokens and button styles from styles.css. */
+
+.profiles-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+}
+
+.profiles h2 {
+	margin: 0;
+	font-size: 16px;
+}
+
+.profiles h3 {
+	margin: 4px 0 12px;
+	font-size: 15px;
+}
+
+.profiles .muted {
+	margin: 4px 0 12px;
+}
+
+.profile-list {
+	list-style: none;
+	margin: 12px 0 0;
+	padding: 0;
+}
+
+.profile-list li {
+	padding: 10px 0;
+	border-bottom: 1px solid var(--line);
+}
+
+.profile-name {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.profile-summary {
+	margin: 4px 0 8px;
+	font-size: 12px;
+	color: var(--muted);
+}
+
+.profile-actions,
+.profile-confirm,
+.profile-form-actions,
+.profiles-footer {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+}
+
+.profile-confirm p {
+	flex: 1 1 100%;
+	margin: 0;
+}
+
+button.danger {
+	background: var(--danger);
+	border-color: var(--danger);
+}
+
+.profiles-footer {
+	margin-top: 14px;
+}
+
+.profiles-import {
+	padding: 10px 12px;
+	border-radius: 14px;
+	border: 1px solid var(--line);
+	background: var(--raised);
+}
+
+.profiles-import p {
+	margin: 0 0 6px;
+}
+
+.profiles-import p:last-child {
+	margin-bottom: 0;
+}
+
+.profile-editor {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	margin-top: 8px;
+}
+
+.profile-field {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.profile-field input,
+.role-route select {
+	padding: 7px 10px;
+	border-radius: 10px;
+	border: 1px solid var(--line);
+	background: var(--raised);
+	color: inherit;
+	font: inherit;
+}
+
+.profile-problem {
+	color: var(--danger);
+}
+
+.role-routes {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.role-route {
+	display: grid;
+	grid-template-columns: minmax(110px, 1fr) minmax(0, 2fr) minmax(0, 1fr);
+	align-items: center;
+	gap: 8px;
+}
+
+.role-label {
+	font-size: 13px;
+}
+
+.role-route select {
+	min-width: 0;
+}

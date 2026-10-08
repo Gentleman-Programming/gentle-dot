@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PROTOCOL_VERSION, parseClientMessage } from "../src/index.ts";
+import { isValidProfileName, PROTOCOL_VERSION, parseClientMessage, THINKING_LEVELS } from "../src/index.ts";
 
 describe("protocol", () => {
 	it("exposes version 1", () => {
@@ -54,5 +54,94 @@ describe("protocol", () => {
 		]) {
 			expect(parseClientMessage(raw), raw).toBeUndefined();
 		}
+	});
+});
+
+describe("profile messages", () => {
+	const parse = (value: object) => parseClientMessage(JSON.stringify(value));
+
+	it("accepts every profile command", () => {
+		expect(parse({ type: "profiles_list" })).toEqual({ type: "profiles_list" });
+		expect(parse({ type: "profile_import" })).toEqual({ type: "profile_import" });
+		expect(parse({ type: "profile_apply", name: "deep-work" })).toEqual({
+			type: "profile_apply",
+			name: "deep-work",
+		});
+		expect(parse({ type: "profile_delete", name: "a.b_c" })).toEqual({
+			type: "profile_delete",
+			name: "a.b_c",
+		});
+		expect(parse({ type: "profile_rename", from: "a", to: "b" })).toEqual({
+			type: "profile_rename",
+			from: "a",
+			to: "b",
+		});
+		expect(parse({ type: "profile_duplicate", from: "a", to: "b" })).toEqual({
+			type: "profile_duplicate",
+			from: "a",
+			to: "b",
+		});
+		expect(parse({ type: "profile_save_current", name: "mine" })).toEqual({
+			type: "profile_save_current",
+			name: "mine",
+		});
+	});
+
+	it("keeps only valid routes when saving a profile and drops empty ones", () => {
+		expect(
+			parse({
+				type: "profile_save",
+				name: "fast",
+				roles: {
+					orchestrator: { model: "anthropic/claude-sonnet-4", thinking: "high" },
+					"gentle-ai-worker": { thinking: "low" },
+					"gentle-ai-explore": {},
+				},
+			}),
+		).toEqual({
+			type: "profile_save",
+			name: "fast",
+			roles: {
+				orchestrator: { model: "anthropic/claude-sonnet-4", thinking: "high" },
+				"gentle-ai-worker": { thinking: "low" },
+			},
+		});
+	});
+
+	it("rejects bad profile names, roles, models, and thinking levels", () => {
+		for (const bad of [
+			{ type: "profile_apply" },
+			{ type: "profile_apply", name: "" },
+			{ type: "profile_apply", name: "-starts-with-dash" },
+			{ type: "profile_apply", name: "has space" },
+			{ type: "profile_apply", name: "x".repeat(65) },
+			{ type: "profile_apply", name: "constructor" },
+			{ type: "profile_delete", name: "prototype" },
+			{ type: "profile_rename", from: "a" },
+			{ type: "profile_duplicate", from: "a", to: "../b" },
+			{ type: "profile_save", name: "ok" },
+			{ type: "profile_save", name: "ok", roles: [] },
+			{ type: "profile_save", name: "ok", roles: { worker: "anthropic/x" } },
+			{ type: "profile_save", name: "ok", roles: { worker: { model: "bad model" } } },
+			{ type: "profile_save", name: "ok", roles: { worker: { thinking: "extreme" } } },
+			{ type: "profile_save", name: "ok", roles: { "bad role": { thinking: "low" } } },
+			{ type: "profile_save", name: "ok", roles: { worker: { model: 3 } } },
+			{ type: "profile_save_current", name: "__proto__" },
+		]) {
+			expect(parse(bad), JSON.stringify(bad)).toBeUndefined();
+		}
+		expect(
+			parseClientMessage('{"type":"profile_save","name":"ok","roles":{"__proto__":{"thinking":"low"}}}'),
+		).toBeUndefined();
+	});
+
+	it("validates profile names like the engine does", () => {
+		expect(isValidProfileName("deep-work.v2_A")).toBe(true);
+		expect(isValidProfileName("9lives")).toBe(true);
+		expect(isValidProfileName("x".repeat(64))).toBe(true);
+		for (const name of ["", "_x", ".x", "x".repeat(65), "a/b", "constructor", "prototype", "__proto__", 3]) {
+			expect(isValidProfileName(name), String(name)).toBe(false);
+		}
+		expect(THINKING_LEVELS).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 	});
 });

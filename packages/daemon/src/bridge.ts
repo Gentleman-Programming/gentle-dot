@@ -1,5 +1,12 @@
 import { join } from "node:path";
-import type { AgentState, Ask, ClientMessage, ServerPayload } from "@gentle-dot/protocol";
+import {
+	type AgentState,
+	type Ask,
+	type ClientMessage,
+	isThinkingLevel,
+	type RoleRoute,
+	type ServerPayload,
+} from "@gentle-dot/protocol";
 import type { AuthManager } from "./auth.ts";
 import {
 	conversationIdOf,
@@ -8,6 +15,13 @@ import {
 	resolveConversation,
 } from "./conversations.ts";
 import { describeTool, textOf } from "./presentation.ts";
+import {
+	LiveModelSwitch,
+	ProfileError,
+	type ProfileStore,
+	type SwitchOutcome,
+	toModelOptions,
+} from "./profiles.ts";
 import type { AgentRecord, AgentSupervisor, SupervisorEvent } from "./supervisor.ts";
 import { isBlockedInput, presentText, shouldShowToast } from "./white-label.ts";
 
@@ -19,7 +33,22 @@ export interface BridgeOptions {
 	dataDir: string;
 	log?: (line: string) => void;
 	auth?: AuthManager;
+	profiles?: ProfileStore;
 }
+
+type ProfileCommand = Extract<
+	ClientMessage,
+	{
+		type:
+			| "profile_save"
+			| "profile_rename"
+			| "profile_duplicate"
+			| "profile_delete"
+			| "profile_apply"
+			| "profile_import"
+			| "profile_save_current";
+	}
+>;
 
 const DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
 
@@ -45,10 +74,12 @@ export class DotBridge {
 	private nextMessage = 0;
 	private assistantId: string | undefined;
 	private restartPending = false;
+	private readonly liveSwitch: LiveModelSwitch;
 
 	constructor(supervisor: AgentSupervisor, options: BridgeOptions) {
 		this.supervisor = supervisor;
 		this.options = options;
+		this.liveSwitch = new LiveModelSwitch(supervisor, (line) => this.log(line));
 		this.sessionDir = join(options.dataDir, "sessions");
 		supervisor.onEvent((event) => this.onAgentEvent(event));
 		if (options.auth) options.auth.onCredentialsChanged = () => this.afterCredentialsChange();
@@ -107,6 +138,10 @@ export class DotBridge {
 				if (message.requestId && this.alreadySeen(message.requestId)) return;
 				if (/^\s*\/login\s*$/i.test(message.text)) {
 					await this.sendProviders(client, true);
+					return;
+				}
+				if (/^\s*\/profiles\s*$/i.test(message.text)) {
+					await this.sendProfiles(client, true);
 					return;
 				}
 				this.interrupted = false;
@@ -197,6 +232,18 @@ export class DotBridge {
 			case "auth_logout":
 				await this.requireAuth().logout(message.providerId);
 				return;
+			case "profiles_list":
+				await this.sendProfiles(client);
+				return;
+			case "profile_save":
+			case "profile_rename":
+			case "profile_duplicate":
+			case "profile_delete":
+			case "profile_apply":
+			case "profile_import":
+			case "profile_save_current":
+				await this.profileCommand(client, message);
+				return;
 			case "get_history":
 				this.deliver(client, {
 					type: "history",
@@ -217,6 +264,101 @@ export class DotBridge {
 		this.deliver(client, { type: "auth_providers", providers, ...(open ? { open: true } : {}) });
 	}
 
+	private requireProfiles(): ProfileStore {
+		if (!this.options.profiles) throw new Error("profiles are not available");
+		return this.options.profiles;
+	}
+
+	private async sendProfiles(client: BridgeClient, open = false): Promise<void> {
+		try {
+			this.deliver(client, { ...(await this.profilesPayload()), ...(open ? { open: true } : {}) });
+		} catch (error) {
+			if (!(error instanceof ProfileError)) throw error;
+			this.deliver(client, { type: "error", code: error.code, message: error.message });
+		}
+	}
+
+	private async profilesPayload(): Promise<Extract<ServerPayload, { type: "profiles" }>> {
+		const store = this.requireProfiles();
+		const { profiles, active } = store.list();
+		const models = await this.supervisor.request({ type: "get_available_models" }).then(
+			(response) => toModelOptions(response.data),
+			() => [],
+		);
+		return {
+			type: "profiles",
+			profiles,
+			...(active ? { active } : {}),
+			roles: store.roles(),
+			models,
+			importable: store.importable(),
+		};
+	}
+
+	/** Runs one profile change; every window gets the new list, errors go to the window that asked. */
+	private async profileCommand(client: BridgeClient, message: ProfileCommand): Promise<void> {
+		const store = this.requireProfiles();
+		try {
+			switch (message.type) {
+				case "profile_save":
+					await store.save(message.name, message.roles);
+					// Editing the profile in use takes effect right away.
+					if (store.list().active === message.name) await this.applyProfile(message.name);
+					break;
+				case "profile_rename":
+					await store.rename(message.from, message.to);
+					break;
+				case "profile_duplicate":
+					await store.duplicate(message.from, message.to);
+					break;
+				case "profile_delete":
+					await store.remove(message.name);
+					break;
+				case "profile_apply":
+					await this.applyProfile(message.name);
+					break;
+				case "profile_save_current":
+					await store.saveCurrent(message.name, await this.runningRoute());
+					break;
+				case "profile_import": {
+					const providers = await (this.options.auth?.providers() ?? Promise.resolve([])).catch(() => []);
+					this.deliver(client, { type: "profiles_imported", ...(await store.import(providers)) });
+					break;
+				}
+			}
+		} catch (error) {
+			if (!(error instanceof ProfileError)) throw error;
+			this.deliver(client, { type: "error", code: error.code, message: error.message });
+			return;
+		}
+		this.broadcast(await this.profilesPayload());
+	}
+
+	private async applyProfile(name: string): Promise<void> {
+		const orchestrator = await this.requireProfiles().apply(name);
+		if (orchestrator) this.reportSwitch(await this.liveSwitch.switchTo(orchestrator));
+	}
+
+	private reportSwitch(outcome: SwitchOutcome): void {
+		if (outcome !== "failed") return;
+		this.broadcast({
+			type: "toast",
+			level: "warning",
+			message:
+				"Profile applied. The main assistant keeps its current model until that model's account is connected.",
+		});
+	}
+
+	/** The main assistant's model and thinking level in the running conversation. */
+	private async runningRoute(): Promise<RoleRoute | undefined> {
+		const response = await this.supervisor.request({ type: "get_state" });
+		const state = response.data as { model?: { provider?: unknown; id?: unknown }; thinkingLevel?: unknown };
+		if (typeof state?.model?.provider !== "string" || typeof state.model.id !== "string") return undefined;
+		const route: RoleRoute = { model: `${state.model.provider}/${state.model.id}` };
+		if (isThinkingLevel(state.thinkingLevel)) route.thinking = state.thinkingLevel;
+		return route;
+	}
+
 	/** New credentials: refresh every window, and restart the agent once it is idle so it sees new models. */
 	private afterCredentialsChange(): void {
 		void this.requireAuth()
@@ -233,6 +375,11 @@ export class DotBridge {
 	private restartAgent(): void {
 		this.restartPending = false;
 		this.supervisor.restart().catch((error: Error) => this.log(`agent restart failed: ${error.message}`));
+	}
+
+	/** A profile applied while the assistant was busy switches the model now. */
+	private settleModelSwitch(): void {
+		void this.liveSwitch.settle().then((outcome) => this.reportSwitch(outcome));
 	}
 
 	private afterConversationChange(messages: unknown[]): void {
@@ -265,6 +412,7 @@ export class DotBridge {
 		switch (event.type) {
 			case "supervisor_state":
 				if (event.state !== "ready") this.clearRun();
+				else this.settleModelSwitch();
 				break;
 			case "interrupted":
 				this.interrupted = true;
@@ -288,6 +436,7 @@ export class DotBridge {
 				this.assistantId = undefined;
 				// The title of a new conversation comes from its first message.
 				this.broadcast(this.conversationsPayload());
+				this.settleModelSwitch();
 				if (this.restartPending) this.restartAgent();
 				break;
 			case "extension_ui_request":

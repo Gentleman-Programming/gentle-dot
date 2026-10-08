@@ -5,6 +5,7 @@ import { AccountsPanel } from "./AccountsPanel.tsx";
 import { AskCard } from "./AskCard.tsx";
 import { Composer } from "./Composer.tsx";
 import { MessageList } from "./MessageList.tsx";
+import { ProfilesPanel } from "./ProfilesPanel.tsx";
 import { newRequestId, type Send } from "./types.ts";
 
 interface ChatSurfaceProps {
@@ -45,7 +46,12 @@ export function ChatSurface({
 		send({ type: "auth_list" });
 		dispatch({ type: "accounts", open: true });
 	};
+	const openProfiles = () => {
+		send({ type: "profiles_list" });
+		dispatch({ type: "profiles", open: true });
+	};
 	const [showConversations, setShowConversations] = useState(false);
+	const covered = state.auth.open || state.profiles.open;
 	const status = statusText(state);
 	const ready =
 		state.connection === "open" && state.agentState !== "restarting" && state.agentState !== "starting";
@@ -69,6 +75,9 @@ export function ChatSurface({
 				</button>
 				<button type="button" className="icon" aria-label="Accounts" onClick={openAccounts}>
 					⚿
+				</button>
+				<button type="button" className="icon" aria-label="Profiles" onClick={openProfiles}>
+					◐
 				</button>
 				<button
 					type="button"
@@ -125,7 +134,18 @@ export function ChatSurface({
 				</main>
 			) : null}
 
-			{!state.auth.open && needsAccount(state) ? (
+			{state.profiles.open && !state.auth.open ? (
+				<main className="chat-body">
+					<ProfilesPanel
+						profiles={state.profiles}
+						send={send}
+						dispatch={dispatch}
+						{...(state.auth.providers ? { providers: state.auth.providers } : {})}
+					/>
+				</main>
+			) : null}
+
+			{!covered && needsAccount(state) ? (
 				<div className="onboarding">
 					<p>To start, connect the AI service you use (a subscription or an API key).</p>
 					<button type="button" className="primary" onClick={openAccounts}>
@@ -134,7 +154,7 @@ export function ChatSurface({
 				</div>
 			) : null}
 
-			<main className="chat-body" hidden={state.auth.open}>
+			<main className="chat-body" hidden={covered}>
 				<MessageList messages={state.messages} />
 				{state.interrupted ? (
 					<div className="interrupted">

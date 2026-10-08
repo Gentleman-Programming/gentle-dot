@@ -12,12 +12,32 @@
 //   FAKE_AGENT_ARGS_FILE  write argv as JSON to this file
 //   FAKE_AGENT_BRANDING   emit branded startup UI records
 //   FAKE_AGENT_ENV_FILE   write selected environment variables as JSON to this file
+//   FAKE_AGENT_COMMANDS_FILE  append every model command (set_model, set_thinking_level) as JSONL
+// get_available_models lists MODELS; set_model and set_thinking_level change what
+// get_state reports, so tests can read the last values back.
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 type Rec = Record<string, unknown>;
 type Message = { role: "user" | "assistant"; content: string };
+
+const MODELS: Rec[] = [
+	{
+		id: "fake-model",
+		name: "Fake Model",
+		provider: "fake",
+		reasoning: true,
+		// Real models may carry credentials in headers; they must never reach a client.
+		headers: { Authorization: "Bearer fake-secret-header" },
+		baseUrl: "https://internal.fake.example",
+		cost: { input: 1, output: 2 },
+	},
+	{ id: "fake-fast", name: "Fake Fast", provider: "fake", reasoning: false },
+	{ id: "big", name: "Other Big", provider: "other", reasoning: true },
+];
+let model = MODELS[0] as Rec;
+let thinkingLevel = "medium";
 
 const argv = process.argv.slice(2);
 if (process.env.FAKE_AGENT_ARGS_FILE) writeFileSync(process.env.FAKE_AGENT_ARGS_FILE, JSON.stringify(argv));
@@ -41,6 +61,13 @@ newSession();
 function argValue(name: string): string | undefined {
 	const i = argv.indexOf(name);
 	return i >= 0 ? argv[i + 1] : undefined;
+}
+
+function recordCommand(rec: Rec): void {
+	const file = process.env.FAKE_AGENT_COMMANDS_FILE;
+	if (!file) return;
+	const { id: _id, ...command } = rec;
+	appendFileSync(file, `${JSON.stringify({ ...command, busy })}\n`);
 }
 
 function out(rec: Rec): void {
@@ -152,8 +179,8 @@ function handle(rec: Rec) {
 	switch (type) {
 		case "get_state":
 			return respond(id, "get_state", {
-				model: { id: "fake-model", name: "Fake Model", provider: "fake" },
-				thinkingLevel: "medium",
+				model: { id: model.id, name: model.name, provider: model.provider },
+				thinkingLevel,
 				isStreaming: busy,
 				sessionFile,
 				sessionId,
@@ -191,6 +218,25 @@ function handle(rec: Rec) {
 				return respond(id, "switch_session", undefined, "Session not found");
 			}
 			return respond(id, "switch_session", { cancelled: false });
+		case "get_available_models":
+			return respond(id, type, { models: MODELS });
+		case "set_model": {
+			recordCommand(rec);
+			const found = MODELS.find((m) => m.provider === rec.provider && m.id === rec.modelId);
+			if (!found)
+				return respond(
+					id,
+					type,
+					undefined,
+					`Model not found: ${String(rec.provider)}/${String(rec.modelId)}`,
+				);
+			model = found;
+			return respond(id, type, found);
+		}
+		case "set_thinking_level":
+			recordCommand(rec);
+			thinkingLevel = String(rec.level);
+			return respond(id, type);
 		case "noreply":
 			return;
 		case "extension_ui_response": {

@@ -6,6 +6,9 @@ import type {
 	AuthPrompt,
 	AuthProvider,
 	ConversationSummary,
+	ModelOption,
+	Profile,
+	ProfileRole,
 	ServerMessage,
 } from "@gentle-dot/protocol";
 
@@ -22,6 +25,18 @@ export interface AuthState {
 	/** Undefined until the first provider list arrives. */
 	providers?: AuthProvider[];
 	flow?: AuthFlowState;
+}
+
+export interface ProfilesState {
+	open: boolean;
+	/** Undefined until the first list arrives. */
+	list?: Profile[];
+	active?: string;
+	roles: ProfileRole[];
+	models: ModelOption[];
+	importable: boolean;
+	/** The last import's result, shown until the screen closes. */
+	lastImport?: { imported: { from: string; to: string }[]; missingProviders: string[] };
 }
 
 export type ConnectionStatus = "connecting" | "open" | "closed" | "unauthorized";
@@ -51,6 +66,7 @@ export interface DotState {
 	interrupted: boolean;
 	notices: Notice[];
 	auth: AuthState;
+	profiles: ProfilesState;
 }
 
 export type DotAction =
@@ -58,6 +74,7 @@ export type DotAction =
 	| { type: "connection"; status: ConnectionStatus }
 	| { type: "dismiss"; id: number }
 	| { type: "accounts"; open: boolean }
+	| { type: "profiles"; open: boolean }
 	| { type: "auth_started"; providerId: string };
 
 export const initialState: DotState = {
@@ -69,6 +86,7 @@ export const initialState: DotState = {
 	interrupted: false,
 	notices: [],
 	auth: { open: false },
+	profiles: { open: false, roles: [], models: [], importable: false },
 };
 
 let nextNotice = 0;
@@ -87,10 +105,12 @@ export function reduce(state: DotState, action: DotAction): DotState {
 			// Closing drops the flow; reopening keeps a running one and leaves a finished one.
 			const keep = action.open && state.auth.flow !== undefined && state.auth.flow.done === undefined;
 			return {
-				...state,
+				...closeProfiles(state, action.open),
 				auth: { ...state.auth, open: action.open, flow: keep ? state.auth.flow : undefined },
 			};
 		}
+		case "profiles":
+			return openProfiles(state, action.open);
 		case "auth_started":
 			return {
 				...state,
@@ -164,8 +184,24 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 			return { ...state, interrupted: true };
 		case "auth_providers":
 			return {
-				...state,
+				...closeProfiles(state, message.open === true),
 				auth: { ...state.auth, providers: message.providers, open: message.open ? true : state.auth.open },
+			};
+		case "profiles": {
+			const { type: _type, seq: _seq, open, profiles, active, ...rest } = message;
+			const next = { ...state.profiles, ...rest, list: profiles };
+			if (active === undefined) delete next.active;
+			else next.active = active;
+			const updated = { ...state, profiles: next };
+			return open ? openProfiles(updated, true) : updated;
+		}
+		case "profiles_imported":
+			return {
+				...state,
+				profiles: {
+					...state.profiles,
+					lastImport: { imported: message.imported, missingProviders: message.missingProviders },
+				},
 			};
 		case "auth_event":
 			return updateFlow(state, message.flowId, (f) => ({ ...f, events: [...f.events, message.event] }));
@@ -184,6 +220,20 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 		case "error":
 			return addNotice(state, "error", message.message);
 	}
+}
+
+/** Profiles and accounts share the screen: opening one closes the other. */
+function openProfiles(state: DotState, open: boolean): DotState {
+	const { lastImport: _lastImport, ...rest } = state.profiles;
+	return {
+		...state,
+		auth: open ? { ...state.auth, open: false } : state.auth,
+		profiles: open ? { ...state.profiles, open } : { ...rest, open },
+	};
+}
+
+function closeProfiles(state: DotState, when: boolean): DotState {
+	return when && state.profiles.open ? openProfiles(state, false) : state;
 }
 
 function updateFlow(state: DotState, flowId: string, update: (f: AuthFlowState) => AuthFlowState): DotState {

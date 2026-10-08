@@ -1,5 +1,17 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { expect, type Page, test } from "@playwright/test";
-import { E2E_TOKEN } from "./token.ts";
+import { E2E_COMMANDS_FILE, E2E_DATA_DIR, E2E_TOKEN } from "./token.ts";
+
+const readJson = (path: string) =>
+	existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as unknown) : undefined;
+const agentCommands = () =>
+	existsSync(E2E_COMMANDS_FILE)
+		? readFileSync(E2E_COMMANDS_FILE, "utf8")
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line) as unknown)
+		: [];
 
 async function open(page: Page) {
 	await page.goto(`/#token=${E2E_TOKEN}`);
@@ -85,6 +97,54 @@ test("opens accounts with /login and connects and disconnects an API key", async
 	await expect(openai.getByText("Connected")).toBeHidden();
 	await accounts.getByRole("button", { name: "Close accounts" }).click();
 	await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
+});
+
+test("creates a profile with /profiles, edits a role, and switches to it", async ({ page }) => {
+	await open(page);
+	await say(page, "/profiles");
+	const profiles = page.getByRole("region", { name: "Profiles" });
+	await expect(profiles).toBeVisible();
+	await expect(profiles.getByText("No profiles yet.")).toBeVisible();
+	await expect(profiles.getByRole("button", { name: "Import my Gentle Shell profiles" })).toBeHidden();
+
+	await profiles.getByRole("button", { name: "New profile" }).click();
+	await profiles.getByRole("textbox", { name: "Profile name" }).fill("e2e-focus");
+	await profiles.getByRole("combobox", { name: "Main assistant model" }).selectOption({ label: "Fake Fast" });
+	await profiles.getByRole("button", { name: "Save" }).click();
+	const item = profiles.getByRole("listitem").filter({ has: page.getByText("e2e-focus", { exact: true }) });
+	await expect(item).toContainText("Main assistant: Fake Fast");
+
+	await item.getByRole("button", { name: "Edit" }).click();
+	await profiles.getByRole("combobox", { name: "Main assistant thinking" }).selectOption("high");
+	await profiles.getByRole("button", { name: "Save" }).click();
+	await expect(item).toContainText("Main assistant: Fake Fast · High");
+
+	expect(agentCommands()).toEqual([]);
+	await item.getByRole("button", { name: "Use" }).click();
+	await expect(item.getByText("In use")).toBeVisible();
+	await expect(item.getByRole("button", { name: "Use" })).toBeHidden();
+
+	const roles = { orchestrator: { model: "fake/fake-fast", thinking: "high" } };
+	expect(readJson(join(E2E_DATA_DIR, "gentle-ai", "profiles.json"))).toEqual({
+		kind: "gentle-pi.agent_model_profiles",
+		version: 1,
+		profiles: { "e2e-focus": roles },
+		active: "e2e-focus",
+	});
+	expect(readJson(join(E2E_DATA_DIR, "gentle-ai", "models.json"))).toEqual(roles);
+	expect(readJson(join(E2E_DATA_DIR, "agent", "settings.json"))).toEqual({
+		defaultProvider: "fake",
+		defaultModel: "fake-fast",
+		defaultThinkingLevel: "high",
+	});
+	await expect.poll(agentCommands).toEqual([
+		{ type: "set_model", provider: "fake", modelId: "fake-fast", busy: false },
+		{ type: "set_thinking_level", level: "high", busy: false },
+	]);
+
+	await profiles.getByRole("button", { name: "Close profiles" }).click();
+	await page.getByRole("button", { name: "Profiles" }).click();
+	await expect(page.getByRole("region", { name: "Profiles" }).getByText("In use")).toBeVisible();
 });
 
 test("explains a rejected access key", async ({ page }) => {

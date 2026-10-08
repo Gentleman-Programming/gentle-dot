@@ -7,6 +7,7 @@ import { type ClientMessage, CloseCode, PROTOCOL_VERSION, parseClientMessage } f
 import { type WebSocket, WebSocketServer } from "ws";
 import { AuthManager, type AuthRuntime, createModelAuthRuntime, resolveAgentHome } from "./auth.ts";
 import { type BridgeClient, DotBridge } from "./bridge.ts";
+import { defaultImportPath, ProfileStore } from "./profiles.ts";
 import { AgentSupervisor } from "./supervisor.ts";
 import { identityArgs } from "./white-label.ts";
 
@@ -23,6 +24,8 @@ export interface DaemonOptions {
 	agentEnv?: NodeJS.ProcessEnv;
 	/** The assistant's own Gentle Shell home (`--home`); profiles go next to it. */
 	agentHome?: string;
+	/** Another setup's `profiles.json` offered for a one-time import; defaults to the user's Gentle Shell store. */
+	profilesImportPath?: string;
 	/** Creates the sign-in runtime; defaults to Pi's ModelRuntime on the agent home. */
 	authRuntime?: () => Promise<AuthRuntime>;
 	/** Origins allowed to open the WebSocket, besides the daemon's own and the desktop app's. */
@@ -86,17 +89,17 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		...(options.backoffMs ? { backoffMs: options.backoffMs } : {}),
 		log: (line) => log(`[agent] ${line}`),
 	});
+	const agentHome = options.agentHome ?? resolveAgentHome(process.env, options.dataDir);
 	const auth = new AuthManager({
-		runtime:
-			options.authRuntime ??
-			(() =>
-				createModelAuthRuntime(
-					options.agentHome ?? resolveAgentHome(process.env, options.dataDir),
-					options.workspace,
-				)),
+		runtime: options.authRuntime ?? (() => createModelAuthRuntime(agentHome, options.workspace)),
 		log,
 	});
-	const bridge = new DotBridge(supervisor, { dataDir: options.dataDir, log, auth });
+	const profiles = new ProfileStore({
+		configHome: join(options.dataDir, "gentle-ai"),
+		agentHome,
+		importPath: options.profilesImportPath ?? defaultImportPath(process.env),
+	});
+	const bridge = new DotBridge(supervisor, { dataDir: options.dataDir, log, auth, profiles });
 
 	const server = createServer((req, res) => handleHttp(req, res, options.uiDir, bridge));
 	const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
