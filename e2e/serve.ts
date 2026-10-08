@@ -16,4 +16,6 @@ process.env.GENTLE_DOT_AGENT_BIN = process.execPath;
 process.env.GENTLE_DOT_AGENT_ARGS = JSON.stringify([
 	fileURLToPath(new URL("../packages/daemon/test/fixtures/fake-agent.ts", import.meta.url)),
 ]);
-await import("../packages/daemon/src/cli.ts");
+// A non-literal specifier keeps the daemon sources out of this tsconfig project.
+const cli = "../packages/daemon/src/cli.ts";
+await import(cli);
