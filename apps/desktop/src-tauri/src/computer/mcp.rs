@@ -699,7 +699,10 @@ impl Helper {
                         self.post(epoch, InputEvent::Text(chunk))?;
                     }
                 }
-                (self.glow)(Mark::Key);
+                // The glow marks posted input only; an empty text posts none.
+                if !typed.is_empty() {
+                    (self.glow)(Mark::Key);
+                }
                 Ok((format!("{action} in {target}: done."), SETTLE_MS))
             }
             Tool::Key { combo } => {
@@ -1719,6 +1722,15 @@ mod tests {
                 (Mark::Key, 8),
             ]
         );
+    }
+
+    #[test]
+    fn typing_nothing_marks_nothing() {
+        let rig = rig();
+        rig.ready();
+        assert!(!is_error(&rig.call("type", json!({"text": ""}))));
+        assert!(rig.desktop.events().is_empty());
+        assert_eq!(marks(&rig), vec![]);
     }
 
     #[test]
