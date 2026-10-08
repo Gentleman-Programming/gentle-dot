@@ -1,0 +1,15 @@
+{
+	"$schema": "../gen/schemas/desktop-schema.json",
+	"identifier": "default",
+	"description": "What the Dot and panel UI may call: event listening, Dot dragging, and the four shell commands.",
+	"windows": ["dot", "panel"],
+	"permissions": [
+		"core:event:allow-listen",
+		"core:event:allow-unlisten",
+		"core:window:allow-start-dragging",
+		"allow-connection-info",
+		"allow-toggle-panel",
+		"allow-hide-panel",
+		"allow-set-dot-state"
+	]
+}

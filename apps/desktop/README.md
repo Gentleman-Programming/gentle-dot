@@ -1,0 +1,73 @@
+# Gentle Dot desktop (macOS)
+
+The Tauri 2 shell around the Gentle Dot UI: a floating Dot, an expandable panel, a menu bar item, and a global shortcut. The contract between Rust and the UI is §9 of [`docs/design.md`](../../docs/design.md).
+
+## Requirements
+
+- macOS, Xcode command line tools, Node 24, pnpm.
+- Rust stable through rustup. If another `cargo` without `rustc` (for example from Nix) comes first on `PATH`, put rustup first:
+
+  ```sh
+  export PATH=/opt/homebrew/opt/rustup/bin:$PATH
+  ```
+
+- `src-tauri/.cargo/config.toml` pins the linker and C compiler to Apple's `/usr/bin/cc`, because a Nix GCC `cc` on `PATH` cannot link against the macOS SDK.
+
+## Run
+
+```sh
+pnpm --filter @gentle-dot/desktop dev
+```
+
+This starts the UI dev server on `http://127.0.0.1:5173` and opens the Dot. Debug builds spawn the daemon with `GENTLE_DOT_ALLOWED_ORIGINS='["http://127.0.0.1:5173","http://localhost:5173"]'`, because the daemon rejects WebSocket origins outside its allowlist and `tauri dev` serves the UI from that origin. Release builds never set it; there the UI loads from `tauri://localhost`, which the daemon always allows. A daemon that was already running when the app started keeps its own allowlist.
+
+## Build
+
+```sh
+pnpm --filter @gentle-dot/desktop tauri build --debug --bundles app   # debug .app
+pnpm --filter @gentle-dot/desktop build                                # release
+```
+
+The bundle is written to `src-tauri/target/{debug,release}/bundle/macos/Gentle Dot.app`. Run the Rust unit tests with `cargo test` inside `src-tauri`.
+
+## The daemon and `PATH`
+
+On launch, the app checks `GET http://127.0.0.1:<port>/health`. If nothing answers, it spawns `<node> <repo>/packages/daemon/src/cli.ts` and writes its output to `~/.gentle-dot/daemon.log`.
+
+Apps opened from Finder get a minimal `PATH`, but the daemon needs `gentle-shell`. So `build.rs` records three values at build time: the absolute `node` path, the daemon script path, and the build `PATH`. The spawned daemon runs with that `PATH`. Build from a shell where `node` and `gentle-shell` resolve, and rebuild if they move.
+
+Runtime overrides:
+
+| Variable | Effect |
+|---|---|
+| `GENTLE_DOT_NODE` | `node` binary used to start the daemon |
+| `GENTLE_DOT_DAEMON_SCRIPT` | Daemon entry point |
+| `GENTLE_DOT_DATA_DIR` | Data directory (default `~/.gentle-dot`) |
+| `GENTLE_DOT_PORT` | Daemon port (default `4317`, otherwise `port` in `config.json`) |
+
+`shortcut` in `~/.gentle-dot/config.json` changes the global shortcut (default `Alt+Space`). The Dot position is saved in `~/.gentle-dot/desktop.json`.
+
+## Menu bar
+
+| Item | What it does |
+|---|---|
+| Open (`⌥ Space`) | Shows the panel next to the Dot. The shortcut toggles it. |
+| New conversation | Shows the panel and emits `dot://new-conversation` so the UI starts a new conversation. |
+| Open in browser | Opens `http://127.0.0.1:<port>/#token=…` in the default browser. |
+| Restart assistant | Restarts the daemon if the app started it. If it was started elsewhere, shows a dialog instead. |
+| Launch at login | Turns the login item on or off (macOS LaunchAgent). This menu item is the source of truth; `launchAtLogin` in `config.json` is not read. |
+| Quit | Stops the daemon the app started (SIGTERM), then quits. A daemon started elsewhere keeps running. |
+
+The menu bar title shows a short marker for the agent state that the UI reports through `set_dot_state`, and the tooltip names it.
+
+## Icons
+
+`scripts/make-icon.mjs` draws the violet circle used for the app icons, with no dependencies:
+
+```sh
+node scripts/make-icon.mjs src-tauri/icons/source.png 1024 '#7C5CFF'
+node scripts/make-icon.mjs src-tauri/icons/tray.png 32 '#000000'
+pnpm --filter @gentle-dot/desktop tauri icon src-tauri/icons/source.png
+```
+
+The tray icon is a template image, so macOS uses only its alpha and tints it to match the menu bar.
