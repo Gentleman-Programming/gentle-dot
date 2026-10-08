@@ -37,7 +37,8 @@
 //   FAKE_AGENT_START_DELAY_MS  answer the first get_state only after this delay
 //   FAKE_AGENT_DROP_CUSTOM  load session files without their custom messages (a format drift)
 // get_available_models lists MODELS; set_model and set_thinking_level change what
-// get_state reports, so tests can read the last values back.
+// get_state reports, so tests can read the last values back. A model's `input` says whether it
+// accepts images, like the engine's models.
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -51,12 +52,13 @@ const MODELS: Rec[] = [
 		name: "Fake Model",
 		provider: "fake",
 		reasoning: true,
+		input: ["text", "image"],
 		// Real models may carry credentials in headers; they must never reach a client.
 		headers: { Authorization: "Bearer fake-secret-header" },
 		baseUrl: "https://internal.fake.example",
 		cost: { input: 1, output: 2 },
 	},
-	{ id: "fake-fast", name: "Fake Fast", provider: "fake", reasoning: false },
+	{ id: "fake-fast", name: "Fake Fast", provider: "fake", reasoning: false, input: ["text"] },
 	{ id: "big", name: "Other Big", provider: "other", reasoning: true },
 ];
 let model = MODELS[0] as Rec;
@@ -379,7 +381,7 @@ function handle(rec: Rec) {
 			}
 			started = true;
 			return respond(id, "get_state", {
-				model: { id: model.id, name: model.name, provider: model.provider },
+				model: { id: model.id, name: model.name, provider: model.provider, input: model.input },
 				thinkingLevel,
 				isStreaming: busy,
 				isCompacting: false,

@@ -193,6 +193,37 @@ function credentialTree() {
 	return { data, agent, workspace, files, guarded, at };
 }
 
+describe("built-in computer server (S24.7)", () => {
+	const withComputer = (): ConnectorPolicy => ({ ...policy("read_only"), builtin: ["computer"] });
+
+	it("runs its tools without approval cards, since the desktop app enforces its own checks", () => {
+		for (const tool of ["mcp__computer__screenshot", "mcp__computer__click", "mcp__computer__type"]) {
+			expect(decide(call(tool, { x: 1, y: 2, text: "send" }), withComputer()), tool).toEqual({
+				action: "pass",
+			});
+		}
+	});
+
+	it("leaves every other server's rules as they were", () => {
+		expect(decide(call("mcp__notion__notion_create_pages", { title: "x" }), withComputer()).action).toBe(
+			"block",
+		);
+		expect(decide(call("mcp__evil__send", { to: "x" }, true), withComputer()).action).toBe("block");
+		// A look-alike server name is not the built-in one.
+		expect(decide(call("mcp__computer_x__click", {}), withComputer()).action).toBe("block");
+		// Without the built-in entry, the computer's tools are an unapproved server.
+		expect(decide(call("mcp__computer__click", {}), policy()).action).toBe("block");
+	});
+
+	it("reads the built-in list from the daemon's policy and rejects a malformed one", () => {
+		expect(parsePolicy(JSON.stringify(withComputer()))).toEqual(withComputer());
+		expect(parsePolicy(JSON.stringify({ ...policy(), builtin: "computer" }))).toBeUndefined();
+		expect(parsePolicy(JSON.stringify({ ...policy(), builtin: [3] }))).toBeUndefined();
+		// Only the computer server can be built in.
+		expect(parsePolicy(JSON.stringify({ ...policy(), builtin: ["notion"] }))).toBeUndefined();
+	});
+});
+
 describe("credential and control files (B2)", () => {
 	it("blocks reading them with the read tool, by any path spelling", () => {
 		const { files, guarded, at, workspace, data } = credentialTree();

@@ -1,0 +1,112 @@
+import type { ConnectorInfo } from "@gentle-dot/protocol";
+import { useCallback, useEffect, useState } from "react";
+import {
+	type ComputerPermission,
+	type ComputerPermissions,
+	type ComputerSession,
+	timeLeft,
+} from "../computer.ts";
+
+/** Computer control in the desktop panel (S24.5, S24.6); the web page never gets it. */
+export interface ComputerControls {
+	/** The app has a helper (macOS), so the Connectors screen offers it. */
+	available: boolean;
+	/** The session the user allowed, while it lasts. */
+	session?: ComputerSession;
+	stop: () => void;
+	permissions: () => Promise<ComputerPermissions>;
+	requestPermission: (kind: ComputerPermission) => Promise<unknown>;
+}
+
+const PERMISSIONS: [ComputerPermission, string][] = [
+	["accessibility", "Accessibility"],
+	["screenRecording", "Screen Recording"],
+];
+
+export const DEBUG_BUILD_NOTE =
+	"Debug builds lose these permissions on every rebuild because macOS ties them to the app's signature; grant them again after updating.";
+const NO_IMAGES_NOTE =
+	"The current model does not accept images, so the assistant cannot see your screen. Choose a model that does in Profiles.";
+
+/** "Controlling your Mac · mm:ss left" with a Stop button, while a session is active. */
+export function ComputerBanner({ session, stop }: { session: ComputerSession; stop: () => void }) {
+	const [now, setNow] = useState(() => Date.now());
+	useEffect(() => {
+		const timer = setInterval(() => setNow(Date.now()), 1000);
+		return () => clearInterval(timer);
+	}, []);
+	const left = session.endsAt === undefined ? "" : ` · ${timeLeft(session.endsAt, now)} left`;
+	return (
+		<section className="computer-banner" aria-label="Computer control">
+			<span className="computer-banner-light" aria-hidden="true" />
+			<span>Controlling your Mac{left}</span>
+			<button type="button" className="primary" onClick={stop}>
+				Stop
+			</button>
+		</section>
+	);
+}
+
+interface ComputerEntryProps {
+	/** The daemon's built-in entry, once the helper is registered. */
+	info?: ConnectorInfo;
+	controls: ComputerControls;
+}
+
+/** The built-in Computer connector: the macOS permissions it needs and how to grant them. */
+export function ComputerEntry({ info, controls }: ComputerEntryProps) {
+	const { permissions, requestPermission } = controls;
+	const [granted, setGranted] = useState<ComputerPermissions>();
+	const check = useCallback(() => {
+		permissions().then(setGranted, () => setGranted(undefined));
+	}, [permissions]);
+	useEffect(check, [check]);
+
+	return (
+		<li className="computer-entry" aria-labelledby="connector-computer">
+			<div className="provider-name">
+				<b id="connector-computer">Computer</b>
+				<span className="chip connector-connected">Built in</span>
+			</div>
+			{info ? (
+				<>
+					<p className="connector-note">{info.reads}</p>
+					<p className="connector-note">{info.sends}</p>
+				</>
+			) : null}
+			<ul className="computer-permissions">
+				{PERMISSIONS.map(([kind, label]) => {
+					const allowed = granted?.[kind] === true;
+					const id = `computer-permission-${kind}`;
+					return (
+						<li key={kind} aria-labelledby={id}>
+							<span id={id}>{label}</span>
+							<span className={`chip ${allowed ? "connector-connected" : "connector-needs_setup"}`}>
+								{granted === undefined ? "Checking…" : allowed ? "Allowed" : "Not allowed"}
+							</span>
+							{granted !== undefined && !allowed ? (
+								<button
+									type="button"
+									className="primary"
+									aria-label={`Grant ${label}`}
+									onClick={() => {
+										requestPermission(kind).then(check, check);
+									}}
+								>
+									Grant
+								</button>
+							) : null}
+						</li>
+					);
+				})}
+			</ul>
+			<div className="provider-actions">
+				<button type="button" onClick={check}>
+					Check again
+				</button>
+			</div>
+			<p className="connector-note">{DEBUG_BUILD_NOTE}</p>
+			{info?.noImages ? <p className="connector-note computer-warning">{NO_IMAGES_NOTE}</p> : null}
+		</li>
+	);
+}

@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { type ConnectionInfo, tokenFromLocation } from "./client.ts";
 import { ChatSurface } from "./components/ChatSurface.tsx";
+import type { ComputerControls } from "./components/Computer.tsx";
 import { DotSurface } from "./components/DotSurface.tsx";
+import { computerPermissions, requestComputerPermission, stopComputer } from "./computer.ts";
 import {
 	connectionInfo,
 	hidePanel,
@@ -11,6 +13,7 @@ import {
 	startDragging,
 	togglePanel,
 } from "./desktop.ts";
+import { useComputerRegistration, useComputerSession } from "./useComputer.ts";
 import { useDot } from "./useDot.ts";
 
 type Surface = "dot" | "panel" | "web";
@@ -47,6 +50,24 @@ export function App() {
 	const { state, send, dismiss, dispatch } = useDot(info);
 	const conversations = useRef(state.features.conversations);
 	conversations.current = state.features.conversations;
+	// Computer control lives in the desktop app only (S24.7); the panel registers the helper.
+	const desktop = inDesktop();
+	const computerSession = useComputerSession(desktop && surface !== "web");
+	const computerAvailable = useComputerRegistration(
+		desktop && surface === "panel",
+		state.connection === "open",
+		send,
+	);
+	const computer: ComputerControls | undefined =
+		desktop && surface === "panel"
+			? {
+					available: computerAvailable,
+					...(computerSession ? { session: computerSession } : {}),
+					stop: stopComputer,
+					permissions: computerPermissions,
+					requestPermission: requestComputerPermission,
+				}
+			: undefined;
 
 	useEffect(() => {
 		if (inDesktop()) {
@@ -91,6 +112,7 @@ export function App() {
 			<DotSurface
 				agentState={state.agentState}
 				connected={state.connection === "open"}
+				inControl={computerSession !== undefined}
 				toggle={togglePanel}
 				startDrag={() => void startDragging()}
 			/>
@@ -114,6 +136,7 @@ export function App() {
 			dispatch={dispatch}
 			focusKey={focusKey}
 			{...(surface === "panel" ? { onHide: hidePanel } : {})}
+			{...(computer ? { computer } : {})}
 		/>
 	);
 }

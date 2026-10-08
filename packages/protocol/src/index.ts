@@ -122,6 +122,13 @@ export interface ConnectorInfo {
 	custom?: { origin: string; summary: string };
 	/** It has no sign-in of its own (it uses a token, or none). */
 	noSignIn?: true;
+	/**
+	 * Built into the desktop app (Computer): listed only while the app has it registered, and not
+	 * changed or removed through the connector messages. Its address and key are never sent.
+	 */
+	builtin?: true;
+	/** The current model does not accept images, so the assistant cannot see the screenshots. */
+	noImages?: true;
 }
 
 /** The daemon keeps at most this many drafts waiting; a newer one drops the oldest. */
@@ -269,7 +276,10 @@ export type ClientMessage =
 	| { type: "connector_mode"; connectorId: string; mode: ConnectorMode }
 	| { type: "connector_draft_reply"; draftId: string; approve: boolean }
 	| { type: "connectors_scan" }
-	| { type: "connector_import"; ids: string[] };
+	| { type: "connector_import"; ids: string[] }
+	/** The desktop app's computer-control helper (macOS), at `http://127.0.0.1:<port>/mcp` with its key. */
+	| { type: "computer_register"; url: string; token: string }
+	| { type: "computer_unregister" };
 
 export type ServerPayload =
 	| { type: "ready"; agentState: AgentState; conversationId?: string; model?: string; features?: Features }
@@ -334,6 +344,15 @@ const CONNECTOR_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const isConnectorId = (value: unknown): value is string => isString(value) && CONNECTOR_ID.test(value);
 const isShortString = (value: unknown): value is string => isString(value) && value.length <= 200;
 const MAX_IMPORTS = 200;
+const COMPUTER_URL = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/mcp$/;
+/** The helper's key goes into an `Authorization` header, so only header-safe characters. */
+const COMPUTER_TOKEN = /^[A-Za-z0-9._~+/=-]{16,512}$/;
+
+/** Only the helper's loopback address: `http://127.0.0.1:<port>/mcp`, nothing else. */
+export function isComputerUrl(value: unknown): value is string {
+	const port = isString(value) ? COMPUTER_URL.exec(value)?.[1] : undefined;
+	return port !== undefined && Number(port) <= 65_535;
+}
 
 /**
  * Reads the complete queues from the engine's `queue_update` record. A missing
@@ -437,6 +456,11 @@ export function parseClientMessage(raw: string): ClientMessage | undefined {
 			return Array.isArray(m.ids) && m.ids.length <= MAX_IMPORTS && m.ids.every(isShortString)
 				? { type: "connector_import", ids: m.ids }
 				: undefined;
+		case "computer_register":
+			return isComputerUrl(m.url) && isString(m.token) && COMPUTER_TOKEN.test(m.token)
+				? { type: "computer_register", url: m.url, token: m.token }
+				: undefined;
+		case "computer_unregister":
 		case "connectors_list":
 		case "connectors_scan":
 		case "profiles_list":

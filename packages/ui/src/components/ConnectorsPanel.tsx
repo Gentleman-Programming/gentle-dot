@@ -3,6 +3,7 @@ import { useState } from "react";
 import type { ConnectorsState, DotAction } from "../store.ts";
 import "../accounts.css";
 import { FlowEvent, FlowPrompt } from "./AccountsPanel.tsx";
+import { type ComputerControls, ComputerEntry } from "./Computer.tsx";
 import type { Send } from "./types.ts";
 
 interface ConnectorsPanelProps {
@@ -10,6 +11,8 @@ interface ConnectorsPanelProps {
 	send: Send;
 	dispatch: (action: DotAction) => void;
 	openUrl: (url: string) => void;
+	/** Computer control, in the desktop app on macOS only. */
+	computer?: ComputerControls;
 }
 
 const STATUS_LABELS: Record<ConnectorStatus, string> = {
@@ -25,7 +28,7 @@ export const addConnectorRequest = (what: string) =>
 	`Please help me add a connector for ${what}. Find its MCP server and draft it for me to review.`;
 
 /** The apps the assistant can use, each signed in from here and set to read only or read and send. */
-export function ConnectorsPanel({ connectors, send, dispatch, openUrl }: ConnectorsPanelProps) {
+export function ConnectorsPanel({ connectors, send, dispatch, openUrl, computer }: ConnectorsPanelProps) {
 	const [guideFor, setGuideFor] = useState<string>();
 	const [adding, setAdding] = useState(false);
 	const flow = connectors.flow;
@@ -129,26 +132,37 @@ export function ConnectorsPanel({ connectors, send, dispatch, openUrl }: Connect
 						/>
 					) : null}
 					<ul className="providers">
-						{(connectors.list ?? []).map((connector) => (
-							<ConnectorRow
-								key={connector.id}
-								connector={connector}
-								send={send}
-								connect={() =>
-									connector.guide && !connector.added
-										? setGuideFor(connector.id)
-										: start(connector, "connector_connect")
-								}
-								signIn={() => start(connector, "connector_signin")}
-								setUp={() => start(connector, "connector_setup")}
+						{computer ? (
+							<ComputerEntry
+								controls={computer}
+								{...withInfo(connectors.list?.find((c) => c.builtin && c.id === "computer"))}
 							/>
-						))}
+						) : null}
+						{/* Built-in entries are the desktop app's; the web page never shows them. */}
+						{(connectors.list ?? [])
+							.filter((c) => !c.builtin)
+							.map((connector) => (
+								<ConnectorRow
+									key={connector.id}
+									connector={connector}
+									send={send}
+									connect={() =>
+										connector.guide && !connector.added
+											? setGuideFor(connector.id)
+											: start(connector, "connector_connect")
+									}
+									signIn={() => start(connector, "connector_signin")}
+									setUp={() => start(connector, "connector_setup")}
+								/>
+							))}
 					</ul>
 				</>
 			)}
 		</section>
 	);
 }
+
+const withInfo = (info: ConnectorInfo | undefined) => (info ? { info } : {});
 
 interface ConnectorGuideViewProps {
 	connector: ConnectorInfo;

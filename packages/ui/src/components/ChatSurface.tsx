@@ -5,6 +5,7 @@ import { activeTitle, type DotAction, type DotState, isBusy, needsAccount } from
 import { AccountsPanel } from "./AccountsPanel.tsx";
 import { AskCard } from "./AskCard.tsx";
 import { Composer } from "./Composer.tsx";
+import { ComputerBanner, type ComputerControls } from "./Computer.tsx";
 import { ConnectorDraftCard } from "./ConnectorDraftCard.tsx";
 import { ConnectorsPanel } from "./ConnectorsPanel.tsx";
 import {
@@ -29,6 +30,8 @@ interface ChatSurfaceProps {
 	focusKey?: number;
 	dispatch?: (action: DotAction) => void;
 	openUrl?: (url: string) => void;
+	/** Computer control, in the desktop panel only. */
+	computer?: ComputerControls;
 }
 
 const CONTINUE_TEXT = "Continue where you left off.";
@@ -55,6 +58,7 @@ export function ChatSurface({
 	focusKey,
 	dispatch = () => {},
 	openUrl = openExternal,
+	computer,
 }: ChatSurfaceProps) {
 	const openAccounts = () => {
 		send({ type: "auth_list" });
@@ -152,6 +156,8 @@ export function ChatSurface({
 				) : null}
 			</header>
 
+			{computer?.session ? <ComputerBanner session={computer.session} stop={computer.stop} /> : null}
+
 			{conversations && showConversations ? (
 				<nav className="conversations" aria-label="Earlier conversations">
 					<p className="eyebrow">Conversations</p>
@@ -200,7 +206,13 @@ export function ChatSurface({
 
 			{state.connectors.open && !state.auth.open && !state.profiles.open ? (
 				<main className="chat-body">
-					<ConnectorsPanel connectors={state.connectors} send={send} dispatch={dispatch} openUrl={openUrl} />
+					<ConnectorsPanel
+						connectors={state.connectors}
+						send={send}
+						dispatch={dispatch}
+						openUrl={openUrl}
+						{...(computer?.available ? { computer } : {})}
+					/>
 				</main>
 			) : null}
 

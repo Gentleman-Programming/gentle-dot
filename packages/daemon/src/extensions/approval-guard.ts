@@ -5,7 +5,8 @@
  * the server marks them `readOnlyHint: true` AND they are on the connector's curated list.
  * Anything else asks the user through a confirm card with a preview, and is blocked when the
  * user declines, when nobody can answer, or when the connector is set to read only. Calls made
- * by other tools (nested calls) go through the same hook.
+ * by other tools (nested calls) go through the same hook. The built-in computer server (the desktop
+ * app's helper, S24) runs without cards: the app grants sessions and confirms risky actions itself.
  *
  * The policy (approved connectors, modes, curated lists, protected files) comes from the
  * daemon in this process's environment, which the assistant cannot change. Without a valid
@@ -114,7 +115,15 @@ export interface ConnectorPolicy {
 	connectors?: Record<string, { name: string; mode: ConnectorMode; readOnlyTools: string[] }>;
 	/** Files only the daemon may read or change: credentials and connector control files. */
 	protectedPaths: string[];
+	/**
+	 * Built-in servers whose tools run without approval cards: only `computer`, the desktop app's
+	 * helper, which asks the user itself (session grant, risky-action confirmations) outside the engine.
+	 */
+	builtin?: string[];
 }
+
+/** The only server that can be built in. */
+export const BUILTIN_SERVERS = ["computer"] as const;
 
 export type GuardDecision =
 	| { action: "pass" }
@@ -190,7 +199,12 @@ export function parsePolicy(raw: string | undefined): ConnectorPolicy | undefine
 			entry.readOnlyTools.every((tool) => typeof tool === "string");
 		if (!valid) return undefined;
 	}
-	return { connectors, protectedPaths: policy.protectedPaths };
+	const { builtin } = policy;
+	if (builtin === undefined) return { connectors, protectedPaths: policy.protectedPaths };
+	const known: readonly string[] = BUILTIN_SERVERS;
+	if (!Array.isArray(builtin) || !builtin.every((id) => typeof id === "string" && known.includes(id)))
+		return undefined;
+	return { connectors, protectedPaths: policy.protectedPaths, builtin };
 }
 
 export function decide(call: GuardCall, policy: ConnectorPolicy): GuardDecision {
@@ -214,6 +228,7 @@ export function decide(call: GuardCall, policy: ConnectorPolicy): GuardDecision 
 			: { action: "pass" };
 	}
 	if (!toolName.startsWith("mcp__")) return { action: "pass" };
+	if (policy.builtin?.some((id) => toolName.startsWith(toolId(id, "")))) return { action: "pass" };
 
 	const approved = policy.connectors;
 	const server = approved

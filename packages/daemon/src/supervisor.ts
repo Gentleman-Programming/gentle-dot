@@ -67,6 +67,8 @@ export class AgentSupervisor {
 	sessionFile: string | undefined;
 	sessionId: string | undefined;
 	model: string | undefined;
+	/** Whether the current model accepts images (its `input` lists `image`); undefined when not reported. */
+	modelImages: boolean | undefined;
 
 	private child: ChildProcess | undefined;
 	private readonly pending = new Map<string, Pending>();
@@ -136,6 +138,9 @@ export class AgentSupervisor {
 			this.busy = true;
 		}
 		if (command.type === "new_session" || command.type === "switch_session") await this.refreshSession();
+		// A switch answers with the new model.
+		if (command.type === "set_model") this.applyModel(response.data);
+		if (command.type === "cycle_model") this.applyModel((response.data as { model?: unknown } | null)?.model);
 		return response;
 	}
 
@@ -307,14 +312,21 @@ export class AgentSupervisor {
 		const state = (data ?? {}) as {
 			sessionFile?: string;
 			sessionId?: string;
-			model?: { name?: string; id?: string };
+			model?: unknown;
 		};
-		if (state.model) this.model = state.model.name ?? state.model.id;
+		if (state.model) this.applyModel(state.model);
 		if (state.sessionId) this.sessionId = state.sessionId;
 		if (state.sessionFile && state.sessionFile !== this.sessionFile) {
 			this.sessionFile = state.sessionFile;
 		}
 		if (this.sessionFile) this.persistSession(this.sessionFile);
+	}
+
+	private applyModel(data: unknown): void {
+		if (typeof data !== "object" || data === null) return;
+		const model = data as { name?: string; id?: string; input?: unknown };
+		this.model = model.name ?? model.id;
+		this.modelImages = Array.isArray(model.input) ? model.input.includes("image") : undefined;
 	}
 
 	private readPersistedSession(): string | undefined {

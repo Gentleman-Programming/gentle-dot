@@ -300,6 +300,23 @@ export const CATALOG: readonly CatalogEntry[] = [
 
 const catalogEntry = (id: string) => CATALOG.find((entry) => entry.id === id);
 
+/** The desktop app's computer-control helper (S24): its loopback address and its key for this launch. */
+export interface ComputerEndpoint {
+	url: string;
+	token: string;
+}
+
+/** The built-in server's name in `mcp.json`; no connector can take it. */
+export const COMPUTER_ID = "computer";
+
+const COMPUTER_INFO = {
+	id: COMPUTER_ID,
+	name: "Computer",
+	reads: "See your screen during a session you allow in the app.",
+	sends:
+		"Click, type, and open apps on this Mac during that session. The app asks you again before risky actions.",
+} as const;
+
 /** A server the user added from the assistant's draft or an import. */
 export interface CustomConnector {
 	name: string;
@@ -432,7 +449,7 @@ function ordered(state: ConnectorsState): [string, SavedConnector][] {
  * user's own has no curated list, so all of its tools are hidden. A connector that still waits for
  * a value the user types is left out.
  */
-export function renderMcpJson(state: ConnectorsState): string {
+export function renderMcpJson(state: ConnectorsState, computer?: ComputerEndpoint): string {
 	const servers: Record<string, unknown> = {};
 	for (const [id, saved] of ordered(state)) {
 		const spec = specOf(id, saved);
@@ -452,6 +469,13 @@ export function renderMcpJson(state: ConnectorsState): string {
 			...(saved.enabled ? {} : { enabled: false }),
 		};
 	}
+	// The helper checks its own key and asks the user itself, so all of its tools are direct.
+	if (computer)
+		servers[COMPUTER_ID] = {
+			url: computer.url,
+			headers: { Authorization: `Bearer ${literal(computer.token)}` },
+			exposure: "direct",
+		};
 	return `${JSON.stringify({ mcpServers: servers }, null, 2)}\n`;
 }
 
@@ -487,6 +511,8 @@ export class ConnectorStore {
 	/** Called after a change made outside the Connectors screen was put back. */
 	onReverted: () => void = () => {};
 	private saved: ConnectorsState;
+	/** The desktop app's helper while a window has it registered; only in memory and `mcp.json`. */
+	private computer: ComputerEndpoint | undefined;
 	private watchers: FSWatcher[] = [];
 	private readonly options: ConnectorStoreOptions;
 
@@ -513,7 +539,22 @@ export class ConnectorStore {
 		this.saved = state;
 		mkdirSync(this.options.agentHome, { recursive: true, mode: 0o700 });
 		writePrivate(this.file, this.recordText());
-		writePrivate(this.mcpFile, renderMcpJson(state));
+		writePrivate(this.mcpFile, renderMcpJson(state, this.computer));
+	}
+
+	/** Adds, replaces, or removes the computer helper in `mcp.json`; true when that changed it. */
+	setComputer(endpoint: ComputerEndpoint | undefined): boolean {
+		const same = endpoint?.url === this.computer?.url && endpoint?.token === this.computer?.token;
+		if (same) return false;
+		this.computer = endpoint ? { ...endpoint } : undefined;
+		mkdirSync(this.options.agentHome, { recursive: true, mode: 0o700 });
+		writePrivate(this.mcpFile, renderMcpJson(this.saved, this.computer));
+		return true;
+	}
+
+	/** The helper's address while it is registered (never its key). */
+	computerUrl(): string | undefined {
+		return this.computer?.url;
 	}
 
 	/**
@@ -521,11 +562,11 @@ export class ConnectorStore {
 	 * `report: false` only writes them (the daemon's start, where the files are what it just read).
 	 */
 	enforce(report = true): boolean {
-		const untouched = Object.keys(this.saved.connectors).length === 0;
+		const untouched = Object.keys(this.saved.connectors).length === 0 && !this.computer;
 		const changed: string[] = [];
 		for (const [file, text] of [
 			[this.file, this.recordText()],
-			[this.mcpFile, renderMcpJson(this.saved)],
+			[this.mcpFile, renderMcpJson(this.saved, this.computer)],
 		] as const) {
 			const current = existsSync(file) ? readFileSync(file, "utf8") : undefined;
 			if (current === text || (current === undefined && untouched)) continue;
@@ -599,6 +640,7 @@ export class ConnectorStore {
 				join(this.options.dataDir, "token"),
 				...(this.options.guardPath ? [this.options.guardPath] : []),
 			],
+			...(this.computer ? { builtin: [COMPUTER_ID] } : {}),
 		};
 	}
 
@@ -672,6 +714,7 @@ export class ConnectorStore {
 			};
 			const connectors: ConnectorsState["connectors"] = {};
 			for (const [id, value] of Object.entries(saved.connectors ?? {})) {
+				if (id === COMPUTER_ID) continue;
 				const custom = catalogEntry(id) ? undefined : parseCustom(value?.custom);
 				if (!catalogEntry(id) && !custom) continue;
 				const entry: SavedConnector = {
@@ -825,7 +868,11 @@ export class ConnectorManager {
 	onChanged: (restart: boolean) => void = () => {};
 	/** A change to the connector files made outside the Connectors screen was put back. */
 	onBlocked: () => void = () => {};
+	/** Whether the current model accepts images; undefined when that is not known. */
+	imagesSupported: () => boolean | undefined = () => undefined;
 	private flow: Flow | undefined;
+	/** The window that registered the computer helper; it goes away with that window. */
+	private computerOwner: object | undefined;
 	private setupFlow: Setup | undefined;
 	private readonly failed = new Set<string>();
 	private readonly waiting = new Map<string, ConnectorDraft>();
@@ -854,7 +901,7 @@ export class ConnectorManager {
 				.map(([id]) => id)
 				.filter((id) => !catalogEntry(id)),
 		];
-		return ids.flatMap((id) => {
+		const infos = ids.flatMap((id) => {
 			const saved = connectors[id];
 			const spec = specOf(id, saved);
 			if (!spec) return [];
@@ -873,6 +920,38 @@ export class ConnectorManager {
 			if (spec.custom) info.custom = { origin: spec.custom.origin, summary: summarize(spec.custom.server) };
 			return [info];
 		});
+		if (this.options.store.computerUrl() === undefined) return infos;
+		const computer: ConnectorInfo = {
+			...COMPUTER_INFO,
+			added: true,
+			enabled: true,
+			mode: "read_write",
+			status: "connected",
+			noSignIn: true,
+			builtin: true,
+		};
+		if (this.imagesSupported() === false) computer.noImages = true;
+		return [...infos, computer];
+	}
+
+	/**
+	 * The desktop app's computer helper, registered by one of its windows (S24.7). The engine reads it
+	 * at its next start; its key is written only to `mcp.json`, never logged or sent to a window.
+	 */
+	registerComputer(owner: object, endpoint: ComputerEndpoint): void {
+		this.computerOwner = owner;
+		if (!this.options.store.setComputer(endpoint)) return;
+		this.log("the desktop app registered computer control");
+		this.onChanged(true);
+	}
+
+	/** Removes the helper; only the window that registered it can (it also goes when that window does). */
+	unregisterComputer(owner: object): void {
+		if (this.computerOwner !== owner) return;
+		this.computerOwner = undefined;
+		if (!this.options.store.setComputer(undefined)) return;
+		this.log("computer control was unregistered");
+		this.onChanged(true);
 	}
 
 	/** Adds or turns on a connector: asks for the values it still needs, then signs in when it has no sign-in yet. */
@@ -1052,8 +1131,12 @@ export class ConnectorManager {
 		const home = this.options.importHome ?? homedir();
 		const groups = new Map<string, { candidate: ImportCandidate; server: ScannedServer }>();
 		const found = new Map<string, ScannedServer>();
+		const computerUrl = this.options.store.computerUrl();
+		const computer = computerUrl === undefined ? undefined : fingerprint({ url: computerUrl });
 		for (const server of scanClientConfigs(home)) {
 			const key = server.server ? fingerprint(server.server) : `${server.source}:${server.name}`;
+			// The helper is built in; a copy of it elsewhere is never offered.
+			if (key === computer) continue;
 			const group = groups.get(key);
 			if (group) {
 				if (!group.candidate.sources.includes(server.source)) group.candidate.sources.push(server.source);
@@ -1140,7 +1223,7 @@ export class ConnectorManager {
 				.slice(0, 32)
 				.replace(/-+$/, "") || "server";
 		const taken = (id: string) =>
-			catalogEntry(id) !== undefined || id in this.options.store.state().connectors;
+			id === COMPUTER_ID || catalogEntry(id) !== undefined || id in this.options.store.state().connectors;
 		if (!taken(base)) return base;
 		for (let n = 2; ; n++) if (!taken(`${base}-${n}`)) return `${base}-${n}`;
 	}

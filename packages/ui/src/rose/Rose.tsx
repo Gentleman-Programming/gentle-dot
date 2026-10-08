@@ -2,7 +2,7 @@ import type { CSSProperties } from "react";
 import { ROSE_SPARKLES, ROSE_STROKES } from "./strokes.ts";
 
 /** How the rose looks (design sheet `docs/brand/rose-design.html`). */
-export type RoseMood = "idle" | "thinking" | "working" | "needs" | "restarting" | "offline";
+export type RoseMood = "idle" | "thinking" | "working" | "needs" | "restarting" | "offline" | "control";
 
 /**
  * The square crop that frames the rose in the Dot's circle: centered on the

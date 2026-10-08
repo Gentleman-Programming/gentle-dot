@@ -263,6 +263,12 @@ textarea:focus {
 	--rim: rgba(255, 255, 255, 0.06);
 }
 
+/* In control of the Mac (S24.6): the accent rim glows steadily over every other state. */
+.dot-in_control .dot-disc {
+	--rim: rgba(240, 149, 200, 0.8);
+	--rim-glow: rgba(240, 149, 200, 0.35);
+}
+
 .rose {
 	position: relative;
 	display: block;
@@ -403,6 +409,27 @@ textarea:focus {
 	filter: none;
 }
 
+/* In control: the whole rose lit and calling, with a steady, quick light along every stroke. */
+.rose-control .rose-base {
+	opacity: 1;
+	animation: rose-call 2s ease-in-out infinite;
+}
+
+.rose-control .rose-light {
+	opacity: 1;
+}
+
+.rose-control .rose-light path {
+	stroke-dasharray: 0.3 0.4;
+	animation: rose-run calc(var(--d) * 0.8) linear infinite;
+	animation-delay: calc(var(--i) * -0.2s);
+}
+
+.rose-control .rose-sparkles circle {
+	animation: rose-twinkle 1.2s ease-in-out infinite;
+	animation-delay: calc(var(--i) * -0.17s);
+}
+
 /* On the circle's edge, at the top right. */
 .dot-badge {
 	position: absolute;
@@ -430,7 +457,8 @@ textarea:focus {
 	}
 
 	.rose-working .rose-base,
-	.rose-needs .rose-base {
+	.rose-needs .rose-base,
+	.rose-control .rose-base {
 		filter: drop-shadow(0 0 1.5px var(--neon)) drop-shadow(0 0 4px var(--neon));
 	}
 }
@@ -628,6 +656,68 @@ html[data-effects="none"] .chat-panel {
 	color: var(--muted);
 	font-size: 12px;
 	line-height: 16px;
+}
+
+/* While the assistant controls the Mac (S24.6): time left and Stop, always in view. */
+.computer-banner {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin: 10px 12px 0;
+	padding: 8px 8px 8px 12px;
+	border-radius: var(--radius-md);
+	border: 1px solid var(--accent-line);
+	background: var(--accent-soft);
+	color: var(--text);
+	font-size: 13px;
+	font-weight: 600;
+	line-height: 18px;
+}
+
+.computer-banner > span:nth-child(2) {
+	flex: 1;
+	font-variant-numeric: tabular-nums;
+}
+
+.computer-banner button {
+	padding: 4px 14px;
+}
+
+.computer-banner-light {
+	width: 8px;
+	height: 8px;
+	border-radius: var(--radius-pill);
+	background: var(--accent);
+	box-shadow: 0 0 8px var(--accent);
+	animation: pulse 1.6s ease-in-out infinite;
+}
+
+.computer-permissions {
+	display: grid;
+	gap: 6px;
+	margin: 8px 0;
+	padding: 0;
+	list-style: none;
+}
+
+.computer-permissions li {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 13px;
+}
+
+.computer-permissions li > span:first-child {
+	flex: 1;
+}
+
+.computer-permissions button {
+	padding: 3px 12px;
+	font-size: 12px;
+}
+
+.computer-warning {
+	color: var(--yellow);
 }
 
 .chat-body {

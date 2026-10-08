@@ -126,6 +126,7 @@ export class DotBridge {
 		if (options.connectors) {
 			options.connectors.onChanged = (restart) => this.afterConnectorsChange(restart);
 			options.connectors.onBlocked = () => this.connectorChangeBlocked();
+			options.connectors.imagesSupported = () => supervisor.modelImages;
 		}
 		this.state = this.deriveState();
 	}
@@ -152,6 +153,7 @@ export class DotBridge {
 			this.clients.delete(client);
 			this.options.auth?.cancelOwnedBy(client);
 			this.options.connectors?.cancelOwnedBy(client);
+			this.options.connectors?.unregisterComputer(client);
 		};
 	}
 
@@ -349,6 +351,12 @@ export class DotBridge {
 			}
 			case "connectors_scan":
 				this.deliver(client, { type: "connector_imports", found: this.requireConnectors().scan() });
+				return;
+			case "computer_register":
+				this.requireConnectors().registerComputer(client, { url: message.url, token: message.token });
+				return;
+			case "computer_unregister":
+				this.requireConnectors().unregisterComputer(client);
 				return;
 			case "connector_import":
 				this.deliver(client, {

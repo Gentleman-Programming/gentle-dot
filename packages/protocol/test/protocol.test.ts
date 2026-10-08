@@ -251,3 +251,70 @@ describe("connector messages", () => {
 		}
 	});
 });
+
+describe("computer control messages", () => {
+	const parse = (value: object) => parseClientMessage(JSON.stringify(value));
+	const token = "k3Y_0123456789abcdef-ABCDEF.~+/=";
+
+	it("registers the desktop app's helper at a loopback MCP address, and unregisters it", () => {
+		expect(parse({ type: "computer_register", url: "http://127.0.0.1:51234/mcp", token })).toEqual({
+			type: "computer_register",
+			url: "http://127.0.0.1:51234/mcp",
+			token,
+		});
+		expect(parse({ type: "computer_register", url: "http://127.0.0.1:1/mcp", token, extra: 1 })).toEqual({
+			type: "computer_register",
+			url: "http://127.0.0.1:1/mcp",
+			token,
+		});
+		expect(parse({ type: "computer_register", url: "http://127.0.0.1:65535/mcp", token })).toMatchObject({
+			url: "http://127.0.0.1:65535/mcp",
+		});
+		expect(parse({ type: "computer_unregister" })).toEqual({ type: "computer_unregister" });
+	});
+
+	it("rejects any address other than http://127.0.0.1:<port>/mcp", () => {
+		for (const url of [
+			"https://127.0.0.1:51234/mcp",
+			"http://localhost:51234/mcp",
+			"http://[::1]:51234/mcp",
+			"http://127.0.0.2:51234/mcp",
+			"http://0.0.0.0:51234/mcp",
+			"http://example.com:51234/mcp",
+			"http://127.0.0.1/mcp",
+			"http://127.0.0.1:0/mcp",
+			"http://127.0.0.1:65536/mcp",
+			"http://127.0.0.1:051234/mcp",
+			"http://127.0.0.1:51234/",
+			"http://127.0.0.1:51234/mcp/",
+			"http://127.0.0.1:51234/mcp/x",
+			"http://127.0.0.1:51234/MCP",
+			"http://127.0.0.1:51234/mcp?x=1",
+			"http://127.0.0.1:51234/mcp#x",
+			"http://user:pass@127.0.0.1:51234/mcp",
+			"http://127.0.0.1:51234@evil.example/mcp",
+			" http://127.0.0.1:51234/mcp",
+			"http://127.0.0.1:51234/mcp\n",
+		]) {
+			expect(parse({ type: "computer_register", url, token }), url).toBeUndefined();
+		}
+		expect(parse({ type: "computer_register", token })).toBeUndefined();
+		expect(parse({ type: "computer_register", url: 51234, token })).toBeUndefined();
+	});
+
+	it("rejects a key that is missing, too short or long, or not safe for a header", () => {
+		const url = "http://127.0.0.1:51234/mcp";
+		for (const bad of [
+			undefined,
+			7,
+			"",
+			"short",
+			"x".repeat(513),
+			`${"a".repeat(20)} b`,
+			`${"a".repeat(20)}\r\nX-Evil: 1`,
+			`${"a".repeat(20)}"`,
+		]) {
+			expect(parse({ type: "computer_register", url, token: bad }), String(bad)).toBeUndefined();
+		}
+	});
+});
