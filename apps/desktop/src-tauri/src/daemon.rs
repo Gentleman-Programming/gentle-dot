@@ -23,19 +23,46 @@ pub struct LaunchSpec {
     pub envs: Vec<(String, String)>,
 }
 
-/// `<node> <daemon script>` with the build-time PATH; `GENTLE_DOT_NODE` and
-/// `GENTLE_DOT_DAEMON_SCRIPT` override the build-time paths.
-pub fn launch_spec(env: impl Fn(&str) -> Option<String>, dev: bool) -> LaunchSpec {
-    let pick = |key: &str, fallback: &str| env(key).filter(|v| !v.is_empty()).unwrap_or_else(|| fallback.into());
-    let mut envs = vec![("PATH".to_string(), env!("GENTLE_DOT_BUILD_PATH").to_string())];
+/// `<node> <daemon script>` (S29.5). With a bundled runtime (`<runtime>/daemon/cli.mjs`
+/// exists) that is the runtime's own Node and daemon, a PATH of the runtime plus the
+/// system folders, and `GENTLE_DOT_RUNTIME`; otherwise the build-time paths and PATH.
+/// `GENTLE_DOT_NODE` and `GENTLE_DOT_DAEMON_SCRIPT` override the program and script in both.
+pub fn launch_spec(env: impl Fn(&str) -> Option<String>, dev: bool, runtime: Option<&Path>) -> LaunchSpec {
+    let pick = |key: &str, fallback: String| env(key).filter(|v| !v.is_empty()).unwrap_or(fallback);
+    let bundled = runtime.filter(|dir| dir.join("daemon/cli.mjs").is_file());
+    let (node, script, mut envs) = match bundled {
+        Some(dir) => {
+            let root = dir.display().to_string();
+            let path = format!("{root}/bin:{root}/node/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+            (
+                format!("{root}/node/bin/node"),
+                format!("{root}/daemon/cli.mjs"),
+                vec![("PATH".to_string(), path), ("GENTLE_DOT_RUNTIME".to_string(), root)],
+            )
+        }
+        None => (
+            env!("GENTLE_DOT_BUILD_NODE").to_string(),
+            env!("GENTLE_DOT_BUILD_DAEMON_SCRIPT").to_string(),
+            vec![("PATH".to_string(), env!("GENTLE_DOT_BUILD_PATH").to_string())],
+        ),
+    };
     if dev {
         envs.push(("GENTLE_DOT_ALLOWED_ORIGINS".into(), DEV_ALLOWED_ORIGINS.into()));
     }
     LaunchSpec {
-        program: pick("GENTLE_DOT_NODE", env!("GENTLE_DOT_BUILD_NODE")),
-        args: vec![pick("GENTLE_DOT_DAEMON_SCRIPT", env!("GENTLE_DOT_BUILD_DAEMON_SCRIPT"))],
+        program: pick("GENTLE_DOT_NODE", node),
+        args: vec![pick("GENTLE_DOT_DAEMON_SCRIPT", script)],
         envs,
     }
+}
+
+/// Where a bundled runtime would live: `GENTLE_DOT_RUNTIME_DIR`, else the app's `runtime`
+/// resource. `launch_spec` uses it only when it holds `daemon/cli.mjs`.
+pub fn runtime_dir(env: impl Fn(&str) -> Option<String>, resource_dir: Option<PathBuf>) -> Option<PathBuf> {
+    env("GENTLE_DOT_RUNTIME_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| resource_dir.map(|dir| dir.join("runtime")))
 }
 
 /// Opens `<data_dir>/daemon.log` for appending. The folder is 0700 and the log
@@ -132,12 +159,13 @@ pub enum RestartOutcome {
 pub struct Daemon {
     port: u16,
     data_dir: PathBuf,
+    runtime_dir: Option<PathBuf>,
     child: Mutex<Option<Box<dyn ChildProcess>>>,
 }
 
 impl Daemon {
-    pub fn new(port: u16, data_dir: PathBuf) -> Self {
-        Self { port, data_dir, child: Mutex::new(None) }
+    pub fn new(port: u16, data_dir: PathBuf, runtime_dir: Option<PathBuf>) -> Self {
+        Self { port, data_dir, runtime_dir, child: Mutex::new(None) }
     }
 
     pub fn is_healthy(&self) -> bool {
@@ -178,7 +206,7 @@ impl Daemon {
                 return Ok(());
             }
         }
-        let spec = launch_spec(|key| std::env::var(key).ok(), cfg!(debug_assertions));
+        let spec = launch_spec(|key| std::env::var(key).ok(), cfg!(debug_assertions), self.runtime_dir.as_deref());
         let log = open_private_log(&self.data_dir).map_err(|e| format!("cannot open daemon.log: {e}"))?;
         let child = spawn_daemon(&spec, log).map_err(|e| format!("cannot start {}: {e}", spec.program))?;
         *slot = Some(child);
@@ -226,7 +254,7 @@ mod tests {
 
     #[test]
     fn launch_spec_uses_build_time_paths() {
-        let spec = launch_spec(env_of(&[]), false);
+        let spec = launch_spec(env_of(&[]), false, None);
         assert_eq!(spec.program, env!("GENTLE_DOT_BUILD_NODE"));
         assert_eq!(spec.args, vec![env!("GENTLE_DOT_BUILD_DAEMON_SCRIPT").to_string()]);
         assert!(spec.args[0].ends_with("packages/daemon/src/cli.ts"));
@@ -239,17 +267,91 @@ mod tests {
         let spec = launch_spec(
             env_of(&[("GENTLE_DOT_NODE", "/opt/node"), ("GENTLE_DOT_DAEMON_SCRIPT", "/srv/cli.ts")]),
             false,
+            None,
         );
         assert_eq!(spec.program, "/opt/node");
         assert_eq!(spec.args, vec!["/srv/cli.ts".to_string()]);
-        let spec = launch_spec(env_of(&[("GENTLE_DOT_NODE", "")]), false);
+        let spec = launch_spec(env_of(&[("GENTLE_DOT_NODE", "")]), false, None);
         assert_eq!(spec.program, env!("GENTLE_DOT_BUILD_NODE"));
     }
 
     #[test]
     fn only_dev_builds_allow_the_dev_server_origin() {
-        let spec = launch_spec(env_of(&[]), true);
+        let spec = launch_spec(env_of(&[]), true, None);
         assert_eq!(env_value(&spec, "GENTLE_DOT_ALLOWED_ORIGINS"), Some(DEV_ALLOWED_ORIGINS));
+    }
+
+    /// A fake `runtime/` tree, with `daemon/cli.mjs` only when `with_daemon`.
+    fn fake_runtime(name: &str, with_daemon: bool) -> PathBuf {
+        let runtime = scratch_dir(name).join("runtime");
+        fs::create_dir_all(runtime.join("daemon")).unwrap();
+        fs::create_dir_all(runtime.join("node/bin")).unwrap();
+        if with_daemon {
+            fs::write(runtime.join("daemon/cli.mjs"), "").unwrap();
+        }
+        runtime
+    }
+
+    #[test]
+    fn launch_spec_runs_the_bundled_runtime_when_present() {
+        let runtime = fake_runtime("runtime-bundled", true);
+        let spec = launch_spec(env_of(&[]), false, Some(&runtime));
+        let root = runtime.display().to_string();
+        assert_eq!(spec.program, format!("{root}/node/bin/node"));
+        assert_eq!(spec.args, vec![format!("{root}/daemon/cli.mjs")]);
+        assert_eq!(
+            env_value(&spec, "PATH"),
+            Some(format!("{root}/bin:{root}/node/bin:/usr/bin:/bin:/usr/sbin:/sbin").as_str())
+        );
+        assert_eq!(env_value(&spec, "GENTLE_DOT_RUNTIME"), Some(root.as_str()));
+        assert_eq!(env_value(&spec, "GENTLE_DOT_ALLOWED_ORIGINS"), None);
+        let spec = launch_spec(env_of(&[]), true, Some(&runtime));
+        assert_eq!(env_value(&spec, "GENTLE_DOT_ALLOWED_ORIGINS"), Some(DEV_ALLOWED_ORIGINS));
+    }
+
+    #[test]
+    fn launch_spec_keeps_the_build_machine_launch_without_a_bundled_daemon() {
+        let today = LaunchSpec {
+            program: env!("GENTLE_DOT_BUILD_NODE").into(),
+            args: vec![env!("GENTLE_DOT_BUILD_DAEMON_SCRIPT").into()],
+            envs: vec![("PATH".into(), env!("GENTLE_DOT_BUILD_PATH").into())],
+        };
+        let runtime = fake_runtime("runtime-empty", false);
+        assert_eq!(launch_spec(env_of(&[]), false, Some(&runtime)), today);
+        assert_eq!(launch_spec(env_of(&[]), false, Some(&runtime.join("missing"))), today);
+        assert_eq!(launch_spec(env_of(&[]), false, None), today);
+    }
+
+    #[test]
+    fn overrides_win_over_the_bundled_runtime() {
+        let runtime = fake_runtime("runtime-override", true);
+        let spec = launch_spec(
+            env_of(&[("GENTLE_DOT_NODE", "/opt/node"), ("GENTLE_DOT_DAEMON_SCRIPT", "/srv/cli.ts")]),
+            false,
+            Some(&runtime),
+        );
+        assert_eq!(spec.program, "/opt/node");
+        assert_eq!(spec.args, vec!["/srv/cli.ts".to_string()]);
+        assert_eq!(env_value(&spec, "GENTLE_DOT_RUNTIME"), Some(runtime.display().to_string().as_str()));
+        let spec = launch_spec(env_of(&[("GENTLE_DOT_NODE", "")]), false, Some(&runtime));
+        assert_eq!(spec.program, runtime.join("node/bin/node").display().to_string());
+    }
+
+    #[test]
+    fn runtime_dir_is_the_runtime_resource_unless_overridden() {
+        let resources = Some(PathBuf::from("/Applications/Gentle Dot.app/Contents/Resources"));
+        let bundled = Some(PathBuf::from("/Applications/Gentle Dot.app/Contents/Resources/runtime"));
+        assert_eq!(runtime_dir(env_of(&[]), resources.clone()), bundled);
+        assert_eq!(runtime_dir(env_of(&[("GENTLE_DOT_RUNTIME_DIR", "")]), resources.clone()), bundled);
+        assert_eq!(
+            runtime_dir(env_of(&[("GENTLE_DOT_RUNTIME_DIR", "/srv/runtime")]), resources),
+            Some(PathBuf::from("/srv/runtime"))
+        );
+        assert_eq!(
+            runtime_dir(env_of(&[("GENTLE_DOT_RUNTIME_DIR", "/srv/runtime")]), None),
+            Some(PathBuf::from("/srv/runtime"))
+        );
+        assert_eq!(runtime_dir(env_of(&[]), None), None);
     }
 
     fn scratch_dir(name: &str) -> PathBuf {

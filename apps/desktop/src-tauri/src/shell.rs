@@ -4,7 +4,7 @@
 use crate::computer::app as computer;
 use crate::computer::session::Reason;
 use crate::config::{self, ConnectionInfo, DesktopConfig, DEFAULT_SHORTCUT};
-use crate::daemon::{Daemon, RestartOutcome};
+use crate::daemon::{self, Daemon, RestartOutcome};
 use crate::geometry::{self, Rect};
 use crate::platform::{self, LaunchRequest, Os, DOT_TITLE, PANEL_TITLE};
 use crate::position::{self, DotPosition};
@@ -621,7 +621,8 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let handle = app.handle().clone();
 
-            let daemon = Arc::new(Daemon::new(config.port, config.data_dir.clone()));
+            let runtime_dir = daemon::runtime_dir(|key| std::env::var(key).ok(), app.path().resource_dir().ok());
+            let daemon = Arc::new(Daemon::new(config.port, config.data_dir.clone(), runtime_dir));
             let starter = daemon.clone();
             thread::spawn(move || {
                 if let Err(error) = starter.ensure_running(DAEMON_START_TIMEOUT) {
