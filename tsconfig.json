@@ -9,6 +9,9 @@
 		},
 		{
 			"path": "packages/ui"
+		},
+		{
+			"path": "e2e"
 		}
 	]
 }
