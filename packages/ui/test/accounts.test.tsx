@@ -1,5 +1,5 @@
 import type { ServerMessage, ServerPayload } from "@gentle-dot/protocol";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { AccountsPanel } from "../src/components/AccountsPanel.tsx";
@@ -77,6 +77,42 @@ describe("AccountsPanel", () => {
 		expect(dispatch).toHaveBeenCalledWith({ type: "auth_started", providerId: "anthropic" });
 		await userEvent.click(screen.getAllByRole("button", { name: "Use an API key" })[0] as HTMLElement);
 		expect(send).toHaveBeenCalledWith({ type: "auth_login", providerId: "anthropic", method: "api_key" });
+	});
+
+	it("lists subscriptions first and API keys below", () => {
+		const auth = apply(base(), {
+			type: "auth_providers",
+			providers: [
+				{ id: "anthropic", name: "Anthropic", methods: ["api_key"], configured: false },
+				{
+					id: "github-copilot",
+					name: "GitHub Copilot",
+					methods: ["oauth"],
+					oauthName: "GitHub Copilot",
+					configured: false,
+				},
+				{
+					id: "openai-codex",
+					name: "OpenAI Codex",
+					methods: ["oauth"],
+					oauthName: "OpenAI (ChatGPT Plus/Pro)",
+					configured: false,
+				},
+				{ id: "openai", name: "OpenAI", methods: ["api_key"], configured: false },
+			],
+		}).auth;
+		render(<AccountsPanel auth={auth} send={vi.fn()} dispatch={vi.fn()} openUrl={vi.fn()} />);
+		const subscriptions = screen.getByRole("region", { name: "Use your subscription" });
+		const keys = screen.getByRole("region", { name: "Use an API key" });
+		expect(subscriptions.compareDocumentPosition(keys) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		expect(
+			within(subscriptions)
+				.getAllByRole("button")
+				.map((b) => b.textContent),
+		).toEqual(["Sign in with GitHub Copilot", "Sign in with OpenAI (ChatGPT Plus/Pro)"]);
+		expect(within(keys).getByText("Anthropic")).toBeInTheDocument();
+		expect(within(keys).getByText("OpenAI")).toBeInTheDocument();
+		expect(within(keys).queryByText("GitHub Copilot")).toBeNull();
 	});
 
 	it("filters providers by name", async () => {

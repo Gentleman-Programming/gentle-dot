@@ -1,6 +1,7 @@
 import type { AuthEvent, AuthPrompt, AuthProvider } from "@gentle-dot/protocol";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import type { AuthState, DotAction } from "../store.ts";
+import "../accounts.css";
 import type { Send } from "./types.ts";
 
 interface AccountsPanelProps {
@@ -83,39 +84,74 @@ export function AccountsPanel({ auth, send, dispatch, openUrl }: AccountsPanelPr
 						value={filter}
 						onChange={(event) => setFilter(event.target.value)}
 					/>
-					<ul className="providers">
-						{providers.map((provider) => (
-							<li key={provider.id}>
-								<div className="provider-name">
-									<b>{provider.name}</b>
-									{provider.configured ? <span className="chip ok">Connected</span> : null}
-								</div>
-								<div className="provider-actions">
-									{provider.methods.includes("oauth") ? (
-										<button type="button" className="primary" onClick={() => login(provider, "oauth")}>
-											{`Sign in with ${provider.oauthName ?? provider.name}`}
-										</button>
-									) : null}
-									{provider.methods.includes("api_key") ? (
-										<button type="button" onClick={() => login(provider, "api_key")}>
-											Use an API key
-										</button>
-									) : null}
-									{provider.configured && provider.source === "stored" ? (
-										<button
-											type="button"
-											className="link"
-											onClick={() => send({ type: "auth_logout", providerId: provider.id })}
-										>
-											Sign out
-										</button>
-									) : null}
-								</div>
-							</li>
-						))}
-					</ul>
+					<ProviderSection
+						title="Use your subscription"
+						hint="Sign in with a plan you already pay for."
+						providers={providers.filter((p) => p.methods.includes("oauth"))}
+						label={(p) => p.oauthName ?? p.name}
+						action={(p) => (
+							<button type="button" className="primary" onClick={() => login(p, "oauth")}>
+								{`Sign in with ${p.oauthName ?? p.name}`}
+							</button>
+						)}
+						send={send}
+					/>
+					<ProviderSection
+						title="Use an API key"
+						hint="For every other service: paste the key from its website."
+						providers={providers.filter((p) => p.methods.includes("api_key"))}
+						label={(p) => p.name}
+						action={(p) => (
+							<button type="button" onClick={() => login(p, "api_key")}>
+								Use an API key
+							</button>
+						)}
+						send={send}
+					/>
 				</>
 			)}
+		</section>
+	);
+}
+
+interface ProviderSectionProps {
+	title: string;
+	hint: string;
+	providers: AuthProvider[];
+	label: (provider: AuthProvider) => string;
+	action: (provider: AuthProvider) => ReactNode;
+	send: Send;
+}
+
+function ProviderSection({ title, hint, providers, label, action, send }: ProviderSectionProps) {
+	if (providers.length === 0) return null;
+	const id = `providers-${title.toLowerCase().replace(/\W+/g, "-")}`;
+	return (
+		<section className="provider-section" aria-labelledby={id}>
+			<h3 id={id}>{title}</h3>
+			<p className="muted">{hint}</p>
+			<ul className="providers">
+				{providers.map((provider) => (
+					<li key={provider.id}>
+						<div className="provider-name">
+							<b>{label(provider)}</b>
+							{provider.configured ? <span className="chip ok">Connected</span> : null}
+						</div>
+						<div className="provider-actions">
+							{action(provider)}
+							{provider.configured && provider.source === "stored" ? (
+								<button
+									type="button"
+									className="link"
+									onClick={() => send({ type: "auth_logout", providerId: provider.id })}
+								>
+									Sign out
+								</button>
+							) : null}
+						</div>
+					</li>
+				))}
+			</ul>
 		</section>
 	);
 }

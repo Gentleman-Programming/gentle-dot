@@ -1,0 +1,18 @@
+.provider-section {
+	margin-top: 18px;
+}
+
+.provider-section h3 {
+	margin: 0;
+	font-size: 12px;
+	line-height: 16px;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	color: var(--muted);
+}
+
+.provider-section > .muted {
+	margin: 2px 0 4px;
+	font-size: 12px;
+}
