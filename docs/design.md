@@ -171,7 +171,46 @@ Every daemon message carries `seq` (monotonic per connection) so the UI can dete
 - WebSocket upgrades check `Origin` against an allowlist (`http://127.0.0.1:4317`, `tauri://localhost`).
 - The VPS guide requires HTTPS, a reverse proxy with authentication, and a dedicated Docker container with no access to personal machines.
 
-## 9. Configuration
+## 9. Desktop shell contract (Tauri 2 <-> UI)
+
+The desktop app bundles the built UI (`packages/ui/dist/app`) as its frontend, so its origin is `tauri://localhost`, which the daemon allows. It has no dock icon (macOS accessory activation policy).
+
+### Windows
+
+| Label | Size | URL | Properties |
+|---|---|---|---|
+| `dot` | 56 × 56 | `index.html?surface=dot` | transparent, no decorations, always on top, not resizable, skip taskbar, visible on all workspaces, shadow off |
+| `panel` | 420 × 640 | `index.html?surface=panel` | transparent with macOS vibrancy (`HudWindow`), no decorations, always on top, hidden at start, skip taskbar |
+
+When the panel opens, it is placed next to the Dot on the side with more room, and it stays inside the monitor.
+
+### Rust commands the UI calls (`@tauri-apps/api/core` `invoke`)
+
+| Command | Arguments | Result |
+|---|---|---|
+| `connection_info` | — | `{ "url": "ws://127.0.0.1:<port>/ws", "token": "…", "webUrl": "http://127.0.0.1:<port>/#token=…" }`, read from `~/.gentle-dot/config.json` and `~/.gentle-dot/token` |
+| `toggle_panel` | — | shows and focuses the panel next to the Dot, or hides it |
+| `hide_panel` | — | hides the panel |
+| `set_dot_state` | `{ "state": AgentState }` | updates the tray icon tooltip and title marker |
+
+The Dot drags with `getCurrentWindow().startDragging()` (permission `core:window:allow-start-dragging`). After a drag ends (no move events for 300 ms), Rust snaps the Dot to the nearest monitor edge with a 12 px margin and saves the position in `~/.gentle-dot/desktop.json`; the next launch restores it, or defaults to the right edge, vertically centered.
+
+### Events Rust emits to the UI (`@tauri-apps/api/event` `listen`)
+
+| Event | Payload | Meaning |
+|---|---|---|
+| `dot://new-conversation` | — | the tray item "New conversation" was chosen; the panel starts a new conversation and opens |
+| `dot://panel-shown` | — | the panel became visible; the UI focuses the composer |
+
+### Menu bar and shortcut
+
+Tray menu: Open (`⌥ Space`), New conversation, Open in browser, Restart assistant, Launch at login (check item), Quit. The global shortcut `Alt+Space` (configurable as `shortcut` in `config.json`) toggles the panel. Launch at login uses `tauri-plugin-autostart`; Open in browser uses `tauri-plugin-opener` with `webUrl`.
+
+### Daemon lifecycle
+
+On launch, the app checks `GET /health`. If the daemon does not answer, the app spawns it: `<node> <repo>/packages/daemon/src/cli.ts`, with the `PATH` captured at build time (apps launched from Finder get a minimal `PATH`, and the daemon needs `gentle-shell`). `build.rs` records the absolute `node` path, the daemon script path, and `PATH`; `GENTLE_DOT_NODE` and `GENTLE_DOT_DAEMON_SCRIPT` override them at runtime. A daemon spawned by the app is stopped on Quit. Restart assistant restarts a spawned daemon, and reports through a dialog when the daemon was started outside the app. The UI connects only after `/health` answers.
+
+## 10. Configuration
 
 `~/.gentle-dot/config.json`, all optional:
 

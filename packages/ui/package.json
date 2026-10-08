@@ -9,6 +9,7 @@
 	},
 	"dependencies": {
 		"@gentle-dot/protocol": "workspace:*",
+		"@tauri-apps/api": "^2.12.1",
 		"react": "^19.3.0",
 		"react-dom": "^19.3.0",
 		"react-markdown": "^10.1.0",
