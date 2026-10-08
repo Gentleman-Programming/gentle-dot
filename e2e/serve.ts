@@ -17,7 +17,6 @@ process.env.GENTLE_PI_CONFIG_HOME = join(dataDir, "no-shell-profiles");
 delete process.env.GENTLE_DOT_AGENT_HOME;
 process.env.FAKE_AGENT_COMMANDS_FILE = E2E_COMMANDS_FILE;
 process.env.GENTLE_DOT_DATA_DIR = dataDir;
-process.env.GENTLE_DOT_WORKSPACE = dataDir;
 process.env.GENTLE_DOT_AGENT_BIN = process.execPath;
 process.env.GENTLE_DOT_AGENT_ARGS = JSON.stringify([
 	fileURLToPath(new URL("../packages/daemon/test/fixtures/fake-agent.ts", import.meta.url)),

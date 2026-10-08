@@ -33,8 +33,7 @@ USER dot
 WORKDIR /home/dot
 ENV GENTLE_DOT_HOST=0.0.0.0 \
 	GENTLE_DOT_PORT=4317 \
-	GENTLE_DOT_DATA_DIR=/home/dot/.gentle-dot \
-	GENTLE_DOT_WORKSPACE=/home/dot/workspace
+	GENTLE_DOT_DATA_DIR=/home/dot/.gentle-dot
 EXPOSE 4317
 HEALTHCHECK --interval=30s --timeout=5s CMD node -e "fetch('http://127.0.0.1:4317/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
 ENTRYPOINT ["tini", "--", "gentle-dot-entrypoint"]
