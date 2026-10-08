@@ -185,9 +185,15 @@ fn parse_call(name: &str, args: &Value) -> Option<Result<Call, String>> {
             }
             "type" => {
                 let text = string(args, "text")?;
-                // Newlines press Return (and are checked); tabs move the focus. Nothing else.
-                if text.chars().any(|c| c.is_ascii_control() && !matches!(c, '\n' | '\r' | '\t')) {
+                // Newlines press Return (and are checked); tabs move the focus. Nothing else,
+                // including Unicode line and paragraph separators that could act as Return.
+                let control = |c: char| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}');
+                if text.chars().any(|c| control(c) && !matches!(c, '\n' | '\r' | '\t')) {
                     return Err("`text` must not contain control characters other than newline and tab".into());
+                }
+                // The risk check sees the focus before the text; after a tab it may sit on a send button.
+                if text.split_once('\t').is_some_and(|(_, rest)| rest.contains([' ', '\n', '\r'])) {
+                    return Err("`text` must not type a space or a newline after a tab; send them in a separate call".into());
                 }
                 Tool::Type { text }
             }
@@ -1161,6 +1167,33 @@ mod tests {
         assert!(rig.desktop.events().is_empty());
         assert!(!is_error(&rig.call("type", json!({"text": "a\tb"}))));
         assert_eq!(rig.desktop.events(), vec![InputEvent::Text("a\tb".into())]);
+    }
+
+    #[test]
+    fn typing_unicode_line_breaks_is_refused() {
+        let rig = rig();
+        rig.ready();
+        for text in ["a\u{2028}b", "a\u{2029}b", "a\u{85}b"] {
+            let result = rig.call("type", json!({"text": text}));
+            assert!(is_error(&result), "{text:?}");
+            assert!(first_text(&result).contains("control character"), "{result}");
+        }
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn typing_space_or_return_after_a_tab_is_refused() {
+        // The tab may move the focus onto a send button the risk check never saw.
+        let rig = rig();
+        rig.ready();
+        for text in ["hello\t ", "hello\t\n", "a\tb c"] {
+            let result = rig.call("type", json!({"text": text}));
+            assert!(is_error(&result), "{text:?}");
+            assert!(first_text(&result).contains("after a tab"), "{result}");
+        }
+        assert!(rig.desktop.events().is_empty());
+        assert!(!is_error(&rig.call("type", json!({"text": "a b\tc"}))));
+        assert_eq!(rig.desktop.events(), vec![InputEvent::Text("a b\tc".into())]);
     }
 
     #[test]
