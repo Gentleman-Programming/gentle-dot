@@ -19,6 +19,22 @@ pnpm dev          # builds the UI and starts the daemon on http://127.0.0.1:4317
 
 The daemon prints a URL that already carries the access token. Open it in a browser.
 
+## Desktop app (macOS)
+
+```bash
+PATH=/opt/homebrew/opt/rustup/bin:$PATH pnpm --filter @gentle-dot/desktop dev
+```
+
+The app puts the Dot on the desktop and an item in the menu bar, and `⌥ Space` opens the panel. If the daemon is not running, the app starts it. See [apps/desktop/README.md](apps/desktop/README.md).
+
+## Server
+
+`Dockerfile` and `compose.yaml` run the same daemon on a VPS behind HTTPS. See [docs/deploy-vps.md](docs/deploy-vps.md).
+
+## How it works
+
+The daemon starts the agent (`gentle-shell --mode rpc`) as a child process and gives it the Gentle Dot identity. It restarts the agent if it crashes, reopening the same conversation, and translates its events into a small WebSocket protocol for the desktop and web interfaces. Conversations live in `~/.gentle-dot/sessions`; the access key is in `~/.gentle-dot/token`.
+
 ## Checks
 
 ```bash
