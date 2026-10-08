@@ -15,6 +15,7 @@ import {
 } from "./desktop.ts";
 import { useComputerRegistration, useComputerState } from "./useComputer.ts";
 import { useDot } from "./useDot.ts";
+import { usePanelWindow } from "./usePanelWindow.ts";
 
 type Surface = "dot" | "panel" | "web";
 
@@ -42,6 +43,13 @@ function browserConnection(): ConnectionInfo | undefined {
 	return { url: `${protocol}//${base.host}/ws`, token };
 }
 
+/** ⌘⇧F (Ctrl+Shift+F off macOS) toggles the panel's full screen. */
+function isFullscreenShortcut(event: KeyboardEvent): boolean {
+	return (
+		(event.metaKey || event.ctrlKey) && event.shiftKey && !event.altKey && event.key.toLowerCase() === "f"
+	);
+}
+
 export function App() {
 	const surface = currentSurface();
 	const [info, setInfo] = useState<ConnectionInfo | undefined>(undefined);
@@ -58,6 +66,10 @@ export function App() {
 		state.connection === "open",
 		send,
 	);
+	// The panel's own window (S26): hide the rose, full screen.
+	const panel = usePanelWindow(desktop && surface === "panel");
+	const fullscreenNow = panel.fullscreenNow;
+	const setFullscreen = panel.controls.setFullscreen;
 	const computer: ComputerControls | undefined =
 		desktop && surface === "panel"
 			? {
@@ -94,15 +106,26 @@ export function App() {
 			}),
 			onDesktopEvent("dot://panel-shown", () => setFocusKey((k) => k + 1)),
 		];
+		// Esc, in order: whatever inside the panel already handled it (it called preventDefault),
+		// then leaving full screen, then hiding the panel.
 		const onKey = (event: KeyboardEvent) => {
-			if (event.key === "Escape") hidePanel();
+			if (event.defaultPrevented) return;
+			if (event.key === "Escape") {
+				if (fullscreenNow.current) setFullscreen(false);
+				else hidePanel();
+				return;
+			}
+			if (isFullscreenShortcut(event)) {
+				event.preventDefault();
+				setFullscreen(!fullscreenNow.current);
+			}
 		};
 		window.addEventListener("keydown", onKey);
 		return () => {
 			window.removeEventListener("keydown", onKey);
 			for (const s of subscriptions) void s.then((unlisten) => unlisten());
 		};
-	}, [surface, send]);
+	}, [surface, send, fullscreenNow, setFullscreen]);
 
 	useEffect(() => {
 		document.documentElement.dataset.surface = surface;
@@ -140,6 +163,7 @@ export function App() {
 			focusKey={focusKey}
 			{...(surface === "panel" ? { onHide: hidePanel } : {})}
 			{...(computer ? { computer } : {})}
+			{...(desktop && surface === "panel" ? { panelWindow: panel.controls } : {})}
 		/>
 	);
 }

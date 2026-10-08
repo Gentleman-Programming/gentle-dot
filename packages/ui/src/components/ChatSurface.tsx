@@ -2,6 +2,7 @@ import type { ClientMessage } from "@gentle-dot/protocol";
 import { useState } from "react";
 import { openUrl as openExternal } from "../desktop.ts";
 import { activeTitle, type DotAction, type DotState, isBusy, needsAccount } from "../store.ts";
+import type { PanelWindowControls } from "../usePanelWindow.ts";
 import { AccountsPanel } from "./AccountsPanel.tsx";
 import { AskCard } from "./AskCard.tsx";
 import { Composer } from "./Composer.tsx";
@@ -10,8 +11,12 @@ import { ConnectorDraftCard } from "./ConnectorDraftCard.tsx";
 import { ConnectorsPanel } from "./ConnectorsPanel.tsx";
 import {
 	AccountsIcon,
+	CollapseIcon,
 	ConnectorsIcon,
 	ConversationsIcon,
+	ExpandIcon,
+	EyeIcon,
+	EyeOffIcon,
 	MinusIcon,
 	PlusIcon,
 	ProfilesIcon,
@@ -32,6 +37,8 @@ interface ChatSurfaceProps {
 	openUrl?: (url: string) => void;
 	/** Computer control, in the desktop panel only. */
 	computer?: ComputerControls;
+	/** Hiding the rose and full screen (S26), in the desktop panel only; the web page already fills the browser. */
+	panelWindow?: PanelWindowControls;
 }
 
 const CONTINUE_TEXT = "Continue where you left off.";
@@ -59,6 +66,7 @@ export function ChatSurface({
 	dispatch = () => {},
 	openUrl = openExternal,
 	computer,
+	panelWindow,
 }: ChatSurfaceProps) {
 	const openAccounts = () => {
 		send({ type: "auth_list" });
@@ -96,7 +104,10 @@ export function ChatSurface({
 		state.connection === "open" && state.agentState !== "restarting" && state.agentState !== "starting";
 
 	return (
-		<div className={`chat chat-${variant}`} data-state={state.agentState}>
+		<div
+			className={`chat chat-${variant}${panelWindow?.fullscreen ? " chat-fullscreen" : ""}`}
+			data-state={state.agentState}
+		>
 			<header className="chat-header" data-tauri-drag-region={variant === "panel" ? "" : undefined}>
 				<span className={`state-dot state-${state.agentState}`} aria-hidden="true" />
 				{conversations ? (
@@ -148,6 +159,12 @@ export function ChatSurface({
 					>
 						<PlusIcon />
 					</button>
+				) : null}
+				{panelWindow ? (
+					<>
+						<RoseButton controls={panelWindow} />
+						<FullscreenButton controls={panelWindow} />
+					</>
 				) : null}
 				{onHide ? (
 					<button type="button" className="icon" aria-label="Hide" title="Hide" onClick={onHide}>
@@ -306,5 +323,36 @@ export function ChatSurface({
 				onStartTyping={closeOptions}
 			/>
 		</div>
+	);
+}
+
+function RoseButton({ controls }: { controls: PanelWindowControls }) {
+	const label = controls.roseHidden ? "Show the rose" : "Hide the rose";
+	return (
+		<button
+			type="button"
+			className="icon"
+			aria-label={label}
+			title={label}
+			onClick={() => controls.setRoseHidden(!controls.roseHidden)}
+		>
+			{controls.roseHidden ? <EyeIcon /> : <EyeOffIcon />}
+		</button>
+	);
+}
+
+function FullscreenButton({ controls }: { controls: PanelWindowControls }) {
+	const label = controls.fullscreen ? "Exit full screen" : "Full screen";
+	return (
+		<button
+			type="button"
+			className="icon"
+			aria-label={label}
+			title={`${label} (⌘⇧F)`}
+			aria-pressed={controls.fullscreen}
+			onClick={() => controls.setFullscreen(!controls.fullscreen)}
+		>
+			{controls.fullscreen ? <CollapseIcon /> : <ExpandIcon />}
+		</button>
 	);
 }

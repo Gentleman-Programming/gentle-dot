@@ -129,6 +129,44 @@ pub fn place_panel(dot: Rect, panel: (i32, i32), monitor: Rect, gap: i32, margin
     )
 }
 
+/// Places the panel when the rose is hidden (S26.1): back at its remembered
+/// spot when that lies on the current display (pulled inside it), otherwise at
+/// the right edge of the current display, vertically centered.
+pub fn place_panel_alone(
+    remembered: Option<(i32, i32)>,
+    panel: (i32, i32),
+    current: Rect,
+    margin: i32,
+) -> (i32, i32) {
+    let (width, height) = panel;
+    match remembered {
+        Some((x, y)) if current.contains(Rect::new(x, y, width, height).center()) => (
+            clamp_span(x, width, current.x, current.right(), margin),
+            clamp_span(y, height, current.y, current.bottom(), margin),
+        ),
+        _ => default_dot_position(current, panel, margin),
+    }
+}
+
+/// The frame of the full-screen panel (S26.2): the work area of the display
+/// it is on, so the menu bar and the Dock stay visible.
+pub fn full_screen_rect(panel: Rect, monitors: &[Rect]) -> Option<Rect> {
+    monitor_for(panel, monitors)
+}
+
+/// The frame to return to from full screen: the one before, kept on a display
+/// that still exists.
+pub fn restore_rect(before: Rect, monitors: &[Rect], margin: i32) -> Rect {
+    let Some(m) = monitor_for(before, monitors) else {
+        return before;
+    };
+    Rect {
+        x: clamp_span(before.x, before.width, m.x, m.right(), margin),
+        y: clamp_span(before.y, before.height, m.y, m.bottom(), margin),
+        ..before
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +285,38 @@ mod tests {
     fn panel_opens_toward_the_side_with_more_room() {
         assert_eq!(place_panel(dot(1852, 500), (420, 640), SCREEN, 8, 12), (1424, 208));
         assert_eq!(place_panel(dot(12, 500), (420, 640), SCREEN, 8, 12), (76, 208));
+    }
+
+    #[test]
+    fn panel_without_the_rose_returns_to_its_remembered_spot_on_the_current_display() {
+        assert_eq!(place_panel_alone(Some((300, 200)), (420, 640), SCREEN, 12), (300, 200));
+        // A spot partly off the display is pulled back inside it.
+        assert_eq!(place_panel_alone(Some((1700, 600)), (420, 640), SCREEN, 12), (1488, 428));
+    }
+
+    #[test]
+    fn panel_without_the_rose_defaults_to_the_right_edge_of_the_current_display() {
+        assert_eq!(place_panel_alone(None, (420, 640), SCREEN, 12), (1488, 220));
+        // A spot remembered on another display does not drag the panel there.
+        let right = Rect::new(1920, -200, 2560, 1440);
+        assert_eq!(place_panel_alone(Some((300, 200)), (420, 640), right, 12), (4048, 200));
+    }
+
+    #[test]
+    fn full_screen_fills_the_work_area_of_the_panel_display() {
+        let right = Rect::new(1920, -200, 2560, 1440);
+        assert_eq!(full_screen_rect(Rect::new(1424, 208, 420, 640), &[SCREEN, right]), Some(SCREEN));
+        assert_eq!(full_screen_rect(Rect::new(2000, 0, 420, 640), &[SCREEN, right]), Some(right));
+        assert_eq!(full_screen_rect(Rect::new(0, 0, 420, 640), &[]), None);
+    }
+
+    #[test]
+    fn restoring_from_full_screen_returns_to_the_previous_frame() {
+        let before = Rect::new(1424, 208, 420, 640);
+        assert_eq!(restore_rect(before, &[SCREEN], 12), before);
+        // The display it was on is gone: same size, moved onto the nearest one that remains.
+        assert_eq!(restore_rect(Rect::new(2500, 100, 420, 640), &[SCREEN], 12), Rect::new(1488, 100, 420, 640));
+        assert_eq!(restore_rect(before, &[], 12), before);
     }
 
     #[test]

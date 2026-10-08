@@ -200,12 +200,12 @@ Why enforcement lives in the app: everything inside the engine, and the daemon's
 ### The panel (expanded)
 
 - 420 × 640 px, rounded 20 px, translucent (macOS vibrancy), anchored to the Dot.
-- Header (one continuous chat): the rose glyph and "Gentle Dot", then Accounts, Profiles, Connectors (a plug; also `/connectors`), and Hide as 18 px stroke icons with tooltips. With `features.conversations` on, the conversation title, the conversations list, and New conversation return.
+- Header (one continuous chat): the rose glyph and "Gentle Dot", then Accounts, Profiles, Connectors (a plug; also `/connectors`), Hide the rose (an eye) and Full screen (desktop panel only), and Hide as 18 px stroke icons with tooltips. With `features.conversations` on, the conversation title, the conversations list, and New conversation return.
 - "Show earlier" at the top of the chat loads the previous page; a subtle "Earlier messages" divider marks where the chat's earlier session ends.
 - Body: message list with streaming Markdown and code blocks; activity rows are collapsed one-liners grouped under the assistant turn ("Read 3 files · Ran tests").
 - Ask cards: when the agent needs the user, an inline card with the question and buttons (select and confirm) or a text field (input and editor). The Dot turns amber until the user answers.
 - Composer: multiline, Enter sends, Shift+Enter adds a new line. While the agent works, the composer offers "Stop", and sending a message steers the current run.
-- `Esc` collapses back to the Dot; the conversation keeps running.
+- `Esc` collapses back to the Dot; the conversation keeps running. In full screen, `Esc` first restores the panel's size (see §9, Hiding the rose and full screen).
 
 ### Menu bar
 
@@ -271,6 +271,9 @@ When the panel opens, it is placed next to the Dot on the side with more room, a
 | `toggle_panel` | — | shows and focuses the panel next to the Dot, or hides it |
 | `hide_panel` | — | hides the panel |
 | `set_dot_state` | `{ "state": AgentState }` | updates the tray tooltip and swaps the tray glyph for the state |
+| `rose_hidden` | — | `true` when the user hid the rose |
+| `set_rose_hidden` | `{ "hidden": boolean }` | hides or shows the Dot window, saves the choice, emits `dot://rose`; returns the resulting state |
+| `set_panel_fullscreen` | `{ "on": boolean }` | fills the work area of the panel's display, or restores the frame before; returns the resulting state |
 
 The Dot drags with `getCurrentWindow().startDragging()` (permission `core:window:allow-start-dragging`). After a drag ends (no move events for 300 ms), Rust snaps the Dot, by its real window size, to the nearest monitor edge with a 12 px margin and saves the position in `~/.gentle-dot/desktop.json`; the next launch restores it, or defaults to the right edge, vertically centered.
 
@@ -280,10 +283,17 @@ The Dot drags with `getCurrentWindow().startDragging()` (permission `core:window
 |---|---|---|
 | `dot://new-conversation` | — | the tray item "New conversation" was chosen; with the conversations list on, the panel starts a new conversation and opens; in the single chat (default) the UI ignores it |
 | `dot://panel-shown` | — | the panel became visible; the UI focuses the composer |
+| `dot://rose` | `{ "hidden": boolean }` | the rose was hidden or shown (panel header or tray) |
 
 ### Menu bar and shortcut
 
-Tray menu: Open (`⌥ Space`), New conversation (only with `GENTLE_DOT_CONVERSATIONS=1`, read like the daemon reads it), Open in browser, Restart assistant, Launch at login (check item), Quit. The global shortcut `Alt+Space` (configurable as `shortcut` in `config.json`) toggles the panel. Launch at login uses `tauri-plugin-autostart`; Open in browser uses `tauri-plugin-opener` with `webUrl`.
+Tray menu: Open (`⌥ Space`), New conversation (only with `GENTLE_DOT_CONVERSATIONS=1`, read like the daemon reads it), Open in browser, Hide the rose / Show the rose, Restart assistant, Launch at login (check item), Quit. The global shortcut `Alt+Space` (configurable as `shortcut` in `config.json`) toggles the panel. Launch at login uses `tauri-plugin-autostart`; Open in browser uses `tauri-plugin-opener` with `webUrl`.
+
+### Hiding the rose and full screen (S26)
+
+- Hide the rose: the tray item "Hide the rose" (relabeled "Show the rose" while hidden) and an eye button in the panel header call `set_rose_hidden`. The choice is saved as `rose_hidden` in `~/.gentle-dot/desktop.json` next to `dot_points`; files without the key load as shown. A hidden rose is still placed at launch, only not shown. The shortcut and the tray's Open never need the Dot: with the rose hidden, the panel opens at the spot where it was last hidden when that is on the display under the pointer, or else at the right edge of that display, vertically centered. Computer control stays visible in the panel banner (and the tray's Yolo mode check) while the rose is hidden.
+- Full screen: a header button and ⌘⇧F (Ctrl+Shift+F off macOS) while the panel has focus call `set_panel_fullscreen`. The panel fills the work area of its display (the menu bar and the Dock stay visible) and stays an accessory window, not a separate macOS fullscreen Space. The app remembers the frame before and restores it, kept on a display that still exists. While full screen, the panel is not moved when it opens or the Dot snaps, and the conversation, notes, and composer use a centered column of `--reading-width` (780 px, the web page's column). The web page has no button; it already fills the browser.
+- `Esc` in the panel, in order: an `Esc` that something inside the panel already handled (`preventDefault`) is left alone; in full screen it restores the panel; otherwise it hides the panel.
 
 ### Second launch and `--toggle`
 

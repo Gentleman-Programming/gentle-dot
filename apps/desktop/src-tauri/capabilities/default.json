@@ -1,7 +1,7 @@
 {
 	"$schema": "../gen/schemas/desktop-schema.json",
 	"identifier": "default",
-	"description": "What the Dot and panel UI may call: event listening, Dot dragging, opening web pages (sign-in), the four shell commands, and the computer-control commands (yolo mode included: its native confirmation decides).",
+	"description": "What the Dot and panel UI may call: event listening, Dot dragging, opening web pages (sign-in), the shell commands (hiding the rose and the full-screen panel included), and the computer-control commands (yolo mode included: its native confirmation decides).",
 	"windows": ["dot", "panel"],
 	"permissions": [
 		"core:event:allow-listen",
@@ -12,6 +12,9 @@
 		"allow-toggle-panel",
 		"allow-hide-panel",
 		"allow-set-dot-state",
+		"allow-rose-hidden",
+		"allow-set-rose-hidden",
+		"allow-set-panel-fullscreen",
 		"allow-computer-endpoint",
 		"allow-computer-permissions",
 		"allow-computer-request-permission",

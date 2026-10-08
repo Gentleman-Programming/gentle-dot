@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-rose-hidden"
+description = "Enables the rose_hidden command without any pre-configured scope."
+commands.allow = ["rose_hidden"]
+
+[[permission]]
+identifier = "deny-rose-hidden"
+description = "Denies the rose_hidden command without any pre-configured scope."
+commands.deny = ["rose_hidden"]

@@ -23,6 +23,8 @@
 	--radius-lg: 16px;
 	--radius-pill: 999px;
 	--radius: 20px;
+	/* The reading column of the web page and of the full-screen panel (S26.2). */
+	--reading-width: 780px;
 	--ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 	--font-text: Inter, "SF Pro Text", system-ui, -apple-system, "Segoe UI", sans-serif;
 	--font-mono: "IosevkaTerm NF", "Iosevka Term", "JetBrains Mono", "SF Mono", ui-monospace, Menlo, monospace;
@@ -544,7 +546,7 @@ html[data-effects="none"] .chat-panel {
 }
 
 .chat-web {
-	max-width: 780px;
+	max-width: var(--reading-width);
 	margin: 0 auto;
 	border-left: 1px solid var(--line);
 	border-right: 1px solid var(--line);
@@ -1320,6 +1322,20 @@ button.link:hover:not(:disabled) {
 .auth-actions {
 	display: flex;
 	gap: 8px;
+}
+
+/* Full screen (S26.2): the panel fills the display, and the conversation, its notes, and the
+   composer keep the web page's readable centered column. */
+.chat-fullscreen .chat-body,
+.chat-fullscreen .notices {
+	padding-inline: max(16px, calc((100% - var(--reading-width)) / 2));
+}
+
+.chat-fullscreen .status,
+.chat-fullscreen .computer-banner,
+.chat-fullscreen .switch-confirm,
+.chat-fullscreen .composer {
+	margin-inline: max(12px, calc((100% - var(--reading-width)) / 2));
 }
 
 @media (prefers-reduced-motion: reduce) {

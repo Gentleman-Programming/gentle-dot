@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-panel-fullscreen"
+description = "Enables the set_panel_fullscreen command without any pre-configured scope."
+commands.allow = ["set_panel_fullscreen"]
+
+[[permission]]
+identifier = "deny-set-panel-fullscreen"
+description = "Denies the set_panel_fullscreen command without any pre-configured scope."
+commands.deny = ["set_panel_fullscreen"]

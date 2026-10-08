@@ -124,3 +124,49 @@ export function MinusIcon() {
 		</Icon>
 	);
 }
+
+/** An eye: show the floating rose again. */
+export function EyeIcon() {
+	return (
+		<Icon>
+			<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" />
+			<circle cx="12" cy="12" r="3" />
+		</Icon>
+	);
+}
+
+/** A crossed-out eye: hide the floating rose. */
+export function EyeOffIcon() {
+	return (
+		<Icon>
+			<path d="M10.6 5.1A9.8 9.8 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-2.2 3.1" />
+			<path d="M6.6 6.6C3.6 8.4 2 12 2 12s3.5 7 10 7a9.7 9.7 0 0 0 5.4-1.6" />
+			<path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+			<path d="m2 2 20 20" />
+		</Icon>
+	);
+}
+
+/** Corners pointing out: fill the screen. */
+export function ExpandIcon() {
+	return (
+		<Icon>
+			<path d="M15 3h6v6" />
+			<path d="M9 21H3v-6" />
+			<path d="M21 3l-7 7" />
+			<path d="M3 21l7-7" />
+		</Icon>
+	);
+}
+
+/** Corners pointing in: back to the panel's size. */
+export function CollapseIcon() {
+	return (
+		<Icon>
+			<path d="M4 14h6v6" />
+			<path d="M20 10h-6V4" />
+			<path d="M14 10l7-7" />
+			<path d="M3 21l7-7" />
+		</Icon>
+	);
+}

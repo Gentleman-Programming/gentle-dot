@@ -1,5 +1,5 @@
 //! Tauri wiring: windows, commands, tray menu, global shortcut, Dot snapping,
-//! and the daemon lifecycle (design §9).
+//! hiding the rose, the full-screen panel, and the daemon lifecycle (design §9).
 
 use crate::computer::app as computer;
 use crate::computer::session::Reason;
@@ -9,7 +9,9 @@ use crate::geometry::{self, Rect};
 use crate::platform::{self, LaunchRequest, Os, DOT_TITLE, PANEL_TITLE};
 use crate::position::{self, DotPosition};
 use crate::status::{is_template, tray_status, TrayGlyph};
-use std::sync::{mpsc, Arc};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use tauri::image::Image;
@@ -45,6 +47,48 @@ struct Shell {
     snap: mpsc::Sender<()>,
     /// False on native Wayland, where the compositor places windows (Hyprland window rules).
     places_windows: bool,
+    /// The user hid the Dot window (S26.1); saved in `desktop.json`.
+    rose_hidden: AtomicBool,
+    /// Where the panel was when it was last hidden, for placing it without the Dot.
+    panel_spot: Mutex<Option<(i32, i32)>>,
+    /// While the panel fills the screen (S26.2): its frame before, to restore.
+    full_screen: Mutex<Option<Rect>>,
+}
+
+/// The tray's rose item, relabeled when the rose is hidden or shown.
+struct RoseMenuItem(MenuItem<tauri::Wry>);
+
+/// Where `show_panel` puts the panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placement {
+    /// Leave it where it is: full screen, or a compositor that places windows itself.
+    Keep,
+    BesideDot,
+    /// The rose is hidden: the remembered spot or the default one on the current display.
+    Alone,
+}
+
+/// Opening the panel never depends on the Dot window being visible.
+fn panel_placement(places_windows: bool, full_screen: bool, rose_hidden: bool) -> Placement {
+    if !places_windows || full_screen {
+        Placement::Keep
+    } else if rose_hidden {
+        Placement::Alone
+    } else {
+        Placement::BesideDot
+    }
+}
+
+fn rose_menu_label(hidden: bool) -> &'static str {
+    if hidden {
+        "Show the rose"
+    } else {
+        "Hide the rose"
+    }
+}
+
+fn desktop_file(config: &DesktopConfig) -> PathBuf {
+    config.data_dir.join("desktop.json")
 }
 
 type CommandResult<T = ()> = Result<T, String>;
@@ -88,7 +132,67 @@ fn toggle_panel(app: AppHandle) -> CommandResult {
 
 #[tauri::command]
 fn hide_panel(app: AppHandle) -> CommandResult {
-    window(&app, PANEL)?.hide().map_err(err)
+    let panel = window(&app, PANEL)?;
+    let shell = app.state::<Shell>();
+    if shell.full_screen.lock().unwrap().is_none() {
+        if let Ok(rect) = rect_of(&panel) {
+            *shell.panel_spot.lock().unwrap() = Some((rect.x, rect.y));
+        }
+    }
+    panel.hide().map_err(err)
+}
+
+#[tauri::command]
+fn rose_hidden(app: AppHandle) -> bool {
+    rose_hidden_state(&app)
+}
+
+/// Hides or shows the Dot window and remembers the choice. Returns whether it is hidden.
+#[tauri::command]
+fn set_rose_hidden(app: AppHandle, hidden: bool) -> CommandResult<bool> {
+    let shell = app.state::<Shell>();
+    position::save_rose_hidden(&desktop_file(&shell.config), hidden).map_err(err)?;
+    shell.rose_hidden.store(hidden, Ordering::SeqCst);
+    let dot = window(&app, DOT)?;
+    if hidden {
+        dot.hide().map_err(err)?;
+    } else {
+        dot.show().map_err(err)?;
+    }
+    if let Some(item) = app.try_state::<RoseMenuItem>() {
+        item.0.set_text(rose_menu_label(hidden)).map_err(err)?;
+    }
+    app.emit("dot://rose", serde_json::json!({ "hidden": hidden })).map_err(err)?;
+    Ok(hidden)
+}
+
+/// Fills the work area of the panel's display, or returns to the frame before (S26.2).
+/// It stays an accessory window, never a separate macOS fullscreen Space. Returns the new state.
+#[tauri::command]
+fn set_panel_fullscreen(app: AppHandle, on: bool) -> CommandResult<bool> {
+    let panel = window(&app, PANEL)?;
+    let shell = app.state::<Shell>();
+    let mut full_screen = shell.full_screen.lock().unwrap();
+    let monitors = monitor_rects(&panel)?;
+    match (on, *full_screen) {
+        (true, None) => {
+            let before = rect_of(&panel)?;
+            let Some(area) = geometry::full_screen_rect(before, &monitors) else {
+                return Ok(false);
+            };
+            // GTK keeps a non-resizable window at its content size.
+            #[cfg(target_os = "linux")]
+            panel.set_resizable(true).map_err(err)?;
+            set_frame(&panel, area)?;
+            *full_screen = Some(before);
+        }
+        (false, Some(before)) => {
+            set_frame(&panel, geometry::restore_rect(before, &monitors, EDGE_MARGIN))?;
+            *full_screen = None;
+        }
+        _ => {}
+    }
+    Ok(full_screen.is_some())
 }
 
 #[tauri::command]
@@ -126,6 +230,21 @@ fn move_to(window: &WebviewWindow, (x, y): (i32, i32)) -> CommandResult {
     window.set_position(LogicalPosition::new(f64::from(x), f64::from(y))).map_err(err)
 }
 
+fn set_frame(window: &WebviewWindow, rect: Rect) -> CommandResult {
+    window.set_size(LogicalSize::new(f64::from(rect.width), f64::from(rect.height))).map_err(err)?;
+    move_to(window, (rect.x, rect.y))
+}
+
+/// The work area under the pointer, or the primary one. Tao reports the pointer in pixels of the
+/// primary monitor's scale factor.
+fn current_monitor(app: &AppHandle, monitors: &[Rect]) -> CommandResult<Option<Rect>> {
+    let primary = app.primary_monitor().map_err(err)?;
+    let scale = primary.as_ref().map_or(1.0, |m| m.scale_factor());
+    let points = |value: f64| (value / scale).round() as i32;
+    let pointer = app.cursor_position().ok().map(|p| Rect::new(points(p.x), points(p.y), 0, 0));
+    Ok(pointer.and_then(|p| geometry::monitor_for(p, monitors)).or_else(|| primary.as_ref().map(work_area)))
+}
+
 /// Keeps the Dot at exactly `DOT_SIZE` points, in case macOS or a monitor change resized it.
 fn keep_dot_size(dot: &WebviewWindow, current: Rect) -> CommandResult {
     if (current.width, current.height) == (DOT_SIZE.0 as i32, DOT_SIZE.1 as i32) {
@@ -134,10 +253,27 @@ fn keep_dot_size(dot: &WebviewWindow, current: Rect) -> CommandResult {
     dot.set_size(LogicalSize::new(DOT_SIZE.0, DOT_SIZE.1)).map_err(err)
 }
 
-fn place_panel_next_to_dot(app: &AppHandle) -> CommandResult {
-    if !app.state::<Shell>().places_windows {
-        return Ok(());
+fn place_panel(app: &AppHandle) -> CommandResult {
+    let shell = app.state::<Shell>();
+    let full_screen = shell.full_screen.lock().unwrap().is_some();
+    match panel_placement(shell.places_windows, full_screen, shell.rose_hidden.load(Ordering::SeqCst)) {
+        Placement::Keep => Ok(()),
+        Placement::BesideDot => place_panel_next_to_dot(app),
+        Placement::Alone => place_panel_alone(app),
     }
+}
+
+fn place_panel_alone(app: &AppHandle) -> CommandResult {
+    let panel = window(app, PANEL)?;
+    let Some(current) = current_monitor(app, &monitor_rects(&panel)?)? else {
+        return Ok(());
+    };
+    let remembered = *app.state::<Shell>().panel_spot.lock().unwrap();
+    let size = (PANEL_SIZE.0 as i32, PANEL_SIZE.1 as i32);
+    move_to(&panel, geometry::place_panel_alone(remembered, size, current, EDGE_MARGIN))
+}
+
+fn place_panel_next_to_dot(app: &AppHandle) -> CommandResult {
     let (dot, panel) = (window(app, DOT)?, window(app, PANEL)?);
     let mut dot_rect = rect_of(&dot)?;
     (dot_rect.width, dot_rect.height) = (DOT_SIZE.0 as i32, DOT_SIZE.1 as i32);
@@ -151,7 +287,7 @@ fn place_panel_next_to_dot(app: &AppHandle) -> CommandResult {
 }
 
 fn show_panel(app: &AppHandle) -> CommandResult {
-    place_panel_next_to_dot(app)?;
+    place_panel(app)?;
     let panel = window(app, PANEL)?;
     panel.show().map_err(err)?;
     panel.set_focus().map_err(err)?;
@@ -169,9 +305,9 @@ fn snap_dot(app: &AppHandle) -> CommandResult {
         move_to(&dot, (x, y))?;
     }
     let shell = app.state::<Shell>();
-    position::save(&shell.config.data_dir.join("desktop.json"), DotPosition { x, y }).map_err(err)?;
+    position::save(&desktop_file(&shell.config), DotPosition { x, y }).map_err(err)?;
     if window(app, PANEL)?.is_visible().unwrap_or(false) {
-        place_panel_next_to_dot(app)?;
+        place_panel(app)?;
     }
     Ok(())
 }
@@ -196,7 +332,12 @@ fn spawn_snapper(app: AppHandle) -> mpsc::Sender<()> {
     tx
 }
 
-fn build_windows(app: &AppHandle, config: &DesktopConfig, places_windows: bool) -> tauri::Result<()> {
+fn build_windows(
+    app: &AppHandle,
+    config: &DesktopConfig,
+    places_windows: bool,
+    rose_hidden: bool,
+) -> tauri::Result<()> {
     let dot = WebviewWindowBuilder::new(app, DOT, WebviewUrl::App("index.html?surface=dot".into()))
         .title(DOT_TITLE)
         .inner_size(DOT_SIZE.0, DOT_SIZE.1)
@@ -232,7 +373,9 @@ fn build_windows(app: &AppHandle, config: &DesktopConfig, places_windows: bool) 
 
     if !places_windows {
         // Native Wayland ignores positions; Hyprland window rules place and pin the Dot.
-        dot.show()?;
+        if !rose_hidden {
+            dot.show()?;
+        }
         return Ok(());
     }
 
@@ -243,13 +386,16 @@ fn build_windows(app: &AppHandle, config: &DesktopConfig, places_windows: bool) 
     let monitors = monitor_rects(&dot).unwrap_or_default();
     let size = (DOT_SIZE.0 as i32, DOT_SIZE.1 as i32);
     let primary = app.primary_monitor()?.as_ref().map(work_area);
-    let saved = position::load(&config.data_dir.join("desktop.json")).map(|p| (p.x, p.y));
+    let saved = position::load(&desktop_file(config)).map(|p| (p.x, p.y));
     if let Some((x, y)) = geometry::initial_dot_position(saved, size, &monitors, primary, EDGE_MARGIN) {
         dot.set_position(LogicalPosition::new(f64::from(x), f64::from(y)))?;
     }
     // Set the size again once the window is in place, so it is exactly DOT_SIZE points there.
     dot.set_size(LogicalSize::new(DOT_SIZE.0, DOT_SIZE.1))?;
-    dot.show()?;
+    // A hidden rose stays placed, ready for "Show the rose".
+    if !rose_hidden {
+        dot.show()?;
+    }
     Ok(())
 }
 
@@ -261,12 +407,13 @@ fn conversations_on(value: Option<&str>) -> bool {
 /// The tray menu, top to bottom (`-` is a separator). "New conversation" only exists with the
 /// conversations list on; in the single continuous chat there is nothing new to start.
 /// "Stop computer control" and "Yolo mode" exist where computer control does (macOS, S24.3, S24.9).
+/// "rose" hides or shows the floating Dot (S26.1).
 fn tray_menu_ids(conversations: bool, computer_control: bool) -> Vec<&'static str> {
     let mut ids = vec!["open"];
     if conversations {
         ids.push("new");
     }
-    ids.push("browser");
+    ids.extend(["browser", "rose"]);
     if computer_control {
         ids.extend(["computer-stop", "computer-yolo"]);
     }
@@ -274,7 +421,7 @@ fn tray_menu_ids(conversations: bool, computer_control: bool) -> Vec<&'static st
     ids
 }
 
-fn build_tray(app: &AppHandle, config: &DesktopConfig) -> tauri::Result<TrayIcon> {
+fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tauri::Result<TrayIcon> {
     let autostart = app.autolaunch().is_enabled().unwrap_or(false);
     // The accelerator is only a label here; an unparsable one must not break the menu.
     let open = MenuItem::with_id(app, "open", "Open", true, Some(config.shortcut.as_str()))
@@ -286,6 +433,11 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig) -> tauri::Result<TrayIcon
             "open" => menu.append(&open)?,
             "new" => menu.append(&MenuItem::with_id(app, "new", "New conversation", true, None::<&str>)?)?,
             "browser" => menu.append(&MenuItem::with_id(app, "browser", "Open in browser", true, None::<&str>)?)?,
+            "rose" => {
+                let item = MenuItem::with_id(app, "rose", rose_menu_label(rose_hidden), true, None::<&str>)?;
+                menu.append(&item)?;
+                app.manage(RoseMenuItem(item));
+            }
             "computer-stop" => menu.append(&MenuItem::with_id(
                 app,
                 "computer-stop",
@@ -325,6 +477,7 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig) -> tauri::Result<TrayIcon
                 "open" => show_panel(app),
                 "new" => show_panel(app).and_then(|()| app.emit("dot://new-conversation", ()).map_err(err)),
                 "browser" => open_in_browser(app),
+                "rose" => set_rose_hidden(app.clone(), !rose_hidden_state(app)).map(|_| ()),
                 "computer-stop" => {
                     computer::stop(app, Reason::Stopped);
                     Ok(())
@@ -349,6 +502,10 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig) -> tauri::Result<TrayIcon
             }
         })
         .build(app)
+}
+
+fn rose_hidden_state(app: &AppHandle) -> bool {
+    app.state::<Shell>().rose_hidden.load(Ordering::SeqCst)
 }
 
 fn show_message(app: &AppHandle, kind: MessageDialogKind, text: &str) {
@@ -449,6 +606,9 @@ pub fn run() {
             toggle_panel,
             hide_panel,
             set_dot_state,
+            rose_hidden,
+            set_rose_hidden,
+            set_panel_fullscreen,
             computer::computer_endpoint,
             computer::computer_permissions,
             computer::computer_request_permission,
@@ -468,13 +628,22 @@ pub fn run() {
                     eprintln!("gentle-dot: {error}");
                 }
             });
-            app.manage(Shell { config: config.clone(), daemon, snap: spawn_snapper(handle.clone()), places_windows });
+            let rose_hidden = position::load_rose_hidden(&desktop_file(&config));
+            app.manage(Shell {
+                config: config.clone(),
+                daemon,
+                snap: spawn_snapper(handle.clone()),
+                places_windows,
+                rose_hidden: AtomicBool::new(rose_hidden),
+                panel_spot: Mutex::new(None),
+                full_screen: Mutex::new(None),
+            });
             app.manage(computer::start(&handle));
             #[cfg(target_os = "macos")]
             register_panic_shortcut(&handle);
 
-            build_windows(&handle, &config, places_windows)?;
-            build_tray(&handle, &config)?;
+            build_windows(&handle, &config, places_windows, rose_hidden)?;
+            build_tray(&handle, &config, rose_hidden)?;
             if places_windows {
                 register_shortcut(&handle, &config.shortcut);
                 let snap = app.state::<Shell>().snap.clone();
@@ -513,7 +682,7 @@ mod tests {
     fn tray_hides_new_conversation_in_the_single_chat() {
         assert_eq!(
             tray_menu_ids(false, false),
-            vec!["open", "browser", "-", "restart", "autostart", "-", "quit"]
+            vec!["open", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
         );
     }
 
@@ -521,7 +690,7 @@ mod tests {
     fn tray_shows_new_conversation_with_the_conversations_list() {
         assert_eq!(
             tray_menu_ids(true, false),
-            vec!["open", "new", "browser", "-", "restart", "autostart", "-", "quit"]
+            vec!["open", "new", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
         );
     }
 
@@ -529,8 +698,25 @@ mod tests {
     fn tray_offers_stop_computer_control_where_it_exists() {
         assert_eq!(
             tray_menu_ids(false, true),
-            vec!["open", "browser", "computer-stop", "computer-yolo", "-", "restart", "autostart", "-", "quit"]
+            vec!["open", "browser", "rose", "computer-stop", "computer-yolo", "-", "restart", "autostart", "-", "quit"]
         );
+    }
+
+    #[test]
+    fn the_rose_item_offers_the_opposite_of_its_state() {
+        assert_eq!(rose_menu_label(false), "Hide the rose");
+        assert_eq!(rose_menu_label(true), "Show the rose");
+    }
+
+    #[test]
+    fn shortcut_and_tray_open_place_the_panel_without_the_rose_when_it_is_hidden() {
+        // `toggle_panel` (the shortcut) and the tray's Open both go through `show_panel`.
+        assert_eq!(panel_placement(true, false, false), Placement::BesideDot);
+        assert_eq!(panel_placement(true, false, true), Placement::Alone);
+        // Full screen keeps its frame; native Wayland leaves placement to the compositor.
+        assert_eq!(panel_placement(true, true, true), Placement::Keep);
+        assert_eq!(panel_placement(true, true, false), Placement::Keep);
+        assert_eq!(panel_placement(false, false, true), Placement::Keep);
     }
 
     #[test]
