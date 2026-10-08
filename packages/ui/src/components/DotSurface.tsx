@@ -29,20 +29,30 @@ interface DotSurfaceProps {
 	connected: boolean;
 	/** The assistant controls the Mac (S24.6); it shows over every other state. */
 	inControl?: boolean;
+	/** Yolo mode is on (S24.9): risky actions run without asking, so the rose says so. */
+	yolo?: boolean;
 	toggle: () => void;
 	startDrag: () => void;
 }
 
 /** The collapsed, always-on-top rose in its black circle. A click opens the panel; a drag moves the window. */
-export function DotSurface({ agentState, connected, inControl = false, toggle, startDrag }: DotSurfaceProps) {
+export function DotSurface({
+	agentState,
+	connected,
+	inControl = false,
+	yolo = false,
+	toggle,
+	startDrag,
+}: DotSurfaceProps) {
 	const press = useRef<{ x: number; y: number; dragging: boolean } | undefined>(undefined);
 	const state = connected ? agentState : "restarting";
+	const label = inControl ? "controlling your Mac" : LABELS[state];
 
 	return (
 		<button
 			type="button"
-			className={`dot dot-${state}${inControl ? " dot-in_control" : ""}`}
-			aria-label={`Gentle Dot: ${inControl ? "controlling your Mac" : LABELS[state]}`}
+			className={`dot dot-${state}${inControl ? " dot-in_control" : ""}${yolo ? " dot-yolo" : ""}`}
+			aria-label={`Gentle Dot: ${label}${yolo ? ", yolo mode on" : ""}`}
 			onPointerDown={(event) => {
 				if (event.button !== 0) return;
 				press.current = { x: event.clientX, y: event.clientY, dragging: false };
@@ -70,6 +80,7 @@ export function DotSurface({ agentState, connected, inControl = false, toggle, s
 			<span className="dot-disc" aria-hidden="true">
 				<Rose mood={inControl ? "control" : MOODS[state]} />
 			</span>
+			{yolo ? <span className="dot-yolo-mark" aria-hidden="true" /> : null}
 			{state === "needs_you" ? (
 				<span className="dot-badge" aria-hidden="true">
 					!

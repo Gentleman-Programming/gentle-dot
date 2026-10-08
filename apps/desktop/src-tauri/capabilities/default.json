@@ -1,7 +1,7 @@
 {
 	"$schema": "../gen/schemas/desktop-schema.json",
 	"identifier": "default",
-	"description": "What the Dot and panel UI may call: event listening, Dot dragging, opening web pages (sign-in), the four shell commands, and the computer-control commands.",
+	"description": "What the Dot and panel UI may call: event listening, Dot dragging, opening web pages (sign-in), the four shell commands, and the computer-control commands (yolo mode included: its native confirmation decides).",
 	"windows": ["dot", "panel"],
 	"permissions": [
 		"core:event:allow-listen",
@@ -16,6 +16,7 @@
 		"allow-computer-permissions",
 		"allow-computer-request-permission",
 		"allow-computer-stop",
-		"allow-computer-status"
+		"allow-computer-status",
+		"allow-computer-set-yolo"
 	]
 }

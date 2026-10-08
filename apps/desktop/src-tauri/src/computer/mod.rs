@@ -113,6 +113,8 @@ pub trait Dialogs: Send + Sync {
     fn ask_grant(&self) -> bool;
     /// A per-action confirmation showing the action and its target.
     fn confirm(&self, message: &str) -> bool;
+    /// "Turn on yolo mode? ..." (Turn On / Cancel), S24.9.
+    fn ask_yolo(&self) -> bool;
 }
 
 pub trait Clock: Send + Sync {

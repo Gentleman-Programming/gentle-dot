@@ -260,7 +260,7 @@ fn conversations_on(value: Option<&str>) -> bool {
 
 /// The tray menu, top to bottom (`-` is a separator). "New conversation" only exists with the
 /// conversations list on; in the single continuous chat there is nothing new to start.
-/// "Stop computer control" exists where computer control does (macOS, S24.3).
+/// "Stop computer control" and "Yolo mode" exist where computer control does (macOS, S24.3, S24.9).
 fn tray_menu_ids(conversations: bool, computer_control: bool) -> Vec<&'static str> {
     let mut ids = vec!["open"];
     if conversations {
@@ -268,7 +268,7 @@ fn tray_menu_ids(conversations: bool, computer_control: bool) -> Vec<&'static st
     }
     ids.push("browser");
     if computer_control {
-        ids.push("computer-stop");
+        ids.extend(["computer-stop", "computer-yolo"]);
     }
     ids.extend(["-", "restart", "autostart", "-", "quit"]);
     ids
@@ -293,6 +293,12 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig) -> tauri::Result<TrayIcon
                 true,
                 None::<&str>,
             )?)?,
+            "computer-yolo" => {
+                // Off at launch: yolo mode never outlives the app (S24.9).
+                let item = CheckMenuItem::with_id(app, "computer-yolo", "Yolo mode", true, false, None::<&str>)?;
+                menu.append(&item)?;
+                app.manage(computer::YoloMenuItem(item));
+            }
             "restart" => {
                 menu.append(&MenuItem::with_id(app, "restart", "Restart assistant", true, None::<&str>)?)?;
             }
@@ -321,6 +327,10 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig) -> tauri::Result<TrayIcon
                 "browser" => open_in_browser(app),
                 "computer-stop" => {
                     computer::stop(app, Reason::Stopped);
+                    Ok(())
+                }
+                "computer-yolo" => {
+                    computer::toggle_yolo(app);
                     Ok(())
                 }
                 "restart" => {
@@ -443,7 +453,8 @@ pub fn run() {
             computer::computer_permissions,
             computer::computer_request_permission,
             computer::computer_stop,
-            computer::computer_status
+            computer::computer_status,
+            computer::computer_set_yolo
         ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]
@@ -518,7 +529,7 @@ mod tests {
     fn tray_offers_stop_computer_control_where_it_exists() {
         assert_eq!(
             tray_menu_ids(false, true),
-            vec!["open", "browser", "computer-stop", "-", "restart", "autostart", "-", "quit"]
+            vec!["open", "browser", "computer-stop", "computer-yolo", "-", "restart", "autostart", "-", "quit"]
         );
     }
 

@@ -156,7 +156,9 @@ export function ChatSurface({
 				) : null}
 			</header>
 
-			{computer?.session ? <ComputerBanner session={computer.session} stop={computer.stop} /> : null}
+			{computer?.session ? (
+				<ComputerBanner session={computer.session} yolo={computer.yolo !== undefined} stop={computer.stop} />
+			) : null}
 
 			{conversations && showConversations ? (
 				<nav className="conversations" aria-label="Earlier conversations">

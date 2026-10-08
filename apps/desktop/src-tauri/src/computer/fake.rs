@@ -114,6 +114,8 @@ pub struct FakeDialogs {
     pub confirm: Mutex<bool>,
     pub grants: AtomicUsize,
     pub confirmations: Mutex<Vec<String>>,
+    pub yolo: Mutex<bool>,
+    pub yolo_asks: AtomicUsize,
     /// Runs while a dialog is open (for example, to move the focus to Gentle Dot).
     pub during: Mutex<Option<Hook>>,
 }
@@ -125,6 +127,8 @@ impl FakeDialogs {
             confirm: Mutex::new(confirm),
             grants: AtomicUsize::new(0),
             confirmations: Mutex::new(Vec::new()),
+            yolo: Mutex::new(true),
+            yolo_asks: AtomicUsize::new(0),
             during: Mutex::new(None),
         }
     }
@@ -147,6 +151,11 @@ impl Dialogs for FakeDialogs {
         self.confirmations.lock().unwrap().push(message.into());
         self.run_hook();
         *self.confirm.lock().unwrap()
+    }
+
+    fn ask_yolo(&self) -> bool {
+        self.yolo_asks.fetch_add(1, Ordering::SeqCst);
+        *self.yolo.lock().unwrap()
     }
 }
 

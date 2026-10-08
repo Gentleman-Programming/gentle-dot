@@ -268,3 +268,70 @@ describe("while the assistant controls the Mac (S24.6)", () => {
 		expect(rule(".computer-banner")).toMatch(/border-radius: var\(--radius-md\)/);
 	});
 });
+
+describe("yolo mode (S24.9)", () => {
+	const yoloSwitch = async () => {
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		return within(entry).getByRole("switch", { name: "Yolo mode" });
+	};
+
+	it("the switch in Connectors asks the app, and only the app's state moves it", async () => {
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		const toggle = await yoloSwitch();
+		expect(toggle).toHaveAttribute("aria-checked", "false");
+
+		await userEvent.click(toggle);
+		expect(h.invoke).toHaveBeenCalledWith("computer_set_yolo", { enabled: true });
+		// The native confirmation decides; nothing changes until the app reports it.
+		expect(toggle).toHaveAttribute("aria-checked", "false");
+
+		await emitState({ active: false, yolo: true, yoloEndsAt: Date.now() + 3_600_000 });
+		expect(toggle).toHaveAttribute("aria-checked", "true");
+		await userEvent.click(toggle);
+		expect(h.invoke).toHaveBeenCalledWith("computer_set_yolo", { enabled: false });
+
+		await emitState({ active: false, yolo: false });
+		expect(toggle).toHaveAttribute("aria-checked", "false");
+	});
+
+	it("reflects yolo mode that was already on when the panel opened", async () => {
+		h.status = { active: false, yolo: true, yoloEndsAt: Date.now() + 60_000 };
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		const toggle = await yoloSwitch();
+		await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+	});
+
+	it("the session banner says Yolo while it is on", async () => {
+		await renderApp("?surface=panel");
+		await emitState({ active: true, endsAt: Date.now() + 60_000, reason: "granted", yolo: true });
+		const banner = screen.getByRole("region", { name: "Computer control" });
+		expect(within(banner).getByText("Yolo")).toBeInTheDocument();
+		await emitState({ active: true, endsAt: Date.now() + 60_000, yolo: false });
+		expect(within(banner).queryByText("Yolo")).toBeNull();
+	});
+
+	it("the rose carries a yolo marker while it is on", async () => {
+		await renderApp("?surface=dot");
+		const dot = screen.getByRole("button");
+		await emitState({ active: true, endsAt: Date.now() + 60_000, yolo: true });
+		expect(dot).toHaveClass("dot-in_control", "dot-yolo");
+		expect(dot).toHaveAccessibleName("Gentle Dot: controlling your Mac, yolo mode on");
+		expect(dot.querySelector(".dot-yolo-mark")).not.toBeNull();
+
+		await emitState({ active: true, endsAt: Date.now() + 60_000, yolo: false });
+		expect(dot).not.toHaveClass("dot-yolo");
+		expect(dot.querySelector(".dot-yolo-mark")).toBeNull();
+	});
+
+	it("styles the yolo marker and switch with the site's tokens", () => {
+		const stylesheet = "../src/styles.css";
+		const css = readFileSync(fileURLToPath(new URL(stylesheet, import.meta.url)), "utf8");
+		const rule = (selector: string) =>
+			css.match(new RegExp(`\\n${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\{([^}]*)\\}`))?.[1] ?? "";
+		expect(rule(".dot-yolo-mark")).toMatch(/var\(--yellow/);
+		expect(rule(".computer-yolo-chip")).toMatch(/var\(--yellow/);
+		expect(rule('.switch[aria-checked="true"]')).toMatch(/var\(--accent/);
+	});
+});

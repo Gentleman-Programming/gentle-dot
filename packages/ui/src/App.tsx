@@ -3,7 +3,7 @@ import { type ConnectionInfo, tokenFromLocation } from "./client.ts";
 import { ChatSurface } from "./components/ChatSurface.tsx";
 import type { ComputerControls } from "./components/Computer.tsx";
 import { DotSurface } from "./components/DotSurface.tsx";
-import { computerPermissions, requestComputerPermission, stopComputer } from "./computer.ts";
+import { computerPermissions, requestComputerPermission, setComputerYolo, stopComputer } from "./computer.ts";
 import {
 	connectionInfo,
 	hidePanel,
@@ -13,7 +13,7 @@ import {
 	startDragging,
 	togglePanel,
 } from "./desktop.ts";
-import { useComputerRegistration, useComputerSession } from "./useComputer.ts";
+import { useComputerRegistration, useComputerState } from "./useComputer.ts";
 import { useDot } from "./useDot.ts";
 
 type Surface = "dot" | "panel" | "web";
@@ -52,7 +52,7 @@ export function App() {
 	conversations.current = state.features.conversations;
 	// Computer control lives in the desktop app only (S24.7); the panel registers the helper.
 	const desktop = inDesktop();
-	const computerSession = useComputerSession(desktop && surface !== "web");
+	const { session: computerSession, yolo } = useComputerState(desktop && surface !== "web");
 	const computerAvailable = useComputerRegistration(
 		desktop && surface === "panel",
 		state.connection === "open",
@@ -63,7 +63,9 @@ export function App() {
 			? {
 					available: computerAvailable,
 					...(computerSession ? { session: computerSession } : {}),
+					...(yolo ? { yolo } : {}),
 					stop: stopComputer,
+					setYolo: setComputerYolo,
 					permissions: computerPermissions,
 					requestPermission: requestComputerPermission,
 				}
@@ -113,6 +115,7 @@ export function App() {
 				agentState={state.agentState}
 				connected={state.connection === "open"}
 				inControl={computerSession !== undefined}
+				yolo={yolo !== undefined}
 				toggle={togglePanel}
 				startDrag={() => void startDragging()}
 			/>

@@ -2,6 +2,11 @@
 //! `tools/list`, and `tools/call`, behind a per-launch bearer token. Each call passes the
 //! guards in order: rate limit, permissions, session grant, blocklist, risky-action
 //! confirmation; then it acts and returns a fresh screenshot (S24.2–S24.4).
+//!
+//! `batch` (S24.8) runs up to 20 actions in one call. Each step takes the single tool's path
+//! (`perform`) and counts as one action for the rate limit; a full window delays the step
+//! instead of refusing it. Coordinates refer to the screenshot taken before the batch, and one
+//! screenshot follows it. The first refused, declined, or failed step stops the batch.
 
 use super::blocklist::{blocked_name, blocked_reason, AppIdentity};
 use super::control::Control;
@@ -17,8 +22,13 @@ use std::sync::{Arc, Mutex, MutexGuard};
 /// Supported MCP revisions, newest first; the newest answers an unknown request.
 const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 /// Time for the screen to settle before the screenshot that follows an action.
-const SETTLE_MS: u64 = 300;
+const SETTLE_MS: u64 = 150;
 const OPEN_APP_SETTLE_MS: u64 = 1500;
+const MAX_BATCH_STEPS: usize = 20;
+/// The tools a batch step may use: actions only (a batch returns its own screenshot).
+const BATCH_TOOLS: &[&str] = &["click", "move", "drag", "scroll", "type", "key", "open_app", "wait"];
+/// Between batch steps, so each step's guards read the focus and windows the previous step left.
+const STEP_PAUSE_MS: u64 = 100;
 const MAX_WAIT_MS: u64 = 5000;
 const WAIT_SLICE_MS: u64 = 100;
 /// macOS posts at most 20 UTF-16 units of text per keyboard event.
@@ -33,8 +43,10 @@ const UNKNOWN_TARGET: &str = "Cannot tell which app is under that point, so the 
 Take a new screenshot and try again.";
 
 const INSTRUCTIONS: &str = "Controls this Mac. Take a screenshot first; x and y are pixels of the latest \
-screenshot. Every action returns a fresh screenshot. The user must allow a session, risky actions ask \
-the user to confirm, and some apps (System Settings, password managers) are off limits.";
+screenshot. Every action returns a fresh screenshot. Use `batch` for a predictable sequence (click a field, \
+type, press tab, type, press return) so it runs in one call; end the batch whenever you must see the screen \
+before deciding the next step. The user must allow a session, risky actions ask the user to confirm, and \
+some apps (System Settings, password managers) are off limits.";
 
 pub struct HttpRequest<'a> {
     pub method: &'a str,
@@ -60,6 +72,8 @@ enum Tool {
     OpenApp { name: String },
     ListApps,
     Wait { ms: u64 },
+    /// Steps with their tool names, checked one by one when they run.
+    Batch { steps: Vec<(&'static str, Call)> },
 }
 
 struct Call {
@@ -69,12 +83,23 @@ struct Call {
 
 type Content = Vec<Value>;
 
-fn text(text: impl Into<String>) -> Value {
-    json!({"type": "text", "text": text.into()})
+/// A tool error; its content is a message, or what a batch did before it stopped.
+struct Failed(Content);
+
+impl From<String> for Failed {
+    fn from(message: String) -> Self {
+        Failed(vec![text(message)])
+    }
 }
 
-fn tool_error(message: &str) -> Value {
-    json!({"content": [text(message)], "isError": true})
+impl From<&str> for Failed {
+    fn from(message: &str) -> Self {
+        Failed(vec![text(message)])
+    }
+}
+
+fn text(text: impl Into<String>) -> Value {
+    json!({"type": "text", "text": text.into()})
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -132,7 +157,15 @@ fn tools() -> Value {
         {"name": "list_apps", "description": "List the running apps.",
          "inputSchema": schema(json!({}), &[])},
         {"name": "wait", "description": "Wait, then take a screenshot.",
-         "inputSchema": schema(json!({"ms": {"type": "integer", "minimum": 0, "maximum": MAX_WAIT_MS}}), &["ms"])}
+         "inputSchema": schema(json!({"ms": {"type": "integer", "minimum": 0, "maximum": MAX_WAIT_MS}}), &["ms"])},
+        {"name": "batch", "description": "Run 1 to 20 actions in order in one call, then return one screenshot. Use it for \
+predictable sequences, for example type, `tab`, type; or click a field, type, `return`. Coordinates are pixels of \
+the screenshot taken before the batch, so batch only steps whose targets you can already see; when a step's result \
+decides what comes next, end the batch there and look at the screenshot it returns. Each step is checked like a \
+single call; the batch stops at the first refused, declined, or failed step and says which steps ran.",
+         "inputSchema": schema(json!({"steps": {"type": "array", "minItems": 1, "maxItems": MAX_BATCH_STEPS,
+            "items": {"type": "object", "description": "A tool name plus that tool's arguments, for example {\"tool\": \"type\", \"text\": \"hello\"}.",
+                "properties": {"tool": {"type": "string", "enum": BATCH_TOOLS}}, "required": ["tool"]}}}), &["steps"])}
     ])
 }
 
@@ -206,6 +239,7 @@ fn parse_call(name: &str, args: &Value) -> Option<Result<Call, String>> {
                 Tool::OpenApp { name }
             }
             "list_apps" => Tool::ListApps,
+            "batch" => Tool::Batch { steps: batch_steps(args)? },
             "wait" => {
                 let ms = integer(args, "ms")?;
                 if !(0..=MAX_WAIT_MS as i64).contains(&ms) {
@@ -217,12 +251,34 @@ fn parse_call(name: &str, args: &Value) -> Option<Result<Call, String>> {
         })
     };
     const NAMES: &[&str] =
-        &["screenshot", "click", "move", "drag", "scroll", "type", "key", "open_app", "list_apps", "wait"];
+        &["screenshot", "click", "move", "drag", "scroll", "type", "key", "open_app", "list_apps", "wait", "batch"];
     if !NAMES.contains(&name) {
         return None;
     }
     let intent = args.get("intent").and_then(Value::as_str).map(str::to_string);
     Some(tool().map(|tool| Call { tool, intent }))
+}
+
+/// The steps of a `batch`, each parsed like a single call. Any invalid step refuses the batch.
+fn batch_steps(args: &Map<String, Value>) -> Result<Vec<(&'static str, Call)>, String> {
+    let steps = args.get("steps").and_then(Value::as_array).ok_or("`steps` must be a list of steps")?;
+    if steps.is_empty() || steps.len() > MAX_BATCH_STEPS {
+        return Err(format!("`steps` must hold 1 to {MAX_BATCH_STEPS} steps"));
+    }
+    let step = |n: usize, step: &Value| -> Result<(&'static str, Call), String> {
+        let mut step = step.as_object().cloned().ok_or(format!("step {n} must be an object"))?;
+        let name = step.remove("tool").and_then(|t| t.as_str().map(str::to_string));
+        let name = name.ok_or(format!("step {n} needs a `tool`"))?;
+        let tool = BATCH_TOOLS.iter().copied().find(|t| *t == name).ok_or_else(|| {
+            format!("step {n}: `{name}` cannot be a batch step; use one of {}", BATCH_TOOLS.join(", "))
+        })?;
+        match parse_call(tool, &Value::Object(step)) {
+            Some(Ok(call)) => Ok((tool, call)),
+            Some(Err(error)) => Err(format!("step {n} ({tool}): {error}")),
+            None => Err(format!("step {n}: unknown tool `{tool}`")),
+        }
+    };
+    steps.iter().enumerate().map(|(i, s)| step(i + 1, s)).collect()
 }
 
 /// Splits text into chunks of at most `TEXT_CHUNK_UNITS` UTF-16 units, never inside a character.
@@ -333,16 +389,18 @@ impl Helper {
 
     /// A `tools/call` that arrived while the session was at `epoch`.
     fn call_tool_from(&self, epoch: u64, name: &str, args: &Value) -> Option<Value> {
-        let outcome = parse_call(name, args)?.and_then(|call| self.run(epoch, call));
+        let outcome = parse_call(name, args)?.map_err(Failed::from).and_then(|call| self.run(epoch, call));
         Some(match outcome {
             Ok(content) => json!({"content": content}),
-            Err(message) => tool_error(&message),
+            Err(Failed(content)) => json!({"content": content, "isError": true}),
         })
     }
 
-    fn run(&self, epoch: u64, call: Call) -> Result<Content, String> {
-        if !lock(&self.limiter).try_acquire(self.clock.now_ms()) {
-            return Err(format!("Too many actions: at most {MAX_ACTIONS_PER_SECOND} per second. Wait a moment."));
+    fn run(&self, epoch: u64, call: Call) -> Result<Content, Failed> {
+        // A batch counts each of its steps instead (`pace`).
+        let counted = !matches!(call.tool, Tool::Batch { .. });
+        if counted && !lock(&self.limiter).try_acquire(self.clock.now_ms()) {
+            return Err(format!("Too many actions: at most {MAX_ACTIONS_PER_SECOND} per second. Wait a moment.").into());
         }
         self.check_permissions(&call.tool)?;
         let mut latest = lock(&self.actions);
@@ -362,6 +420,9 @@ impl Helper {
     }
 
     fn check_permissions(&self, tool: &Tool) -> Result<(), String> {
+        if let Tool::Batch { steps } = tool {
+            return steps.iter().try_for_each(|(_, step)| self.check_permissions(&step.tool));
+        }
         let permissions = self.desktop.permissions();
         let sees = !matches!(tool, Tool::ListApps);
         let acts = matches!(
@@ -437,6 +498,10 @@ impl Helper {
         let Some(reason) = risk else {
             return Ok(());
         };
+        // Yolo mode (S24.9), switched on by the user in the app, skips only this confirmation.
+        if self.control.yolo(self.clock.now_ms()) {
+            return Ok(());
+        }
         let message = format!("{action} in {target}.\n\nThis needs your OK because of {reason}.");
         if self.with_dialog(|| self.dialogs.confirm(&message)) {
             Ok(())
@@ -471,13 +536,95 @@ impl Helper {
         Ok(content)
     }
 
-    fn act(&self, epoch: u64, latest: &mut Option<ScreenshotGeometry>, call: Call) -> Result<Content, String> {
-        let intent = call.intent.as_deref();
+    fn act(&self, epoch: u64, latest: &mut Option<ScreenshotGeometry>, call: Call) -> Result<Content, Failed> {
+        match call.tool {
+            Tool::Screenshot => Ok(self.screenshot(latest)?),
+            Tool::ListApps => {
+                let apps = self.desktop.list_apps()?;
+                Ok(vec![text(serde_json::to_string(&apps).map_err(|e| e.to_string())?)])
+            }
+            Tool::Batch { steps } => self.batch(epoch, latest, steps, call.intent.as_deref()),
+            tool => {
+                let (done, settle_ms) = self.perform(epoch, latest, tool, call.intent.as_deref())?;
+                Ok(self.after(latest, done, settle_ms)?)
+            }
+        }
+    }
+
+    /// Runs a batch's steps in order, then one screenshot. On the first failure it stops and
+    /// reports the steps that ran, with a fresh screenshot while the session lasts.
+    fn batch(
+        &self,
+        epoch: u64,
+        latest: &mut Option<ScreenshotGeometry>,
+        steps: Vec<(&'static str, Call)>,
+        intent: Option<&str>,
+    ) -> Result<Content, Failed> {
+        let total = steps.len();
+        let mut done: Vec<String> = Vec::new();
+        let mut settle_ms = 0;
+        for (i, (name, step)) in steps.into_iter().enumerate() {
+            if i > 0 {
+                // An app that is opening needs its full wait before anything targets it.
+                self.clock.sleep_ms(if settle_ms == OPEN_APP_SETTLE_MS { settle_ms } else { STEP_PAUSE_MS });
+            }
+            // The batch's intent applies to every step, on top of the step's own.
+            let intents: Vec<&str> = [intent, step.intent.as_deref()].into_iter().flatten().collect();
+            let intents = (!intents.is_empty()).then(|| intents.join("; "));
+            let outcome =
+                self.pace(epoch).and_then(|()| self.perform(epoch, latest, step.tool, intents.as_deref()));
+            match outcome {
+                Ok((message, step_settle_ms)) => {
+                    done.push(format!("{}. {message}", i + 1));
+                    settle_ms = step_settle_ms;
+                }
+                Err(error) => {
+                    let ran = done.len();
+                    let at = i + 1;
+                    let mut message = format!("Stopped at step {at} of {total} ({name}): {error}\nRan {ran} of {total} steps");
+                    message.push_str(if ran == 0 { "." } else { ":\n" });
+                    message.push_str(&done.join("\n"));
+                    if self.still_running(epoch).is_err() {
+                        return Err(Failed(vec![text(message)]));
+                    }
+                    return Err(Failed(self.after(latest, message, settle_ms.max(SETTLE_MS))?));
+                }
+            }
+        }
+        let summary = format!("Ran {total} of {total} steps:\n{}", done.join("\n"));
+        Ok(self.after(latest, summary, settle_ms)?)
+    }
+
+    /// Counts one batch step against the rate limit, waiting for room instead of refusing.
+    fn pace(&self, epoch: u64) -> Result<(), String> {
+        loop {
+            self.still_running(epoch)?;
+            let wait_ms = {
+                let mut limiter = lock(&self.limiter);
+                let now = self.clock.now_ms();
+                if limiter.try_acquire(now) {
+                    return Ok(());
+                }
+                limiter.wait_ms(now)
+            };
+            self.clock.sleep_ms(wait_ms.clamp(1, WAIT_SLICE_MS));
+        }
+    }
+
+    /// One action through every guard, then posted: what was done and how long the screen
+    /// needs to settle before a screenshot. A single call and a batch step both come here.
+    fn perform(
+        &self,
+        epoch: u64,
+        latest: &Option<ScreenshotGeometry>,
+        tool: Tool,
+        intent: Option<&str>,
+    ) -> Result<(String, u64), String> {
         let map = |latest: &Option<ScreenshotGeometry>, (x, y): (f64, f64)| -> Result<Point, String> {
             latest.ok_or(NEEDS_SCREENSHOT)?.to_point(x, y).map_err(|e| e.to_string())
         };
-        match call.tool {
-            Tool::Screenshot => self.screenshot(latest),
+        match tool {
+            Tool::Screenshot | Tool::ListApps | Tool::Batch { .. } => Err("Not an action.".into()),
             Tool::Click { x, y, button, count } => {
                 let at = map(latest, (x, y))?;
                 let target = self.pointer_target(at)?;
@@ -490,7 +637,7 @@ impl Helper {
                 };
                 self.confirm_if_risky(assess(Act::Click(&chain), intent), &action, &target)?;
                 self.post(epoch, InputEvent::Click { at, button, count })?;
-                self.after(latest, format!("{action} in {target}: done."), SETTLE_MS)
+                Ok((format!("{action} in {target}: done."), SETTLE_MS))
             }
             Tool::Move { x, y } => {
                 let at = map(latest, (x, y))?;
@@ -498,7 +645,7 @@ impl Helper {
                 let action = format!("Move the pointer to ({x}, {y})");
                 self.confirm_if_risky(assess(Act::Other, intent), &action, &target)?;
                 self.post(epoch, InputEvent::Move(at))?;
-                self.after(latest, format!("{action}: done."), SETTLE_MS)
+                Ok((format!("{action}: done."), SETTLE_MS))
             }
             Tool::Drag { from, to } => {
                 let (start, end) = (map(latest, from)?, map(latest, to)?);
@@ -509,7 +656,7 @@ impl Helper {
                 let (from_chain, to_chain) = (self.desktop.element_at(start), self.desktop.element_at(end));
                 self.confirm_if_risky(assess(Act::Drag(&from_chain, &to_chain), intent), &action, &target)?;
                 self.post(epoch, InputEvent::Drag { from: start, to: end })?;
-                self.after(latest, format!("{action}: done."), SETTLE_MS)
+                Ok((format!("{action}: done."), SETTLE_MS))
             }
             Tool::Scroll { x, y, dx, dy } => {
                 let at = map(latest, (x, y))?;
@@ -517,7 +664,7 @@ impl Helper {
                 let action = format!("Scroll by ({dx}, {dy}) at ({x}, {y})");
                 self.confirm_if_risky(assess(Act::Other, intent), &action, &target)?;
                 self.post(epoch, InputEvent::Scroll { at, dx, dy })?;
-                self.after(latest, format!("{action}: done."), SETTLE_MS)
+                Ok((format!("{action}: done."), SETTLE_MS))
             }
             Tool::Type { text: typed } => {
                 let target = self.keyboard_target()?;
@@ -534,7 +681,7 @@ impl Helper {
                         self.post(epoch, InputEvent::Text(chunk))?;
                     }
                 }
-                self.after(latest, format!("{action} in {target}: done."), SETTLE_MS)
+                Ok((format!("{action} in {target}: done."), SETTLE_MS))
             }
             Tool::Key { combo } => {
                 let target = self.keyboard_target()?;
@@ -549,7 +696,7 @@ impl Helper {
                 let action = format!("Press {}", combo.key);
                 self.confirm_if_risky(assess(act, intent), &action, &target)?;
                 self.post(epoch, InputEvent::Key(combo))?;
-                self.after(latest, format!("{action} in {target}: done."), SETTLE_MS)
+                Ok((format!("{action} in {target}: done."), SETTLE_MS))
             }
             Tool::OpenApp { name } => {
                 if let Some(label) = blocked_name(&name) {
@@ -559,11 +706,7 @@ impl Helper {
                 self.confirm_if_risky(assess(Act::Other, intent), &action, "macOS")?;
                 self.still_running(epoch)?;
                 self.desktop.open_app(&name)?;
-                self.after(latest, format!("{action}: done."), OPEN_APP_SETTLE_MS)
-            }
-            Tool::ListApps => {
-                let apps = self.desktop.list_apps()?;
-                Ok(vec![text(serde_json::to_string(&apps).map_err(|e| e.to_string())?)])
+                Ok((format!("{action}: done."), OPEN_APP_SETTLE_MS))
             }
             Tool::Wait { ms } => {
                 let mut left = ms;
@@ -573,7 +716,7 @@ impl Helper {
                     left -= slice;
                     self.still_running(epoch)?;
                 }
-                self.after(latest, format!("Waited {ms} ms."), 0)
+                Ok((format!("Waited {ms} ms."), 0))
             }
         }
     }
@@ -726,7 +869,7 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
-            ["screenshot", "click", "move", "drag", "scroll", "type", "key", "open_app", "list_apps", "wait"]
+            ["screenshot", "click", "move", "drag", "scroll", "type", "key", "open_app", "list_apps", "wait", "batch"]
         );
         for tool in tools {
             let schema = &tool["inputSchema"];
@@ -771,7 +914,12 @@ mod tests {
         assert_eq!(rig.dialogs.grants.load(Ordering::SeqCst), 1);
         assert_eq!(
             *rig.states.lock().unwrap(),
-            vec![StateEvent { active: true, ends_at: Some(NOW + SESSION_MS), reason: Some(Reason::Granted) }]
+            vec![StateEvent {
+                active: true,
+                ends_at: Some(NOW + SESSION_MS),
+                reason: Some(Reason::Granted),
+                ..StateEvent::default()
+            }]
         );
     }
 
@@ -1213,6 +1361,285 @@ mod tests {
             .collect();
         assert_eq!(chunks.concat(), text);
         assert!(chunks.iter().all(|c| c.encode_utf16().count() <= 20), "{chunks:?}");
+    }
+
+
+    // --- Speed (S24.8) ---
+
+    #[test]
+    fn an_action_settles_150_ms_and_open_app_still_1500() {
+        let rig = rig();
+        rig.ready();
+        let before = rig.clock.now_ms();
+        rig.call("click", json!({"x": 10, "y": 10}));
+        assert_eq!(rig.clock.now_ms() - before, 150);
+        let before = rig.clock.now_ms();
+        rig.call("open_app", json!({"name": "Mail"}));
+        assert_eq!(rig.clock.now_ms() - before, 1500);
+    }
+
+    #[test]
+    fn a_short_message_with_an_emoji_is_two_events_and_one_settle() {
+        // L66: an 18 s `type` of this text. The helper's own share is two chunks (four
+        // keyboard events, 15 ms apart on the Mac) plus one settle; no confirmation is asked.
+        let rig = rig();
+        rig.ready();
+        let message = "¡Hola, Panda! Te quiero mucho ❤️";
+        let before = rig.clock.now_ms();
+        assert!(!is_error(&rig.call("type", json!({"text": message}))));
+        assert_eq!(rig.clock.now_ms() - before, 150);
+        assert!(rig.dialogs.confirmations.lock().unwrap().is_empty());
+        let events = rig.desktop.events();
+        assert_eq!(events.len(), 2, "{events:?}");
+        let typed: String = events
+            .into_iter()
+            .map(|e| match e {
+                InputEvent::Text(t) => t,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(typed, message);
+    }
+
+    fn batch(steps: Value) -> Value {
+        json!({"steps": steps})
+    }
+
+    fn image_count(result: &Value) -> usize {
+        result["content"].as_array().map_or(0, |c| c.iter().filter(|b| b["type"] == "image").count())
+    }
+
+    #[test]
+    fn tools_list_offers_batch_for_predictable_sequences() {
+        let rig = rig();
+        let body = rig.rpc("tools/list", json!({}));
+        let tools = body["result"]["tools"].as_array().unwrap();
+        let batch = tools.iter().find(|t| t["name"] == "batch").unwrap();
+        let steps = &batch["inputSchema"]["properties"]["steps"];
+        assert_eq!((steps["minItems"].as_u64(), steps["maxItems"].as_u64()), (Some(1), Some(20)));
+        assert_eq!(
+            steps["items"]["properties"]["tool"]["enum"],
+            json!(["click", "move", "drag", "scroll", "type", "key", "open_app", "wait"])
+        );
+        assert!(batch["description"].as_str().unwrap().contains("screenshot"));
+        let instructions = rig.rpc("initialize", json!({}))["result"]["instructions"].as_str().unwrap().to_string();
+        assert!(instructions.contains("batch"), "{instructions}");
+    }
+
+    #[test]
+    fn a_batch_runs_its_steps_in_order_and_returns_one_screenshot() {
+        let rig = rig();
+        rig.ready();
+        let result = rig.call(
+            "batch",
+            batch(json!([
+                {"tool": "click", "x": 100, "y": 50},
+                {"tool": "type", "text": "Ana"},
+                {"tool": "key", "combo": "tab"},
+                {"tool": "type", "text": "Hi there"},
+                {"tool": "scroll", "x": 5, "y": 6, "dx": 0, "dy": 120},
+            ])),
+        );
+        assert!(!is_error(&result), "{result}");
+        let p = |x, y| Point { x, y };
+        assert_eq!(
+            rig.desktop.events(),
+            vec![
+                // Mapped with the screenshot taken before the batch (scale 0.5).
+                InputEvent::Click { at: p(200.0, 100.0), button: MouseButton::Left, count: 1 },
+                InputEvent::Text("Ana".into()),
+                InputEvent::Key(parse_combo("tab").unwrap()),
+                InputEvent::Text("Hi there".into()),
+                InputEvent::Scroll { at: p(10.0, 12.0), dx: 0, dy: 120 },
+            ]
+        );
+        assert_eq!(rig.desktop.captures.load(Ordering::SeqCst), 2);
+        assert_eq!(image_count(&result), 1);
+        let summary = first_text(&result);
+        assert!(summary.contains("5 of 5") && summary.contains("Type 3 characters"), "{summary}");
+    }
+
+    #[test]
+    fn a_risky_step_asks_once_and_a_decline_stops_the_batch_after_the_earlier_steps() {
+        let rig = rig_with(true, false);
+        rig.ready();
+        *rig.desktop.elements.lock().unwrap() = send_button();
+        let result = rig.call(
+            "batch",
+            batch(json!([
+                {"tool": "type", "text": "hi"},
+                {"tool": "click", "x": 10, "y": 10},
+                {"tool": "type", "text": "never"},
+            ])),
+        );
+        assert!(is_error(&result));
+        let message = first_text(&result);
+        assert!(message.contains("declined") && message.contains("step 2"), "{message}");
+        assert!(message.contains("1 of 3"), "{message}");
+        assert_eq!(rig.dialogs.confirmations.lock().unwrap().len(), 1);
+        assert_eq!(rig.desktop.events(), vec![InputEvent::Text("hi".into())]);
+        // A fresh screenshot shows where the batch stopped.
+        assert_eq!(image_count(&result), 1);
+    }
+
+    #[test]
+    fn a_blocklisted_step_stops_the_batch() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.owner_at.lock().unwrap() = Box::new(|at: Point| {
+            if at.x > 100.0 {
+                Some(app(300, "com.apple.systempreferences", "System Settings"))
+            } else {
+                Some(safari())
+            }
+        });
+        let result = rig.call(
+            "batch",
+            batch(json!([
+                {"tool": "click", "x": 10, "y": 10},
+                {"tool": "click", "x": 200, "y": 10},
+                {"tool": "click", "x": 20, "y": 20},
+            ])),
+        );
+        assert!(is_error(&result));
+        assert!(first_text(&result).contains("System Settings"), "{result}");
+        assert_eq!(rig.desktop.events().len(), 1);
+    }
+
+    #[test]
+    fn a_panic_during_a_batch_drops_the_remaining_steps() {
+        let rig = rig();
+        rig.ready();
+        let control = rig.control.clone();
+        *rig.clock.on_sleep.lock().unwrap() = Some(Box::new(move || control.end(Reason::Panic)));
+        let result = rig.call(
+            "batch",
+            batch(json!([
+                {"tool": "click", "x": 10, "y": 10},
+                {"tool": "click", "x": 20, "y": 20},
+                {"tool": "click", "x": 30, "y": 30},
+            ])),
+        );
+        assert!(is_error(&result));
+        assert!(first_text(&result).contains("stopped"), "{result}");
+        assert_eq!(rig.desktop.events().len(), 1);
+        // No screenshot once the session ended.
+        assert_eq!(rig.desktop.captures.load(Ordering::SeqCst), 1);
+        assert_eq!(image_count(&result), 0);
+    }
+
+    #[test]
+    fn malformed_batches_are_refused_before_anything_runs() {
+        let rig = rig();
+        let wait = json!({"tool": "wait", "ms": 0});
+        let too_many = Value::Array(vec![wait.clone(); 21]);
+        for args in [
+            json!({}),
+            batch(json!("click")),
+            batch(json!([])),
+            batch(too_many),
+            batch(json!(["click"])),
+            batch(json!([{"tool": "batch", "steps": [wait]}])),
+            batch(json!([{"tool": "format_disk"}])),
+            batch(json!([{"tool": "screenshot"}])),
+            batch(json!([{"x": 1, "y": 1}])),
+            batch(json!([{"tool": "wait", "ms": 0}, {"tool": "click", "x": 1}])),
+        ] {
+            let result = rig.call("batch", args.clone());
+            assert!(is_error(&result), "{args}");
+        }
+        assert_eq!(rig.dialogs.grants.load(Ordering::SeqCst), 0);
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn an_intent_in_a_batch_only_adds_checks() {
+        // A harmless step intent cannot hide a risky batch intent or a risky target.
+        let rig = rig_with(true, false);
+        rig.ready();
+        let result = rig.call(
+            "batch",
+            json!({"intent": "buy the ticket", "steps": [{"tool": "scroll", "x": 1, "y": 1, "dx": 0, "dy": 10, "intent": "just scrolling"}]}),
+        );
+        assert!(first_text(&result).contains("declined"), "{result}");
+        *rig.desktop.elements.lock().unwrap() = send_button();
+        let result = rig.call(
+            "batch",
+            json!({"intent": "look around", "steps": [{"tool": "click", "x": 1, "y": 1, "intent": "harmless"}]}),
+        );
+        assert!(first_text(&result).contains("declined"), "{result}");
+        assert_eq!(rig.dialogs.confirmations.lock().unwrap().len(), 2);
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn a_batch_waits_for_the_rate_limit_instead_of_failing() {
+        // Each step counts as one action; a full window delays the batch, it does not refuse it.
+        let rig = rig();
+        rig.ready();
+        for _ in 0..9 {
+            assert!(!is_error(&rig.call("list_apps", json!({}))));
+        }
+        let steps: Vec<Value> = (0..3).map(|i| json!({"tool": "move", "x": i, "y": i})).collect();
+        let result = rig.call("batch", batch(Value::Array(steps)));
+        assert!(!is_error(&result), "{result}");
+        assert_eq!(rig.desktop.events().len(), 3);
+        assert!(rig.clock.now_ms() >= NOW + 1000);
+    }
+
+    #[test]
+    fn a_batch_asks_for_the_session_once() {
+        let rig = rig_with(false, true);
+        let result = rig.call("batch", batch(json!([{"tool": "key", "combo": "tab"}, {"tool": "key", "combo": "tab"}])));
+        assert!(first_text(&result).contains("not allowed"), "{result}");
+        assert_eq!(rig.dialogs.grants.load(Ordering::SeqCst), 1);
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    // --- Yolo mode (S24.9) ---
+
+    fn yolo_on(rig: &Rig) {
+        rig.control.set_yolo(true, rig.clock.now_ms(), rig.dialogs.as_ref());
+    }
+
+    #[test]
+    fn yolo_skips_the_risky_confirmation() {
+        let rig = rig_with(true, false);
+        rig.ready();
+        yolo_on(&rig);
+        *rig.desktop.elements.lock().unwrap() = send_button();
+        let result = rig.call("click", json!({"x": 10, "y": 10}));
+        assert!(!is_error(&result), "{result}");
+        assert!(rig.dialogs.confirmations.lock().unwrap().is_empty());
+        assert_eq!(rig.desktop.events().len(), 1);
+    }
+
+    #[test]
+    fn yolo_keeps_the_grant_the_blocklist_and_the_panic() {
+        let rig = rig_with(false, false);
+        yolo_on(&rig);
+        assert!(first_text(&rig.call("screenshot", json!({}))).contains("not allowed"));
+        *rig.dialogs.allow.lock().unwrap() = true;
+        rig.ready();
+        *rig.desktop.owner_at.lock().unwrap() =
+            Box::new(|_| Some(app(300, "com.apple.systempreferences", "System Settings")));
+        assert!(first_text(&rig.call("click", json!({"x": 10, "y": 10}))).contains("System Settings"));
+        let queued_at = rig.control.epoch();
+        rig.control.end(Reason::Panic);
+        let result = rig.helper.call_tool_from(queued_at, "key", &json!({"combo": "tab"})).unwrap();
+        assert!(first_text(&result).contains("stopped"), "{result}");
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn risky_actions_ask_again_once_yolo_expires() {
+        let rig = rig_with(true, false);
+        rig.ready();
+        yolo_on(&rig);
+        rig.clock.advance(super::super::session::YOLO_MS);
+        rig.ready();
+        *rig.desktop.elements.lock().unwrap() = send_button();
+        assert!(first_text(&rig.call("click", json!({"x": 10, "y": 10}))).contains("declined"));
     }
 
     #[test]

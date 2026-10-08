@@ -12,6 +12,7 @@ const COMMANDS: &[&str] = &[
     "computer_request_permission",
     "computer_stop",
     "computer_status",
+    "computer_set_yolo",
 ];
 
 fn find_in_path(program: &str, path: &str) -> Option<PathBuf> {

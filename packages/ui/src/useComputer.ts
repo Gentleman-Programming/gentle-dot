@@ -1,15 +1,15 @@
 import type { ClientMessage } from "@gentle-dot/protocol";
 import { useEffect, useState } from "react";
-import { type ComputerSession, computerEndpoint, computerStatus, onComputerState } from "./computer.ts";
+import { type ComputerState, computerEndpoint, computerStatus, onComputerState } from "./computer.ts";
 
-/** The control session the app reports, while one is active (desktop windows only). */
-export function useComputerSession(enabled: boolean): ComputerSession | undefined {
-	const [session, setSession] = useState<ComputerSession | undefined>(undefined);
+/** The control session and yolo mode the app reports (desktop windows only). */
+export function useComputerState(enabled: boolean): ComputerState {
+	const [state, setState] = useState<ComputerState>({});
 	useEffect(() => {
 		if (!enabled) return;
 		let live = true;
-		const update = (next: ComputerSession | undefined) => {
-			if (live) setSession(next);
+		const update = (next: ComputerState) => {
+			if (live) setState(next);
 		};
 		computerStatus().then(update, () => {});
 		const unlisten = onComputerState(update);
@@ -18,7 +18,7 @@ export function useComputerSession(enabled: boolean): ComputerSession | undefine
 			void unlisten.then((stop) => stop());
 		};
 	}, [enabled]);
-	return session;
+	return state;
 }
 
 /**

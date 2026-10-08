@@ -1,6 +1,7 @@
 //! The app side of computer control (L60): the `computer_*` commands, the `computer://state`
 //! event, the panic shortcut, the timeout watcher, and the native dialogs. Off macOS the
-//! commands answer "unavailable" and nothing starts.
+//! commands answer "unavailable" and nothing starts. Yolo mode (S24.9) is switched only from
+//! here (`computer_set_yolo` and the tray item), never from the MCP helper or the daemon.
 
 use super::control::Control;
 use super::server::Endpoint;
@@ -15,6 +16,12 @@ pub const PANIC_SHORTCUT: &str = "Alt+Shift+Escape";
 pub const GRANT_TEXT: &str = "Allow Gentle Dot to see and control this Mac for 30 minutes?";
 pub const GRANT_BUTTONS: (&str, &str) = ("Allow", "Deny");
 pub const CONFIRM_BUTTONS: (&str, &str) = ("Allow", "Cancel");
+pub const YOLO_TEXT: &str = "Turn on yolo mode? Gentle Dot will send, pay, delete, and submit without asking you first, \
+for up to 1 hour. Stop and ⌥⇧Esc still work.";
+pub const YOLO_BUTTONS: (&str, &str) = ("Turn On", "Cancel");
+
+/// The tray's "Yolo mode" item, kept in step with the state.
+pub struct YoloMenuItem(pub tauri::menu::CheckMenuItem<tauri::Wry>);
 
 pub struct Computer {
     control: Arc<Control>,
@@ -29,6 +36,9 @@ pub fn start(app: &AppHandle) -> Computer {
     let control = Arc::new(Control::new(move |event: &StateEvent| {
         if let Err(error) = events.emit(STATE_EVENT, event) {
             eprintln!("gentle-dot: cannot report the computer-control state: {error}");
+        }
+        if let Some(item) = events.try_state::<YoloMenuItem>() {
+            let _ = item.0.set_checked(event.yolo);
         }
     }));
     #[cfg(target_os = "macos")]
@@ -110,6 +120,35 @@ pub fn computer_stop(app: AppHandle) {
     stop(&app, Reason::Stopped);
 }
 
+/// Turns yolo mode on after the native confirmation, or off. Blocks on the dialog, so it runs
+/// off the main thread; the tray item calls it from a thread of its own.
+pub fn set_yolo(app: &AppHandle, enabled: bool) -> Result<StateEvent, String> {
+    let computer = app.try_state::<Computer>().ok_or("Computer control is not ready.")?;
+    #[cfg(target_os = "macos")]
+    return Ok(computer.control.set_yolo(enabled, SystemClock.now_ms(), &NativeDialogs { app: app.clone() }));
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (computer, enabled);
+        Err("Computer control is only available on macOS.".into())
+    }
+}
+
+/// The tray item: the opposite of the current state.
+pub fn toggle_yolo(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let on = app.try_state::<Computer>().is_some_and(|c| c.control.yolo(SystemClock.now_ms()));
+        if let Err(error) = set_yolo(&app, !on) {
+            eprintln!("gentle-dot: cannot switch yolo mode: {error}");
+        }
+    });
+}
+
+#[tauri::command]
+pub async fn computer_set_yolo(app: AppHandle, enabled: bool) -> Result<StateEvent, String> {
+    tauri::async_runtime::spawn_blocking(move || set_yolo(&app, enabled)).await.map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub fn computer_status(computer: State<'_, Computer>) -> StateEvent {
     computer.control.status(SystemClock.now_ms())
@@ -144,6 +183,10 @@ impl super::Dialogs for NativeDialogs {
     fn confirm(&self, message: &str) -> bool {
         self.ask(message, CONFIRM_BUTTONS)
     }
+
+    fn ask_yolo(&self) -> bool {
+        self.ask(YOLO_TEXT, YOLO_BUTTONS)
+    }
 }
 
 #[cfg(test)]
@@ -154,6 +197,16 @@ mod tests {
     fn the_grant_dialog_asks_exactly_what_the_spec_says() {
         assert_eq!(GRANT_TEXT, "Allow Gentle Dot to see and control this Mac for 30 minutes?");
         assert_eq!(GRANT_BUTTONS, ("Allow", "Deny"));
+    }
+
+    #[test]
+    fn the_yolo_dialog_says_what_it_skips_and_for_how_long() {
+        assert_eq!(
+            YOLO_TEXT,
+            "Turn on yolo mode? Gentle Dot will send, pay, delete, and submit without asking you first, \
+for up to 1 hour. Stop and ⌥⇧Esc still work."
+        );
+        assert_eq!(YOLO_BUTTONS, ("Turn On", "Cancel"));
     }
 
     #[test]

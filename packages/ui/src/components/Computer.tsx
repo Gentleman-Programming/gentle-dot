@@ -4,6 +4,7 @@ import {
 	type ComputerPermission,
 	type ComputerPermissions,
 	type ComputerSession,
+	type ComputerYolo,
 	timeLeft,
 } from "../computer.ts";
 
@@ -13,7 +14,11 @@ export interface ComputerControls {
 	available: boolean;
 	/** The session the user allowed, while it lasts. */
 	session?: ComputerSession;
+	/** Yolo mode, while it is on (S24.9). */
+	yolo?: ComputerYolo;
 	stop: () => void;
+	/** Asks the app; its native confirmation decides, and the state follows. */
+	setYolo: (enabled: boolean) => Promise<unknown>;
 	permissions: () => Promise<ComputerPermissions>;
 	requestPermission: (kind: ComputerPermission) => Promise<unknown>;
 }
@@ -25,11 +30,19 @@ const PERMISSIONS: [ComputerPermission, string][] = [
 
 export const DEBUG_BUILD_NOTE =
 	"Debug builds lose these permissions on every rebuild because macOS ties them to the app's signature; grant them again after updating.";
+const YOLO_NOTE =
+	"Yolo mode lets the assistant send, pay, delete, and submit without asking you first. It turns itself off after 1 hour or when the app quits; Stop and ⌥⇧Esc still work.";
 const NO_IMAGES_NOTE =
 	"The current model does not accept images, so the assistant cannot see your screen. Choose a model that does in Profiles.";
 
+interface ComputerBannerProps {
+	session: ComputerSession;
+	yolo: boolean;
+	stop: () => void;
+}
+
 /** "Controlling your Mac · mm:ss left" with a Stop button, while a session is active. */
-export function ComputerBanner({ session, stop }: { session: ComputerSession; stop: () => void }) {
+export function ComputerBanner({ session, yolo, stop }: ComputerBannerProps) {
 	const [now, setNow] = useState(() => Date.now());
 	useEffect(() => {
 		const timer = setInterval(() => setNow(Date.now()), 1000);
@@ -40,6 +53,11 @@ export function ComputerBanner({ session, stop }: { session: ComputerSession; st
 		<section className="computer-banner" aria-label="Computer control">
 			<span className="computer-banner-light" aria-hidden="true" />
 			<span>Controlling your Mac{left}</span>
+			{yolo ? (
+				<span className="chip computer-yolo-chip" title="Risky actions run without asking you first">
+					Yolo
+				</span>
+			) : null}
 			<button type="button" className="primary" onClick={stop}>
 				Stop
 			</button>
@@ -55,7 +73,7 @@ interface ComputerEntryProps {
 
 /** The built-in Computer connector: the macOS permissions it needs and how to grant them. */
 export function ComputerEntry({ info, controls }: ComputerEntryProps) {
-	const { permissions, requestPermission } = controls;
+	const { permissions, requestPermission, yolo, setYolo } = controls;
 	const [granted, setGranted] = useState<ComputerPermissions>();
 	const check = useCallback(() => {
 		permissions().then(setGranted, () => setGranted(undefined));
@@ -105,6 +123,22 @@ export function ComputerEntry({ info, controls }: ComputerEntryProps) {
 					Check again
 				</button>
 			</div>
+			<div className="computer-yolo">
+				<span id="computer-yolo-label">Yolo mode</span>
+				<button
+					type="button"
+					role="switch"
+					className="switch"
+					aria-checked={yolo !== undefined}
+					aria-labelledby="computer-yolo-label"
+					onClick={() => {
+						setYolo(yolo === undefined).catch(() => {});
+					}}
+				>
+					<span className="switch-knob" aria-hidden="true" />
+				</button>
+			</div>
+			<p className="connector-note">{YOLO_NOTE}</p>
 			<p className="connector-note">{DEBUG_BUILD_NOTE}</p>
 			{info?.noImages ? <p className="connector-note computer-warning">{NO_IMAGES_NOTE}</p> : null}
 		</li>

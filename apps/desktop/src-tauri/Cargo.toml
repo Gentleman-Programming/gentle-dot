@@ -37,3 +37,19 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = ["
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSRunningApplication", "NSWorkspace"] }
 objc2-application-services = { version = "0.3", default-features = false, features = ["std", "libc", "AXError", "AXUIElement", "HIServices"] }
 objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["std", "block2", "libc", "objc2-core-foundation", "objc2-core-graphics", "SCScreenshotManager", "SCShareableContent", "SCStream"] }
+
+# Debug builds encode screenshots fast too (S24.8): `image` holds the JPEG encoder and `zune-*`
+# decode JPEGs (tests). The encoder is generic, so most of its code is compiled in this crate,
+# which gets opt-level 1 as well (measured on a 1280 × 800 encode: 200 ms unoptimized, 126 ms
+# with the dependencies optimized, 40 ms with this crate at 1). Other dependencies are untouched.
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+
+[profile.dev.package.zune-core]
+opt-level = 3
+
+[profile.dev.package.gentle-dot]
+opt-level = 1
