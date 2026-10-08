@@ -21,7 +21,7 @@ browser ──HTTPS──▶ Apache (cPanel) or Caddy ──▶ 127.0.0.1:4317 �
                                                                      └─ engram serve (memory)
 ```
 
-The image (`Dockerfile`) installs `gentle-pi` (it provides `gentle-shell`), builds Engram, and builds the web UI. The `dot-home` volume keeps conversations, memory, the access key, and the agent login across restarts.
+The image (`Dockerfile`) installs `gentle-pi` (it provides `gentle-shell`) and the matching `pi`, builds Engram, and builds the web UI. On its first start the container installs the assistant's companion packages, which takes about 15 seconds and needs internet access. The `dot-home` volume keeps conversations, memory, the access key, and the agent login across restarts.
 
 ## Steps
 
@@ -112,6 +112,7 @@ Never run `docker compose down -v`: `-v` deletes the volume with your conversati
 |---|---|
 | The page says the link is not valid | Wrong or old access key. Read it with `docker compose exec gentle-dot cat /home/dot/.gentle-dot/token`. |
 | The page loads but never connects | The proxy does not forward WebSockets (enable `mod_proxy_wstunnel`), or `DOT_DOMAIN` does not match the address you opened, so the Origin check refuses it. |
+| You want no usage metrics | The companion packages send anonymous usage metrics by default. Opt out with `docker compose exec gentle-dot gentle-ai telemetry disable`. |
 | "The assistant is restarting" stays on | The agent cannot start; check `docker compose logs gentle-dot` for a missing model key or login. |
 
 ## Video outline (about 2 minutes)
