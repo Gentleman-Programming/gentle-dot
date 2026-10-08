@@ -70,7 +70,8 @@ describe("AccountsPanel", () => {
 		const send = vi.fn();
 		const dispatch = vi.fn();
 		render(<AccountsPanel auth={base().auth} send={send} dispatch={dispatch} openUrl={vi.fn()} />);
-		expect(screen.getByText("Anthropic")).toBeInTheDocument();
+		// A provider with both methods appears once in each section.
+		expect(screen.getAllByText("Anthropic")).toHaveLength(2);
 		expect(screen.getByText("Connected")).toBeInTheDocument();
 		await userEvent.click(screen.getByRole("button", { name: "Sign in with Claude Pro/Max" }));
 		expect(send).toHaveBeenCalledWith({ type: "auth_login", providerId: "anthropic", method: "oauth" });
@@ -108,8 +109,12 @@ describe("AccountsPanel", () => {
 		expect(
 			within(subscriptions)
 				.getAllByRole("button")
-				.map((b) => b.textContent),
+				.map((b) => b.getAttribute("aria-label")),
 		).toEqual(["Sign in with GitHub Copilot", "Sign in with OpenAI (ChatGPT Plus/Pro)"]);
+		// Rows read like Pi's account list: the provider name, with the plan underneath when it differs.
+		expect(within(subscriptions).getByText("OpenAI Codex")).toBeInTheDocument();
+		expect(within(subscriptions).getByText("OpenAI (ChatGPT Plus/Pro)")).toHaveClass("provider-plan");
+		expect(within(subscriptions).queryAllByText("GitHub Copilot")).toHaveLength(1);
 		expect(within(keys).getByText("Anthropic")).toBeInTheDocument();
 		expect(within(keys).getByText("OpenAI")).toBeInTheDocument();
 		expect(within(keys).queryByText("GitHub Copilot")).toBeNull();

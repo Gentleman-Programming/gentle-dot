@@ -88,10 +88,16 @@ export function AccountsPanel({ auth, send, dispatch, openUrl }: AccountsPanelPr
 						title="Use your subscription"
 						hint="Sign in with a plan you already pay for."
 						providers={providers.filter((p) => p.methods.includes("oauth"))}
-						label={(p) => p.oauthName ?? p.name}
+						label={(p) => p.name}
+						plan={(p) => (p.oauthName && p.oauthName !== p.name ? p.oauthName : undefined)}
 						action={(p) => (
-							<button type="button" className="primary" onClick={() => login(p, "oauth")}>
-								{`Sign in with ${p.oauthName ?? p.name}`}
+							<button
+								type="button"
+								className="primary"
+								aria-label={`Sign in with ${p.oauthName ?? p.name}`}
+								onClick={() => login(p, "oauth")}
+							>
+								Sign in
 							</button>
 						)}
 						send={send}
@@ -119,11 +125,13 @@ interface ProviderSectionProps {
 	hint: string;
 	providers: AuthProvider[];
 	label: (provider: AuthProvider) => string;
+	/** A second line under the name, for example the subscription plan. */
+	plan?: (provider: AuthProvider) => string | undefined;
 	action: (provider: AuthProvider) => ReactNode;
 	send: Send;
 }
 
-function ProviderSection({ title, hint, providers, label, action, send }: ProviderSectionProps) {
+function ProviderSection({ title, hint, providers, label, plan, action, send }: ProviderSectionProps) {
 	if (providers.length === 0) return null;
 	const id = `providers-${title.toLowerCase().replace(/\W+/g, "-")}`;
 	return (
@@ -137,6 +145,7 @@ function ProviderSection({ title, hint, providers, label, action, send }: Provid
 							<b>{label(provider)}</b>
 							{provider.configured ? <span className="chip ok">Connected</span> : null}
 						</div>
+						{plan?.(provider) ? <p className="provider-plan">{plan(provider)}</p> : null}
 						<div className="provider-actions">
 							{action(provider)}
 							{provider.configured && provider.source === "stored" ? (
