@@ -271,6 +271,12 @@ textarea:focus {
 	--rim-glow: rgba(240, 149, 200, 0.35);
 }
 
+/* Yolo mode (S24.9): the rim turns amber while risky actions run unasked; after in-control so it wins. */
+.dot-yolo .dot-disc {
+	--rim: var(--yellow);
+	--rim-glow: rgba(224, 194, 122, 0.45);
+}
+
 .rose {
 	position: relative;
 	display: block;
@@ -449,20 +455,6 @@ textarea:focus {
 	box-shadow:
 		0 0 0 1.5px #050506,
 		0 0 4px rgba(245, 165, 36, 0.7);
-}
-
-/* Yolo mode (S24.9): a yellow mark at the bottom right, over every state, while risky actions run unasked. */
-.dot-yolo-mark {
-	position: absolute;
-	right: 5px;
-	bottom: 5px;
-	width: 10px;
-	height: 10px;
-	border-radius: 50%;
-	background: var(--yellow);
-	box-shadow:
-		0 0 0 1.5px #050506,
-		0 0 6px var(--yellow);
 }
 
 /* Reduce motion: no traveling light (frozen dashes would look broken); the glow stays, stronger when busy.

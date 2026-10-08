@@ -80,7 +80,6 @@ export function DotSurface({
 			<span className="dot-disc" aria-hidden="true">
 				<Rose mood={inControl ? "control" : MOODS[state]} />
 			</span>
-			{yolo ? <span className="dot-yolo-mark" aria-hidden="true" /> : null}
 			{state === "needs_you" ? (
 				<span className="dot-badge" aria-hidden="true">
 					!

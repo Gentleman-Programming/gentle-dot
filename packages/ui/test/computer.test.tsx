@@ -312,17 +312,16 @@ describe("yolo mode (S24.9)", () => {
 		expect(within(banner).queryByText("Yolo")).toBeNull();
 	});
 
-	it("the rose carries a yolo marker while it is on", async () => {
+	it("the rose's rim turns amber while yolo mode is on, with no separate mark", async () => {
 		await renderApp("?surface=dot");
 		const dot = screen.getByRole("button");
 		await emitState({ active: true, endsAt: Date.now() + 60_000, yolo: true });
 		expect(dot).toHaveClass("dot-in_control", "dot-yolo");
 		expect(dot).toHaveAccessibleName("Gentle Dot: controlling your Mac, yolo mode on");
-		expect(dot.querySelector(".dot-yolo-mark")).not.toBeNull();
+		expect(dot.querySelector(".dot-yolo-mark")).toBeNull();
 
 		await emitState({ active: true, endsAt: Date.now() + 60_000, yolo: false });
 		expect(dot).not.toHaveClass("dot-yolo");
-		expect(dot.querySelector(".dot-yolo-mark")).toBeNull();
 	});
 
 	it("styles the yolo marker and switch with the site's tokens", () => {
@@ -330,7 +329,12 @@ describe("yolo mode (S24.9)", () => {
 		const css = readFileSync(fileURLToPath(new URL(stylesheet, import.meta.url)), "utf8");
 		const rule = (selector: string) =>
 			css.match(new RegExp(`\\n${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\{([^}]*)\\}`))?.[1] ?? "";
-		expect(rule(".dot-yolo-mark")).toMatch(/var\(--yellow/);
+		expect(rule(".dot-yolo-mark")).toBe("");
+		expect(rule(".dot-yolo .dot-disc")).toMatch(/--rim: var\(--yellow\)/);
+		// It follows the in-control rim, so it wins while both are on.
+		expect(css.indexOf("\n.dot-yolo .dot-disc {")).toBeGreaterThan(
+			css.indexOf("\n.dot-in_control .dot-disc {"),
+		);
 		expect(rule(".computer-yolo-chip")).toMatch(/var\(--yellow/);
 		expect(rule('.switch[aria-checked="true"]')).toMatch(/var\(--accent/);
 	});
