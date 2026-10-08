@@ -149,7 +149,9 @@ describe("profiles over the gateway", () => {
 			defaultModel: "fake-fast",
 			defaultThinkingLevel: "low",
 		});
-		expect(readFileSync(agentFile, "utf8")).toBe("---\nname: gentle-ai-worker\n---\nWorker\n");
+		expect(readFileSync(agentFile, "utf8")).toBe(
+			"---\nname: gentle-ai-worker\nmodel: other/big\nthinking: high\n---\nWorker\n",
+		);
 		expect(commands()).toEqual([
 			{ type: "set_model", provider: "fake", modelId: "fake-fast", busy: false },
 			{ type: "set_thinking_level", level: "low", busy: false },

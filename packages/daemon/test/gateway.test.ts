@@ -1,9 +1,9 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
-import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { type DotDaemon, ensureToken, startDaemon, startupMessage } from "../src/daemon.ts";
 import { HIDDEN_NAMES } from "../src/white-label.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
@@ -268,6 +268,73 @@ describe("own instance", () => {
 		expect(argv.slice(0, 4)).toEqual(["--home", join(dataDir, "agent"), "--mode", "rpc"]);
 		const env = JSON.parse(readFileSync(envFile, "utf8")) as Record<string, string>;
 		expect(env.GENTLE_PI_CONFIG_HOME).toBe(join(dataDir, "gentle-ai"));
+	});
+
+	it("gives the agent its own HOME, XDG folders, and memory server, keeping PATH and the user's git identity", async () => {
+		const scratch = tempDir();
+		const realHome = join(scratch, "user");
+		mkdirSync(realHome);
+		writeFileSync(join(realHome, ".gitconfig"), "[user]\n\tname = Someone\n");
+		const envFile = join(scratch, "env.json");
+		const dataDir = tempDir();
+		const d = await startDaemon({
+			port: 0,
+			host: "127.0.0.1",
+			dataDir,
+			workspace: join(dataDir, "workspace"),
+			uiDir: dataDir,
+			agentCommand: process.execPath,
+			agentArgs: [FAKE_AGENT],
+			agentHome: join(dataDir, "agent"),
+			agentEnv: {
+				...process.env,
+				HOME: realHome,
+				XDG_CONFIG_HOME: join(realHome, ".config"),
+				XDG_DATA_HOME: join(realHome, "data"),
+				XDG_CACHE_HOME: join(realHome, "cache"),
+				XDG_STATE_HOME: join(realHome, "state"),
+				PI_CODING_AGENT_DIR: join(realHome, ".pi", "agent"),
+				GENTLE_SHELL_CONFIG: join(realHome, ".gentle-shell", "config.json"),
+				ENGRAM_URL: "http://127.0.0.1:7437",
+				FAKE_AGENT_ENV_FILE: envFile,
+			},
+		});
+		daemons.push(d);
+		const env = JSON.parse(readFileSync(envFile, "utf8")) as Record<string, string | undefined>;
+		const home = join(dataDir, "home");
+		expect(env).toEqual({
+			GENTLE_PI_CONFIG_HOME: join(dataDir, "gentle-ai"),
+			HOME: home,
+			XDG_CONFIG_HOME: join(home, ".config"),
+			XDG_DATA_HOME: join(home, ".local", "share"),
+			XDG_CACHE_HOME: join(home, ".cache"),
+			XDG_STATE_HOME: join(home, ".local", "state"),
+			GIT_CONFIG_GLOBAL: join(realHome, ".gitconfig"),
+			PATH: process.env.PATH,
+			// Engram ties a memory server to the HOME that started it, so the assistant runs its own.
+			ENGRAM_PORT: "7438",
+		});
+		expect(statSync(home).mode & 0o777).toBe(0o700);
+		expect(existsSync(join(dataDir, "workspace"))).toBe(true);
+	});
+
+	it("keeps the data folder and the access key private, repairing looser modes", () => {
+		const dataDir = join(tempDir(), "data");
+		mkdirSync(dataDir, { mode: 0o755 });
+		chmodSync(dataDir, 0o755);
+		writeFileSync(join(dataDir, "token"), `${"k".repeat(43)}\n`, { mode: 0o644 });
+		chmodSync(join(dataDir, "token"), 0o644);
+		expect(ensureToken(dataDir)).toBe("k".repeat(43));
+		expect(statSync(dataDir).mode & 0o777).toBe(0o700);
+		expect(statSync(join(dataDir, "token")).mode & 0o777).toBe(0o600);
+	});
+
+	it("shows the access key only on an interactive terminal", () => {
+		const url = "http://127.0.0.1:4317/#token=secret-token";
+		expect(startupMessage(url, "/data", true)).toBe(`Gentle Dot is running at ${url}`);
+		const piped = startupMessage(url, "/data", false);
+		expect(piped).not.toContain("secret-token");
+		expect(piped).toBe("Gentle Dot is running at http://127.0.0.1:4317/ (the access key is in /data/token)");
 	});
 });
 

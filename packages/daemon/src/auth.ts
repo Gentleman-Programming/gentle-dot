@@ -76,6 +76,24 @@ export async function createModelAuthRuntime(agentHome: string, cwd: string): Pr
 
 type Emit = (payload: ServerPayload) => void;
 
+/** Sign-in methods the assistant never offers: a Claude subscription cannot be used legally from here. */
+const UNSUPPORTED_METHODS: Readonly<Record<string, AuthMethod>> = { anthropic: "oauth" };
+
+const isUnsupported = (providerId: string, method: AuthMethod) =>
+	Object.hasOwn(UNSUPPORTED_METHODS, providerId) && UNSUPPORTED_METHODS[providerId] === method;
+
+/** Why a sign-in or sign-out did not start; `message` is safe to show. */
+export type AuthRefusal = { code: "auth_busy" | "auth_unsupported" | "unknown_provider"; message: string };
+
+const REFUSALS = {
+	busy: { code: "auth_busy", message: "Another sign-in is in progress. Finish or cancel it first." },
+	unsupported: {
+		code: "auth_unsupported",
+		message: "Signing in with a Claude subscription is not supported. Use an Anthropic API key instead.",
+	},
+	unknown: { code: "unknown_provider", message: "That account is not available." },
+} as const satisfies Record<string, AuthRefusal>;
+
 interface Flow {
 	id: string;
 	providerId: string;
@@ -108,9 +126,10 @@ export class AuthManager {
 	async providers(): Promise<AuthProvider[]> {
 		const runtime = await this.options.runtime();
 		return runtime.getProviders().flatMap((provider) => {
+			const oauth = isUnsupported(provider.id, "oauth") ? undefined : provider.auth.oauth;
 			const methods: AuthMethod[] = [];
-			if (provider.auth.oauth) methods.push("oauth");
-			if (provider.auth.apiKey) methods.push("api_key");
+			if (oauth) methods.push("oauth");
+			if (provider.auth.apiKey && !isUnsupported(provider.id, "api_key")) methods.push("api_key");
 			if (methods.length === 0) return [];
 			const status = runtime.getProviderAuthStatus(provider.id);
 			const entry: AuthProvider = {
@@ -119,15 +138,16 @@ export class AuthManager {
 				methods,
 				configured: status.configured,
 			};
-			if (provider.auth.oauth) entry.oauthName = provider.auth.oauth.name;
+			if (oauth) entry.oauthName = oauth.name;
 			if (status.configured && status.source) entry.source = status.source;
 			return [entry];
 		});
 	}
 
-	/** Starts a flow; returns false when another sign-in is already running. */
-	start(owner: object, providerId: string, method: AuthMethod, emit: Emit): boolean {
-		if (this.flow) return false;
+	/** Starts a flow, or says why it did not start. */
+	start(owner: object, providerId: string, method: AuthMethod, emit: Emit): AuthRefusal | undefined {
+		if (isUnsupported(providerId, method)) return REFUSALS.unsupported;
+		if (this.flow) return REFUSALS.busy;
 		const flow: Flow = {
 			id: randomUUID(),
 			providerId,
@@ -137,13 +157,13 @@ export class AuthManager {
 		};
 		this.flow = flow;
 		void this.run(flow, method, emit);
-		return true;
+		return undefined;
 	}
 
-	/** Delivers the user's answer (or cancellation) to the waiting prompt. */
-	reply(flowId: string, answer: { value?: string; cancelled?: boolean }): boolean {
+	/** Delivers the user's answer (or cancellation) to the prompt of a flow `owner` started. */
+	reply(owner: object, flowId: string, answer: { value?: string; cancelled?: boolean }): boolean {
 		const flow = this.flow;
-		if (!flow || flow.id !== flowId) return false;
+		if (!flow || flow.id !== flowId || flow.owner !== owner) return false;
 		if (answer.cancelled) {
 			flow.controller.abort();
 			return true;
@@ -161,11 +181,20 @@ export class AuthManager {
 		if (this.flow?.owner === owner) this.flow.controller.abort();
 	}
 
-	async logout(providerId: string): Promise<void> {
+	/** Signs out of a listed provider, or says why not. */
+	async logout(providerId: string): Promise<AuthRefusal | undefined> {
 		const runtime = await this.options.runtime();
+		if (!runtime.getProviders().some((provider) => provider.id === providerId)) return REFUSALS.unknown;
 		await runtime.logout(providerId);
 		this.log(`signed out of ${providerId}`);
 		this.onCredentialsChanged();
+		return undefined;
+	}
+
+	/** True when at least one provider has a credential. */
+	async hasAccount(): Promise<boolean> {
+		const runtime = await this.options.runtime();
+		return runtime.getProviders().some((provider) => runtime.getProviderAuthStatus(provider.id).configured);
 	}
 
 	private async run(flow: Flow, method: AuthMethod, emit: Emit): Promise<void> {

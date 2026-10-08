@@ -7,12 +7,14 @@
 //   "ask:confirm"  asks a confirm dialog and echoes the answer
 //   "hang"         starts a run that only ends on abort
 //   "crash"        starts a run and exits with code 1
+//   "burst"        answers and finishes the run in a single stdout write
 // The "noreply" command is never answered.
 // Environment:
 //   FAKE_AGENT_ARGS_FILE  write argv as JSON to this file
 //   FAKE_AGENT_BRANDING   emit branded startup UI records
 //   FAKE_AGENT_ENV_FILE   write selected environment variables as JSON to this file
 //   FAKE_AGENT_COMMANDS_FILE  append every model command (set_model, set_thinking_level) as JSONL
+//   FAKE_AGENT_NO_MODEL   refuse every prompt, like an engine with no signed-in account
 // get_available_models lists MODELS; set_model and set_thinking_level change what
 // get_state reports, so tests can read the last values back.
 import { randomUUID } from "node:crypto";
@@ -44,7 +46,24 @@ if (process.env.FAKE_AGENT_ARGS_FILE) writeFileSync(process.env.FAKE_AGENT_ARGS_
 if (process.env.FAKE_AGENT_ENV_FILE) {
 	writeFileSync(
 		process.env.FAKE_AGENT_ENV_FILE,
-		JSON.stringify({ GENTLE_PI_CONFIG_HOME: process.env.GENTLE_PI_CONFIG_HOME }),
+		JSON.stringify(
+			Object.fromEntries(
+				[
+					"GENTLE_PI_CONFIG_HOME",
+					"HOME",
+					"XDG_CONFIG_HOME",
+					"XDG_DATA_HOME",
+					"XDG_CACHE_HOME",
+					"XDG_STATE_HOME",
+					"GIT_CONFIG_GLOBAL",
+					"PATH",
+					"PI_CODING_AGENT_DIR",
+					"GENTLE_SHELL_CONFIG",
+					"ENGRAM_PORT",
+					"ENGRAM_URL",
+				].map((key) => [key, process.env[key]]),
+			),
+		),
 	);
 }
 const sessionDir = argValue("--session-dir") ?? join(process.cwd(), ".fake-sessions");
@@ -55,6 +74,8 @@ let sessionFile = "";
 let messages: Message[] = [];
 let busy = false;
 let hanging: (() => void) | undefined;
+/** Records collected for one stdout write while a "burst" prompt runs. */
+let batch: string[] | undefined;
 const pendingUi = new Map<string, (rec: Rec) => void>();
 newSession();
 
@@ -71,7 +92,8 @@ function recordCommand(rec: Rec): void {
 }
 
 function out(rec: Rec): void {
-	process.stdout.write(`${JSON.stringify(rec)}\n`);
+	if (batch) batch.push(`${JSON.stringify(rec)}\n`);
+	else process.stdout.write(`${JSON.stringify(rec)}\n`);
 }
 
 function newSession(): void {
@@ -199,8 +221,14 @@ function handle(rec: Rec) {
 		case "prompt": {
 			if (busy && !rec.streamingBehavior) return respond(id, "prompt", undefined, "Agent is streaming");
 			if (busy) return respond(id, "prompt", { disposition: "queued" });
+			if (process.env.FAKE_AGENT_NO_MODEL) return respond(id, "prompt", undefined, "No model selected");
+			if (rec.message === "burst") batch = [];
 			respond(id, "prompt", { disposition: "started" });
 			void run(String(rec.message));
+			if (batch) {
+				process.stdout.write(batch.join(""));
+				batch = undefined;
+			}
 			return;
 		}
 		case "steer":

@@ -1,10 +1,12 @@
 import {
+	chmodSync,
 	existsSync,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
 	rmdirSync,
 	statSync,
+	symlinkSync,
 	utimesSync,
 	writeFileSync,
 } from "node:fs";
@@ -216,9 +218,45 @@ describe("applying a profile", () => {
 			defaultModel: "claude-opus-4",
 		});
 		expect(statSync(modelsPath).mode & 0o777).toBe(0o600);
+		// The agent's own frontmatter follows the profile, as the engine's apply does.
 		expect(readFileSync(agentFile, "utf8")).toBe(
-			"---\nname: gentle-ai-worker\nmodel: old/model\n---\nBody\n",
+			"---\nname: gentle-ai-worker\nmodel: openai/gpt-5\nthinking: high\n---\nBody\n",
 		);
+	});
+
+	it("clears the frontmatter routing of agents the profile omits, keeping each file's mode", async () => {
+		const { store, agentHome } = setup();
+		mkdirSync(join(agentHome, "agents"), { recursive: true });
+		mkdirSync(join(agentHome, "subagents"), { recursive: true });
+		const explore = join(agentHome, "agents", "explore.md");
+		const helper = join(agentHome, "subagents", "helper.md");
+		writeFileSync(
+			explore,
+			"---\nname: gentle-ai-explore\ndescription: d\nmodel: old/m\nthinking: low\n---\nB\n",
+		);
+		writeFileSync(helper, "---\nname: helper\npackage: kit\n---\nB\n");
+		chmodSync(explore, 0o644);
+		await store.save("p", { "kit.helper": { model: "x/y" } });
+		await store.apply("p");
+		expect(readFileSync(explore, "utf8")).toBe("---\nname: gentle-ai-explore\ndescription: d\n---\nB\n");
+		expect(statSync(explore).mode & 0o777).toBe(0o644);
+		expect(readFileSync(helper, "utf8")).toBe("---\nname: helper\nmodel: x/y\npackage: kit\n---\nB\n");
+	});
+
+	it("never writes an agent file whose real path is outside the assistant's agent folders", async () => {
+		const { store, agentHome } = setup();
+		const outside = join(agentHome, "..", "outside");
+		mkdirSync(join(outside, "dir"), { recursive: true });
+		mkdirSync(join(agentHome, "agents"), { recursive: true });
+		const text = "---\nname: gentle-ai-worker\nmodel: old/model\n---\nB\n";
+		writeFileSync(join(outside, "worker.md"), text);
+		writeFileSync(join(outside, "dir", "explore.md"), text.replace("worker", "explore"));
+		symlinkSync(join(outside, "worker.md"), join(agentHome, "agents", "worker.md"));
+		symlinkSync(join(outside, "dir"), join(agentHome, "subagents"));
+		await store.save("p", { "gentle-ai-worker": { model: "x/y" } });
+		await store.apply("p");
+		expect(readFileSync(join(outside, "worker.md"), "utf8")).toBe(text);
+		expect(readFileSync(join(outside, "dir", "explore.md"), "utf8")).toBe(text.replace("worker", "explore"));
 	});
 
 	it("sets the thinking level and drops model_profiles when the profile routes no agent", async () => {
@@ -243,19 +281,22 @@ describe("applying a profile", () => {
 		expect(readFileSync(settingsPath, "utf8")).toBe(before);
 	});
 
-	it("restores every file when a step fails", async () => {
-		const { store, profilesPath, modelsPath, subagentsPath, settingsPath } = setup();
+	it("restores every file, its contents and its mode, when a step fails", async () => {
+		const { store, agentHome, profilesPath, modelsPath, subagentsPath, settingsPath } = setup();
+		const agentFile = join(agentHome, "agents", "worker.md");
+		mkdirSync(join(agentHome, "agents"), { recursive: true });
+		writeFileSync(agentFile, "---\nname: gentle-ai-worker\n---\nB\n");
 		await store.save("a", { "gentle-ai-worker": { model: "x/a" } });
 		await store.save("b", { orchestrator: { model: "x/b" }, "gentle-ai-worker": { model: "x/b" } });
 		await store.apply("a");
 		writeFileSync(settingsPath, "{not json");
-		const before = [profilesPath, modelsPath, subagentsPath, settingsPath].map((p) =>
-			readFileSync(p, "utf8"),
-		);
+		const paths = [profilesPath, modelsPath, subagentsPath, settingsPath, agentFile];
+		chmodSync(settingsPath, 0o644);
+		chmodSync(subagentsPath, 0o644);
+		chmodSync(agentFile, 0o640);
+		const before = paths.map((p) => [readFileSync(p, "utf8"), statSync(p).mode & 0o777]);
 		await expect(store.apply("b")).rejects.toMatchObject({ code: "settings_invalid" });
-		expect(
-			[profilesPath, modelsPath, subagentsPath, settingsPath].map((p) => readFileSync(p, "utf8")),
-		).toEqual(before);
+		expect(paths.map((p) => [readFileSync(p, "utf8"), statSync(p).mode & 0o777])).toEqual(before);
 	});
 
 	it("waits for the engine's settings lock and takes over a stale one", async () => {

@@ -1,4 +1,4 @@
-import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import type { Activity, ConversationSummary, HistoryMessage } from "@gentle-dot/protocol";
 import { describeTool, textOf } from "./presentation.ts";
@@ -36,13 +36,18 @@ export function conversationIdOf(sessionDir: string, sessionFile: string): strin
 	return relative(sessionDir, sessionFile).split(sep).join("/");
 }
 
-/** Resolves a client-supplied id to a session file inside `sessionDir`, or undefined. */
+/**
+ * Resolves a client-supplied id to a session file inside `sessionDir`, or
+ * undefined. Symlinks are followed before the check, so none can lead outside.
+ */
 export function resolveConversation(sessionDir: string, id: string): string | undefined {
 	if (!id.endsWith(".jsonl") || id.includes("\0")) return undefined;
 	const root = resolve(sessionDir);
 	const path = resolve(root, id);
-	if (!path.startsWith(root + sep)) return undefined;
-	return existsSync(path) && statSync(path).isFile() ? path : undefined;
+	if (!path.startsWith(root + sep) || !existsSync(path)) return undefined;
+	const real = realpathSync(path);
+	if (!real.startsWith(realpathSync(root) + sep)) return undefined;
+	return statSync(real).isFile() ? path : undefined;
 }
 
 function titleOf(path: string): string {

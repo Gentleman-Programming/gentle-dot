@@ -76,25 +76,43 @@ test("keeps the conversation after a page reload", async ({ page }) => {
 	await expect(page.locator(".message-assistant").last()).toHaveText("Echo: remember this");
 });
 
-test("opens accounts with /login and connects and disconnects an API key", async ({ page }) => {
+test("opens accounts with /login, offers subscriptions without Claude, and connects an API key", async ({
+	page,
+}) => {
 	await open(page);
 	await say(page, "/login");
 	const accounts = page.getByRole("region", { name: "Accounts" });
 	await expect(accounts).toBeVisible();
-	await expect(accounts.getByRole("button", { name: /Sign in with .*Claude Pro\/Max/ })).toBeVisible();
+	const useSubscription = accounts.getByRole("button", { name: /^Use a subscription/ });
+	const useApiKey = accounts.getByRole("button", { name: /^Use an API key/ });
+	await expect(useSubscription).toBeVisible();
+	await expect(useApiKey).toBeVisible();
+
+	await useSubscription.click();
+	const subscriptions = accounts.getByRole("region", { name: "Use a subscription" });
+	await expect(subscriptions.getByRole("button", { name: /^Sign in with .*ChatGPT/ }).first()).toBeVisible();
+	// A Claude subscription cannot be used from here, so it is never offered.
+	await expect(accounts.getByRole("button", { name: /Claude Pro\/Max/ })).toHaveCount(0);
+	await accounts.getByRole("button", { name: "Back", exact: true }).click();
+
+	await useApiKey.click();
+	const apiKeys = accounts.getByRole("region", { name: "Use an API key" });
 	await accounts.getByRole("searchbox", { name: "Search providers" }).fill("OpenAI");
-	const openai = accounts.getByRole("listitem").filter({ has: page.getByText("OpenAI", { exact: true }) });
-	await openai.getByRole("button", { name: "Use an API key" }).click();
+	await apiKeys.getByRole("button", { name: "Use an API key for OpenAI" }).click();
 	const key = accounts.getByLabel("Enter OpenAI API key");
 	await expect(key).toHaveAttribute("type", "password");
 	await key.fill("sk-e2e-not-real");
 	await accounts.getByRole("button", { name: "Continue" }).click();
 	await expect(accounts.getByRole("status")).toHaveText("Connected to OpenAI.");
 	await accounts.getByRole("button", { name: "Back to accounts" }).click();
-	await accounts.getByRole("searchbox", { name: "Search providers" }).fill("OpenAI");
-	await expect(openai.getByText("Connected")).toBeVisible();
-	await openai.getByRole("button", { name: "Sign out" }).click();
-	await expect(openai.getByText("Connected")).toBeHidden();
+	// Back to the API key list; connected accounts are listed on the first step.
+	await accounts.getByRole("button", { name: "Back", exact: true }).click();
+	const signOut = accounts
+		.getByRole("region", { name: "Connected" })
+		.getByRole("button", { name: "Sign out of OpenAI" });
+	await expect(signOut).toBeVisible();
+	await signOut.click();
+	await expect(accounts.getByRole("button", { name: "Sign out of OpenAI" })).toHaveCount(0);
 	await accounts.getByRole("button", { name: "Close accounts" }).click();
 	await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
 });

@@ -2,10 +2,10 @@ import type { AuthRuntime } from "../src/auth.ts";
 
 type Interaction = Parameters<AuthRuntime["login"]>[2];
 
-/** A stand-in for Pi's ModelRuntime: two providers and scripted sign-in flows. */
+/** A stand-in for Pi's ModelRuntime: three providers and scripted sign-in flows. */
 export function fakeAuthRuntime() {
 	const configured = new Set<string>();
-	const state = { aborted: false };
+	const state = { aborted: false, logins: [] as string[] };
 	const runtime: AuthRuntime = {
 		getProviders: () => [
 			{
@@ -14,11 +14,13 @@ export function fakeAuthRuntime() {
 				auth: { apiKey: { name: "API key" }, oauth: { name: "Claude Pro/Max" } },
 			},
 			{ id: "openai", name: "OpenAI", auth: { apiKey: { name: "API key" } } },
+			{ id: "github-copilot", name: "GitHub Copilot", auth: { oauth: { name: "GitHub Copilot" } } },
 			{ id: "local", name: "Local", auth: {} },
 		],
 		getProviderAuthStatus: (id) =>
 			configured.has(id) ? { configured: true, source: "stored" } : { configured: false },
 		async login(id, type, interaction: Interaction) {
+			state.logins.push(`${id}:${type}`);
 			interaction.signal?.addEventListener("abort", () => {
 				state.aborted = true;
 			});

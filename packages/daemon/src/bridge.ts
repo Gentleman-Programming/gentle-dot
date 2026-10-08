@@ -111,15 +111,32 @@ export class DotBridge {
 			await this.dispatch(client, message);
 		} catch (error) {
 			this.log(`command ${message.type} failed: ${(error as Error).message}`);
-			const unavailable = this.supervisor.state !== "ready";
-			this.deliver(client, {
-				type: "error",
-				code: unavailable ? "agent_unavailable" : "command_failed",
-				message: unavailable
-					? "The assistant is restarting. Try again in a moment."
-					: "That did not work. Please try again.",
-			});
+			if (this.supervisor.state !== "ready") {
+				this.deliver(client, {
+					type: "error",
+					code: "agent_unavailable",
+					message: "The assistant is restarting. Try again in a moment.",
+				});
+			} else if (message.type === "send" && !(await this.hasAccount())) {
+				this.deliver(client, {
+					type: "error",
+					code: "no_account",
+					message: "Connect an AI account first: open Accounts or type /login.",
+				});
+			} else {
+				this.deliver(client, {
+					type: "error",
+					code: "command_failed",
+					message: "That did not work. Please try again.",
+				});
+			}
 		}
+	}
+
+	/** True when an account is connected, or when that cannot be told. */
+	private async hasAccount(): Promise<boolean> {
+		if (!this.options.auth) return true;
+		return this.options.auth.hasAccount().catch(() => true);
 	}
 
 	private async dispatch(client: BridgeClient, message: ClientMessage): Promise<void> {
@@ -207,21 +224,14 @@ export class DotBridge {
 				await this.sendProviders(client);
 				return;
 			case "auth_login": {
-				const auth = this.requireAuth();
-				const started = auth.start(client, message.providerId, message.method, (payload) =>
+				const refused = this.requireAuth().start(client, message.providerId, message.method, (payload) =>
 					this.deliver(client, payload),
 				);
-				if (!started) {
-					this.deliver(client, {
-						type: "error",
-						code: "auth_busy",
-						message: "Another sign-in is in progress. Finish or cancel it first.",
-					});
-				}
+				if (refused) this.deliver(client, { type: "error", ...refused });
 				return;
 			}
 			case "auth_reply":
-				if (!this.requireAuth().reply(message.flowId, message)) {
+				if (!this.requireAuth().reply(client, message.flowId, message)) {
 					this.deliver(client, {
 						type: "error",
 						code: "auth_flow_not_found",
@@ -229,9 +239,11 @@ export class DotBridge {
 					});
 				}
 				return;
-			case "auth_logout":
-				await this.requireAuth().logout(message.providerId);
+			case "auth_logout": {
+				const refused = await this.requireAuth().logout(message.providerId);
+				if (refused) this.deliver(client, { type: "error", ...refused });
 				return;
+			}
 			case "profiles_list":
 				await this.sendProfiles(client);
 				return;

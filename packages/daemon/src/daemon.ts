@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { extname, join, resolve, sep } from "node:path";
@@ -7,6 +7,7 @@ import { type ClientMessage, CloseCode, PROTOCOL_VERSION, parseClientMessage } f
 import { type WebSocket, WebSocketServer } from "ws";
 import { AuthManager, type AuthRuntime, createModelAuthRuntime, resolveAgentHome } from "./auth.ts";
 import { type BridgeClient, DotBridge } from "./bridge.ts";
+import { ensurePrivateDir, isolatedAgentEnv } from "./isolation.ts";
 import { defaultImportPath, ProfileStore } from "./profiles.ts";
 import { AgentSupervisor } from "./supervisor.ts";
 import { identityArgs } from "./white-label.ts";
@@ -55,11 +56,15 @@ const CONTENT_TYPES: Record<string, string> = {
 	".woff2": "font/woff2",
 };
 
-/** Reads the access token from `<dataDir>/token`, creating a random one (mode 0600) when absent. */
+/**
+ * Reads the access token from `<dataDir>/token`, creating a random one when
+ * absent. The data folder is kept at 0700 and the token at 0600.
+ */
 export function ensureToken(dataDir: string): string {
-	mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+	ensurePrivateDir(dataDir);
 	const file = join(dataDir, "token");
 	if (existsSync(file)) {
+		chmodSync(file, 0o600);
 		const existing = readFileSync(file, "utf8").trim();
 		if (existing.length >= 32) return existing;
 	}
@@ -68,13 +73,25 @@ export function ensureToken(dataDir: string): string {
 	return token;
 }
 
+/**
+ * The line printed at startup. The access key is shown only on an interactive
+ * terminal; redirected output (a log file, `docker logs`) says where it is instead.
+ */
+export function startupMessage(url: string, dataDir: string, interactive: boolean): string {
+	if (interactive) return `Gentle Dot is running at ${url}`;
+	return `Gentle Dot is running at ${url.split("#")[0]} (the access key is in ${join(dataDir, "token")})`;
+}
+
 export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	const log = options.log ?? (() => {});
 	const token = ensureToken(options.dataDir);
-	const agentEnv = { ...(options.agentEnv ?? process.env) };
+	mkdirSync(options.workspace, { recursive: true, mode: 0o700 });
+	let agentEnv = { ...(options.agentEnv ?? process.env) };
 	const homeArgs: string[] = [];
 	if (options.agentHome) {
 		homeArgs.push("--home", options.agentHome);
+		// The engine also writes under the home folder; it gets one of its own.
+		agentEnv = isolatedAgentEnv(agentEnv, options.dataDir);
 		agentEnv.GENTLE_PI_CONFIG_HOME = join(options.dataDir, "gentle-ai");
 	}
 	const supervisor = new AgentSupervisor({

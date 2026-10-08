@@ -14,6 +14,8 @@ describe("loadConfig", () => {
 			dataDir,
 			agentCommand: process.execPath,
 			agentHome: join(dataDir, "agent"),
+			// Never the user's home: the engine reads project settings from its workspace.
+			workspace: join(dataDir, "workspace"),
 		});
 		expect(config.agentArgs).toHaveLength(1);
 		expect(config.agentArgs[0]).toMatch(/node_modules\/gentle-pi\/bin\/gentle-shell\.mjs$/);

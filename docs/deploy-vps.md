@@ -53,7 +53,7 @@ EOF
 chmod 600 .env
 ```
 
-Fill in one model key. If you prefer to log in to a provider instead of using a key, do it once after step 4 with `docker compose run --rm gentle-dot gentle-shell`; the login is kept in the volume.
+Fill in one model key, or leave both empty and sign in from the browser once Gentle Dot is open (step 6): open **Accounts**, or type `/login` in the chat, and choose a subscription or an API key. The sign-in is kept in the volume.
 
 For the Caddy option, also add `DOT_USER` and `DOT_PASSWORD_HASH`. Generate the hash with `docker run --rm caddy:2 caddy hash-password --plaintext 'your-password'`, and write every `$` as `$$`.
 
@@ -62,10 +62,10 @@ For the Caddy option, also add `DOT_USER` and `DOT_PASSWORD_HASH`. Generate the 
 ```bash
 docker compose up -d --build
 curl -s http://127.0.0.1:4317/health     # {"ok":true,"agentState":"idle"}
-docker compose logs gentle-dot | grep "Gentle Dot is running"
+docker compose exec gentle-dot cat /home/dot/.gentle-dot/token
 ```
 
-The log line prints the URL with the access key, `http://127.0.0.1:4317/#token=…`. Keep the part after `#token=`; you will open it with your domain in step 6.
+The last command prints the access key; you will open it with your domain in step 6. The logs never show it: `docker compose logs gentle-dot` only says where the key file is.
 
 ### 5a. HostGator VPS (cPanel/WHM): Apache in front
 
@@ -94,6 +94,8 @@ Caddy obtains the HTTPS certificate on its own and asks for the `DOT_USER` passw
 
 Open `https://dot.example.com/#token=<your access key>`. The browser asks for the web server password first, then the page stores the access key and removes it from the address bar.
 
+If you left the model keys empty in step 3, sign in now: open **Accounts** (or type `/login`), pick a subscription or an API key, and follow the steps on screen.
+
 ## Update, back up, roll back
 
 ```bash
@@ -113,14 +115,15 @@ Never run `docker compose down -v`: `-v` deletes the volume with your conversati
 | The page says the link is not valid | Wrong or old access key. Read it with `docker compose exec gentle-dot cat /home/dot/.gentle-dot/token`. |
 | The page loads but never connects | The proxy does not forward WebSockets (enable `mod_proxy_wstunnel`), or `DOT_DOMAIN` does not match the address you opened, so the Origin check refuses it. |
 | You want no usage metrics | The companion packages send anonymous usage metrics by default. Opt out with `docker compose exec gentle-dot gentle-ai telemetry disable`. |
-| "The assistant is restarting" stays on | The agent cannot start; check `docker compose logs gentle-dot` for a missing model key or login. |
+| "The assistant is restarting" stays on | The agent cannot start; check `docker compose logs gentle-dot` for the reason. |
+| "Connect an AI account first" | No account is connected. Open **Accounts** (or type `/login`) and sign in, or add a model key to `.env` and run `docker compose up -d`. |
 
 ## Video outline (about 2 minutes)
 
 1. "Gentle Dot runs on my Mac. Now let's put it on a HostGator VPS so I can use it from anywhere."
 2. Create the `dot` subdomain in DNS (step 1).
 3. `git clone` into `/opt/gentle-dot`, then create `.env` with the domain and the model key (steps 2–3).
-4. `docker compose up -d --build`, then `curl` the health check (step 4).
+4. `docker compose up -d --build`, `curl` the health check, and read the access key from the container (step 4).
 5. In WHM: run AutoSSL, add the password file, and drop in the Apache include (step 5a).
-6. Open `https://dot.<domain>/#token=…` on a phone: same assistant, same memory.
+6. Open `https://dot.<domain>/#token=…` on a phone, and sign in from **Accounts** if there is no model key: same assistant, same memory.
 7. Close with the safety rules: HTTPS, two locks, an isolated container.

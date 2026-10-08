@@ -70,6 +70,8 @@ export class AgentSupervisor {
 	private readonly pending = new Map<string, Pending>();
 	private readonly listeners = new Set<(event: SupervisorEvent) => void>();
 	private nextId = 0;
+	/** Count of `agent_settled` records seen, to order them against prompt responses. */
+	private settledRuns = 0;
 	private attempts = 0;
 	private spawnedAt = 0;
 	private stopping = false;
@@ -108,10 +110,13 @@ export class AgentSupervisor {
 	/** Sends a command and resolves with its successful response. */
 	async request(command: AgentRecord): Promise<RpcResponse> {
 		if (this.state !== "ready") throw new Error("Agent is not ready");
+		const settledBefore = this.settledRuns;
 		const response = await this.rawRequest(command, this.options.requestTimeoutMs ?? 300_000);
+		// The run may already have settled before this response was handled.
 		if (
 			command.type === "prompt" &&
-			(response.data as { disposition?: string } | undefined)?.disposition === "started"
+			(response.data as { disposition?: string } | undefined)?.disposition === "started" &&
+			this.settledRuns === settledBefore
 		) {
 			this.busy = true;
 		}
@@ -229,6 +234,7 @@ export class AgentSupervisor {
 		}
 		if (record.type === "agent_start") this.busy = true;
 		if (record.type === "agent_settled") {
+			this.settledRuns += 1;
 			this.busy = false;
 			void this.refreshSession().catch(() => {});
 		}

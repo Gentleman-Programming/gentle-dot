@@ -3,17 +3,19 @@ import {
 	closeSync,
 	constants,
 	existsSync,
+	fchmodSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	renameSync,
 	rmSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import {
 	type AuthProvider,
 	isThinkingLevel,
@@ -145,12 +147,14 @@ export function serializeProfilesFile(file: ProfilesFile): string {
 
 const jsonText = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
 
-/** Replaces a file through a sibling temp file (mode 0600) and a rename, so readers never see a partial file. */
-export function writeFileAtomic(path: string, text: string): void {
+/** Replaces a file through a sibling temp file (mode 0600 by default) and a rename, so readers never see a partial file. */
+export function writeFileAtomic(path: string, text: string, mode = 0o600): void {
 	mkdirSync(dirname(path), { recursive: true });
 	const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
-	const fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+	const fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, mode);
 	try {
+		// The process umask may have narrowed the creation mode.
+		fchmodSync(fd, mode);
 		writeFileSync(fd, text);
 	} finally {
 		closeSync(fd);
@@ -169,6 +173,19 @@ function readText(path: string): string | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+/** A file's text and permission bits, so it can be put back exactly; undefined when it does not exist. */
+type Snapshot = { text: string; mode: number } | undefined;
+
+function snapshot(path: string): Snapshot {
+	const text = readText(path);
+	return text === undefined ? undefined : { text, mode: statSync(path).mode & 0o777 };
+}
+
+function restore(path: string, saved: Snapshot): void {
+	if (saved === undefined) rmSync(path, { force: true });
+	else writeFileAtomic(path, saved.text, saved.mode);
 }
 
 /** Reads a JSON object file; missing is `{}`, anything else that is not an object throws `code`. */
@@ -339,31 +356,33 @@ export class ProfileStore {
 
 	/**
 	 * Applies a profile the way the engine does: the active marker, then
-	 * models.json, then subagents.json `model_profiles` (omitted agents cleared),
-	 * then the main assistant's defaults in settings.json. Agent files are never
-	 * rewritten. Any failure restores all four files. Returns the main assistant
-	 * route when the profile sets its model.
+	 * models.json, then subagents.json `model_profiles` and the `model:` and
+	 * `thinking:` frontmatter of the assistant's own agent files (omitted agents
+	 * cleared), then the main assistant's defaults in settings.json. Any failure
+	 * restores every file with its mode. Returns the main assistant route when
+	 * the profile sets its model.
 	 */
 	apply(name: string): Promise<RoleRoute | undefined> {
 		return this.enqueue(async () => {
 			const file = this.read();
 			const roles = requireExisting(file, name);
 			const paths = [this.storePath, this.modelsPath, this.subagentsPath, this.settingsPath];
-			const before = paths.map(readText);
+			const agents = ownAgentFiles(this.options.agentHome);
+			const saved = new Map([...paths, ...agents.map((agent) => agent.path)].map((p) => [p, snapshot(p)]));
 			try {
 				writeFileAtomic(this.storePath, serializeProfilesFile({ ...file, active: name }));
 				writeFileAtomic(this.modelsPath, jsonText(roles));
 				this.writeAgentRoutes(roles);
+				for (const agent of agents) {
+					const next = updateFrontmatterRouting(agent.text, roles[agent.name]);
+					if (next !== agent.text) writeFileAtomic(agent.path, next, agent.mode);
+				}
 				const orchestrator = roles[ORCHESTRATOR];
 				if (!orchestrator?.model) return undefined;
 				await this.writeOrchestrator(orchestrator);
 				return { ...orchestrator };
 			} catch (error) {
-				paths.forEach((path, i) => {
-					const text = before[i];
-					if (text === undefined) rmSync(path, { force: true });
-					else writeFileAtomic(path, text);
-				});
+				for (const [path, before] of saved) restore(path, before);
 				throw error;
 			}
 		});
@@ -522,6 +541,81 @@ export function roleLabel(id: string): string {
 		.trim();
 	const label = presentText(words.charAt(0).toUpperCase() + words.slice(1));
 	return label || "Helper";
+}
+
+/** One agent file whose frontmatter routing the assistant may rewrite; `path` is its real path. */
+interface AgentFile {
+	path: string;
+	name: string;
+	text: string;
+	mode: number;
+}
+
+/**
+ * The agent files of the assistant's own engine home whose frontmatter routes
+ * a model: top-level `.md` files in `<home>/agents` and `<home>/subagents`, named
+ * the way the engine names them (`package.name` or `name`). A file whose real
+ * path is anywhere else (a symlink, or a linked folder) is never included.
+ */
+function ownAgentFiles(agentHome: string): AgentFile[] {
+	let home: string;
+	try {
+		home = realpathSync(agentHome);
+	} catch {
+		return [];
+	}
+	const files: AgentFile[] = [];
+	for (const folder of ["agents", "subagents"]) {
+		const dir = join(agentHome, folder);
+		const allowed = join(home, folder) + sep;
+		if (!existsSync(dir)) continue;
+		for (const entry of readdirSync(dir).sort()) {
+			if (!entry.toLowerCase().endsWith(".md") || entry.toLowerCase().endsWith(".chain.md")) continue;
+			let path: string;
+			try {
+				path = realpathSync(join(dir, entry));
+			} catch {
+				continue;
+			}
+			if (!path.startsWith(allowed) || path.slice(allowed.length).includes(sep)) continue;
+			const stat = statSync(path);
+			const text = stat.isFile() ? readText(path) : undefined;
+			const name = text === undefined ? undefined : engineAgentName(text);
+			if (text === undefined || !name || name === ORCHESTRATOR || REVIEW_ROLES.includes(name)) continue;
+			files.push({ path, name, text, mode: stat.mode & 0o777 });
+		}
+	}
+	return files;
+}
+
+function engineAgentName(text: string): string | undefined {
+	const name = /^name:\s*["']?([^"'\n]+)["']?\s*$/m.exec(text)?.[1]?.trim();
+	if (!name) return undefined;
+	const pkg = /^package:\s*["']?([^"'\n]+)["']?\s*$/m.exec(text)?.[1]?.trim();
+	return pkg ? `${pkg}.${name}` : name;
+}
+
+/**
+ * Sets or clears the top-level `model:` and `thinking:` frontmatter lines, as
+ * the engine's `updateFrontmatterRouting` does (placed after `description:`,
+ * or after the first line).
+ */
+export function updateFrontmatterRouting(content: string, route: RoleRoute | undefined): string {
+	if (!content.startsWith("---\n")) return content;
+	const end = content.indexOf("\n---", 4);
+	if (end === -1) return content;
+	const lines = content
+		.slice(4, end)
+		.split("\n")
+		.filter((line) => !line.startsWith("model:") && !line.startsWith("thinking:"));
+	const routing: string[] = [];
+	if (route?.model) routing.push(`model: ${route.model}`);
+	if (route?.thinking) routing.push(`thinking: ${route.thinking}`);
+	if (routing.length > 0) {
+		const description = lines.findIndex((line) => line.startsWith("description:"));
+		lines.splice(description >= 0 ? description + 1 : Math.min(1, lines.length), 0, ...routing);
+	}
+	return `---\n${lines.join("\n")}${content.slice(end)}`;
 }
 
 /** Agent names the engine discovers in `<home>/agents` and `<home>/subagents` (top-level `.md`, frontmatter `name:`). */

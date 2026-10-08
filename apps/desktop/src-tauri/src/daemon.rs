@@ -1,8 +1,10 @@
 //! Attaches to a running daemon or spawns one, and stops what it spawned.
 
 use crate::health::check_health;
-use std::fs::{self, OpenOptions};
-use std::path::PathBuf;
+use std::fs::{self, File, OpenOptions};
+use std::io;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
@@ -34,6 +36,16 @@ pub fn launch_spec(env: impl Fn(&str) -> Option<String>, dev: bool) -> LaunchSpe
         args: vec![pick("GENTLE_DOT_DAEMON_SCRIPT", env!("GENTLE_DOT_BUILD_DAEMON_SCRIPT"))],
         envs,
     }
+}
+
+/// Opens `<data_dir>/daemon.log` for appending. The folder is 0700 and the log
+/// 0600 (looser modes are repaired) because the daemon's output is private.
+pub fn open_private_log(data_dir: &Path) -> io::Result<File> {
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(data_dir)?;
+    fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))?;
+    let log = OpenOptions::new().create(true).append(true).mode(0o600).open(data_dir.join("daemon.log"))?;
+    log.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(log)
 }
 
 /// Sends SIGTERM, waits up to `grace` for a clean exit, then kills.
@@ -117,12 +129,7 @@ impl Daemon {
             }
         }
         let spec = launch_spec(|key| std::env::var(key).ok(), cfg!(debug_assertions));
-        let _ = fs::create_dir_all(&self.data_dir);
-        let log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.data_dir.join("daemon.log"))
-            .map_err(|e| format!("cannot open daemon.log: {e}"))?;
+        let log = open_private_log(&self.data_dir).map_err(|e| format!("cannot open daemon.log: {e}"))?;
         let child = Command::new(&spec.program)
             .args(&spec.args)
             .envs(spec.envs.iter().map(|(k, v)| (k, v)))
@@ -199,6 +206,37 @@ mod tests {
     fn only_dev_builds_allow_the_dev_server_origin() {
         let spec = launch_spec(env_of(&[]), true);
         assert_eq!(env_value(&spec, "GENTLE_DOT_ALLOWED_ORIGINS"), Some(DEV_ALLOWED_ORIGINS));
+    }
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        std::env::temp_dir().join(format!("gentle-dot-{name}-{}-{nanos}", std::process::id()))
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn daemon_log_is_private_when_created() {
+        let dir = scratch_dir("log-new").join("data");
+        open_private_log(&dir).unwrap();
+        assert_eq!(mode_of(&dir), 0o700);
+        assert_eq!(mode_of(&dir.join("daemon.log")), 0o600);
+    }
+
+    #[test]
+    fn daemon_log_repairs_looser_modes() {
+        let dir = scratch_dir("log-old");
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(dir.join("daemon.log"), "old line\n").unwrap();
+        fs::set_permissions(dir.join("daemon.log"), fs::Permissions::from_mode(0o644)).unwrap();
+        use std::io::Write;
+        writeln!(open_private_log(&dir).unwrap(), "new line").unwrap();
+        assert_eq!(mode_of(&dir), 0o700);
+        assert_eq!(mode_of(&dir.join("daemon.log")), 0o600);
+        assert_eq!(fs::read_to_string(dir.join("daemon.log")).unwrap(), "old line\nnew line\n");
     }
 
     #[test]

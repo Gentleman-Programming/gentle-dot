@@ -13,7 +13,7 @@ afterEach(async () => {
 	await Promise.all(daemons.splice(0).map((d) => d.close()));
 });
 
-async function setup() {
+async function setup(env: NodeJS.ProcessEnv = process.env) {
 	const fake = fakeAuthRuntime();
 	const logs: string[] = [];
 	const dataDir = tempDir();
@@ -26,10 +26,15 @@ async function setup() {
 		agentCommand: process.execPath,
 		agentArgs: [FAKE_AGENT],
 		backoffMs: [50],
+		agentEnv: env,
 		authRuntime: async () => fake.runtime,
 		log: (line) => logs.push(line),
 	});
 	daemons.push(d);
+	return { d, fake, logs, ...(await connect(d)), connect: () => connect(d) };
+}
+
+async function connect(d: DotDaemon) {
 	const ws = new WebSocket(`ws://127.0.0.1:${d.port}/ws`);
 	const messages: ServerMessage[] = [];
 	ws.on("message", (data) => messages.push(JSON.parse(String(data)) as ServerMessage));
@@ -48,7 +53,7 @@ async function setup() {
 			),
 		);
 	}
-	return { d, fake, logs, ws, messages, send, find };
+	return { ws, messages, send, find };
 }
 
 describe("sign-in", () => {
@@ -57,16 +62,34 @@ describe("sign-in", () => {
 		send({ type: "auth_list" });
 		const list = await find("auth_providers");
 		expect(list.providers).toEqual([
+			// A Claude subscription is not offered: Anthropic signs in with an API key only.
+			{ id: "anthropic", name: "Anthropic", methods: ["api_key"], configured: false },
+			{ id: "openai", name: "OpenAI", methods: ["api_key"], configured: false },
 			{
-				id: "anthropic",
-				name: "Anthropic",
-				methods: ["oauth", "api_key"],
-				oauthName: "Claude Pro/Max",
+				id: "github-copilot",
+				name: "GitHub Copilot",
+				methods: ["oauth"],
+				oauthName: "GitHub Copilot",
 				configured: false,
 			},
-			{ id: "openai", name: "OpenAI", methods: ["api_key"], configured: false },
 		]);
 		expect(list.open).toBeUndefined();
+	});
+
+	it("refuses a Claude subscription sign-in without starting it", async () => {
+		const { send, find, fake } = await setup();
+		send({ type: "auth_login", providerId: "anthropic", method: "oauth" });
+		const error = await find("error");
+		expect(error).toMatchObject({
+			code: "auth_unsupported",
+			message: "Signing in with a Claude subscription is not supported. Use an Anthropic API key instead.",
+		});
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(fake.state.logins).toEqual([]);
+		// The refusal does not hold the single sign-in slot.
+		send({ type: "auth_login", providerId: "anthropic", method: "api_key" });
+		expect((await find("auth_prompt")).prompt.kind).toBe("secret");
+		expect(fake.state.logins).toEqual(["anthropic:api_key"]);
 	});
 
 	it("opens the accounts screen when the user types /login", async () => {
@@ -80,7 +103,7 @@ describe("sign-in", () => {
 	it("runs a subscription sign-in: link, code prompt, success, refreshed status, and an agent restart", async () => {
 		const { d, send, find } = await setup();
 		const pid = d.supervisor.pid;
-		send({ type: "auth_login", providerId: "anthropic", method: "oauth" });
+		send({ type: "auth_login", providerId: "github-copilot", method: "oauth" });
 		const link = await find("auth_event", (m) => m.event.kind === "auth_url");
 		expect(link.event).toEqual({
 			kind: "auth_url",
@@ -96,11 +119,11 @@ describe("sign-in", () => {
 		});
 		send({ type: "auth_reply", flowId: link.flowId, value: "good-code" });
 		const done = await find("auth_done");
-		expect(done).toMatchObject({ ok: true, providerId: "anthropic", flowId: link.flowId });
+		expect(done).toMatchObject({ ok: true, providerId: "github-copilot", flowId: link.flowId });
 		const refreshed = await find("auth_providers", (m) =>
-			m.providers.some((p) => p.id === "anthropic" && p.configured),
+			m.providers.some((p) => p.id === "github-copilot" && p.configured),
 		);
-		expect(refreshed.providers.find((p) => p.id === "anthropic")?.source).toBe("stored");
+		expect(refreshed.providers.find((p) => p.id === "github-copilot")?.source).toBe("stored");
 		await waitFor(() => d.supervisor.pid !== pid && d.supervisor.state === "ready");
 	});
 
@@ -117,7 +140,7 @@ describe("sign-in", () => {
 
 	it("reports a failed sign-in in plain words", async () => {
 		const { send, find } = await setup();
-		send({ type: "auth_login", providerId: "anthropic", method: "oauth" });
+		send({ type: "auth_login", providerId: "github-copilot", method: "oauth" });
 		const prompt = await find("auth_prompt");
 		send({ type: "auth_reply", flowId: prompt.prompt.flowId, value: "wrong" });
 		const done = await find("auth_done");
@@ -127,7 +150,7 @@ describe("sign-in", () => {
 
 	it("cancels a sign-in and aborts the provider flow", async () => {
 		const { send, find, fake } = await setup();
-		send({ type: "auth_login", providerId: "anthropic", method: "oauth" });
+		send({ type: "auth_login", providerId: "github-copilot", method: "oauth" });
 		const prompt = await find("auth_prompt");
 		send({ type: "auth_reply", flowId: prompt.prompt.flowId, cancelled: true });
 		const done = await find("auth_done");
@@ -137,7 +160,7 @@ describe("sign-in", () => {
 
 	it("runs one sign-in at a time", async () => {
 		const { send, find } = await setup();
-		send({ type: "auth_login", providerId: "anthropic", method: "oauth" });
+		send({ type: "auth_login", providerId: "github-copilot", method: "oauth" });
 		await find("auth_prompt");
 		send({ type: "auth_login", providerId: "openai", method: "api_key" });
 		expect((await find("error")).code).toBe("auth_busy");
@@ -145,10 +168,52 @@ describe("sign-in", () => {
 
 	it("cancels the sign-in when its window disconnects", async () => {
 		const { ws, find, fake } = await setup();
-		ws.send(JSON.stringify({ type: "auth_login", providerId: "anthropic", method: "oauth" }));
+		ws.send(JSON.stringify({ type: "auth_login", providerId: "github-copilot", method: "oauth" }));
 		await find("auth_prompt");
 		ws.close();
 		await waitFor(() => fake.state.aborted);
+	});
+
+	it("only answers a sign-in prompt from the window that started it", async () => {
+		const { send, find, connect } = await setup();
+		send({ type: "auth_login", providerId: "github-copilot", method: "oauth" });
+		const prompt = await find("auth_prompt");
+		const other = await connect();
+		other.send({ type: "auth_reply", flowId: prompt.prompt.flowId, value: "good-code" });
+		expect((await other.find("error")).code).toBe("auth_flow_not_found");
+		other.send({ type: "auth_reply", flowId: prompt.prompt.flowId, cancelled: true });
+		await waitFor(() => other.messages.filter((m) => m.type === "error").length === 2);
+		send({ type: "auth_reply", flowId: prompt.prompt.flowId, value: "good-code" });
+		expect(await find("auth_done")).toMatchObject({ ok: true, providerId: "github-copilot" });
+	});
+
+	it("refuses to sign out of an account that is not in the list", async () => {
+		const { d, send, find, logs } = await setup();
+		const pid = d.supervisor.pid;
+		send({ type: "auth_logout", providerId: "../../etc" });
+		expect(await find("error")).toMatchObject({
+			code: "unknown_provider",
+			message: "That account is not available.",
+		});
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(d.supervisor.pid).toBe(pid);
+		expect(logs.join("\n")).not.toContain("../../etc");
+	});
+
+	it("asks to connect an account when a message fails and none is connected", async () => {
+		const { send, find, messages, fake } = await setup({ ...process.env, FAKE_AGENT_NO_MODEL: "1" });
+		send({ type: "send", text: "hello" });
+		expect(await find("error")).toMatchObject({
+			code: "no_account",
+			message: "Connect an AI account first: open Accounts or type /login.",
+		});
+		fake.configured.add("openai");
+		send({ type: "send", text: "hello again" });
+		await waitFor(() => messages.filter((m) => m.type === "error").length === 2);
+		expect(messages.filter((m) => m.type === "error").at(-1)).toMatchObject({
+			code: "command_failed",
+			message: "That did not work. Please try again.",
+		});
 	});
 
 	it("signs out", async () => {

@@ -54,6 +54,14 @@ describe("AgentSupervisor", () => {
 		expect(supervisor.busy).toBe(false);
 	});
 
+	it("is not left busy when the run settles before the prompt response is handled", async () => {
+		const { supervisor, events } = track(fakeSupervisor());
+		await supervisor.start();
+		await supervisor.request({ type: "prompt", message: "burst" });
+		expect(events.some((e) => e.type === "agent_settled")).toBe(true);
+		expect(supervisor.busy).toBe(false);
+	});
+
 	it("respawns after a crash, reopens the same conversation, and reports the interruption", async () => {
 		const { supervisor, events } = track(fakeSupervisor());
 		await supervisor.start();

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { loadConfig } from "./config.ts";
-import { startDaemon } from "./daemon.ts";
+import { startDaemon, startupMessage } from "./daemon.ts";
 
 const log = (line: string) => process.stderr.write(`${new Date().toISOString()} ${line}\n`);
 
@@ -18,7 +18,7 @@ async function main(): Promise<void> {
 		allowedOrigins: config.allowedOrigins,
 		log,
 	});
-	process.stdout.write(`Gentle Dot is running at ${daemon.url}\n`);
+	process.stdout.write(`${startupMessage(daemon.url, config.dataDir, process.stdout.isTTY === true)}\n`);
 
 	let closing = false;
 	const shutdown = (signal: string) => {
