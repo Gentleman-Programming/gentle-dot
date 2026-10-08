@@ -34,5 +34,5 @@ export function useDot(info: ConnectionInfo | undefined) {
 	}, []);
 	const dismiss = useCallback((id: number) => dispatch({ type: "dismiss", id }), []);
 
-	return { state, send, dismiss };
+	return { state, send, dismiss, dispatch };
 }

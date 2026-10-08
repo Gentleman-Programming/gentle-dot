@@ -73,6 +73,7 @@ export class AgentSupervisor {
 	private attempts = 0;
 	private spawnedAt = 0;
 	private stopping = false;
+	private restarting = false;
 	private interrupted = false;
 	private restartTimer: NodeJS.Timeout | undefined;
 	private closeWaiters: (() => void)[] = [];
@@ -122,6 +123,23 @@ export class AgentSupervisor {
 	send(record: AgentRecord): void {
 		if (this.state !== "ready" || !this.child?.stdin?.writable) throw new Error("Agent is not ready");
 		this.child.stdin.write(encodeRecord(record));
+	}
+
+	/**
+	 * Replaces the agent process on purpose (for example after new credentials),
+	 * reopening the same conversation. Not reported as an interruption.
+	 */
+	async restart(): Promise<void> {
+		const child = this.child;
+		if (!child || this.stopping) return;
+		this.restarting = true;
+		const closed = new Promise<void>((resolve) => this.closeWaiters.push(resolve));
+		child.stdin?.end();
+		const term = setTimeout(() => child.kill("SIGTERM"), this.options.stopTimeoutMs ?? 5000);
+		await closed;
+		clearTimeout(term);
+		this.setState("restarting");
+		await this.spawnAndInitialize();
 	}
 
 	async stop(): Promise<void> {
@@ -228,6 +246,11 @@ export class AgentSupervisor {
 		}
 		const wasBusy = this.busy;
 		this.busy = false;
+		if (this.restarting) {
+			this.restarting = false;
+			for (const resolve of this.closeWaiters.splice(0)) resolve();
+			return;
+		}
 		for (const resolve of this.closeWaiters.splice(0)) resolve();
 		if (this.stopping) {
 			this.setState("stopped");

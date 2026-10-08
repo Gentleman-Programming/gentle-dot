@@ -85,6 +85,10 @@ Client to daemon:
 | `list_conversations` | — | daemon reads the session dir |
 | `open_conversation` | `conversationId` | `switch_session` |
 | `get_history` | — | `get_messages` |
+| `auth_list` | — | daemon `ModelRuntime.getProviders()` and `getProviderAuthStatus()` |
+| `auth_login` | `providerId`, `method` (`oauth` \| `api_key`) | daemon `ModelRuntime.login()`; one flow at a time |
+| `auth_reply` | `flowId`, `value` \| `cancelled` | answers the flow's current prompt |
+| `auth_logout` | `providerId` | daemon `ModelRuntime.logout()` |
 
 Daemon to client:
 
@@ -103,6 +107,14 @@ Daemon to client:
 | `toast` | sanitized `notify` |
 | `history` | conversation messages for rendering |
 | `error` | `code`, `message` safe for the user |
+| `auth_providers` | providers with `methods`, `oauthName`, `configured`, `source`; `open: true` when the user typed `/login` |
+| `auth_prompt` | `flowId`, `kind` (`text`, `secret`, `select`, `manual_code`), `message`, `options` — sent only to the window that started the flow |
+| `auth_event` | `auth_url`, `device_code`, `progress`, or `info` |
+| `auth_done` | `ok`, plain-language `message` on failure or cancellation |
+
+### Sign-in (S10) and own instance (S12)
+
+The daemon runs the Gentle Shell bundled as its `gentle-pi` dependency, with `--home ~/.gentle-dot/agent` and `GENTLE_PI_CONFIG_HOME=~/.gentle-dot/gentle-ai`, so nothing is shared with a Gentle Shell the user may have installed. `/login` is a terminal-only command in Pi, so sign-in runs in the daemon through Pi's `ModelRuntime` on that same home (same `auth.json` format, file locking, mode 0600). Typed answers are never logged. After new credentials, the daemon refreshes every window's account list and restarts the agent once it is idle, so the new models appear. Typing `/login` in the chat opens the accounts screen.
 
 Every daemon message carries `seq` (monotonic per connection) so the UI can detect gaps and request `get_history`.
 
@@ -218,4 +230,4 @@ On launch, the app checks `GET /health`. If the daemon does not answer, the app 
 { "port": 4317, "workspace": "~", "shortcut": "Alt+Space", "launchAtLogin": false }
 ```
 
-Environment overrides: `GENTLE_DOT_PORT`, `GENTLE_DOT_HOST` (default `127.0.0.1`; `0.0.0.0` only inside a container), `GENTLE_DOT_DATA_DIR`, `GENTLE_DOT_WORKSPACE`, `GENTLE_DOT_UI_DIR`, `GENTLE_DOT_AGENT_BIN`, `GENTLE_DOT_AGENT_ARGS` (JSON array), `GENTLE_DOT_ALLOWED_ORIGINS` (JSON array).
+Environment overrides: `GENTLE_DOT_AGENT_HOME` (default `~/.gentle-dot/agent`), `GENTLE_DOT_PORT`, `GENTLE_DOT_HOST` (default `127.0.0.1`; `0.0.0.0` only inside a container), `GENTLE_DOT_DATA_DIR`, `GENTLE_DOT_WORKSPACE`, `GENTLE_DOT_UI_DIR`, `GENTLE_DOT_AGENT_BIN`, `GENTLE_DOT_AGENT_ARGS` (JSON array), `GENTLE_DOT_ALLOWED_ORIGINS` (JSON array).

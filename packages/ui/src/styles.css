@@ -557,6 +557,133 @@ button.icon {
 	border-radius: 999px;
 }
 
+/* ---------- Accounts ---------- */
+
+.onboarding {
+	margin: 10px 12px 0;
+	padding: 12px;
+	border-radius: 14px;
+	border: 1px solid var(--accent);
+	background: var(--accent-soft);
+}
+
+.onboarding p {
+	margin: 0 0 10px;
+}
+
+.accounts-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+}
+
+.accounts h2 {
+	margin: 0;
+	font-size: 16px;
+}
+
+.accounts .muted {
+	margin: 4px 0 12px;
+}
+
+.accounts-search {
+	width: 100%;
+	padding: 8px 10px;
+	border-radius: 10px;
+	border: 1px solid var(--line);
+	background: var(--raised);
+}
+
+.providers {
+	list-style: none;
+	margin: 12px 0 0;
+	padding: 0;
+}
+
+.providers li {
+	padding: 10px 0;
+	border-bottom: 1px solid var(--line);
+}
+
+.provider-name {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 8px;
+}
+
+.provider-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.chip.ok {
+	padding: 1px 8px;
+	border-radius: 999px;
+	font-size: 11px;
+	background: rgba(62, 207, 142, 0.16);
+	color: #3ecf8e;
+}
+
+button.link {
+	border: none;
+	background: none;
+	color: var(--muted);
+	text-decoration: underline;
+}
+
+.auth-flow {
+	padding: 12px;
+	border-radius: 14px;
+	border: 1px solid var(--line);
+	background: var(--raised);
+}
+
+.auth-flow-title {
+	margin: 0 0 8px;
+	font-weight: 600;
+}
+
+.auth-step {
+	margin: 10px 0;
+}
+
+.auth-step p {
+	margin: 0 0 8px;
+}
+
+.auth-step label {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	flex: 1 1 100%;
+}
+
+.device-code {
+	display: block;
+	margin: 0 0 10px;
+	font:
+		600 22px / 28px "SF Mono",
+		ui-monospace,
+		Menlo,
+		monospace;
+	letter-spacing: 0.08em;
+}
+
+.auth-result.ok {
+	color: #3ecf8e;
+}
+
+.auth-result.failed {
+	color: var(--danger);
+}
+
+.auth-actions {
+	display: flex;
+	gap: 8px;
+}
+
 @media (prefers-reduced-motion: reduce) {
 	*,
 	*::before,

@@ -64,6 +64,29 @@ test("keeps the conversation after a page reload", async ({ page }) => {
 	await expect(page.locator(".message-assistant").last()).toHaveText("Echo: remember this");
 });
 
+test("opens accounts with /login and connects and disconnects an API key", async ({ page }) => {
+	await open(page);
+	await say(page, "/login");
+	const accounts = page.getByRole("region", { name: "Accounts" });
+	await expect(accounts).toBeVisible();
+	await expect(accounts.getByRole("button", { name: /Sign in with .*Claude Pro\/Max/ })).toBeVisible();
+	await accounts.getByRole("searchbox", { name: "Search providers" }).fill("OpenAI");
+	const openai = accounts.getByRole("listitem").filter({ has: page.getByText("OpenAI", { exact: true }) });
+	await openai.getByRole("button", { name: "Use an API key" }).click();
+	const key = accounts.getByLabel("Enter OpenAI API key");
+	await expect(key).toHaveAttribute("type", "password");
+	await key.fill("sk-e2e-not-real");
+	await accounts.getByRole("button", { name: "Continue" }).click();
+	await expect(accounts.getByRole("status")).toHaveText("Connected to OpenAI.");
+	await accounts.getByRole("button", { name: "Back to accounts" }).click();
+	await accounts.getByRole("searchbox", { name: "Search providers" }).fill("OpenAI");
+	await expect(openai.getByText("Connected")).toBeVisible();
+	await openai.getByRole("button", { name: "Sign out" }).click();
+	await expect(openai.getByText("Connected")).toBeHidden();
+	await accounts.getByRole("button", { name: "Close accounts" }).click();
+	await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
+});
+
 test("explains a rejected access key", async ({ page }) => {
 	await page.goto("/#token=wrong-token");
 	await expect(page.getByRole("status")).toContainText("This link is not valid anymore");

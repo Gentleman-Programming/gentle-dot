@@ -36,7 +36,7 @@ export function App() {
 	const [info, setInfo] = useState<ConnectionInfo | undefined>(undefined);
 	const [missingToken, setMissingToken] = useState(false);
 	const [focusKey, setFocusKey] = useState(0);
-	const { state, send, dismiss } = useDot(info);
+	const { state, send, dismiss, dispatch } = useDot(info);
 
 	useEffect(() => {
 		if (inDesktop()) {
@@ -97,6 +97,7 @@ export function App() {
 			state={state}
 			send={send}
 			dismiss={dismiss}
+			dispatch={dispatch}
 			focusKey={focusKey}
 			{...(surface === "panel" ? { onHide: hidePanel } : {})}
 		/>

@@ -11,6 +11,7 @@
 // Environment:
 //   FAKE_AGENT_ARGS_FILE  write argv as JSON to this file
 //   FAKE_AGENT_BRANDING   emit branded startup UI records
+//   FAKE_AGENT_ENV_FILE   write selected environment variables as JSON to this file
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -20,6 +21,12 @@ type Message = { role: "user" | "assistant"; content: string };
 
 const argv = process.argv.slice(2);
 if (process.env.FAKE_AGENT_ARGS_FILE) writeFileSync(process.env.FAKE_AGENT_ARGS_FILE, JSON.stringify(argv));
+if (process.env.FAKE_AGENT_ENV_FILE) {
+	writeFileSync(
+		process.env.FAKE_AGENT_ENV_FILE,
+		JSON.stringify({ GENTLE_PI_CONFIG_HOME: process.env.GENTLE_PI_CONFIG_HOME }),
+	);
+}
 const sessionDir = argValue("--session-dir") ?? join(process.cwd(), ".fake-sessions");
 mkdirSync(sessionDir, { recursive: true });
 

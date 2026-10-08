@@ -110,6 +110,20 @@ describe("AgentSupervisor", () => {
 		expect(second.supervisor.sessionFile).toBe(session);
 	});
 
+	it("restarts on request, keeping the conversation and without an interruption", async () => {
+		const { supervisor, events } = track(fakeSupervisor());
+		await supervisor.start();
+		await supervisor.request({ type: "prompt", message: "keep me" });
+		await waitFor(() => events.some((e) => e.type === "agent_settled"));
+		const session = supervisor.sessionFile;
+		const pid = supervisor.pid;
+		await supervisor.restart();
+		expect(supervisor.state).toBe("ready");
+		expect(supervisor.pid).not.toBe(pid);
+		expect(supervisor.sessionFile).toBe(session);
+		expect(events.some((e) => e.type === "interrupted")).toBe(false);
+	});
+
 	it("stops cleanly and reports the stopped state", async () => {
 		const { supervisor } = track(fakeSupervisor());
 		await supervisor.start();

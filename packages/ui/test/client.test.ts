@@ -55,7 +55,7 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("DotClient", () => {
-	it("says hello with the token, then asks for history and conversations once ready", () => {
+	it("says hello with the token, then asks for history, conversations, and accounts once ready", () => {
 		const { client, statuses, messages } = makeClient();
 		client.start();
 		const socket = FakeSocket.all[0];
@@ -64,7 +64,11 @@ describe("DotClient", () => {
 		socket?.receive({ type: "ready", agentState: "idle" });
 		expect(statuses.at(-1)).toBe("open");
 		expect(messages.map((m) => m.type)).toEqual(["ready"]);
-		expect(socket?.sent.slice(1)).toEqual([{ type: "get_history" }, { type: "list_conversations" }]);
+		expect(socket?.sent.slice(1)).toEqual([
+			{ type: "get_history" },
+			{ type: "list_conversations" },
+			{ type: "auth_list" },
+		]);
 	});
 
 	it("reconnects with backoff after a drop", () => {

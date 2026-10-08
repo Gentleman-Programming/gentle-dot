@@ -1,5 +1,7 @@
 import { useState } from "react";
-import { activeTitle, type DotState, isBusy } from "../store.ts";
+import { openUrl as openExternal } from "../desktop.ts";
+import { activeTitle, type DotAction, type DotState, isBusy, needsAccount } from "../store.ts";
+import { AccountsPanel } from "./AccountsPanel.tsx";
 import { AskCard } from "./AskCard.tsx";
 import { Composer } from "./Composer.tsx";
 import { MessageList } from "./MessageList.tsx";
@@ -12,6 +14,8 @@ interface ChatSurfaceProps {
 	dismiss: (id: number) => void;
 	onHide?: () => void;
 	focusKey?: number;
+	dispatch?: (action: DotAction) => void;
+	openUrl?: (url: string) => void;
 }
 
 const CONTINUE_TEXT = "Continue where you left off.";
@@ -27,7 +31,20 @@ function statusText(state: DotState): string | undefined {
 	return undefined;
 }
 
-export function ChatSurface({ variant, state, send, dismiss, onHide, focusKey }: ChatSurfaceProps) {
+export function ChatSurface({
+	variant,
+	state,
+	send,
+	dismiss,
+	onHide,
+	focusKey,
+	dispatch = () => {},
+	openUrl = openExternal,
+}: ChatSurfaceProps) {
+	const openAccounts = () => {
+		send({ type: "auth_list" });
+		dispatch({ type: "accounts", open: true });
+	};
 	const [showConversations, setShowConversations] = useState(false);
 	const status = statusText(state);
 	const ready =
@@ -49,6 +66,9 @@ export function ChatSurface({ variant, state, send, dismiss, onHide, focusKey }:
 					}}
 				>
 					☰
+				</button>
+				<button type="button" className="icon" aria-label="Accounts" onClick={openAccounts}>
+					⚿
 				</button>
 				<button
 					type="button"
@@ -99,7 +119,22 @@ export function ChatSurface({ variant, state, send, dismiss, onHide, focusKey }:
 				</div>
 			) : null}
 
-			<main className="chat-body">
+			{state.auth.open ? (
+				<main className="chat-body">
+					<AccountsPanel auth={state.auth} send={send} dispatch={dispatch} openUrl={openUrl} />
+				</main>
+			) : null}
+
+			{!state.auth.open && needsAccount(state) ? (
+				<div className="onboarding">
+					<p>To start, connect the AI service you use (a subscription or an API key).</p>
+					<button type="button" className="primary" onClick={openAccounts}>
+						Connect an AI account
+					</button>
+				</div>
+			) : null}
+
+			<main className="chat-body" hidden={state.auth.open}>
 				<MessageList messages={state.messages} />
 				{state.interrupted ? (
 					<div className="interrupted">

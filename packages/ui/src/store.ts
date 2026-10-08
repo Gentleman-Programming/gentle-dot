@@ -1,4 +1,28 @@
-import type { Activity, AgentState, Ask, ConversationSummary, ServerMessage } from "@gentle-dot/protocol";
+import type {
+	Activity,
+	AgentState,
+	Ask,
+	AuthEvent,
+	AuthPrompt,
+	AuthProvider,
+	ConversationSummary,
+	ServerMessage,
+} from "@gentle-dot/protocol";
+
+export interface AuthFlowState {
+	providerId: string;
+	flowId?: string;
+	events: AuthEvent[];
+	prompt?: AuthPrompt;
+	done?: { ok: boolean; message?: string };
+}
+
+export interface AuthState {
+	open: boolean;
+	/** Undefined until the first provider list arrives. */
+	providers?: AuthProvider[];
+	flow?: AuthFlowState;
+}
 
 export type ConnectionStatus = "connecting" | "open" | "closed" | "unauthorized";
 
@@ -26,12 +50,15 @@ export interface DotState {
 	conversations: ConversationSummary[];
 	interrupted: boolean;
 	notices: Notice[];
+	auth: AuthState;
 }
 
 export type DotAction =
 	| { type: "server"; message: ServerMessage }
 	| { type: "connection"; status: ConnectionStatus }
-	| { type: "dismiss"; id: number };
+	| { type: "dismiss"; id: number }
+	| { type: "accounts"; open: boolean }
+	| { type: "auth_started"; providerId: string };
 
 export const initialState: DotState = {
 	connection: "connecting",
@@ -41,6 +68,7 @@ export const initialState: DotState = {
 	conversations: [],
 	interrupted: false,
 	notices: [],
+	auth: { open: false },
 };
 
 let nextNotice = 0;
@@ -55,6 +83,19 @@ export function reduce(state: DotState, action: DotAction): DotState {
 			};
 		case "dismiss":
 			return { ...state, notices: state.notices.filter((n) => n.id !== action.id) };
+		case "accounts": {
+			// Closing drops the flow; reopening keeps a running one and leaves a finished one.
+			const keep = action.open && state.auth.flow !== undefined && state.auth.flow.done === undefined;
+			return {
+				...state,
+				auth: { ...state.auth, open: action.open, flow: keep ? state.auth.flow : undefined },
+			};
+		}
+		case "auth_started":
+			return {
+				...state,
+				auth: { ...state.auth, open: true, flow: { providerId: action.providerId, events: [] } },
+			};
 		case "server":
 			return reduceServer(state, action.message);
 	}
@@ -121,11 +162,39 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 			};
 		case "interrupted":
 			return { ...state, interrupted: true };
+		case "auth_providers":
+			return {
+				...state,
+				auth: { ...state.auth, providers: message.providers, open: message.open ? true : state.auth.open },
+			};
+		case "auth_event":
+			return updateFlow(state, message.flowId, (f) => ({ ...f, events: [...f.events, message.event] }));
+		case "auth_prompt":
+			return updateFlow(state, message.prompt.flowId, (f) => ({ ...f, prompt: message.prompt }));
+		case "auth_done":
+			return updateFlow(state, message.flowId, (f) => {
+				const { prompt: _prompt, ...rest } = f;
+				return {
+					...rest,
+					done: message.message ? { ok: message.ok, message: message.message } : { ok: message.ok },
+				};
+			});
 		case "toast":
 			return addNotice(state, message.level, message.message);
 		case "error":
 			return addNotice(state, "error", message.message);
 	}
+}
+
+function updateFlow(state: DotState, flowId: string, update: (f: AuthFlowState) => AuthFlowState): DotState {
+	const flow = state.auth.flow;
+	if (!flow || (flow.flowId && flow.flowId !== flowId)) return state;
+	return { ...state, auth: { ...state.auth, flow: update({ ...flow, flowId }) } };
+}
+
+/** True once providers are known and none has a working credential. */
+export function needsAccount(state: DotState): boolean {
+	return state.auth.providers !== undefined && !state.auth.providers.some((p) => p.configured);
 }
 
 function updateAssistant(state: DotState, id: string, update: (m: ChatMessage) => ChatMessage): DotState {

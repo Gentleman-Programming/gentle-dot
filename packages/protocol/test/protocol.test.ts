@@ -23,6 +23,21 @@ describe("protocol", () => {
 			confirmed: false,
 		});
 		expect(parseClientMessage('{"type":"abort","extra":1}')).toEqual({ type: "abort" });
+		expect(parseClientMessage('{"type":"auth_login","providerId":"anthropic","method":"oauth"}')).toEqual({
+			type: "auth_login",
+			providerId: "anthropic",
+			method: "oauth",
+		});
+		expect(parseClientMessage('{"type":"auth_reply","flowId":"f","value":"sk-x"}')).toEqual({
+			type: "auth_reply",
+			flowId: "f",
+			value: "sk-x",
+		});
+		expect(parseClientMessage('{"type":"auth_reply","flowId":"f","cancelled":true}')).toEqual({
+			type: "auth_reply",
+			flowId: "f",
+			cancelled: true,
+		});
 	});
 
 	it("rejects malformed or unknown messages", () => {
@@ -34,6 +49,8 @@ describe("protocol", () => {
 			'{"type":"ui_response","requestId":"a"}',
 			'{"type":"open_conversation"}',
 			'{"type":"shell","cmd":"rm"}',
+			'{"type":"auth_login","providerId":"x","method":"password"}',
+			'{"type":"auth_reply","flowId":"f"}',
 		]) {
 			expect(parseClientMessage(raw), raw).toBeUndefined();
 		}

@@ -10,6 +10,8 @@ rmSync(dataDir, { recursive: true, force: true });
 mkdirSync(dataDir, { recursive: true });
 writeFileSync(join(dataDir, "token"), `${E2E_TOKEN}\n`, { mode: 0o600 });
 
+// Provider keys in the developer's environment would mark accounts as connected.
+delete process.env.OPENAI_API_KEY;
 process.env.GENTLE_DOT_DATA_DIR = dataDir;
 process.env.GENTLE_DOT_WORKSPACE = dataDir;
 process.env.GENTLE_DOT_AGENT_BIN = process.execPath;

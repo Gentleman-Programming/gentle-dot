@@ -71,6 +71,7 @@ export class DotClient {
 				this.handlers.onStatus("open");
 				this.send({ type: "get_history" });
 				this.send({ type: "list_conversations" });
+				this.send({ type: "auth_list" });
 			}
 		};
 		socket.onclose = (event: CloseEvent) => {

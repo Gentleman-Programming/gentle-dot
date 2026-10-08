@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import type { AgentState, Ask, ClientMessage, ServerPayload } from "@gentle-dot/protocol";
+import type { AuthManager } from "./auth.ts";
 import {
 	conversationIdOf,
 	historyFromMessages,
@@ -17,6 +18,7 @@ export interface BridgeClient {
 export interface BridgeOptions {
 	dataDir: string;
 	log?: (line: string) => void;
+	auth?: AuthManager;
 }
 
 const DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
@@ -42,12 +44,14 @@ export class DotBridge {
 	private interrupted = false;
 	private nextMessage = 0;
 	private assistantId: string | undefined;
+	private restartPending = false;
 
 	constructor(supervisor: AgentSupervisor, options: BridgeOptions) {
 		this.supervisor = supervisor;
 		this.options = options;
 		this.sessionDir = join(options.dataDir, "sessions");
 		supervisor.onEvent((event) => this.onAgentEvent(event));
+		if (options.auth) options.auth.onCredentialsChanged = () => this.afterCredentialsChange();
 		this.state = this.deriveState();
 	}
 
@@ -65,7 +69,10 @@ export class DotBridge {
 		});
 		for (const { ask } of this.asks.values()) this.deliver(client, { type: "ask", ask });
 		if (this.interrupted) this.deliver(client, { type: "interrupted" });
-		return () => this.clients.delete(client);
+		return () => {
+			this.clients.delete(client);
+			this.options.auth?.cancelOwnedBy(client);
+		};
 	}
 
 	async handle(client: BridgeClient, message: ClientMessage): Promise<void> {
@@ -98,6 +105,10 @@ export class DotBridge {
 					return;
 				}
 				if (message.requestId && this.alreadySeen(message.requestId)) return;
+				if (/^\s*\/login\s*$/i.test(message.text)) {
+					await this.sendProviders(client, true);
+					return;
+				}
 				this.interrupted = false;
 				const busy = this.supervisor.busy;
 				await this.supervisor.request(
@@ -157,6 +168,35 @@ export class DotBridge {
 				this.afterConversationChange(await this.loadHistory());
 				return;
 			}
+			case "auth_list":
+				await this.sendProviders(client);
+				return;
+			case "auth_login": {
+				const auth = this.requireAuth();
+				const started = auth.start(client, message.providerId, message.method, (payload) =>
+					this.deliver(client, payload),
+				);
+				if (!started) {
+					this.deliver(client, {
+						type: "error",
+						code: "auth_busy",
+						message: "Another sign-in is in progress. Finish or cancel it first.",
+					});
+				}
+				return;
+			}
+			case "auth_reply":
+				if (!this.requireAuth().reply(message.flowId, message)) {
+					this.deliver(client, {
+						type: "error",
+						code: "auth_flow_not_found",
+						message: "That sign-in is no longer active.",
+					});
+				}
+				return;
+			case "auth_logout":
+				await this.requireAuth().logout(message.providerId);
+				return;
 			case "get_history":
 				this.deliver(client, {
 					type: "history",
@@ -165,6 +205,34 @@ export class DotBridge {
 				});
 				return;
 		}
+	}
+
+	private requireAuth(): AuthManager {
+		if (!this.options.auth) throw new Error("sign-in is not available");
+		return this.options.auth;
+	}
+
+	private async sendProviders(client: BridgeClient, open = false): Promise<void> {
+		const providers = await this.requireAuth().providers();
+		this.deliver(client, { type: "auth_providers", providers, ...(open ? { open: true } : {}) });
+	}
+
+	/** New credentials: refresh every window, and restart the agent once it is idle so it sees new models. */
+	private afterCredentialsChange(): void {
+		void this.requireAuth()
+			.providers()
+			.then((providers) => this.broadcast({ type: "auth_providers", providers }))
+			.catch((error: Error) => this.log(`could not list providers: ${error.message}`));
+		if (this.supervisor.busy) {
+			this.restartPending = true;
+			return;
+		}
+		this.restartAgent();
+	}
+
+	private restartAgent(): void {
+		this.restartPending = false;
+		this.supervisor.restart().catch((error: Error) => this.log(`agent restart failed: ${error.message}`));
 	}
 
 	private afterConversationChange(messages: unknown[]): void {
@@ -220,6 +288,7 @@ export class DotBridge {
 				this.assistantId = undefined;
 				// The title of a new conversation comes from its first message.
 				this.broadcast(this.conversationsPayload());
+				if (this.restartPending) this.restartAgent();
 				break;
 			case "extension_ui_request":
 				this.onUiRequest(event);

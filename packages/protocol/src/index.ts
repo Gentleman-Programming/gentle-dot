@@ -42,6 +42,34 @@ export interface ConversationSummary {
 	updatedAt: string;
 }
 
+export type AuthMethod = "oauth" | "api_key";
+
+export interface AuthProvider {
+	id: string;
+	name: string;
+	/** Sign-in methods the provider supports. */
+	methods: AuthMethod[];
+	/** Name of the subscription sign-in, for example "Claude Pro/Max". */
+	oauthName?: string;
+	configured: boolean;
+	/** Where the working credential comes from, for example "stored" or "environment". */
+	source?: string;
+}
+
+export interface AuthPrompt {
+	flowId: string;
+	kind: "text" | "secret" | "select" | "manual_code";
+	message: string;
+	placeholder?: string;
+	options?: { id: string; label: string; description?: string }[];
+}
+
+export type AuthEvent =
+	| { kind: "info"; message: string; links?: { url: string; label?: string }[] }
+	| { kind: "auth_url"; url: string; instructions?: string }
+	| { kind: "device_code"; userCode: string; verificationUri: string; expiresInSeconds?: number }
+	| { kind: "progress"; message: string };
+
 export type ClientMessage =
 	| { type: "hello"; token: string; protocol: number }
 	| { type: "send"; text: string; requestId?: string }
@@ -51,7 +79,11 @@ export type ClientMessage =
 	| { type: "new_conversation" }
 	| { type: "list_conversations" }
 	| { type: "open_conversation"; conversationId: string }
-	| { type: "get_history" };
+	| { type: "get_history" }
+	| { type: "auth_list" }
+	| { type: "auth_login"; providerId: string; method: AuthMethod }
+	| { type: "auth_reply"; flowId: string; value?: string; cancelled?: boolean }
+	| { type: "auth_logout"; providerId: string };
 
 export type ServerPayload =
 	| { type: "ready"; agentState: AgentState; conversationId?: string; model?: string }
@@ -66,7 +98,11 @@ export type ServerPayload =
 	| { type: "history"; conversationId?: string; messages: HistoryMessage[] }
 	| { type: "conversations"; conversations: ConversationSummary[]; activeId?: string }
 	| { type: "interrupted" }
-	| { type: "error"; code: string; message: string };
+	| { type: "error"; code: string; message: string }
+	| { type: "auth_providers"; providers: AuthProvider[]; open?: boolean }
+	| { type: "auth_prompt"; prompt: AuthPrompt }
+	| { type: "auth_event"; flowId: string; event: AuthEvent }
+	| { type: "auth_done"; flowId: string; providerId: string; ok: boolean; message?: string };
 
 /** Every daemon message carries a per-connection, monotonic `seq`. */
 export type ServerMessage = ServerPayload & { seq: number };
@@ -111,6 +147,20 @@ export function parseClientMessage(raw: string): ClientMessage | undefined {
 			}
 			return undefined;
 		}
+		case "auth_login":
+			return isString(m.providerId) && (m.method === "oauth" || m.method === "api_key")
+				? { type: "auth_login", providerId: m.providerId, method: m.method }
+				: undefined;
+		case "auth_reply":
+			if (!isString(m.flowId)) return undefined;
+			if (m.cancelled === true) return { type: "auth_reply", flowId: m.flowId, cancelled: true };
+			return isString(m.value) && m.value.length <= MAX_TEXT
+				? { type: "auth_reply", flowId: m.flowId, value: m.value }
+				: undefined;
+		case "auth_logout":
+			return isString(m.providerId) ? { type: "auth_logout", providerId: m.providerId } : undefined;
+		case "auth_list":
+			return { type: "auth_list" };
 		case "open_conversation":
 			return isString(m.conversationId)
 				? { type: "open_conversation", conversationId: m.conversationId }

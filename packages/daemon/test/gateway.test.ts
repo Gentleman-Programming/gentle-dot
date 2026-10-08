@@ -246,6 +246,31 @@ describe("gateway", () => {
 	});
 });
 
+describe("own instance", () => {
+	it("runs the agent with the assistant's own home and profile store", async () => {
+		const scratch = tempDir();
+		const argsFile = join(scratch, "argv.json");
+		const envFile = join(scratch, "env.json");
+		const dataDir = tempDir();
+		const d = await startDaemon({
+			port: 0,
+			host: "127.0.0.1",
+			dataDir,
+			workspace: dataDir,
+			uiDir: dataDir,
+			agentCommand: process.execPath,
+			agentArgs: [FAKE_AGENT],
+			agentHome: join(dataDir, "agent"),
+			agentEnv: { ...process.env, FAKE_AGENT_ARGS_FILE: argsFile, FAKE_AGENT_ENV_FILE: envFile },
+		});
+		daemons.push(d);
+		const argv = JSON.parse(readFileSync(argsFile, "utf8")) as string[];
+		expect(argv.slice(0, 4)).toEqual(["--home", join(dataDir, "agent"), "--mode", "rpc"]);
+		const env = JSON.parse(readFileSync(envFile, "utf8")) as Record<string, string>;
+		expect(env.GENTLE_PI_CONFIG_HOME).toBe(join(dataDir, "gentle-ai"));
+	});
+});
+
 describe("white label", () => {
 	it("passes the product identity to the agent", async () => {
 		const argsFile = join(tempDir(), "argv.json");

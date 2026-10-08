@@ -5,6 +5,7 @@ import type { AddressInfo } from "node:net";
 import { extname, join, resolve, sep } from "node:path";
 import { type ClientMessage, CloseCode, PROTOCOL_VERSION, parseClientMessage } from "@gentle-dot/protocol";
 import { type WebSocket, WebSocketServer } from "ws";
+import { AuthManager, type AuthRuntime, createModelAuthRuntime, resolveAgentHome } from "./auth.ts";
 import { type BridgeClient, DotBridge } from "./bridge.ts";
 import { AgentSupervisor } from "./supervisor.ts";
 import { identityArgs } from "./white-label.ts";
@@ -20,6 +21,10 @@ export interface DaemonOptions {
 	agentArgs?: string[];
 	agentExtraArgs?: string[];
 	agentEnv?: NodeJS.ProcessEnv;
+	/** The assistant's own Gentle Shell home (`--home`); profiles go next to it. */
+	agentHome?: string;
+	/** Creates the sign-in runtime; defaults to Pi's ModelRuntime on the agent home. */
+	authRuntime?: () => Promise<AuthRuntime>;
 	/** Origins allowed to open the WebSocket, besides the daemon's own and the desktop app's. */
 	allowedOrigins?: string[];
 	backoffMs?: number[];
@@ -63,17 +68,35 @@ export function ensureToken(dataDir: string): string {
 export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	const log = options.log ?? (() => {});
 	const token = ensureToken(options.dataDir);
+	const agentEnv = { ...(options.agentEnv ?? process.env) };
+	const homeArgs: string[] = [];
+	if (options.agentHome) {
+		homeArgs.push("--home", options.agentHome);
+		agentEnv.GENTLE_PI_CONFIG_HOME = join(options.dataDir, "gentle-ai");
+	}
 	const supervisor = new AgentSupervisor({
 		command: options.agentCommand,
-		args: options.agentArgs ?? [],
+		args: [...(options.agentArgs ?? []), ...homeArgs],
 		extraArgs: [...identityArgs(options.dataDir), ...(options.agentExtraArgs ?? [])],
 		cwd: options.workspace,
 		dataDir: options.dataDir,
-		env: options.agentEnv ?? process.env,
+		env: agentEnv,
+		// The first start in a new home installs the engine's companion packages.
+		...(options.agentHome ? { startTimeoutMs: 180_000 } : {}),
 		...(options.backoffMs ? { backoffMs: options.backoffMs } : {}),
 		log: (line) => log(`[agent] ${line}`),
 	});
-	const bridge = new DotBridge(supervisor, { dataDir: options.dataDir, log });
+	const auth = new AuthManager({
+		runtime:
+			options.authRuntime ??
+			(() =>
+				createModelAuthRuntime(
+					options.agentHome ?? resolveAgentHome(process.env, options.dataDir),
+					options.workspace,
+				)),
+		log,
+	});
+	const bridge = new DotBridge(supervisor, { dataDir: options.dataDir, log, auth });
 
 	const server = createServer((req, res) => handleHttp(req, res, options.uiDir, bridge));
 	const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });

@@ -7,7 +7,7 @@ Design: [docs/design.md](docs/design.md) · Plan: [odd/tasks/gentle-dot.md](odd/
 ## Requirements
 
 - Node.js 24 and pnpm 10
-- `gentle-shell` on `PATH` with a configured model provider
+- Nothing else: the assistant brings its own Gentle Shell engine (the `gentle-pi` dependency) and signs in from its Accounts screen
 - Rust stable (only for the desktop app)
 
 ## Run locally

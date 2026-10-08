@@ -14,6 +14,7 @@ async function main(): Promise<void> {
 		uiDir: config.uiDir,
 		agentCommand: config.agentCommand,
 		agentArgs: config.agentArgs,
+		...(config.agentHome ? { agentHome: config.agentHome } : {}),
 		allowedOrigins: config.allowedOrigins,
 		log,
 	});

@@ -21,6 +21,16 @@ export function setDotState(state: AgentState): void {
 	if (inDesktop()) void invoke("set_dot_state", { state });
 }
 
+/** Opens a web page (sign-in) in the user's browser. Only http and https. */
+export function openUrl(url: string): void {
+	if (!/^https?:\/\//i.test(url)) return;
+	if (inDesktop()) {
+		void import("@tauri-apps/plugin-opener").then(({ openUrl: open }) => open(url));
+		return;
+	}
+	window.open(url, "_blank", "noopener,noreferrer");
+}
+
 export async function startDragging(): Promise<void> {
 	const { getCurrentWindow } = await import("@tauri-apps/api/window");
 	await getCurrentWindow().startDragging();
