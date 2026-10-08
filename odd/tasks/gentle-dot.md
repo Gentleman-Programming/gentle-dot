@@ -96,7 +96,7 @@ Branch: `feat/gentle-dot` · Delivery strategy: `single-pr` (user choice, L7; fo
 | T16 | S10 | inline | done | `7337b52` RED 4 failing → GREEN 14/14 | Accounts in two steps: method first, then provider |
 | T17 | S14–S17, S21 | delegated writer (context backstop) | done | `b0ee7ac`; parent re-ran 227 tests, typecheck, lint | Queue display, gentlemanprogramming.com style, typing closes options, header icons |
 | T18 | S18–S20 | explore (delegated, read-only) → spec details → implement | in progress | — | Connectors: map the engine's MCP integration and the providers first |
-| T19 | S22 | inline or delegated after T17 (same files) | pending | — | Single continuous chat: hide conversations, transparent session rotation, recent-only history |
+| T19 | S22 (+ design §4/§6/§7 refresh) | delegated writer (context backstop) | in progress | — | Single continuous chat: hide conversations, transparent session rotation, recent-only history |
 | T20 | S23 | delegated writer, after T17 (the runtime refused it in parallel: test surface overlap with T17's `packages/daemon/test/**`) | done | `823363e`, follow-up `400ec73`; parent re-ran 235 tests, typecheck, e2e 12/12 | Global Engram, project gentle-dot |
 | T9 | S1–S6, S9–S12 | delegated verifier (high risk: process supervision, auth) | done | L24 + L31 | Full verification: unit, integration, Playwright, `@real-agent`, `tauri build` + launch, manual macOS checklist with observed results |
 
