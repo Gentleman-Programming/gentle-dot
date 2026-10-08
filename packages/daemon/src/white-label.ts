@@ -45,7 +45,7 @@ export function isBlockedInput(text: string): boolean {
 	return /^\s*\/gentle:/i.test(text);
 }
 
-const IDENTITY_SOURCE = new URL("./identity.md", import.meta.url);
+export const IDENTITY_SOURCE = new URL("./identity.md", import.meta.url);
 
 /** Writes the identity prompt to `<dataDir>/identity.md` and returns the agent arguments that load it. */
 export function identityArgs(dataDir: string): string[] {

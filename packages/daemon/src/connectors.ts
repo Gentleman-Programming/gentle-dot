@@ -26,6 +26,7 @@ import type {
 import { MAX_CONNECTOR_DRAFTS } from "@gentle-dot/protocol";
 import { type ScannedServer, scanClientConfigs, valueNotes } from "./connector-import.ts";
 import { type ConnectorPolicy, draftSecretProblem, POLICY_ENV } from "./extensions/approval-guard.ts";
+import { runtimeDir, runtimeModules } from "./runtime.ts";
 
 /** A value the user types in the app (a token, client credentials); kept only in the assistant's private state. */
 export interface SetupField {
@@ -798,8 +799,21 @@ export interface McpCli {
 	args: string[];
 }
 
-/** The command line of the engine bundled with the daemon (`pi-coding-agent`). */
-export function bundledMcpCli(): McpCli {
+/** The command line of the engine bundled with the daemon (`pi-coding-agent`), from the runtime in an installed app. */
+export function bundledMcpCli(env: NodeJS.ProcessEnv = process.env): McpCli {
+	const runtime = runtimeDir(env);
+	if (runtime) {
+		const cli = join(
+			runtimeModules(runtime),
+			"@earendil-works",
+			"pi-coding-agent",
+			"dist",
+			"bundle",
+			"cli.js",
+		);
+		if (existsSync(cli)) return { command: process.execPath, args: [cli] };
+		throw new Error(`The bundled assistant engine is missing from ${runtimeModules(runtime)}.`);
+	}
 	const require = createRequire(import.meta.url);
 	for (const dir of require.resolve.paths("@earendil-works/pi-coding-agent") ?? []) {
 		const cli = join(dir, "@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js");

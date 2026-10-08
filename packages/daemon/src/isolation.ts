@@ -3,12 +3,16 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
+import { resolveEngramBin, runtimeDir } from "./runtime.ts";
 
 /**
  * The folder with the `pi` executable bundled with the daemon. The engine's
- * first-run setup needs `pi` on PATH, and a clean machine has none.
+ * first-run setup needs `pi` on PATH, and a clean machine has none. An installed
+ * app carries a relocatable `pi` in `<runtime>/bin`; pnpm's shim is not relocatable.
  */
-function bundledBinDir(): string | undefined {
+function bundledBinDir(base: NodeJS.ProcessEnv): string | undefined {
+	const runtime = runtimeDir(base);
+	if (runtime) return join(runtime, "bin");
 	const require = createRequire(import.meta.url);
 	for (const dir of require.resolve.paths("@earendil-works/pi-coding-agent") ?? []) {
 		const bin = join(dir, ".bin");
@@ -57,6 +61,9 @@ export function ensureMemoryProject(workspace: string): void {
  * `GENTLE_DOT_ENGRAM=private` instead runs a memory of its own under the
  * engine's home, on port 7438 (`GENTLE_DOT_ENGRAM_PORT` overrides it).
  * Subagents are off (`GENTLE_PI_AGENTS=0`) until S25.
+ *
+ * An installed app (`GENTLE_DOT_RUNTIME`) also names the Engram binary
+ * (`ENGRAM_BIN`, see `resolveEngramBin`), since its PATH has no user folders.
  */
 export function isolatedAgentEnv(base: NodeJS.ProcessEnv, dataDir: string): NodeJS.ProcessEnv {
 	const home = join(dataDir, "home");
@@ -71,7 +78,7 @@ export function isolatedAgentEnv(base: NodeJS.ProcessEnv, dataDir: string): Node
 		XDG_STATE_HOME: join(home, ".local", "state"),
 	};
 	for (const key of INHERITED_HOMES) delete env[key];
-	const bin = bundledBinDir();
+	const bin = bundledBinDir(base);
 	if (bin) {
 		const rest = (base.PATH ?? "").split(delimiter).filter((part) => part && part !== bin);
 		env.PATH = [bin, ...rest].join(delimiter);
@@ -87,6 +94,8 @@ export function isolatedAgentEnv(base: NodeJS.ProcessEnv, dataDir: string): Node
 		env.ENGRAM_DATA_DIR =
 			base.GENTLE_DOT_ENGRAM_DATA_DIR || base.ENGRAM_DATA_DIR || join(realHome, ".engram");
 	}
+	const runtime = runtimeDir(base);
+	if (runtime) env.ENGRAM_BIN = resolveEngramBin(base, runtime, { home: realHome });
 	const gitConfig = join(realHome, ".gitconfig");
 	if (!base.GIT_CONFIG_GLOBAL && existsSync(gitConfig)) env.GIT_CONFIG_GLOBAL = gitConfig;
 	return env;

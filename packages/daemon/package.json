@@ -6,6 +6,9 @@
 	"bin": {
 		"gentle-dot": "./src/cli.ts"
 	},
+	"scripts": {
+		"build:runtime": "node scripts/build-runtime.ts"
+	},
 	"dependencies": {
 		"@earendil-works/pi-ai": "1.0.4",
 		"@earendil-works/pi-coding-agent": "1.0.4",
@@ -15,6 +18,7 @@
 		"ws": "^8.22.0"
 	},
 	"devDependencies": {
-		"@types/ws": "^8.18.2"
+		"@types/ws": "^8.18.2",
+		"esbuild": "0.28.2"
 	}
 }

@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runtimeDir, runtimeModules } from "./runtime.ts";
 
 export interface DotConfig {
 	port: number;
@@ -22,14 +23,29 @@ export interface DotConfig {
 
 const DEFAULT_UI_DIR = fileURLToPath(new URL("../../ui/dist/app", import.meta.url));
 
-/** Path of the Gentle Shell launcher bundled with the daemon (the `gentle-pi` dependency). */
-export function bundledGentleShell(): string {
+/**
+ * Path of the Gentle Shell launcher bundled with the daemon (the `gentle-pi` dependency),
+ * from the runtime's `node_modules` in an installed app.
+ */
+export function bundledGentleShell(env: NodeJS.ProcessEnv = process.env): string {
+	const runtime = runtimeDir(env);
+	if (runtime) {
+		const bin = join(runtimeModules(runtime), "gentle-pi", "bin", "gentle-shell.mjs");
+		if (existsSync(bin)) return bin;
+		throw new Error(`The bundled assistant engine is missing from ${runtimeModules(runtime)}.`);
+	}
 	const require = createRequire(import.meta.url);
 	for (const dir of require.resolve.paths("gentle-pi") ?? []) {
 		const bin = join(dir, "gentle-pi", "bin", "gentle-shell.mjs");
 		if (existsSync(bin)) return bin;
 	}
 	throw new Error("The bundled assistant engine is missing. Run `pnpm install`.");
+}
+
+/** The web UI: the runtime's `ui/` in an installed app, the UI package's build otherwise. */
+function uiDirOf(env: NodeJS.ProcessEnv): string {
+	const runtime = runtimeDir(env);
+	return runtime ? join(runtime, "ui") : DEFAULT_UI_DIR;
 }
 
 function expandHome(path: string): string {
@@ -77,7 +93,7 @@ function agentConfig(env: NodeJS.ProcessEnv, dataDir: string) {
 			agentHome: undefined,
 		};
 	if (env.GENTLE_DOT_AGENT_BIN) return { agentCommand: env.GENTLE_DOT_AGENT_BIN, agentArgs: [], agentHome };
-	return { agentCommand: process.execPath, agentArgs: [bundledGentleShell()], agentHome };
+	return { agentCommand: process.execPath, agentArgs: [bundledGentleShell(env)], agentHome };
 }
 
 /** Resolves configuration from environment variables, then `~/.gentle-dot/config.json`, then defaults. */
@@ -98,7 +114,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DotConfig {
 		dataDir,
 		workspace,
 		preferredFolder: preferredFolder === workspace ? undefined : preferredFolder,
-		uiDir: resolve(env.GENTLE_DOT_UI_DIR ?? DEFAULT_UI_DIR),
+		uiDir: resolve(env.GENTLE_DOT_UI_DIR ?? uiDirOf(env)),
 		...agentConfig(env, dataDir),
 		allowedOrigins: parseList(env.GENTLE_DOT_ALLOWED_ORIGINS, "GENTLE_DOT_ALLOWED_ORIGINS"),
 	};
