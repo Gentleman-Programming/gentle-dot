@@ -17,18 +17,17 @@ COPY tsconfig.base.json ./
 RUN pnpm --filter @gentle-dot/ui build
 
 FROM node:24-bookworm-slim
+COPY --from=build /app /app
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends ca-certificates curl git tini \
 	&& rm -rf /var/lib/apt/lists/* \
-	&& npm install -g gentle-pi \
-	# The companion-package setup needs `pi` on PATH; match the version gentle-pi bundles.
-	&& PI_VERSION="$(node -p "require('$(npm root -g)/gentle-pi/node_modules/@earendil-works/pi-coding-agent/package.json').version")" \
+	# The engine's first-run setup needs `pi` on PATH; match the version the daemon bundles.
+	&& PI_VERSION="$(node -p "require('/app/packages/daemon/node_modules/@earendil-works/pi-coding-agent/package.json').version")" \
 	&& npm install -g "@earendil-works/pi-coding-agent@${PI_VERSION}" \
 	&& useradd --create-home dot \
-	# gentle-pi installs its gentle-ai binary as root with mode 0700; the agent runs as dot.
-	&& chown -R dot:dot "$(npm root -g)/gentle-pi/.gentle-ai"
+	# gentle-pi installs its gentle-ai binary with mode 0700 during the build (as root); the engine runs as dot.
+	&& chown -R dot:dot /app
 COPY --from=engram /go/bin/engram /usr/local/bin/engram
-COPY --from=build /app /app
 COPY docker/entrypoint.sh /usr/local/bin/gentle-dot-entrypoint
 USER dot
 WORKDIR /home/dot
