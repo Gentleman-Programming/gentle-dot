@@ -72,7 +72,7 @@ Branch: `feat/gentle-dot` · Delivery strategy: `single-pr` (user choice, L7; fo
 | T13 | S12 | inline | done | `43a512d` config + spawn tests; real smoke without gentle-shell on PATH: own home created, 42 providers, none configured | Bundle `gentle-pi`, own `--home` and profile store, first-run timeout, no PATH dependency |
 | T14 | S13 | delegated writer (after T15, shares apps/desktop) | pending | — | Linux port of the desktop app: per-platform window effects, tray icon, Wayland fallbacks, AppImage/deb bundles |
 | T15 | S6, S7, S11, S12, S9 | delegated writers (parallel: daemon/isolation vs. Dot circle) | in progress | — | One correction batch for verifier blockers B1–B4 and the S9 circle change, then a recheck limited to them |
-| T16 | S10 | inline | in progress | — | Accounts in two steps: method first, then provider |
+| T16 | S10 | inline | done | `7337b52` RED 4 failing → GREEN 14/14 | Accounts in two steps: method first, then provider |
 | T9 | S1–S6, S9–S12 | delegated verifier (high risk: process supervision, auth) | pending | — | Full verification: unit, integration, Playwright, `@real-agent`, `tauri build` + launch, manual macOS checklist with observed results |
 
 Environment notes: Node v24.14.1 and pnpm are present. `cargo` is on PATH but `rustc` is not, so T7 must first install or repair the Rust toolchain (rustup) and asks before installing. Xcode is present.
