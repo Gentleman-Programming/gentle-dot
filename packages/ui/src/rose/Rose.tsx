@@ -1,14 +1,22 @@
 import type { CSSProperties } from "react";
-import { ROSE_SPARKLES, ROSE_STROKES, ROSE_VIEWBOX } from "./strokes.ts";
+import { ROSE_SPARKLES, ROSE_STROKES } from "./strokes.ts";
 
 /** How the rose looks (design sheet `docs/brand/rose-design.html`). */
 export type RoseMood = "idle" | "thinking" | "working" | "needs" | "restarting" | "offline";
 
 /**
- * Strokes that carry the traveling light. In the 64 px Dot one screen pixel is
- * about 13 source pixels, so only the 60 longest strokes (50 source px and up,
- * 57% of the drawing) are long enough to show a moving light; the rest would
- * flicker as dots. The outline always draws all 178 strokes, which stay static.
+ * The square crop that frames the rose in the Dot's circle: centered on the
+ * strokes' smallest enclosing circle (center 610, 598; radius 493 source px)
+ * with a small gap to the rim. In the 66 px disc one screen pixel is about 16
+ * source pixels.
+ */
+export const ROSE_DISC_VIEWBOX = "90 78 1040 1040";
+
+/**
+ * Strokes that carry the traveling light. At the Dot's size only the 60
+ * longest strokes (50 source px and up, 57% of the drawing) are long enough to
+ * show a moving light; the rest would flicker as dots. The outline always
+ * draws all 178 strokes, which stay static.
  */
 export const DOT_LIGHT_STROKES = 60;
 
@@ -34,13 +42,13 @@ const sparkles = ROSE_SPARKLES.map(([cx, cy, r], i) => (
 export function Rose({ mood }: { mood: RoseMood }) {
 	return (
 		<span className={`rose rose-${mood}`} aria-hidden="true">
-			<svg className="rose-base" viewBox={ROSE_VIEWBOX} aria-hidden="true" focusable="false">
+			<svg className="rose-base" viewBox={ROSE_DISC_VIEWBOX} aria-hidden="true" focusable="false">
 				{outline}
 			</svg>
-			<svg className="rose-light" viewBox={ROSE_VIEWBOX} aria-hidden="true" focusable="false">
+			<svg className="rose-light" viewBox={ROSE_DISC_VIEWBOX} aria-hidden="true" focusable="false">
 				{lights}
 			</svg>
-			<svg className="rose-sparkles" viewBox={ROSE_VIEWBOX} aria-hidden="true" focusable="false">
+			<svg className="rose-sparkles" viewBox={ROSE_DISC_VIEWBOX} aria-hidden="true" focusable="false">
 				{sparkles}
 			</svg>
 		</span>

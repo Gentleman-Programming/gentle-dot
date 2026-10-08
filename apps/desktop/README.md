@@ -45,7 +45,7 @@ Runtime overrides:
 | `GENTLE_DOT_DATA_DIR` | Data directory (default `~/.gentle-dot`) |
 | `GENTLE_DOT_PORT` | Daemon port (default `4317`, otherwise `port` in `config.json`) |
 
-`shortcut` in `~/.gentle-dot/config.json` changes the global shortcut (default `Alt+Space`). The Dot position is saved in `~/.gentle-dot/desktop.json`.
+`shortcut` in `~/.gentle-dot/config.json` changes the global shortcut (default `Alt+Space`). The Dot position is saved in `~/.gentle-dot/desktop.json` as `dot_points`, in macOS points (the screen space every monitor shares, whatever its scale factor). The `dot` key written by older builds was in physical pixels and is ignored, so the Dot starts once more at the right edge of the main display.
 
 ## Menu bar
 

@@ -1,8 +1,10 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { AgentState } from "@gentle-dot/protocol";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { DotSurface } from "../src/components/DotSurface.tsx";
-import { DOT_LIGHT_STROKES } from "../src/rose/Rose.tsx";
+import { DOT_LIGHT_STROKES, ROSE_DISC_VIEWBOX } from "../src/rose/Rose.tsx";
 import { ROSE_SPARKLES, ROSE_STROKES } from "../src/rose/strokes.ts";
 
 function setup(agentState: AgentState = "idle", connected = true) {
@@ -40,20 +42,25 @@ describe("DotSurface", () => {
 		const { dot } = setup("needs_you");
 		expect(dot).toHaveAccessibleName("Gentle Dot: needs your answer");
 		expect(dot).toHaveClass("dot-needs_you");
-		expect(screen.getByText("!")).toBeInTheDocument();
+		// The badge sits on the circle's edge, outside the disc.
+		expect(dot.querySelector(":scope > .dot-badge")).toHaveTextContent("!");
 	});
 
-	it("is the rose itself: traced strokes, a light layer, and sparkles, with no orb", () => {
+	it("is the glowing rose inside a black disc", () => {
 		const { dot } = setup();
-		const rose = dot.querySelector(".rose");
+		const rose = dot.querySelector(":scope > .dot-disc > .rose");
 		expect(rose).not.toBeNull();
+		expect(dot.querySelector(".dot-disc")).toHaveAttribute("aria-hidden", "true");
 		expect(rose).toHaveAttribute("aria-hidden", "true");
-		expect(dot.querySelector(".dot-core, .dot-orbit")).toBeNull();
 
-		// Three stacked SVG layers; each carries its own glow (see Rose.tsx).
-		expect(
-			[...(rose?.querySelectorAll(":scope > svg") ?? [])].map((svg) => svg.getAttribute("class")),
-		).toEqual(["rose-base", "rose-light", "rose-sparkles"]);
+		// Three stacked SVG layers, each with its own glow (see Rose.tsx), framed for the disc.
+		const layers = [...(rose?.querySelectorAll(":scope > svg") ?? [])];
+		expect(layers.map((svg) => svg.getAttribute("class"))).toEqual([
+			"rose-base",
+			"rose-light",
+			"rose-sparkles",
+		]);
+		for (const svg of layers) expect(svg).toHaveAttribute("viewBox", ROSE_DISC_VIEWBOX);
 		const base = [...(rose?.querySelectorAll(".rose-base path") ?? [])];
 		const light = [...(rose?.querySelectorAll(".rose-light path") ?? [])];
 		expect(base).toHaveLength(ROSE_STROKES.length);
@@ -64,6 +71,35 @@ describe("DotSurface", () => {
 			expect(path).toHaveAttribute("pathLength", "1");
 		});
 		expect(rose?.querySelectorAll(".rose-sparkles circle")).toHaveLength(ROSE_SPARKLES.length);
+	});
+
+	it("frames the whole rose inside the circle", () => {
+		const [x, y, width, height] = ROSE_DISC_VIEWBOX.split(" ").map(Number) as [
+			number,
+			number,
+			number,
+			number,
+		];
+		expect(width).toBe(height);
+		const [cx, cy, radius] = [x + width / 2, y + height / 2, width / 2];
+		const points = ROSE_STROKES.flatMap(({ d }) =>
+			[...d.matchAll(/(-?[\d.]+) (-?[\d.]+)/g)].map((m) => [Number(m[1]), Number(m[2]), 0]),
+		);
+		for (const [px, py, r] of [...points, ...ROSE_SPARKLES]) {
+			expect(Math.hypot(px - cx, py - cy) + r).toBeLessThan(radius);
+		}
+	});
+
+	it("keeps the Dot surface the same size as its window", () => {
+		const read = (relative: string) =>
+			readFileSync(fileURLToPath(new URL(relative, import.meta.url)), "utf8");
+		const rule = read("../src/styles.css").match(/\n\.dot \{([^}]*)\}/)?.[1] ?? "";
+		const window = read("../../../apps/desktop/src-tauri/src/shell.rs").match(
+			/const DOT_SIZE: \(f64, f64\) = \(([\d.]+), ([\d.]+)\)/,
+		);
+		expect(window?.slice(1).map(Number)).toEqual([72, 72]);
+		expect(rule).toMatch(/\twidth: 72px;/);
+		expect(rule).toMatch(/\theight: 72px;/);
 	});
 
 	it.each<[AgentState, string, string]>([

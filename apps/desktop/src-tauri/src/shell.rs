@@ -14,8 +14,8 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
 use tauri::window::{Effect, EffectState, EffectsBuilder};
 use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, RunEvent, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
-    WindowEvent,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, RunEvent, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
@@ -25,11 +25,13 @@ use tauri_plugin_opener::OpenerExt;
 const DOT: &str = "dot";
 const PANEL: &str = "panel";
 const TRAY: &str = "main";
-/// The rose window, in logical pixels: the rose's aspect (860 × 1130 crop).
-const DOT_SIZE: (f64, f64) = (64.0, 84.0);
+/// The Dot window, in points: a 66 pt black disc with the rose, plus a 3 pt
+/// ring for its shadow. About the screen area of the earlier 64 × 84 rose.
+const DOT_SIZE: (f64, f64) = (72.0, 72.0);
 const PANEL_SIZE: (f64, f64) = (420.0, 640.0);
-const EDGE_MARGIN: f64 = 12.0;
-const PANEL_GAP: f64 = 8.0;
+/// All placement runs in points (see `geometry`), so margins never depend on a scale factor.
+const EDGE_MARGIN: i32 = 12;
+const PANEL_GAP: i32 = 8;
 const DRAG_SETTLE: Duration = Duration::from_millis(300);
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -92,26 +94,38 @@ fn set_dot_state(app: AppHandle, state: String) -> CommandResult {
     tray.set_icon_as_template(true).map_err(err)
 }
 
+/// The window frame in points. Tao reports it in pixels of the window's current scale factor.
 fn rect_of(window: &WebviewWindow) -> CommandResult<Rect> {
     let position = window.outer_position().map_err(err)?;
     let size = window.outer_size().map_err(err)?;
-    Ok(Rect::new(position.x, position.y, size.width as i32, size.height as i32))
+    let scale = window.scale_factor().map_err(err)?;
+    Ok(geometry::to_points((position.x, position.y), (size.width, size.height), scale))
 }
 
-/// Work areas (without menu bar and Dock) of every monitor, in physical pixels.
+/// Work area (without menu bar and Dock) of a monitor in points, using that monitor's own scale factor.
+fn work_area(monitor: &tauri::Monitor) -> Rect {
+    let area = monitor.work_area();
+    geometry::to_points(
+        (area.position.x, area.position.y),
+        (area.size.width, area.size.height),
+        monitor.scale_factor(),
+    )
+}
+
 fn monitor_rects(window: &WebviewWindow) -> CommandResult<Vec<Rect>> {
-    let monitors = window.available_monitors().map_err(err)?;
-    Ok(monitors
-        .iter()
-        .map(|m| {
-            let area = m.work_area();
-            Rect::new(area.position.x, area.position.y, area.size.width as i32, area.size.height as i32)
-        })
-        .collect())
+    Ok(window.available_monitors().map_err(err)?.iter().map(work_area).collect())
 }
 
-fn scaled(window: &WebviewWindow, logical: f64) -> i32 {
-    (logical * window.scale_factor().unwrap_or(1.0)).round() as i32
+fn move_to(window: &WebviewWindow, (x, y): (i32, i32)) -> CommandResult {
+    window.set_position(LogicalPosition::new(f64::from(x), f64::from(y))).map_err(err)
+}
+
+/// Keeps the Dot at exactly `DOT_SIZE` points, in case macOS or a monitor change resized it.
+fn keep_dot_size(dot: &WebviewWindow, current: Rect) -> CommandResult {
+    if (current.width, current.height) == (DOT_SIZE.0 as i32, DOT_SIZE.1 as i32) {
+        return Ok(());
+    }
+    dot.set_size(LogicalSize::new(DOT_SIZE.0, DOT_SIZE.1)).map_err(err)
 }
 
 fn place_panel_next_to_dot(app: &AppHandle) -> CommandResult {
@@ -120,15 +134,9 @@ fn place_panel_next_to_dot(app: &AppHandle) -> CommandResult {
     let Some(monitor) = geometry::monitor_for(dot_rect, &monitor_rects(&dot)?) else {
         return Ok(());
     };
-    let size = panel.outer_size().map_err(err)?;
-    let (x, y) = geometry::place_panel(
-        dot_rect,
-        (size.width as i32, size.height as i32),
-        monitor,
-        scaled(&dot, PANEL_GAP),
-        scaled(&dot, EDGE_MARGIN),
-    );
-    panel.set_position(PhysicalPosition::new(x, y)).map_err(err)
+    let size = rect_of(&panel)?;
+    let position = geometry::place_panel(dot_rect, (size.width, size.height), monitor, PANEL_GAP, EDGE_MARGIN);
+    move_to(&panel, position)
 }
 
 fn show_panel(app: &AppHandle) -> CommandResult {
@@ -142,10 +150,12 @@ fn show_panel(app: &AppHandle) -> CommandResult {
 /// Snaps the Dot to the nearest edge and persists the position.
 fn snap_dot(app: &AppHandle) -> CommandResult {
     let dot = window(app, DOT)?;
-    let current = rect_of(&dot)?;
-    let (x, y) = geometry::snap_to_edge(current, &monitor_rects(&dot)?, scaled(&dot, EDGE_MARGIN));
+    let mut current = rect_of(&dot)?;
+    keep_dot_size(&dot, current)?;
+    (current.width, current.height) = (DOT_SIZE.0 as i32, DOT_SIZE.1 as i32);
+    let (x, y) = geometry::snap_to_edge(current, &monitor_rects(&dot)?, EDGE_MARGIN);
     if (x, y) != (current.x, current.y) {
-        dot.set_position(PhysicalPosition::new(x, y)).map_err(err)?;
+        move_to(&dot, (x, y))?;
     }
     let shell = app.state::<Shell>();
     position::save(&shell.config.data_dir.join("desktop.json"), DotPosition { x, y }).map_err(err)?;
@@ -203,19 +213,17 @@ fn build_windows(app: &AppHandle, config: &DesktopConfig) -> tauri::Result<()> {
 
     // Restore the saved position (re-snapped in case the monitors changed), or
     // default to the right edge of the primary monitor, vertically centered.
+    // Everything is in points: before it is shown, the window may sit on a
+    // monitor with another scale factor than the one it is moved to.
     let monitors = monitor_rects(&dot).unwrap_or_default();
-    // The real window size, so a tall rose snapped to the bottom edge stays fully on screen.
-    let fallback = (scaled(&dot, DOT_SIZE.0), scaled(&dot, DOT_SIZE.1));
-    let size = rect_of(&dot).map(|r| (r.width, r.height)).unwrap_or(fallback);
-    let primary = app.primary_monitor()?.map(|m| {
-        let area = m.work_area();
-        Rect::new(area.position.x, area.position.y, area.size.width as i32, area.size.height as i32)
-    });
+    let size = (DOT_SIZE.0 as i32, DOT_SIZE.1 as i32);
+    let primary = app.primary_monitor()?.as_ref().map(work_area);
     let saved = position::load(&config.data_dir.join("desktop.json")).map(|p| (p.x, p.y));
-    let target = geometry::initial_dot_position(saved, size, &monitors, primary, scaled(&dot, EDGE_MARGIN));
-    if let Some((x, y)) = target {
-        dot.set_position(PhysicalPosition::new(x, y))?;
+    if let Some((x, y)) = geometry::initial_dot_position(saved, size, &monitors, primary, EDGE_MARGIN) {
+        dot.set_position(LogicalPosition::new(f64::from(x), f64::from(y)))?;
     }
+    // Set the size again once the window is in place, so it is exactly DOT_SIZE points there.
+    dot.set_size(LogicalSize::new(DOT_SIZE.0, DOT_SIZE.1))?;
     dot.show()?;
     Ok(())
 }
@@ -348,7 +356,8 @@ pub fn run() {
 
             let snap = app.state::<Shell>().snap.clone();
             window(&handle, DOT)?.on_window_event(move |event| {
-                if let WindowEvent::Moved(_) = event {
+                // A move, or a new monitor scale, re-snaps the Dot and restores its size.
+                if let WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } = event {
                     let _ = snap.send(());
                 }
             });

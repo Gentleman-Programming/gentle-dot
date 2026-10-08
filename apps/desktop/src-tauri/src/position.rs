@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::Path;
 
-/// Top-left corner of the Dot window, in physical pixels.
+/// Top-left corner of the Dot window, in logical points.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DotPosition {
     pub x: i32,
@@ -13,20 +13,21 @@ pub struct DotPosition {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct DesktopState {
-    dot: Option<DotPosition>,
+    /// Older builds saved `dot` in physical pixels; that key is ignored.
+    dot_points: Option<DotPosition>,
 }
 
 /// The saved position, or `None` when the file is missing or unreadable.
 pub fn load(path: &Path) -> Option<DotPosition> {
     let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str::<DesktopState>(&text).ok()?.dot
+    serde_json::from_str::<DesktopState>(&text).ok()?.dot_points
 }
 
 pub fn save(path: &Path, position: DotPosition) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let state = DesktopState { dot: Some(position) };
+    let state = DesktopState { dot_points: Some(position) };
     let json = serde_json::to_string_pretty(&state).map_err(io::Error::other)?;
     std::fs::write(path, json + "\n")
 }
@@ -51,7 +52,15 @@ mod tests {
         save(&file, DotPosition { x: 1852, y: 12 }).unwrap();
         assert_eq!(load(&file), Some(DotPosition { x: 1852, y: 12 }));
         let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
-        assert_eq!(json["dot"]["x"], 1852);
+        assert_eq!(json["dot_points"]["x"], 1852);
+    }
+
+    #[test]
+    fn ignores_positions_saved_in_physical_pixels() {
+        // Older builds saved `dot` in physical pixels; read as points it would be off screen.
+        let file = scratch("legacy").join("desktop.json");
+        fs::write(&file, r#"{ "dot": { "x": 3688, "y": 1036 } }"#).unwrap();
+        assert_eq!(load(&file), None);
     }
 
     #[test]
@@ -62,7 +71,7 @@ mod tests {
     #[test]
     fn corrupt_file_yields_none() {
         let dir = scratch("corrupt");
-        for (name, body) in [("garbage.json", "{ nope"), ("wrong.json", r#"{ "dot": { "x": "a" } }"#), ("empty.json", "{}")] {
+        for (name, body) in [("garbage.json", "{ nope"), ("wrong.json", r#"{ "dot_points": { "x": "a" } }"#), ("empty.json", "{}")] {
             let file = dir.join(name);
             fs::write(&file, body).unwrap();
             assert_eq!(load(&file), None, "{name}");

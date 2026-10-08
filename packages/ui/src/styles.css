@@ -104,19 +104,20 @@ button.icon {
 	outline-offset: 2px;
 }
 
-/* ---------- Dot: the rose (docs/brand/rose-design.html) ---------- */
+/* ---------- Dot: the rose in a black circle (docs/brand/rose-design.html) ---------- */
 
+/* The window is this square (DOT_SIZE in shell.rs); outside the disc it stays transparent. */
 .dot {
 	--neon: #ff2d7a;
 	--neon-soft: rgba(255, 45, 122, 0.35);
 	--core: #ffd6e8;
 	position: relative;
 	display: block;
-	width: 64px;
-	height: 84px;
+	width: 72px;
+	height: 72px;
 	padding: 0;
 	border: none;
-	border-radius: 14px;
+	border-radius: 50%;
 	background: none;
 	user-select: none;
 	-webkit-user-select: none;
@@ -130,7 +131,48 @@ button.icon {
 	outline-offset: -2px;
 }
 
-/* No circle and no box: the strokes are the rose, and they carry the glow. */
+/* The black disc, as on the app icon: a near-black radial fill with a faint pink rim.
+   The 3 px inset leaves room for its outer shadow inside the window. The rim carries a
+   subtle state cue; the glow and the traveling light stay on the rose's strokes. */
+.dot-disc {
+	--rim: rgba(255, 45, 122, 0.22);
+	--rim-glow: rgba(255, 45, 122, 0);
+	position: absolute;
+	inset: 3px;
+	border-radius: 50%;
+	background: radial-gradient(circle at 50% 40%, #1a0a12, #050506 75%);
+	box-shadow:
+		0 1px 2px rgba(0, 0, 0, 0.6),
+		0 0 1px rgba(0, 0, 0, 0.5),
+		inset 0 1px 0 rgba(255, 255, 255, 0.07),
+		inset 0 0 0 1px var(--rim),
+		inset 0 0 6px var(--rim-glow);
+	transition: box-shadow 400ms var(--ease);
+}
+
+.dot-thinking .dot-disc {
+	--rim: rgba(255, 45, 122, 0.32);
+}
+
+.dot-working .dot-disc {
+	--rim: rgba(255, 45, 122, 0.45);
+	--rim-glow: rgba(255, 45, 122, 0.22);
+}
+
+.dot-needs_you .dot-disc {
+	--rim: rgba(245, 165, 36, 0.55);
+	--rim-glow: rgba(245, 165, 36, 0.2);
+}
+
+.dot-starting .dot-disc,
+.dot-restarting .dot-disc {
+	--rim: rgba(255, 255, 255, 0.1);
+}
+
+.dot-error .dot-disc {
+	--rim: rgba(255, 255, 255, 0.06);
+}
+
 .rose {
 	position: relative;
 	display: block;
@@ -271,10 +313,11 @@ button.icon {
 	filter: none;
 }
 
+/* On the circle's edge, at the top right. */
 .dot-badge {
 	position: absolute;
-	top: 2px;
-	right: 2px;
+	top: 4px;
+	right: 4px;
 	width: 16px;
 	height: 16px;
 	border-radius: 50%;
@@ -284,11 +327,13 @@ button.icon {
 	font-weight: 800;
 	line-height: 16px;
 	text-align: center;
-	box-shadow: 0 0 6px rgba(245, 165, 36, 0.7);
+	box-shadow:
+		0 0 0 1.5px #050506,
+		0 0 4px rgba(245, 165, 36, 0.7);
 }
 
 /* Reduce motion: no traveling light (frozen dashes would look broken); the glow stays, stronger when busy.
-   Glow radii stay small because the window is only a few pixels larger than the rose. */
+   Glow radii stay small so the glow stays inside the disc. */
 @media (prefers-reduced-motion: reduce) {
 	.rose-light {
 		display: none;

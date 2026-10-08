@@ -1,4 +1,5 @@
-//! Pure placement math for the Dot and the panel, in physical pixels.
+//! Pure placement math for the Dot and the panel, in logical points: the
+//! global macOS screen space that every monitor shares, whatever its scale.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
@@ -35,6 +36,21 @@ impl Rect {
         let dy = i64::from((self.y - y).max(0).max(y - self.bottom()));
         dx * dx + dy * dy
     }
+}
+
+/// Converts a rectangle tao reports in physical pixels back to points. Tao
+/// derives each physical rectangle from points times one scale factor (a
+/// monitor's own, or the window's current one), so `scale` must be that same
+/// factor. Physical rectangles of monitors with different scales overlap and
+/// cannot be compared; their points can.
+pub fn to_points(position: (i32, i32), size: (u32, u32), scale: f64) -> Rect {
+    let points = |value: f64| (value / scale).round() as i32;
+    Rect::new(
+        points(position.0.into()),
+        points(position.1.into()),
+        points(size.0.into()),
+        points(size.1.into()),
+    )
 }
 
 /// Keeps `[value, value + size]` inside `[start + margin, end - margin]`; when
@@ -169,7 +185,7 @@ mod tests {
         assert_eq!(default_dot_position(Rect::new(1920, -200, 2560, 1440), (112, 112), 24), (4344, 464));
     }
 
-    /// The rose window is taller than wide: 64 × 84 pt, here at 2× scale.
+    /// A window taller than wide: snapping must use its real size, whatever the shape.
     fn rose(x: i32, y: i32) -> Rect {
         Rect::new(x, y, 128, 168)
     }
@@ -194,6 +210,37 @@ mod tests {
         // Without monitor information the saved spot cannot be checked, so use the primary monitor.
         assert_eq!(initial_dot_position(Some((5, 5)), (128, 168), &[], Some(SCREEN), 24), Some((1768, 456)));
         assert_eq!(initial_dot_position(None, (128, 168), &[], None, 24), None);
+    }
+
+    #[test]
+    fn converts_each_rectangle_with_its_own_scale_factor() {
+        // A 1512 × 945 pt Retina built-in (2×) and, to its right, a 2560 × 1440 pt display at 1×.
+        // Tao reports them as (0, 0, 3024, 1890) and (1512, 0, 2560, 1440): in physical pixels the
+        // two monitors overlap, so only points put every monitor in one coordinate space.
+        let built_in = to_points((0, 0), (3024, 1890), 2.0);
+        let external = to_points((1512, 0), (2560, 1440), 1.0);
+        assert_eq!(built_in, Rect::new(0, 0, 1512, 945));
+        assert_eq!(external, Rect::new(1512, 0, 2560, 1440));
+        // The Dot on the external display, reported with the window's own 1× factor.
+        let dot = to_points((3900, 600), (72, 72), 1.0);
+        assert_eq!(dot, Rect::new(3900, 600, 72, 72));
+        assert_eq!(monitor_for(dot, &[built_in, external]), Some(external));
+        assert_eq!(snap_to_edge(dot, &[built_in, external], 12), (3988, 600));
+        // The same window on the built-in reports twice the pixels, but the same points.
+        assert_eq!(to_points((2736, 1200), (144, 144), 2.0), Rect::new(1368, 600, 72, 72));
+    }
+
+    #[test]
+    fn places_a_72_point_dot_12_points_from_the_edge_of_a_retina_display() {
+        // 3840 × 2160 at 2× (1920 × 1080 pt) below a 25 pt menu bar, as tao reports its work area.
+        let main = to_points((0, 50), (3840, 2110), 2.0);
+        assert_eq!(main, Rect::new(0, 25, 1920, 1055));
+        let (x, y) = initial_dot_position(None, (72, 72), &[main], Some(main), 12).unwrap();
+        assert_eq!((x, y), (1836, 516));
+        assert_eq!(main.right() - (x + 72), 12);
+        // A saved spot is restored in points, on whichever monitor it lies.
+        let built_in = to_points((3840, 0), (2560, 1600), 2.0);
+        assert_eq!(initial_dot_position(Some((3116, 400)), (72, 72), &[main, built_in], Some(main), 12), Some((3116, 400)));
     }
 
     #[test]

@@ -31,7 +31,7 @@ interface DotSurfaceProps {
 	startDrag: () => void;
 }
 
-/** The collapsed, always-on-top rose. A click opens the panel; a drag moves the window. */
+/** The collapsed, always-on-top rose in its black circle. A click opens the panel; a drag moves the window. */
 export function DotSurface({ agentState, connected, toggle, startDrag }: DotSurfaceProps) {
 	const press = useRef<{ x: number; y: number; dragging: boolean } | undefined>(undefined);
 	const state = connected ? agentState : "restarting";
@@ -65,7 +65,9 @@ export function DotSurface({ agentState, connected, toggle, startDrag }: DotSurf
 				}
 			}}
 		>
-			<Rose mood={MOODS[state]} />
+			<span className="dot-disc" aria-hidden="true">
+				<Rose mood={MOODS[state]} />
+			</span>
 			{state === "needs_you" ? (
 				<span className="dot-badge" aria-hidden="true">
 					!
