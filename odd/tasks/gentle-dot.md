@@ -100,6 +100,8 @@ Branch: `feat/gentle-dot` · Delivery strategy: `single-pr` (user choice, L7; fo
   - **S27.4 Pink glow.** The agent's pointer is shown as a pink glow (accent #f095c8) at the point where it acts, with a pulse on click, in a click-through overlay above all windows that is never in screenshots; it fades when the agent is idle and disappears when the session ends.
   - Out of scope: a truly independent second cursor (needs a virtual machine or another user session).
 
+- **S28 — Pink glow where the agent acts (L72).** User: "lo del glow rosa si eso si para saber que esta haciendo el agente y solo mientras este interactuando". During computer control, each pointer action (click, move, drag, scroll) shows a pink glow (accent #f095c8) at the point where the agent acts, with a pulse on click and a trail along a drag; keyboard actions show it briefly at the focused element when its position is known. It is visible only while the agent is interacting: it fades out shortly after the last action and never shows when idle or after the session ends. It lives in a click-through overlay above all windows (it never blocks the user's clicks) and is never in screenshots. The rest of S27 stays dropped.
+
 ## Tasks
 
 | ID | Specs | Route | Status | Commit / evidence | Scope |
@@ -129,7 +131,8 @@ Branch: `feat/gentle-dot` · Delivery strategy: `single-pr` (user choice, L7; fo
 | T21b | S24.5 UI, S24.6, S24.7 | delegated writer (parallel with T21a, surface `packages/**`, `docs/**`) | done | `5b59c0e`; RED 20 failing → GREEN; parent re-ran 400 passed / 5 skipped | Protocol, daemon registration, connectors entry, rose state, banner |
 | T24 | S24.8, S24.9 | delegated writer (context backstop), then independent verifier (high: touches the S24.4 checks) | in progress | — | Computer control speed: batch, faster helper, lighter screenshots |
 | T25 | S26 | queued after T24 (same edit surface: shell.rs and packages/ui) | pending | — | Hide the rose; full-screen chat |
-| T26 | S27 | — | dropped (L71) | — | Accessibility-first actions, keyboard to an app, cursor restore, pink glow |
+| T26 | S27 | — | dropped (L71) | — |
+| T27 | S28 | queued after T25 (same edit surface) | pending | — | Pink glow while the agent interacts | Accessibility-first actions, keyboard to an app, cursor restore, pink glow |
 | T22 | S18 (hardening, L47 B1/B2) | delegated writer | done (accepted with documented gaps, L52) | `8651bba`; parent re-ran 328 tests + typecheck | Option A: authoritative in-memory connector state with revert, credential reads blocked, path-independent bash checks, full approval preview, redirect manual, private Engram stop, onboarding overlap fix |
 | T23 | S25 | explore → spec → implement (stage 2) | pending | — | Daemon-side MCP proxy with Keychain tokens |
 | T9 | S1–S6, S9–S12 | delegated verifier (high risk: process supervision, auth) | done | L24 + L31 | Full verification: unit, integration, Playwright, `@real-agent`, `tauri build` + launch, manual macOS checklist with observed results |
@@ -209,4 +212,5 @@ Environment notes: Node v24.14.1 and pnpm are present. `cargo` is on PATH but `r
 - **L69 (2026-10-08, user):** "y se le puede poner su propio mouse? en vez de utilizar el mio?". Answered: macOS has one cursor per session; recommended Accessibility actions first, keyboard to an app, real mouse with cursor restore as the last resort, and a visible ghost pointer; a separate cursor needs a VM.
 - **L70 (2026-10-08, user):** "que sea como un glow rosa". Recorded as S27/T26 with the ghost pointer as a pink glow, queued after T25.
 - **L71 (2026-10-08, user):** "no no no lo pongas lo del segundo mouse no te preocupes". S27/T26 dropped, the pink glow included; nothing was implemented.
-- **Next step:** T24, then T25, then the remaining real-Mac checks; grant both permissions, take a screenshot (the Dot must be absent), click and type in a harmless app, a risky "Send" confirmation, ⌥⇧Esc panic, a blocked app (System Settings), and `screencapture -x /tmp/t.png` from the agent's bash must fail (R1); the community tester runs docs/linux-testing.md when the user shares it; T23/S25 before any public release.
+- **L72 (2026-10-08, user):** "lo del glow rosa si eso si para saber que esta haciendo el agente y solo mientras este interactuando". The glow alone is back as S28/T27, queued after T25.
+- **Next step:** T24, then T25, then T27, then the remaining real-Mac checks; grant both permissions, take a screenshot (the Dot must be absent), click and type in a harmless app, a risky "Send" confirmation, ⌥⇧Esc panic, a blocked app (System Settings), and `screencapture -x /tmp/t.png` from the agent's bash must fail (R1); the community tester runs docs/linux-testing.md when the user shares it; T23/S25 before any public release.
