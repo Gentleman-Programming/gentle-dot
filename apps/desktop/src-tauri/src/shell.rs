@@ -1,6 +1,8 @@
 //! Tauri wiring: windows, commands, tray menu, global shortcut, Dot snapping,
 //! and the daemon lifecycle (design §9).
 
+use crate::computer::app as computer;
+use crate::computer::session::Reason;
 use crate::config::{self, ConnectionInfo, DesktopConfig, DEFAULT_SHORTCUT};
 use crate::daemon::{Daemon, RestartOutcome};
 use crate::geometry::{self, Rect};
@@ -258,12 +260,17 @@ fn conversations_on(value: Option<&str>) -> bool {
 
 /// The tray menu, top to bottom (`-` is a separator). "New conversation" only exists with the
 /// conversations list on; in the single continuous chat there is nothing new to start.
-fn tray_menu_ids(conversations: bool) -> Vec<&'static str> {
+/// "Stop computer control" exists where computer control does (macOS, S24.3).
+fn tray_menu_ids(conversations: bool, computer_control: bool) -> Vec<&'static str> {
     let mut ids = vec!["open"];
     if conversations {
         ids.push("new");
     }
-    ids.extend(["browser", "-", "restart", "autostart", "-", "quit"]);
+    ids.push("browser");
+    if computer_control {
+        ids.push("computer-stop");
+    }
+    ids.extend(["-", "restart", "autostart", "-", "quit"]);
     ids
 }
 
@@ -274,11 +281,18 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig) -> tauri::Result<TrayIcon
         .or_else(|_| MenuItem::with_id(app, "open", "Open", true, None::<&str>))?;
     let menu = Menu::new(app)?;
     let conversations = conversations_on(std::env::var("GENTLE_DOT_CONVERSATIONS").ok().as_deref());
-    for id in tray_menu_ids(conversations) {
+    for id in tray_menu_ids(conversations, cfg!(target_os = "macos")) {
         match id {
             "open" => menu.append(&open)?,
             "new" => menu.append(&MenuItem::with_id(app, "new", "New conversation", true, None::<&str>)?)?,
             "browser" => menu.append(&MenuItem::with_id(app, "browser", "Open in browser", true, None::<&str>)?)?,
+            "computer-stop" => menu.append(&MenuItem::with_id(
+                app,
+                "computer-stop",
+                "Stop computer control",
+                true,
+                None::<&str>,
+            )?)?,
             "restart" => {
                 menu.append(&MenuItem::with_id(app, "restart", "Restart assistant", true, None::<&str>)?)?;
             }
@@ -305,6 +319,10 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig) -> tauri::Result<TrayIcon
                 "open" => show_panel(app),
                 "new" => show_panel(app).and_then(|()| app.emit("dot://new-conversation", ()).map_err(err)),
                 "browser" => open_in_browser(app),
+                "computer-stop" => {
+                    computer::stop(app, Reason::Stopped);
+                    Ok(())
+                }
                 "restart" => {
                     restart_daemon(app.clone());
                     Ok(())
@@ -360,6 +378,19 @@ fn restart_daemon(app: AppHandle) {
     });
 }
 
+/// ⌥⇧Esc ends computer control from anywhere, even while another app is in front.
+#[cfg(target_os = "macos")]
+fn register_panic_shortcut(app: &AppHandle) {
+    let handler = |app: &AppHandle, _: &_, event: tauri_plugin_global_shortcut::ShortcutEvent| {
+        if event.state() == ShortcutState::Pressed {
+            computer::stop(app, Reason::Panic);
+        }
+    };
+    if let Err(error) = app.global_shortcut().on_shortcut(computer::PANIC_SHORTCUT, handler) {
+        eprintln!("gentle-dot: the computer-control panic shortcut is unavailable: {error}");
+    }
+}
+
 fn register_shortcut(app: &AppHandle, shortcut: &str) {
     let handler = |app: &AppHandle, _: &_, event: tauri_plugin_global_shortcut::ShortcutEvent| {
         if event.state() == ShortcutState::Pressed {
@@ -403,7 +434,17 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![connection_info, toggle_panel, hide_panel, set_dot_state])
+        .invoke_handler(tauri::generate_handler![
+            connection_info,
+            toggle_panel,
+            hide_panel,
+            set_dot_state,
+            computer::computer_endpoint,
+            computer::computer_permissions,
+            computer::computer_request_permission,
+            computer::computer_stop,
+            computer::computer_status
+        ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -417,6 +458,9 @@ pub fn run() {
                 }
             });
             app.manage(Shell { config: config.clone(), daemon, snap: spawn_snapper(handle.clone()), places_windows });
+            app.manage(computer::start(&handle));
+            #[cfg(target_os = "macos")]
+            register_panic_shortcut(&handle);
 
             build_windows(&handle, &config, places_windows)?;
             build_tray(&handle, &config)?;
@@ -457,7 +501,7 @@ mod tests {
     #[test]
     fn tray_hides_new_conversation_in_the_single_chat() {
         assert_eq!(
-            tray_menu_ids(false),
+            tray_menu_ids(false, false),
             vec!["open", "browser", "-", "restart", "autostart", "-", "quit"]
         );
     }
@@ -465,8 +509,16 @@ mod tests {
     #[test]
     fn tray_shows_new_conversation_with_the_conversations_list() {
         assert_eq!(
-            tray_menu_ids(true),
+            tray_menu_ids(true, false),
             vec!["open", "new", "browser", "-", "restart", "autostart", "-", "quit"]
+        );
+    }
+
+    #[test]
+    fn tray_offers_stop_computer_control_where_it_exists() {
+        assert_eq!(
+            tray_menu_ids(false, true),
+            vec!["open", "browser", "computer-stop", "-", "restart", "autostart", "-", "quit"]
         );
     }
 

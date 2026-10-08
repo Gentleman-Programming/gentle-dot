@@ -22,3 +22,18 @@ tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libc = "0.2"
+getrandom = "0.3"
+base64 = "0.22"
+tiny_http = "0.12"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+
+# The computer-control helper (S24) is macOS only.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSString", "NSValue"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFArray", "CFCGTypes", "CFData", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGDataProvider", "CGDirectDisplay", "CGError", "CGEvent", "CGEventTypes", "CGImage", "CGRemoteOperation", "CGWindow"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSRunningApplication", "NSWorkspace"] }
+objc2-application-services = { version = "0.3", default-features = false, features = ["std", "AXError", "AXUIElement", "HIServices"] }
+objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["std", "block2", "libc", "objc2-core-foundation", "objc2-core-graphics", "SCScreenshotManager", "SCShareableContent", "SCStream"] }

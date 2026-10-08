@@ -1,3 +1,4 @@
+pub mod computer;
 pub mod config;
 pub mod daemon;
 pub mod geometry;

@@ -2,7 +2,17 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 /// Commands the UI may invoke; each one gets an `allow-<command>` permission.
-const COMMANDS: &[&str] = &["connection_info", "toggle_panel", "hide_panel", "set_dot_state"];
+const COMMANDS: &[&str] = &[
+    "connection_info",
+    "toggle_panel",
+    "hide_panel",
+    "set_dot_state",
+    "computer_endpoint",
+    "computer_permissions",
+    "computer_request_permission",
+    "computer_stop",
+    "computer_status",
+];
 
 fn find_in_path(program: &str, path: &str) -> Option<PathBuf> {
     env::split_paths(path)
