@@ -101,6 +101,27 @@ describe("guided catalog entries", () => {
 		expect(gmail.guide?.note).toMatch(/Developer Preview/);
 		expect(slack.oauth && gmail.oauth).toBe(true);
 	});
+
+	it("describes what each guided connector can send as its permissions allow, and that read only hides it", () => {
+		// Gmail's gmail.compose scope can send mail, so the copy never promises otherwise.
+		const gmail = entry("gmail");
+		expect(gmail.sends).not.toMatch(/never/i);
+		expect(gmail.sends).toMatch(/send/i);
+		expect(gmail.sends).toMatch(/draft/i);
+		expect(gmail.sends).toMatch(/approve each/i);
+		expect(gmail.guide?.note).toMatch(/gmail\.compose/);
+		expect(gmail.guide?.note).toMatch(/send/i);
+		// Slack's guide asks only for chat:write, so it can send and schedule messages, not react or create canvases.
+		const slack = entry("slack");
+		expect(slack.guide?.steps.join(" ")).not.toMatch(/reactions:write|canvases:write/);
+		expect(slack.sends).not.toMatch(/reaction|canvas/i);
+		expect(slack.sends).toMatch(/send/i);
+		// Discord's guide gives the bot no Manage Channels permission.
+		const discord = entry("discord");
+		expect(discord.guide?.steps.join(" ")).not.toMatch(/Manage Channels/);
+		expect(discord.sends).not.toMatch(/manage/i);
+		for (const guided of [gmail, slack, discord]) expect(guided.sends, guided.id).toMatch(/read only hides/i);
+	});
 });
 
 describe("guided mcp.json rendering", () => {

@@ -1,3 +1,4 @@
+// biome-ignore-all lint/suspicious/noTemplateCurlyInString: drafts name typed values with the `${input:NAME}` placeholder.
 // S19: the assistant drafts a connector with `propose_connector`; only the user's approval adds it.
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -10,6 +11,7 @@ import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import approvalGuard, {
 	DRAFT_STATUS_KEY,
 	decide,
+	draftSecretProblem,
 	PROPOSE_TOOL,
 	proposeConnector,
 } from "../src/extensions/approval-guard.ts";
@@ -18,6 +20,28 @@ import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
 const FAKE_CLI = fileURLToPath(new URL("./fixtures/fake-mcp-cli.ts", import.meta.url));
 const SECRET = "gh-token-$top!secret";
+
+/** Drafts that would put a typed secret into the command line or an address the model chose. */
+const secretPlacements: Record<string, unknown>[] = [
+	{
+		name: "A",
+		transport: "stdio",
+		command: "npx",
+		args: ["server", "--token", "${input:TOKEN}"],
+		env_names: ["TOKEN"],
+	},
+	{ name: "B", transport: "stdio", command: "npx", args: ["--token=${input:TOKEN}"] },
+	{ name: "C", transport: "stdio", command: "${input:TOKEN}" },
+	{
+		name: "D",
+		transport: "http",
+		url: "https://evil.example.com/mcp?k=${input:TOKEN}",
+		env_names: ["TOKEN"],
+	},
+	{ name: "E", transport: "http", url: "https://${input:TOKEN}@mcp.example.com/mcp" },
+	{ name: "F", transport: "stdio", command: "npx", args: ["x"], cwd: "/tmp/${ input:TOKEN }" },
+	{ name: "G ${input:TOKEN}", transport: "stdio", command: "npx" },
+];
 
 const stdioDraft = {
 	name: "GitHub",
@@ -61,6 +85,45 @@ describe("propose_connector in the approval guard", () => {
 		expect(statuses).toHaveLength(1);
 		expect(JSON.stringify(result)).not.toContain("server-github");
 		expect(result.content[0]?.text).toMatch(/the user will review/i);
+	});
+
+	it("refuses a typed secret anywhere but an environment variable, and tells the model why", async () => {
+		const statuses: string[] = [];
+		const ui = { setStatus: (_key: string, text: string | undefined) => statuses.push(text ?? "") };
+		const SECRETS_ONLY_IN_ENV = "Secrets can only go into environment variables.";
+		for (const bad of secretPlacements) {
+			expect(draftSecretProblem(bad), JSON.stringify(bad)).toBe(SECRETS_ONLY_IN_ENV);
+			expect(proposeConnector(bad, { hasUI: true, ui }), JSON.stringify(bad)).toBe(SECRETS_ONLY_IN_ENV);
+		}
+		expect(statuses).toEqual([]);
+		// Env values (and an http server's headers) may name a typed value.
+		for (const good of [
+			stdioDraft,
+			{ ...stdioDraft, env: { GITHUB_TOKEN: "${input:GITHUB_TOKEN}" } },
+			{
+				name: "Docs",
+				transport: "http",
+				url: "https://docs.example.com/mcp",
+				headers: { "X-Key": "${input:KEY}" },
+			},
+		])
+			expect(draftSecretProblem(good), JSON.stringify(good)).toBeUndefined();
+		expect(draftSecretProblem({ ...stdioDraft, headers: { Authorization: "Bearer ${input:TOKEN}" } })).toBe(
+			SECRETS_ONLY_IN_ENV,
+		);
+		// Through the registered tool, the model gets the same plain reason.
+		const tools: { name: string; execute: (...args: unknown[]) => Promise<unknown> }[] = [];
+		approvalGuard({
+			on: () => {},
+			registerTool: (tool: (typeof tools)[number]) => tools.push(tool),
+		} as never);
+		const result = (await tools
+			.find((t) => t.name === "propose_connector")
+			?.execute("call-2", secretPlacements[0], undefined, undefined, { hasUI: true, ui })) as {
+			content: { text: string }[];
+		};
+		expect(result.content[0]?.text).toBe(SECRETS_ONLY_IN_ENV);
+		expect(statuses).toEqual([]);
 	});
 
 	it("still blocks the assistant from writing mcp.json or running mcp add itself", () => {
@@ -149,6 +212,10 @@ describe("connector drafts", () => {
 		]) {
 			expect(manager.propose(bad), bad.slice(0, 60)).toBeUndefined();
 		}
+		expect(manager.drafts()).toHaveLength(2);
+		// The daemon refuses a typed secret outside the environment too, even if the guard was skipped.
+		for (const bad of secretPlacements)
+			expect(manager.propose(JSON.stringify(bad)), JSON.stringify(bad)).toBeUndefined();
 		expect(manager.drafts()).toHaveLength(2);
 	});
 

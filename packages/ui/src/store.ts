@@ -16,6 +16,7 @@ import type {
 	ProfileRole,
 	ServerMessage,
 } from "@gentle-dot/protocol";
+import { MAX_CONNECTOR_DRAFTS } from "@gentle-dot/protocol";
 
 export interface AuthFlowState {
 	providerId: string;
@@ -50,7 +51,10 @@ export interface ConnectorsState {
 	list?: ConnectorInfo[];
 	/** A connector sign-in or setup; `providerId` is the connector id (or the draft's name). */
 	flow?: AuthFlowState;
-	/** Connectors the assistant drafted, waiting for the user's answer. */
+	/**
+	 * Connectors the assistant drafted, waiting for the user's answer: like the daemon, only the newest
+	 * five, and replaced by what the daemon sends after each `ready`.
+	 */
 	drafts?: ConnectorDraft[];
 	/** The servers the last scan found in other apps, while the list is shown. */
 	imports?: ImportCandidate[];
@@ -177,6 +181,8 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 				conversationId: message.conversationId ?? state.conversationId,
 				model: message.model ?? state.model,
 				features: message.features ?? initialState.features,
+				// The daemon sends the drafts still waiting right after ready.
+				connectors: { ...state.connectors, drafts: [] },
 			};
 		case "agent_state":
 			return { ...state, agentState: message.state };
@@ -253,7 +259,8 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 		case "connector_draft": {
 			const drafts = state.connectors.drafts ?? [];
 			if (drafts.some((d) => d.draftId === message.draft.draftId)) return state;
-			return { ...state, connectors: { ...state.connectors, drafts: [...drafts, message.draft] } };
+			const kept = [...drafts, message.draft].slice(-MAX_CONNECTOR_DRAFTS);
+			return { ...state, connectors: { ...state.connectors, drafts: kept } };
 		}
 		case "connector_draft_resolved": {
 			const drafts = (state.connectors.drafts ?? []).filter((d) => d.draftId !== message.draftId);

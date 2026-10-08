@@ -151,6 +151,44 @@ function mapServer(source: string, name: string, raw: Json, context: MapContext)
 	return { ...base, transport: url ? "http" : "stdio", reason: NO_SERVER };
 }
 
+/**
+ * What the engine does with each value it resolves (env, headers, the OAuth client secret) when the
+ * server starts, in plain words: a leading `!` runs a command, and `$NAME` or `${NAME}` reads an
+ * environment variable (`$$` and `$!` are literals). The command itself is never repeated.
+ */
+export function valueNotes(server: ServerTemplate): string[] {
+	const values: [string, string][] = [
+		...Object.entries("command" in server ? (server.env ?? {}) : (server.headers ?? {})),
+		...("url" in server && server.oauth?.clientSecret !== undefined
+			? [["Client Secret", server.oauth.clientSecret] as [string, string]]
+			: []),
+	];
+	return values.flatMap(([key, text]) => {
+		if (text.startsWith("!")) return [`${key}: Runs a command on your computer to get this value.`];
+		const names = envReferences(text);
+		if (names.length === 0) return [];
+		const list = names.join(", ");
+		return [`${key}: Reads the environment variable${names.length > 1 ? "s" : ""} ${list}.`];
+	});
+}
+
+/** The environment variables a value reads, as the engine parses its templates. */
+function envReferences(text: string): string[] {
+	const names: string[] = [];
+	for (let index = text.indexOf("$"); index >= 0; index = text.indexOf("$", index)) {
+		const next = text[index + 1];
+		if (next === "$" || next === "!") {
+			index += 2;
+			continue;
+		}
+		const braced = next === "{" ? /^\$\{([^}]*)\}/.exec(text.slice(index)) : undefined;
+		const name = braced ? braced[1] : /^\$([A-Za-z_][A-Za-z0-9_]*)/.exec(text.slice(index))?.[1];
+		if (name && ENV_NAME.test(name) && !names.includes(name)) names.push(name);
+		index += braced ? braced[0].length : 1 + (name?.length ?? 0);
+	}
+	return names;
+}
+
 function isSsePath(url: string): boolean {
 	return URL.canParse(url) && /\/sse\/?$/i.test(new URL(url).pathname);
 }

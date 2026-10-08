@@ -251,6 +251,19 @@ describe("adding another connector", () => {
 			apply(ready, { type: "connector_draft", draft }, { type: "connector_draft", draft }).connectors.drafts,
 		).toHaveLength(1);
 	});
+
+	it("keeps only the drafts the daemon still holds: the newest five, and none it resolved while away", () => {
+		const many = Array.from({ length: 7 }, (_, i) => ({ ...draft, draftId: `d${i}`, name: `Server ${i}` }));
+		const s = apply(ready, ...many.map((d): ServerPayload => ({ type: "connector_draft", draft: d })));
+		expect(s.connectors.drafts?.map((d) => d.draftId)).toEqual(["d2", "d3", "d4", "d5", "d6"]);
+		// After a reconnect the daemon sends the drafts still waiting right after ready.
+		const again = apply(
+			s,
+			{ type: "ready", agentState: "idle" },
+			{ type: "connector_draft", draft: many[6] as ConnectorDraft },
+		);
+		expect(again.connectors.drafts?.map((d) => d.draftId)).toEqual(["d6"]);
+	});
 });
 
 describe("importing MCP servers", () => {
@@ -287,6 +300,32 @@ describe("importing MCP servers", () => {
 			type: "connector_import",
 			ids: ["Cursor:stripe", "Claude Desktop:github"],
 		});
+	});
+
+	it("notes a value that runs a command or reads an environment variable before the import", () => {
+		const vault: ImportCandidate = {
+			id: "Gentle Shell:vault",
+			name: "vault",
+			sources: ["Gentle Shell"],
+			transport: "stdio",
+			summary: "vault-mcp",
+			envNames: ["VAULT_TOKEN", "REGION"],
+			headerNames: [],
+			inputs: [],
+			importable: true,
+			notes: [
+				"VAULT_TOKEN: Runs a command on your computer to get this value.",
+				"REGION: Reads the environment variable AWS_REGION.",
+			],
+		};
+		panel(
+			apply(reduce(ready, { type: "connectors", open: true }), { type: "connector_imports", found: [vault] }),
+		);
+		const list = within(screen.getByRole("region", { name: "Found these servers" }));
+		expect(
+			list.getByText("VAULT_TOKEN: Runs a command on your computer to get this value."),
+		).toBeInTheDocument();
+		expect(list.getByText("REGION: Reads the environment variable AWS_REGION.")).toBeInTheDocument();
 	});
 
 	it("says when nothing was found, and closes the list after an import", () => {

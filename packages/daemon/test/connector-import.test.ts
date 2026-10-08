@@ -258,7 +258,7 @@ describe("importing MCP servers", () => {
 		});
 		expect(pick(found, "stripe")).toMatchObject({
 			transport: "http",
-			summary: "https://mcp.stripe.com/",
+			summary: "https://mcp.stripe.com/?key=•••",
 			headerNames: ["Authorization"],
 		});
 		expect(pick(found, "everything").summary).toBe(
@@ -356,5 +356,55 @@ describe("importing MCP servers", () => {
 		const { manager, store } = setup(fixtureHome());
 		expect(manager.importServers(["Cursor:github"])).toEqual([]);
 		expect(store.state()).toEqual({ connectors: {} });
+	});
+});
+
+describe("values the engine resolves in an import", () => {
+	it("notes a value that runs a command or reads an environment variable, without showing the command", () => {
+		const home = tempDir();
+		write(home, ".gentle-shell/agent/mcp.json", {
+			mcpServers: {
+				vault: {
+					command: "vault-mcp",
+					env: {
+						VAULT_TOKEN: "!security find-generic-password -w -s vault",
+						PLAIN: "a$$b",
+						REGION: "$AWS_REGION",
+					},
+				},
+				remote: {
+					url: "https://mcp.example.com/mcp",
+					headers: { Authorization: "Bearer ${GH_TOKEN}", "X-Team": "literal-team" },
+					oauth: { clientSecret: "!op read op://vault/item/secret" },
+				},
+				plain: { command: "plain-mcp", env: { MODE: "fast", ESCAPED: "$$HOME and $!bang" } },
+			},
+		});
+		const { manager } = setup(home);
+		const found = manager.scan();
+		expect(pick(found, "vault").notes).toEqual([
+			"VAULT_TOKEN: Runs a command on your computer to get this value.",
+			"REGION: Reads the environment variable AWS_REGION.",
+		]);
+		expect(pick(found, "remote").notes).toEqual([
+			"Authorization: Reads the environment variable GH_TOKEN.",
+			"Client Secret: Runs a command on your computer to get this value.",
+		]);
+		expect(pick(found, "plain").notes).toBeUndefined();
+		const text = JSON.stringify(found);
+		for (const command of ["security find-generic-password", "op read"]) expect(text).not.toContain(command);
+		// Other apps' references become the engine's, so they get the same note.
+		const other = tempDir();
+		write(other, ".cursor/mcp.json", {
+			mcpServers: {
+				copilot: {
+					url: "https://api.githubcopilot.com/mcp/",
+					headers: { Authorization: "Bearer ${env:GH_TOKEN}" },
+				},
+			},
+		});
+		expect(pick(setup(other).manager.scan(), "copilot").notes).toEqual([
+			"Authorization: Reads the environment variable GH_TOKEN.",
+		]);
 	});
 });

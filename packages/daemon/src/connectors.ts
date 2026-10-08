@@ -23,8 +23,9 @@ import type {
 	ImportCandidate,
 	ServerPayload,
 } from "@gentle-dot/protocol";
-import { type ScannedServer, scanClientConfigs } from "./connector-import.ts";
-import { type ConnectorPolicy, POLICY_ENV } from "./extensions/approval-guard.ts";
+import { MAX_CONNECTOR_DRAFTS } from "@gentle-dot/protocol";
+import { type ScannedServer, scanClientConfigs, valueNotes } from "./connector-import.ts";
+import { type ConnectorPolicy, draftSecretProblem, POLICY_ENV } from "./extensions/approval-guard.ts";
 
 /** A value the user types in the app (a token, client credentials); kept only in the assistant's private state. */
 export interface SetupField {
@@ -169,7 +170,7 @@ export const CATALOG: readonly CatalogEntry[] = [
 		],
 		oauth: false,
 		reads: "Read channels, messages, threads, and members in the servers your bot was invited to.",
-		sends: "Send and react to messages and manage channels as your bot, after you approve each one.",
+		sends: "Send messages and reactions as your bot, after you approve each one. Read only hides them.",
 		readOnlyTools: [
 			"discord_list_guilds",
 			"discord_get_guild_info",
@@ -226,8 +227,8 @@ export const CATALOG: readonly CatalogEntry[] = [
 			},
 		],
 		oauth: true,
-		reads: "Search messages, channels, files, and people, and read channels and threads.",
-		sends: "Send and schedule messages, add reactions, and create canvases, after you approve each one.",
+		reads: "Search messages, channels, and people, and read channels, threads, and canvases.",
+		sends: "Send and schedule messages as you, after you approve each one. Read only hides them.",
 		readOnlyTools: [
 			"slack_search_public",
 			"slack_search_public_and_private",
@@ -273,7 +274,7 @@ export const CATALOG: readonly CatalogEntry[] = [
 		fields: [CLIENT_ID, { key: "client_secret", label: "Client Secret", secret: true }],
 		oauth: true,
 		reads: "Search and read your email threads, drafts, and labels.",
-		sends: "Create drafts and label messages, after you approve each one. It never sends mail.",
+		sends: "Draft and send mail as you, after you approve each one. Read only hides them.",
 		readOnlyTools: ["search_threads", "get_thread", "get_message", "list_drafts", "list_labels"],
 		guide: {
 			steps: [
@@ -292,7 +293,7 @@ export const CATALOG: readonly CatalogEntry[] = [
 				},
 			],
 			redirectUrl: GMAIL_REDIRECT,
-			note: "Gmail's server is a Developer Preview: your account must be in the Google Workspace Developer Preview Program. While the app is in testing, Google asks you to sign in again every 7 days.",
+			note: "Gmail's server is a Developer Preview: your account must be in the Google Workspace Developer Preview Program. While the app is in testing, Google asks you to sign in again every 7 days. The gmail.compose permission lets the assistant draft and send mail: each draft or message asks for your approval first, and read only hides them.",
 		},
 	},
 ];
@@ -797,10 +798,7 @@ interface Setup {
 const PASTE_PROMPT =
 	"If the browser shows an error page after you approve, copy the full address from its address bar and paste it here.";
 const DRAFT_ORIGIN = "Drafted by the assistant";
-const MAX_DRAFTS = 5;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
-/** Arguments named like these hold a secret; the value after them is masked in summaries. */
-const SECRET_NAME = /token|key|secret|password|passwd|auth|bearer|credential/i;
 
 export interface ConnectorManagerOptions {
 	store: ConnectorStore;
@@ -999,7 +997,8 @@ export class ConnectorManager {
 		const draft = parseDraft(text);
 		if (!draft) return undefined;
 		this.waiting.set(draft.draftId, draft);
-		for (const id of this.waiting.keys()) if (this.waiting.size > MAX_DRAFTS) this.waiting.delete(id);
+		for (const id of this.waiting.keys())
+			if (this.waiting.size > MAX_CONNECTOR_DRAFTS) this.waiting.delete(id);
 		return draft;
 	}
 
@@ -1110,6 +1109,8 @@ export class ConnectorManager {
 			inputs: server.fields.map((field) => field.label),
 			importable: template !== undefined,
 		};
+		const notes = template ? valueNotes(template) : [];
+		if (notes.length > 0) candidate.notes = notes;
 		if (server.reason) candidate.reason = server.reason;
 		const duplicate = template && this.duplicateOf(template);
 		if (duplicate) {
@@ -1391,6 +1392,8 @@ function parseDraft(text: string): ConnectorDraft | undefined {
 		return undefined;
 	}
 	if (typeof value !== "object" || value === null) return undefined;
+	// A typed value in the command line or the address would hand the secret to the model's choice.
+	if (draftSecretProblem(value)) return undefined;
 	const raw = value as Record<string, unknown>;
 	const name = typeof raw.name === "string" ? raw.name.trim() : "";
 	const description = raw.description === undefined ? "" : raw.description;
@@ -1442,24 +1445,78 @@ function fingerprint(server: ServerTemplate): string {
 	return ["cmd", server.command, ...(server.args ?? []).map(unversioned)].join("\u0000");
 }
 
-/** The command line or address, with values that look secret masked (never an env value or header). */
+const MASK = "•••";
+/** A flag or name whose value is a credential. */
+const SECRET_FLAG = /token|secret|key|pass|auth|cred|bearer/i;
+/** A header that carries a credential (`Name: value`). */
+const SECRET_HEADER =
+	/^(authorization|proxy-authorization|cookie|set-cookie)$|token|secret|key|auth|pass|cred|session|bearer/i;
+const HEADER_FLAG = /^(--header|-H)$/;
+/** Known credential prefixes: GitHub, OpenAI and Stripe style, Slack, AWS, GitLab. */
+const SECRET_PREFIX = /^(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|sk-|sk_|rk_|xox[abprse]-|AKIA|ASIA|glpat-)/;
+/** A long run of letters and digits with no separators, as tokens are (a word-only name is kept). */
+const OPAQUE = (min: number) =>
+	new RegExp(`^(?=[A-Za-z0-9_-]{${min},}$)(?=.*\\d|.*[a-z].*[A-Z]|.*[A-Z].*[a-z])`);
+const OPAQUE_SEGMENT = OPAQUE(20);
+const OPAQUE_WORD = OPAQUE(32);
+const URL_LIKE = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
+
+/**
+ * The command line or address as the user can recognize it (command, host, path), with every value
+ * that can hold a credential masked: an address loses its user and password, its query values, and
+ * long opaque path segments; a header passed as an argument keeps only its name; the value of a
+ * flag named like a credential is masked, and so are known token prefixes. Env values and headers
+ * are never part of it.
+ */
 export function summarize(server: ServerTemplate): string {
-	if ("url" in server) {
-		if (!URL.canParse(server.url)) return server.url.replace(/[?#].*$/, "");
-		const url = new URL(server.url);
-		return `${url.origin}${url.pathname}`;
-	}
+	if ("url" in server) return maskAddress(server.url);
 	const words = [server.command, ...(server.args ?? [])];
-	return words
-		.map((word, index) => {
-			const flag = /^(--?[^=]+)=(.*)$/.exec(word);
-			if (flag?.[1] && SECRET_NAME.test(flag[1])) return `${flag[1]}=•••`;
-			const previous = words[index - 1];
-			if (index > 1 && previous?.startsWith("-") && SECRET_NAME.test(previous) && !word.startsWith("-"))
-				return "•••";
-			return /^(ghp_|gho_|github_pat_|sk-|sk_|xox[abp]-|AKIA)/.test(word) ? "•••" : word;
-		})
-		.join(" ");
+	return words.map((word, index) => maskWord(word, index > 0 ? words[index - 1] : undefined)).join(" ");
+}
+
+function maskWord(word: string, previous: string | undefined): string {
+	if (previous !== undefined && HEADER_FLAG.test(previous)) return maskHeader(word, true);
+	if (
+		previous !== undefined &&
+		/^--?[A-Za-z0-9][\w.-]*$/.test(previous) &&
+		SECRET_FLAG.test(previous) &&
+		!word.startsWith("-")
+	)
+		return MASK;
+	if (previous !== undefined && /^(bearer|basic|token)$/i.test(previous)) return MASK;
+	if (URL_LIKE.test(word)) return maskAddress(word);
+	const assignment = /^(-{0,2}[A-Za-z0-9_][\w.-]*)=(.*)$/s.exec(word);
+	if (assignment) {
+		const [, name = "", value = ""] = assignment;
+		if (HEADER_FLAG.test(name)) return `${name}=${maskHeader(value, true)}`;
+		if (SECRET_FLAG.test(name)) return `${name}=${MASK}`;
+		return `${name}=${maskWord(value, undefined)}`;
+	}
+	const header = maskHeader(word, false);
+	if (header !== word) return header;
+	return SECRET_PREFIX.test(word) || OPAQUE_WORD.test(word) ? MASK : word;
+}
+
+/** `Name: value` with the value masked when the name carries a credential, or always after `--header`. */
+function maskHeader(word: string, always: boolean): string {
+	const header = /^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*)$/s.exec(word);
+	if (!header) return always ? MASK : word;
+	const [, name = ""] = header;
+	return always || SECRET_HEADER.test(name) ? `${name}: ${MASK}` : word;
+}
+
+/** An address as scheme, host, and path: no user or password, query values masked, no fragment. */
+function maskAddress(text: string): string {
+	if (!URL.canParse(text)) return text.replace(/[?#].*$/s, "").replace(/^([^/]*\/\/)[^/@]*@/, "$1");
+	const url = new URL(text);
+	const path = url.pathname
+		.split("/")
+		.map((segment) => (OPAQUE_SEGMENT.test(segment) || SECRET_PREFIX.test(segment) ? MASK : segment))
+		.join("/");
+	const keys = [...new Set(url.searchParams.keys())];
+	const query =
+		keys.length > 0 ? `?${keys.map((key) => `${maskWord(key, undefined)}=${MASK}`).join("&")}` : "";
+	return `${url.protocol}//${url.host}${path}${query}`;
 }
 
 /** The guard's policy for the engine's environment; the engine cannot change its own environment. */

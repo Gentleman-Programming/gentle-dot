@@ -272,6 +272,11 @@ function ImportList({ found, importServers, close }: ImportListProps) {
 								{candidate.summary ? <code>{candidate.summary}</code> : null}
 								<ImportNames label="Keys" names={[...candidate.envNames, ...candidate.headerNames]} />
 								<ImportNames label="You will type" names={candidate.inputs} />
+								{candidate.notes?.map((note) => (
+									<p key={note} className="connector-note">
+										{note}
+									</p>
+								))}
 								{candidate.duplicateOf ? (
 									<p className="connector-note">Already in your connectors as {candidate.duplicateOf}.</p>
 								) : candidate.reason ? (

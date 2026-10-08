@@ -124,6 +124,9 @@ export interface ConnectorInfo {
 	noSignIn?: true;
 }
 
+/** The daemon keeps at most this many drafts waiting; a newer one drops the oldest. */
+export const MAX_CONNECTOR_DRAFTS = 5;
+
 /** A connector the assistant drafted with `propose_connector`, waiting for the user's answer. */
 export interface ConnectorDraft {
 	draftId: string;
@@ -151,6 +154,8 @@ export interface ImportCandidate {
 	headerNames: string[];
 	/** Values the user types after the import (VS Code inputs), by their description. */
 	inputs: string[];
+	/** Values that run a command or read an environment variable when the server starts, in plain words. */
+	notes?: string[];
 	importable: boolean;
 	/** Why it cannot be imported. */
 	reason?: string;

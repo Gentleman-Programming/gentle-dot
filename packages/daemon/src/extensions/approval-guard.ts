@@ -69,6 +69,29 @@ export const PROPOSE_TOOL = {
 
 const REVIEW = "The user will review this connector in the app. Do not ask for its secrets in the chat.";
 const NO_REVIEW = "No one can review a connector right now. Ask the user to open the app.";
+const SECRETS_ONLY_IN_ENV = "Secrets can only go into environment variables.";
+const TYPED_VALUE = /\$\{\s*input\s*:/i;
+
+/**
+ * Why a draft cannot be sent: a value the user types (`${input:NAME}`) anywhere but an environment
+ * value (or an http server's header) would put the secret into the command line or an address the
+ * model chose. The daemon checks the same before it shows a draft.
+ */
+export function draftSecretProblem(params: unknown): string | undefined {
+	const http =
+		typeof params === "object" && params !== null && (params as { transport?: unknown }).transport === "http";
+	const misplaced = (value: unknown, top: boolean): boolean => {
+		if (typeof value === "string") return TYPED_VALUE.test(value);
+		if (typeof value !== "object" || value === null) return false;
+		return Object.entries(value).some(([key, entry]) => {
+			const values = top && (key === "env" || (http && key === "headers"));
+			if (values && typeof entry === "object" && entry !== null && !Array.isArray(entry))
+				return Object.keys(entry).some((name) => TYPED_VALUE.test(name));
+			return TYPED_VALUE.test(key) || misplaced(entry, false);
+		});
+	};
+	return misplaced(params, true) ? SECRETS_ONLY_IN_ENV : undefined;
+}
 
 /** Sends a draft to the daemon; the text is all the model gets back. */
 export function proposeConnector(
@@ -76,6 +99,8 @@ export function proposeConnector(
 	ctx: { hasUI: boolean; ui: { setStatus(key: string, text: string | undefined): void } },
 ): string {
 	if (!ctx.hasUI) return NO_REVIEW;
+	const problem = draftSecretProblem(params);
+	if (problem) return problem;
 	const text = JSON.stringify(params ?? {});
 	if (text.length > MAX_DRAFT) return "That draft is too long. Keep it to the server's command or URL.";
 	ctx.ui.setStatus(DRAFT_STATUS_KEY, text);
