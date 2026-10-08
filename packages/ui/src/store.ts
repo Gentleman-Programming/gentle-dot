@@ -1,0 +1,156 @@
+import type { Activity, AgentState, Ask, ConversationSummary, ServerMessage } from "@gentle-dot/protocol";
+
+export type ConnectionStatus = "connecting" | "open" | "closed" | "unauthorized";
+
+export interface ChatMessage {
+	id: string;
+	role: "user" | "assistant";
+	text: string;
+	streaming: boolean;
+	activities: Activity[];
+}
+
+export interface Notice {
+	id: number;
+	level: "info" | "warning" | "error";
+	message: string;
+}
+
+export interface DotState {
+	connection: ConnectionStatus;
+	agentState: AgentState;
+	conversationId?: string;
+	model?: string;
+	messages: ChatMessage[];
+	asks: Ask[];
+	conversations: ConversationSummary[];
+	interrupted: boolean;
+	notices: Notice[];
+}
+
+export type DotAction =
+	| { type: "server"; message: ServerMessage }
+	| { type: "connection"; status: ConnectionStatus }
+	| { type: "dismiss"; id: number };
+
+export const initialState: DotState = {
+	connection: "connecting",
+	agentState: "starting",
+	messages: [],
+	asks: [],
+	conversations: [],
+	interrupted: false,
+	notices: [],
+};
+
+let nextNotice = 0;
+
+export function reduce(state: DotState, action: DotAction): DotState {
+	switch (action.type) {
+		case "connection":
+			return {
+				...state,
+				connection: action.status,
+				messages: action.status === "open" ? state.messages : state.messages.map(stopStreaming),
+			};
+		case "dismiss":
+			return { ...state, notices: state.notices.filter((n) => n.id !== action.id) };
+		case "server":
+			return reduceServer(state, action.message);
+	}
+}
+
+function reduceServer(state: DotState, message: ServerMessage): DotState {
+	switch (message.type) {
+		case "ready":
+			return {
+				...state,
+				agentState: message.agentState,
+				conversationId: message.conversationId ?? state.conversationId,
+				model: message.model ?? state.model,
+			};
+		case "agent_state":
+			return { ...state, agentState: message.state };
+		case "user_message":
+			return {
+				...state,
+				interrupted: false,
+				messages: [
+					...state.messages,
+					{ id: message.messageId, role: "user", text: message.text, streaming: false, activities: [] },
+				],
+			};
+		case "message_delta":
+			return updateAssistant(state, message.messageId, (m) => ({
+				...m,
+				text: m.text + message.delta,
+				streaming: true,
+			}));
+		case "message_done":
+			return updateAssistant(state, message.messageId, (m) => ({
+				...m,
+				text: message.text,
+				streaming: false,
+			}));
+		case "activity":
+			return updateAssistant(state, message.messageId, (m) => {
+				const index = m.activities.findIndex((a) => a.id === message.activity.id);
+				const activities =
+					index < 0
+						? [...m.activities, message.activity]
+						: m.activities.map((a, i) => (i === index ? message.activity : a));
+				return { ...m, activities };
+			});
+		case "ask":
+			if (state.asks.some((a) => a.requestId === message.ask.requestId)) return state;
+			return { ...state, asks: [...state.asks, message.ask] };
+		case "ask_resolved":
+			return { ...state, asks: state.asks.filter((a) => a.requestId !== message.requestId) };
+		case "history":
+			return {
+				...state,
+				interrupted: false,
+				conversationId: message.conversationId ?? state.conversationId,
+				messages: message.messages.map((m) => ({ ...m, streaming: false })),
+			};
+		case "conversations":
+			return {
+				...state,
+				conversations: message.conversations,
+				conversationId: message.activeId ?? state.conversationId,
+			};
+		case "interrupted":
+			return { ...state, interrupted: true };
+		case "toast":
+			return addNotice(state, message.level, message.message);
+		case "error":
+			return addNotice(state, "error", message.message);
+	}
+}
+
+function updateAssistant(state: DotState, id: string, update: (m: ChatMessage) => ChatMessage): DotState {
+	const index = state.messages.findIndex((m) => m.id === id);
+	if (index < 0) {
+		const created: ChatMessage = { id, role: "assistant", text: "", streaming: false, activities: [] };
+		return { ...state, messages: [...state.messages, update(created)] };
+	}
+	return { ...state, messages: state.messages.map((m, i) => (i === index ? update(m) : m)) };
+}
+
+function addNotice(state: DotState, level: Notice["level"], message: string): DotState {
+	if (!message) return state;
+	return { ...state, notices: [...state.notices.slice(-4), { id: ++nextNotice, level, message }] };
+}
+
+function stopStreaming(message: ChatMessage): ChatMessage {
+	return message.streaming ? { ...message, streaming: false } : message;
+}
+
+/** Conversation title for the header. */
+export function activeTitle(state: DotState): string {
+	return state.conversations.find((c) => c.id === state.conversationId)?.title ?? "New conversation";
+}
+
+export function isBusy(state: AgentState): boolean {
+	return state === "thinking" || state === "working" || state === "needs_you";
+}

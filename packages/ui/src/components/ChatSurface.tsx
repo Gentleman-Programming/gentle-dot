@@ -1,0 +1,138 @@
+import { useState } from "react";
+import { activeTitle, type DotState, isBusy } from "../store.ts";
+import { AskCard } from "./AskCard.tsx";
+import { Composer } from "./Composer.tsx";
+import { MessageList } from "./MessageList.tsx";
+import { newRequestId, type Send } from "./types.ts";
+
+interface ChatSurfaceProps {
+	variant: "web" | "panel";
+	state: DotState;
+	send: Send;
+	dismiss: (id: number) => void;
+	onHide?: () => void;
+	focusKey?: number;
+}
+
+const CONTINUE_TEXT = "Continue where you left off.";
+
+function statusText(state: DotState): string | undefined {
+	if (state.connection === "unauthorized") {
+		return "This link is not valid anymore. Please open the link the assistant printed when it started.";
+	}
+	if (state.connection === "closed") return "Reconnecting to the assistant…";
+	if (state.connection === "connecting") return "Connecting…";
+	if (state.agentState === "restarting") return "The assistant is restarting…";
+	if (state.agentState === "starting") return "Starting the assistant…";
+	return undefined;
+}
+
+export function ChatSurface({ variant, state, send, dismiss, onHide, focusKey }: ChatSurfaceProps) {
+	const [showConversations, setShowConversations] = useState(false);
+	const status = statusText(state);
+	const ready =
+		state.connection === "open" && state.agentState !== "restarting" && state.agentState !== "starting";
+
+	return (
+		<div className={`chat chat-${variant}`} data-state={state.agentState}>
+			<header className="chat-header" data-tauri-drag-region={variant === "panel" ? "" : undefined}>
+				<span className={`state-dot state-${state.agentState}`} aria-hidden="true" />
+				<h1>{activeTitle(state)}</h1>
+				<button
+					type="button"
+					className="icon"
+					aria-label="Conversations"
+					aria-expanded={showConversations}
+					onClick={() => {
+						if (!showConversations) send({ type: "list_conversations" });
+						setShowConversations(!showConversations);
+					}}
+				>
+					☰
+				</button>
+				<button
+					type="button"
+					className="icon"
+					aria-label="New conversation"
+					disabled={!ready}
+					onClick={() => {
+						setShowConversations(false);
+						send({ type: "new_conversation" });
+					}}
+				>
+					＋
+				</button>
+				{onHide ? (
+					<button type="button" className="icon" aria-label="Hide" onClick={onHide}>
+						–
+					</button>
+				) : null}
+			</header>
+
+			{showConversations ? (
+				<nav className="conversations" aria-label="Earlier conversations">
+					{state.conversations.length === 0 ? <p className="muted">No conversations yet.</p> : null}
+					{state.conversations.map((conversation) => (
+						<button
+							key={conversation.id}
+							type="button"
+							className={conversation.id === state.conversationId ? "active" : ""}
+							onClick={() => {
+								setShowConversations(false);
+								if (conversation.id !== state.conversationId) {
+									send({ type: "open_conversation", conversationId: conversation.id });
+								}
+							}}
+						>
+							<span>{conversation.title}</span>
+							<time dateTime={conversation.updatedAt}>
+								{new Date(conversation.updatedAt).toLocaleString()}
+							</time>
+						</button>
+					))}
+				</nav>
+			) : null}
+
+			{status ? (
+				<div className="status" role="status">
+					{status}
+				</div>
+			) : null}
+
+			<main className="chat-body">
+				<MessageList messages={state.messages} />
+				{state.interrupted ? (
+					<div className="interrupted">
+						<p>I was interrupted. Continue?</p>
+						<button
+							type="button"
+							className="primary"
+							disabled={!ready}
+							onClick={() => send({ type: "send", text: CONTINUE_TEXT, requestId: newRequestId() })}
+						>
+							Continue
+						</button>
+					</div>
+				) : null}
+				{state.asks.map((ask) => (
+					<AskCard key={ask.requestId} ask={ask} send={send} />
+				))}
+			</main>
+
+			{state.notices.length > 0 ? (
+				<div className="notices">
+					{state.notices.map((notice) => (
+						<div key={notice.id} className={`notice notice-${notice.level}`}>
+							<span>{notice.message}</span>
+							<button type="button" aria-label="Dismiss" onClick={() => dismiss(notice.id)}>
+								×
+							</button>
+						</div>
+					))}
+				</div>
+			) : null}
+
+			<Composer busy={isBusy(state.agentState)} disabled={!ready} send={send} focusKey={focusKey} />
+		</div>
+	);
+}
