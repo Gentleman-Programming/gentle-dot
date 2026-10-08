@@ -158,6 +158,8 @@ describe("gateway", () => {
 		send(client, { type: "send", text: "tool:read" });
 		const done = await find(client, "activity", (m) => m.activity.status === "done");
 		expect(done.activity.kind).toBe("read");
+		const started = await find(client, "activity", (m) => m.activity.status === "running");
+		expect(started.messageId).toBe(done.messageId);
 		await find(client, "agent_state", (m) => m.state === "working");
 	});
 
@@ -205,6 +207,16 @@ describe("gateway", () => {
 			["user", "first conversation"],
 			["assistant", "Echo: first conversation"],
 		]);
+	});
+
+	it("refreshes the conversation list when a run settles so the title follows the first message", async () => {
+		const d = await daemon();
+		const client = await authed(d);
+		send(client, { type: "send", text: "name this conversation" });
+		const listed = await find(client, "conversations", (m) =>
+			m.conversations.some((c) => c.title === "name this conversation"),
+		);
+		expect(listed.activeId).toBe((await find(client, "ready")).conversationId);
 	});
 
 	it("refuses a conversation id outside the session directory", async () => {

@@ -73,7 +73,10 @@ export function MessageList({ messages }: { messages: ChatMessage[] }) {
 			{messages.map((message) => (
 				<article key={message.id} className={`message message-${message.role}`}>
 					{message.activities.length > 0 ? <Activities activities={message.activities} /> : null}
-					{message.text ? (
+					{message.text && message.role === "user" ? (
+						<div className="message-body message-plain">{message.text}</div>
+					) : null}
+					{message.text && message.role === "assistant" ? (
 						<div className="message-body">
 							<Markdown remarkPlugins={[remarkGfm]}>{message.text}</Markdown>
 						</div>

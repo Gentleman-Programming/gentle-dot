@@ -218,6 +218,8 @@ export class DotBridge {
 			case "agent_settled":
 				this.runningTools.clear();
 				this.assistantId = undefined;
+				// The title of a new conversation comes from its first message.
+				this.broadcast(this.conversationsPayload());
 				break;
 			case "extension_ui_request":
 				this.onUiRequest(event);
@@ -260,9 +262,11 @@ export class DotBridge {
 		if (started) this.runningTools.add(id);
 		else this.runningTools.delete(id);
 		const status = started ? "running" : event.isError ? "failed" : "done";
+		// Start and end of one tool call must land on the same message.
+		this.assistantId ??= `m${++this.nextMessage}`;
 		this.broadcast({
 			type: "activity",
-			messageId: this.assistantId ?? `m${++this.nextMessage}`,
+			messageId: this.assistantId,
 			activity: { id, ...describeTool(String(event.toolName ?? ""), event.args), status },
 		});
 	}

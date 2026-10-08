@@ -348,6 +348,11 @@ button.icon {
 	color: #fff;
 }
 
+.message-plain {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
 .message-body > :first-child {
 	margin-top: 0;
 }

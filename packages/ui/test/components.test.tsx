@@ -110,6 +110,20 @@ describe("MessageList", () => {
 	});
 });
 
+describe("MessageList user text", () => {
+	it("keeps the user's line breaks as typed", () => {
+		const { container } = render(
+			<MessageList
+				messages={[{ id: "u1", role: "user", text: "first line\nsecond", streaming: false, activities: [] }]}
+			/>,
+		);
+		const bubble = container.querySelector(".message-user .message-body");
+		expect(bubble?.textContent).toBe("first line\nsecond");
+		expect(bubble?.querySelector("p")).toBeNull();
+		expect(bubble).toHaveClass("message-plain");
+	});
+});
+
 describe("ChatSurface", () => {
 	it("shows the interruption prompt and continues", async () => {
 		const send = vi.fn();
