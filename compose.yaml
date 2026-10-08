@@ -1,0 +1,37 @@
+# Gentle Dot on a server. Create .env first (docs/deploy-vps.md, step 3).
+# Default: the daemon listens on the VPS loopback only, and the existing web server
+# (Apache on a cPanel/WHM VPS such as HostGator) proxies HTTPS to it.
+# Without a web server, start the bundled Caddy too: docker compose --profile caddy up -d
+services:
+  gentle-dot:
+    build: .
+    restart: unless-stopped
+    environment:
+      GENTLE_DOT_ALLOWED_ORIGINS: '["https://${DOT_DOMAIN}"]'
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - dot-home:/home/dot
+    ports:
+      - "127.0.0.1:${DOT_PORT:-4317}:4317"
+
+  caddy:
+    image: caddy:2
+    profiles: ["caddy"]
+    restart: unless-stopped
+    depends_on:
+      - gentle-dot
+    environment:
+      DOT_DOMAIN: ${DOT_DOMAIN}
+      DOT_USER: ${DOT_USER:-}
+      DOT_PASSWORD_HASH: ${DOT_PASSWORD_HASH:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+
+volumes:
+  dot-home:
+  caddy-data:

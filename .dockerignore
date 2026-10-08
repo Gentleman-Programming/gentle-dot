@@ -1,0 +1,9 @@
+**/node_modules
+**/dist
+.git
+apps/desktop/src-tauri/target
+apps/desktop/src-tauri/gen
+test-results
+playwright-report
+odd
+.atl
