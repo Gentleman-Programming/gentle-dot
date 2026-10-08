@@ -42,6 +42,18 @@ export function AccountsIcon() {
 	);
 }
 
+/** A plug: the apps the assistant can use. */
+export function ConnectorsIcon() {
+	return (
+		<Icon>
+			<path d="M9 2v5" />
+			<path d="M15 2v5" />
+			<path d="M6 7h12v4a6 6 0 0 1-12 0z" />
+			<path d="M12 17v5" />
+		</Icon>
+	);
+}
+
 /** Sliders: which model does what. */
 export function ProfilesIcon() {
 	return (

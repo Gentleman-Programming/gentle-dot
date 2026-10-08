@@ -67,3 +67,56 @@ button.back {
 	margin: 2px 0 4px;
 	font-size: 12px;
 }
+
+/* Connectors screen (ConnectorsPanel). */
+
+.connector-note {
+	margin: 0 0 4px;
+	font-size: 12px;
+	line-height: 17px;
+	color: var(--muted);
+}
+
+.connector-mode {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px 14px;
+	margin: 8px 0 10px;
+	padding: 0;
+	border: none;
+}
+
+.connector-mode legend {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip-path: inset(50%);
+}
+
+.connector-mode label {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 13px;
+}
+
+.connector-mode input {
+	accent-color: var(--accent);
+}
+
+.chip.connector-needs_signin {
+	color: var(--yellow);
+	border-color: rgba(224, 194, 122, 0.45);
+}
+
+.chip.connector-error {
+	color: var(--red);
+	border-color: rgba(255, 113, 143, 0.45);
+}
+
+.chip.connector-connected {
+	border-color: rgba(180, 231, 199, 0.3);
+	background: rgba(180, 231, 199, 0.1);
+	color: var(--green);
+}

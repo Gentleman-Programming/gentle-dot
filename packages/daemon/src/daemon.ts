@@ -7,6 +7,14 @@ import { type ClientMessage, CloseCode, PROTOCOL_VERSION, parseClientMessage } f
 import { type WebSocket, WebSocketServer } from "ws";
 import { AuthManager, type AuthRuntime, createModelAuthRuntime, resolveAgentHome } from "./auth.ts";
 import { type BridgeClient, DotBridge } from "./bridge.ts";
+import {
+	APPROVAL_GUARD,
+	bundledMcpCli,
+	ConnectorManager,
+	ConnectorStore,
+	type McpCli,
+	policyEnv,
+} from "./connectors.ts";
 import { ensureMemoryProject, ensurePrivateDir, isolatedAgentEnv } from "./isolation.ts";
 import { defaultImportPath, ProfileStore } from "./profiles.ts";
 import { type RotationLimits, rotationLimits } from "./rotation.ts";
@@ -33,6 +41,8 @@ export interface DaemonOptions {
 	profilesImportPath?: string;
 	/** Creates the sign-in runtime; defaults to Pi's ModelRuntime on the agent home. */
 	authRuntime?: () => Promise<AuthRuntime>;
+	/** The engine's command line for connector sign-in; default `GENTLE_DOT_MCP_CLI` (JSON array) or the bundled one. */
+	connectorCli?: McpCli;
 	/** Origins allowed to open the WebSocket, besides the daemon's own and the desktop app's. */
 	allowedOrigins?: string[];
 	backoffMs?: number[];
@@ -111,19 +121,41 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		agentEnv = isolatedAgentEnv(agentEnv, options.dataDir);
 		agentEnv.GENTLE_PI_CONFIG_HOME = join(options.dataDir, "gentle-ai");
 	}
+	const agentHome = options.agentHome ?? resolveAgentHome(process.env, options.dataDir);
+	const connectorStore = new ConnectorStore({
+		dataDir: options.dataDir,
+		agentHome,
+		guardPath: APPROVAL_GUARD,
+		log,
+	});
+	// The assistant's own engine loads the approval guard for connector actions.
+	const guardArgs = options.agentHome ? ["-e", APPROVAL_GUARD] : [];
 	const supervisor = new AgentSupervisor({
 		command: options.agentCommand,
 		args: [...(options.agentArgs ?? []), ...homeArgs],
-		extraArgs: [...identityArgs(options.dataDir), ...folderArgs, ...(options.agentExtraArgs ?? [])],
+		extraArgs: [
+			...identityArgs(options.dataDir),
+			...folderArgs,
+			...guardArgs,
+			...(options.agentExtraArgs ?? []),
+		],
 		cwd: options.workspace,
 		dataDir: options.dataDir,
 		env: agentEnv,
+		// mcp.json is read when a session starts: put back anything not approved, and hand the guard its policy.
+		prepareSpawn: () => {
+			try {
+				connectorStore.ensureMcpJson();
+			} catch (error) {
+				log(`could not check mcp.json: ${(error as Error).message}`);
+			}
+			return policyEnv(connectorStore);
+		},
 		// The first start in a new home installs the engine's companion packages.
 		...(options.agentHome ? { startTimeoutMs: 180_000 } : {}),
 		...(options.backoffMs ? { backoffMs: options.backoffMs } : {}),
 		log: (line) => log(`[agent] ${line}`),
 	});
-	const agentHome = options.agentHome ?? resolveAgentHome(process.env, options.dataDir);
 	const auth = new AuthManager({
 		runtime: options.authRuntime ?? (() => createModelAuthRuntime(agentHome, options.workspace)),
 		log,
@@ -133,12 +165,20 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		agentHome,
 		importPath: options.profilesImportPath ?? defaultImportPath(process.env),
 	});
+	const connectors = new ConnectorManager({
+		store: connectorStore,
+		cli: options.connectorCli ?? mcpCliFromEnv(process.env) ?? bundledMcpCli(),
+		env: { ...agentEnv },
+		cwd: options.workspace,
+		log,
+	});
 	const historyPage = options.historyPage ?? Number(process.env.GENTLE_DOT_HISTORY_PAGE);
 	const bridge = new DotBridge(supervisor, {
 		dataDir: options.dataDir,
 		log,
 		auth,
 		profiles,
+		connectors,
 		features: { conversations: options.conversations ?? process.env.GENTLE_DOT_CONVERSATIONS === "1" },
 		rotation: options.rotation ?? rotationLimits(process.env),
 		...(Number.isInteger(historyPage) && historyPage > 0 ? { historyPage } : {}),
@@ -179,6 +219,12 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 			await supervisor.stop();
 		},
 	};
+}
+
+function mcpCliFromEnv(env: NodeJS.ProcessEnv): McpCli | undefined {
+	if (!env.GENTLE_DOT_MCP_CLI) return undefined;
+	const [command, ...args] = JSON.parse(env.GENTLE_DOT_MCP_CLI) as string[];
+	return command ? { command, args } : undefined;
 }
 
 function allowedOrigins(port: number, options: DaemonOptions): Set<string> {

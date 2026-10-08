@@ -228,7 +228,7 @@ function ProviderSection({ title, hint, providers, label, plan, action, send }: 
 	);
 }
 
-function FlowEvent({ event, openUrl }: { event: AuthEvent; openUrl: (url: string) => void }) {
+export function FlowEvent({ event, openUrl }: { event: AuthEvent; openUrl: (url: string) => void }) {
 	switch (event.kind) {
 		case "auth_url":
 			return (
@@ -255,7 +255,7 @@ function FlowEvent({ event, openUrl }: { event: AuthEvent; openUrl: (url: string
 	}
 }
 
-function FlowPrompt({ prompt, send }: { prompt: AuthPrompt; send: Send }) {
+export function FlowPrompt({ prompt, send }: { prompt: AuthPrompt; send: Send }) {
 	const [value, setValue] = useState("");
 	const answer = (text: string) => send({ type: "auth_reply", flowId: prompt.flowId, value: text });
 	if (prompt.kind === "select") {

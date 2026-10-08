@@ -11,6 +11,7 @@ import {
 	type ServerPayload,
 } from "@gentle-dot/protocol";
 import type { AuthManager } from "./auth.ts";
+import type { ConnectorManager, ConnectorRefusal } from "./connectors.ts";
 import {
 	conversationIdOf,
 	type HistoryPage,
@@ -39,6 +40,7 @@ export interface BridgeOptions {
 	log?: (line: string) => void;
 	auth?: AuthManager;
 	profiles?: ProfileStore;
+	connectors?: ConnectorManager;
 	/** How long switching conversations waits for a running answer to stop. Default 10 s. */
 	stopTimeoutMs?: number;
 	/** Optional parts of the app; by default one continuous chat. */
@@ -98,6 +100,8 @@ export class DotBridge {
 	private queue: MessageQueue = { steering: [], followUp: [] };
 	/** Messages on their way to the agent; the session is never rotated under them. */
 	private sending = 0;
+	/** A run settled while a message was still on its way; check for rotation once it arrived. */
+	private rotationDeferred = false;
 	private readonly features: Features;
 	private readonly rotator: SessionRotator;
 	private readonly liveSwitch: LiveModelSwitch;
@@ -116,6 +120,7 @@ export class DotBridge {
 		});
 		supervisor.onEvent((event) => this.onAgentEvent(event));
 		if (options.auth) options.auth.onCredentialsChanged = () => this.afterCredentialsChange();
+		if (options.connectors) options.connectors.onChanged = (restart) => this.afterConnectorsChange(restart);
 		this.state = this.deriveState();
 	}
 
@@ -138,6 +143,7 @@ export class DotBridge {
 		return () => {
 			this.clients.delete(client);
 			this.options.auth?.cancelOwnedBy(client);
+			this.options.connectors?.cancelOwnedBy(client);
 		};
 	}
 
@@ -196,6 +202,14 @@ export class DotBridge {
 					await this.sendProfiles(client, true);
 					return;
 				}
+				if (/^\s*\/connectors\s*$/i.test(message.text)) {
+					this.deliver(client, {
+						type: "connectors",
+						connectors: this.requireConnectors().list(),
+						open: true,
+					});
+					return;
+				}
 				await this.switching;
 				this.interrupted = false;
 				const busy = this.supervisor.busy;
@@ -208,6 +222,11 @@ export class DotBridge {
 					);
 				} finally {
 					this.sending -= 1;
+					// The run may have settled before the answer to this prompt was handled.
+					if (this.sending === 0 && this.rotationDeferred) {
+						this.rotationDeferred = false;
+						if (!this.supervisor.busy) this.rotateWhenIdle();
+					}
 				}
 				return;
 			}
@@ -281,7 +300,11 @@ export class DotBridge {
 				return;
 			}
 			case "auth_reply":
-				if (!this.requireAuth().reply(client, message.flowId, message)) {
+				if (
+					this.options.connectors?.owns(message.flowId)
+						? !this.options.connectors.reply(client, message.flowId, message)
+						: !this.requireAuth().reply(client, message.flowId, message)
+				) {
 					this.deliver(client, {
 						type: "error",
 						code: "auth_flow_not_found",
@@ -296,6 +319,16 @@ export class DotBridge {
 			}
 			case "profiles_list":
 				await this.sendProfiles(client);
+				return;
+			case "connectors_list":
+				this.deliver(client, { type: "connectors", connectors: this.requireConnectors().list() });
+				return;
+			case "connector_connect":
+			case "connector_signin":
+			case "connector_disconnect":
+			case "connector_mode":
+			case "connector_remove":
+				await this.connectorCommand(client, message);
 				return;
 			case "profile_save":
 			case "profile_rename":
@@ -408,6 +441,47 @@ export class DotBridge {
 	private async sendProviders(client: BridgeClient, open = false): Promise<void> {
 		const providers = await this.requireAuth().providers();
 		this.deliver(client, { type: "auth_providers", providers, ...(open ? { open: true } : {}) });
+	}
+
+	private requireConnectors(): ConnectorManager {
+		if (!this.options.connectors) throw new Error("connectors are not available");
+		return this.options.connectors;
+	}
+
+	/** Runs one connector change; a sign-in's steps go only to the window that started it. */
+	private async connectorCommand(
+		client: BridgeClient,
+		message: Extract<ClientMessage, { connectorId: string }>,
+	): Promise<void> {
+		const connectors = this.requireConnectors();
+		const emit = (payload: ServerPayload) => this.deliver(client, payload);
+		let refused: ConnectorRefusal | undefined;
+		switch (message.type) {
+			case "connector_connect":
+				refused = connectors.connect(client, message.connectorId, emit);
+				break;
+			case "connector_signin":
+				refused = connectors.signIn(client, message.connectorId, emit);
+				break;
+			case "connector_disconnect":
+				refused = connectors.disconnect(message.connectorId);
+				break;
+			case "connector_mode":
+				refused = connectors.setMode(message.connectorId, message.mode);
+				break;
+			case "connector_remove":
+				refused = await connectors.remove(message.connectorId);
+				break;
+		}
+		if (refused) this.deliver(client, { type: "error", ...refused });
+	}
+
+	/** Every window sees the new statuses; a new mcp.json needs an agent restart, once it is idle. */
+	private afterConnectorsChange(restart: boolean): void {
+		this.broadcast({ type: "connectors", connectors: this.requireConnectors().list() });
+		if (!restart) return;
+		if (this.supervisor.busy) this.restartPending = true;
+		else this.restartAgent();
 	}
 
 	private requireProfiles(): ProfileStore {
@@ -621,6 +695,7 @@ export class DotBridge {
 				this.broadcast(this.conversationsPayload());
 				this.settleModelSwitch();
 				if (this.restartPending) this.restartAgent();
+				else if (this.sending > 0) this.rotationDeferred = true;
 				else this.rotateWhenIdle();
 				break;
 			case "extension_ui_request":

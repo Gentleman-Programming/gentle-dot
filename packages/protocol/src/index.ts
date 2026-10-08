@@ -86,6 +86,26 @@ export type AuthEvent =
 	| { kind: "device_code"; userCode: string; verificationUri: string; expiresInSeconds?: number }
 	| { kind: "progress"; message: string };
 
+/** What a connector may do: only read, or also act after the user approves each action. */
+export type ConnectorMode = "read_only" | "read_write";
+
+/** `off`: not added or turned off; `error`: the last sign-in failed. */
+export type ConnectorStatus = "off" | "needs_signin" | "connected" | "error";
+
+/** A service the assistant can connect to (an MCP server the daemon manages). */
+export interface ConnectorInfo {
+	id: string;
+	name: string;
+	/** What it can read, in plain words. */
+	reads: string;
+	/** What it can do in "Read and send" mode. */
+	sends: string;
+	added: boolean;
+	enabled: boolean;
+	mode: ConnectorMode;
+	status: ConnectorStatus;
+}
+
 /** Reasoning effort levels the engine accepts. */
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
@@ -178,7 +198,13 @@ export type ClientMessage =
 	| { type: "profile_delete"; name: string }
 	| { type: "profile_apply"; name: string }
 	| { type: "profile_import" }
-	| { type: "profile_save_current"; name: string };
+	| { type: "profile_save_current"; name: string }
+	| { type: "connectors_list" }
+	| {
+			type: "connector_connect" | "connector_signin" | "connector_disconnect" | "connector_remove";
+			connectorId: string;
+	  }
+	| { type: "connector_mode"; connectorId: string; mode: ConnectorMode };
 
 export type ServerPayload =
 	| { type: "ready"; agentState: AgentState; conversationId?: string; model?: string; features?: Features }
@@ -225,7 +251,9 @@ export type ServerPayload =
 			/** Set when the user typed `/profiles`. */
 			open?: boolean;
 	  }
-	| { type: "profiles_imported"; imported: { from: string; to: string }[]; missingProviders: string[] };
+	| { type: "profiles_imported"; imported: { from: string; to: string }[]; missingProviders: string[] }
+	/** Connector sign-ins reuse `auth_event`, `auth_prompt`, and `auth_done`, with flow ids starting `connector-`. */
+	| { type: "connectors"; connectors: ConnectorInfo[]; open?: boolean };
 
 /** Every daemon message carries a per-connection, monotonic `seq`. */
 export type ServerMessage = ServerPayload & { seq: number };
@@ -233,6 +261,8 @@ export type ServerMessage = ServerPayload & { seq: number };
 const isString = (value: unknown): value is string => typeof value === "string";
 const isOptional = (value: unknown, check: (v: unknown) => boolean) => value === undefined || check(value);
 const MAX_TEXT = 100_000;
+const CONNECTOR_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
+const isConnectorId = (value: unknown): value is string => isString(value) && CONNECTOR_ID.test(value);
 
 /**
  * Reads the complete queues from the engine's `queue_update` record. A missing
@@ -318,6 +348,16 @@ export function parseClientMessage(raw: string): ClientMessage | undefined {
 		case "profile_apply":
 		case "profile_save_current":
 			return isValidProfileName(m.name) ? { type: m.type, name: m.name } : undefined;
+		case "connector_connect":
+		case "connector_signin":
+		case "connector_disconnect":
+		case "connector_remove":
+			return isConnectorId(m.connectorId) ? { type: m.type, connectorId: m.connectorId } : undefined;
+		case "connector_mode":
+			return isConnectorId(m.connectorId) && (m.mode === "read_only" || m.mode === "read_write")
+				? { type: "connector_mode", connectorId: m.connectorId, mode: m.mode }
+				: undefined;
+		case "connectors_list":
 		case "profiles_list":
 		case "profile_import":
 		case "abort":

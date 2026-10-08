@@ -5,7 +5,16 @@ import { activeTitle, type DotAction, type DotState, isBusy, needsAccount } from
 import { AccountsPanel } from "./AccountsPanel.tsx";
 import { AskCard } from "./AskCard.tsx";
 import { Composer } from "./Composer.tsx";
-import { AccountsIcon, ConversationsIcon, MinusIcon, PlusIcon, ProfilesIcon, RoseGlyph } from "./icons.tsx";
+import { ConnectorsPanel } from "./ConnectorsPanel.tsx";
+import {
+	AccountsIcon,
+	ConnectorsIcon,
+	ConversationsIcon,
+	MinusIcon,
+	PlusIcon,
+	ProfilesIcon,
+	RoseGlyph,
+} from "./icons.tsx";
 import { MessageList } from "./MessageList.tsx";
 import { ProfilesPanel } from "./ProfilesPanel.tsx";
 import { newRequestId, type Send } from "./types.ts";
@@ -54,6 +63,10 @@ export function ChatSurface({
 		send({ type: "profiles_list" });
 		dispatch({ type: "profiles", open: true });
 	};
+	const openConnectors = () => {
+		send({ type: "connectors_list" });
+		dispatch({ type: "connectors", open: true });
+	};
 	const [showConversations, setShowConversations] = useState(false);
 	/** A switch that waits for the user to confirm stopping the running answer. */
 	const [pendingSwitch, setPendingSwitch] = useState<SwitchMessage | undefined>(undefined);
@@ -67,8 +80,10 @@ export function ChatSurface({
 		setShowConversations(false);
 		if (state.auth.open && !state.auth.flow?.prompt) dispatch({ type: "accounts", open: false });
 		if (state.profiles.open) dispatch({ type: "profiles", open: false });
+		if (state.connectors.open && !state.connectors.flow?.prompt)
+			dispatch({ type: "connectors", open: false });
 	};
-	const covered = state.auth.open || state.profiles.open;
+	const covered = state.auth.open || state.profiles.open || state.connectors.open;
 	// One continuous chat unless the daemon turns the conversations list on.
 	const conversations = state.features.conversations;
 	const status = statusText(state);
@@ -107,6 +122,15 @@ export function ChatSurface({
 				</button>
 				<button type="button" className="icon" aria-label="Profiles" title="Profiles" onClick={openProfiles}>
 					<ProfilesIcon />
+				</button>
+				<button
+					type="button"
+					className="icon"
+					aria-label="Connectors"
+					title="Connectors"
+					onClick={openConnectors}
+				>
+					<ConnectorsIcon />
 				</button>
 				{conversations ? (
 					<button
@@ -170,6 +194,12 @@ export function ChatSurface({
 						dispatch={dispatch}
 						{...(state.auth.providers ? { providers: state.auth.providers } : {})}
 					/>
+				</main>
+			) : null}
+
+			{state.connectors.open && !state.auth.open && !state.profiles.open ? (
+				<main className="chat-body">
+					<ConnectorsPanel connectors={state.connectors} send={send} dispatch={dispatch} openUrl={openUrl} />
 				</main>
 			) : null}
 

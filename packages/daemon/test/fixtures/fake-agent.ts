@@ -6,12 +6,14 @@
 //   "tool:<name>"  runs one fake tool call
 //   "ask:select"   asks a select dialog and echoes the answer
 //   "ask:confirm"  asks a confirm dialog and echoes the answer
+//   "ask:approval" asks the approval guard's real confirm for a Notion page, and echoes the answer
 //   "hang"         starts a run that only ends on abort (an aborted answer), or on a
 //                  session switch (Pi then ends it with an error: "This operation was aborted")
 //   "fail"         the provider fails: an answer that ends with stopReason "error"
 //   "slow"         answers after 1.5 s, leaving time to queue messages
 //   "crash"        starts a run and exits with code 1
 //   "burst"        answers and finishes the run in a single stdout write
+//   "burst:<text>" runs <text> the same way: the prompt's response and the whole run in one write
 //   "compact"      records a compaction entry (its summary lists the user's messages so far)
 //   "pad:<n>"      grows the session file by about n bytes (an entry outside the context)
 //   "recall"       answers with the hidden context messages it was given
@@ -78,6 +80,7 @@ if (process.env.FAKE_AGENT_ENV_FILE) {
 					"ENGRAM_PORT",
 					"ENGRAM_URL",
 					"ENGRAM_DATA_DIR",
+					"GENTLE_DOT_CONNECTOR_POLICY",
 				].map((key) => [key, process.env[key]]),
 			),
 		),
@@ -309,6 +312,28 @@ async function runPrompt(text: string) {
 		assistantText(answer.confirmed ? "Confirmed" : "Declined");
 		return endRun();
 	}
+	if (text === "ask:approval") {
+		const { decide } = await import("../../src/extensions/approval-guard.ts");
+		const decision = decide(
+			{
+				toolName: "mcp__notion__notion_create_pages",
+				input: {
+					parent: "Team notes",
+					title: "Weekly plan",
+					content: "Monday: review the launch checklist.\nTuesday: send the update to the team.",
+				},
+				cwd: process.cwd(),
+			},
+			{
+				connectors: { notion: { name: "Notion", mode: "read_write", readOnlyTools: [] } },
+				protectedPaths: [],
+			},
+		);
+		if (decision.action !== "ask") throw new Error("the guard did not ask");
+		const answer = await askUi({ method: "confirm", title: decision.title, message: decision.message });
+		assistantText(answer.confirmed ? "Created the page" : "I did not create the page");
+		return endRun();
+	}
 	assistantText(`Echo: ${text}`);
 	endRun();
 }
@@ -354,9 +379,10 @@ function handle(rec: Rec) {
 				return respond(id, "prompt", { disposition: "queued" });
 			}
 			if (process.env.FAKE_AGENT_NO_MODEL) return respond(id, "prompt", undefined, "No model selected");
-			if (rec.message === "burst") batch = [];
+			const burst = String(rec.message).startsWith("burst");
+			if (burst) batch = [];
 			respond(id, "prompt", { disposition: "started" });
-			void run(String(rec.message));
+			void run(burst ? String(rec.message).replace(/^burst:/, "") : String(rec.message));
 			if (batch) {
 				process.stdout.write(batch.join(""));
 				batch = undefined;

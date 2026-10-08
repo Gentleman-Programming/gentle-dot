@@ -64,6 +64,7 @@ docs/               design, deployment guide, security checklist
 - Spawns the bundled engine (`node <gentle-pi>/bin/gentle-shell.mjs --home <dataDir>/agent --mode rpc --session-dir <dataDir>/sessions --append-system-prompt <identity file>`) with `cwd` = the assistant's own workspace, `<dataDir>/workspace`, so the engine never reads a `.pi` project config from the user's home. A custom `workspace` (config or `GENTLE_DOT_WORKSPACE`) is never used as `cwd` and nothing is written there; it is passed as one more `--append-system-prompt` text: "The user's preferred working folder is <path>. Use absolute paths there unless told otherwise."
 - Isolation (S12): the child runs with its own `HOME=<dataDir>/home` (0700) and `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, and `XDG_STATE_HOME` under it, plus `GENTLE_PI_CONFIG_HOME=<dataDir>/gentle-ai`. `PATH` is kept, and `GIT_CONFIG_GLOBAL` points at the user's real `~/.gitconfig` when it exists, to keep their git identity. Inherited `PI_CODING_AGENT_DIR`, `GENTLE_PI_AGENT_HOME`, and `GENTLE_SHELL_CONFIG` are removed. The engine's first run otherwise writes into the real `~` (`~/.gentle-shell`, `~/.pi/agent/pi-pretty`, `~/.gentle-ai`), which `--home` alone does not prevent.
 - Memory (S23): the engine uses the user's global Engram, always in the project `gentle-dot`. The memory plugin accepts a server only when `engram instance-id` (read from the Engram data folder, by default `$HOME/.engram`) matches the server's `/health` `instance_id`, so the child gets `ENGRAM_DATA_DIR=<real ~/.engram>` (the inherited `ENGRAM_DATA_DIR` when set; override `GENTLE_DOT_ENGRAM_DATA_DIR`) and keeps the user's own `ENGRAM_PORT` and `ENGRAM_URL` (default server 7437). If the global Engram is not running, the plugin starts it with that data folder, as Gentle Shell does. The project comes from Engram's per-folder setting: the daemon writes `<dataDir>/workspace/.engram/config.json` (`{"project_name":"gentle-dot"}`) at every start, and Engram reads it before any other detection (source `config`). The plugin has no per-client project override (`ENGRAM_PROJECT` only applies to the Engram process itself, which is the user's shared server). Memories the assistant saved earlier in its private memory (`<dataDir>/home/.engram`) are not moved. `GENTLE_DOT_ENGRAM=private` restores a private memory: no `ENGRAM_DATA_DIR`, `ENGRAM_URL` removed, `ENGRAM_PORT=7438` (override `GENTLE_DOT_ENGRAM_PORT`), data under `<dataDir>/home/.engram`.
+- Connectors (S18): before every spawn (first start, restart, respawn) the supervisor's `prepareSpawn` hook checks `<agentHome>/mcp.json` against the hash in `<dataDir>/connectors.json` and restores it, then hands the approval guard its policy in the child's environment (`GENTLE_DOT_CONNECTOR_POLICY`, JSON: the turned-on connectors, their modes and curated read-only tools, and the protected files). The engine cannot change its own environment, so the policy cannot be edited by the assistant. The assistant's own engine loads the guard with `-e packages/daemon/src/extensions/approval-guard.ts` (TypeScript loads as is).
 - Parses stdout with strict LF framing on a byte stream. Never Node `readline` (it splits on U+2028/U+2029, which are valid inside JSON).
 - Correlates commands by `id`; stdout records without `id` are session events.
 - Reads stderr only as diagnostics (logged, never parsed).
@@ -92,6 +93,12 @@ Client to daemon:
 | `auth_login` | `providerId`, `method` (`oauth` \| `api_key`) | daemon `ModelRuntime.login()`; one flow at a time |
 | `auth_reply` | `flowId`, `value` \| `cancelled` | answers the flow's current prompt |
 | `auth_logout` | `providerId` | daemon `ModelRuntime.logout()` |
+| `connectors_list` | — | daemon `connectors.json` and `mcp-auth.json` key presence |
+| `connector_connect` | `connectorId` | adds or turns on the connector (new `mcp.json`, agent restart when idle), then `mcp login` when not signed in |
+| `connector_signin` | `connectorId` | `mcp login <id>`; one flow at a time |
+| `connector_disconnect` | `connectorId` | turns it off (the sign-in stays); agent restart when idle |
+| `connector_mode` | `connectorId`, `mode` (`read_only` \| `read_write`) | new `mcp.json`; agent restart when idle |
+| `connector_remove` | `connectorId` | `mcp logout <id>`, then forgets it; agent restart when idle |
 
 Daemon to client:
 
@@ -116,12 +123,21 @@ Daemon to client:
 | `auth_prompt` | `flowId`, `kind` (`text`, `secret`, `select`, `manual_code`), `message`, `options` — sent only to the window that started the flow |
 | `auth_event` | `auth_url`, `device_code`, `progress`, or `info` |
 | `auth_done` | `ok`, plain-language `message` on failure or cancellation |
+| `connectors` | `connectors` (`id`, `name`, `reads`, `sends`, `added`, `enabled`, `mode`, `status`: `off` \| `needs_signin` \| `connected` \| `error`); `open: true` when the user typed `/connectors` |
 
 ### Sign-in (S10) and own instance (S12)
 
 The daemon runs the Gentle Shell bundled as its `gentle-pi` dependency, with `--home ~/.gentle-dot/agent` and `GENTLE_PI_CONFIG_HOME=~/.gentle-dot/gentle-ai`, so nothing is shared with a Gentle Shell the user may have installed. `/login` is a terminal-only command in Pi, so sign-in runs in the daemon through Pi's `ModelRuntime` on that same home (same `auth.json` format, file locking, mode 0600). Typed answers are never logged. After new credentials, the daemon refreshes every window's account list and restarts the agent once it is idle, so the new models appear. Typing `/login` in the chat opens the accounts screen.
 
 Every daemon message carries `seq` (monotonic per connection) so the UI can detect gaps and request `get_history`.
+
+### Connectors (S18)
+
+- Catalog (`packages/daemon/src/connectors.ts`): Notion `https://mcp.notion.com/mcp`, Linear `https://mcp.linear.app/mcp`, and Atlassian `https://mcp.atlassian.com/v2/mcp`, each remote OAuth, with a curated list of read-only tools. Slack, Gmail, Discord, assistant-drafted servers (S19), and imports (S20) add catalog entries or drafts that go through the same store.
+- The daemon is the only writer of `<agentHome>/mcp.json`. It renders the file from `<dataDir>/connectors.json` (each connector's `enabled` and `mode`, plus the sha256 of the approved `mcp.json`), writes both atomically with mode 0600, and restores `mcp.json` before every agent start. Every server is `exposure: "direct"` (the assistant turns codemode off). "Read only" adds `toolExposure: {"*": "hidden", <curated tool>: "direct"}`; the engine prefers exact names over patterns, so an unknown tool stays hidden.
+- Sign-in runs the engine's own command line as a separate process, `node <pi-coding-agent>/dist/bundle/cli.js mcp login <id>`, with the agent's isolated environment and `PI_CODING_AGENT_DIR=<agentHome>`. The daemon relays the printed authorization URL (`auth_event` `auth_url`) and offers a `manual_code` prompt: when the browser cannot reach this computer's loopback callback, the user pastes the address it ended on, and the daemon opens it locally only when its origin and path equal the authorization URL's `redirect_uri` and its `state` matches. Cancel stops the process by PID. Flow ids start with `connector-`, so `auth_reply` reaches the right flow; typed and printed text is never logged (URLs are masked).
+- Status: `connected` when `mcp-auth.json` holds tokens under `mcp__<id>|<url>` (token values are dropped while parsing); `needs_signin` otherwise; `error` after a failed sign-in.
+- Approval guard (`packages/daemon/src/extensions/approval-guard.ts`, `tool_call` hook, nested calls included): a connector tool runs without asking only when it declares `readOnlyHint: true` AND it is on the curated list. Anything else asks through `ctx.ui.confirm` (an ask card: "Allow Notion to create pages?" with the key arguments, truncated), and is blocked when declined, when no one can answer, or when the connector is "Read only". A server outside the policy is blocked; without a valid policy every connector call asks. `write`/`edit` of `mcp.json`, `mcp-auth.json`, `connectors.json`, or the guard itself (symlinks resolved), and commands that name those files, `PI_CODING_AGENT_DIR`, or `mcp add|login|logout|remove`, are blocked with a note to use the Connectors screen.
 
 ### Switching and history races (S21)
 
@@ -159,7 +175,7 @@ The UI shows one endless chat: no conversations list, no new conversation, and t
 ### The panel (expanded)
 
 - 420 × 640 px, rounded 20 px, translucent (macOS vibrancy), anchored to the Dot.
-- Header (one continuous chat): the rose glyph and "Gentle Dot", then Accounts, Profiles, and Hide as 18 px stroke icons with tooltips. With `features.conversations` on, the conversation title, the conversations list, and New conversation return.
+- Header (one continuous chat): the rose glyph and "Gentle Dot", then Accounts, Profiles, Connectors (a plug; also `/connectors`), and Hide as 18 px stroke icons with tooltips. With `features.conversations` on, the conversation title, the conversations list, and New conversation return.
 - "Show earlier" at the top of the chat loads the previous page; a subtle "Earlier messages" divider marks where the chat's earlier session ends.
 - Body: message list with streaming Markdown and code blocks; activity rows are collapsed one-liners grouped under the assistant turn ("Read 3 files · Ran tests").
 - Ask cards: when the agent needs the user, an inline card with the question and buttons (select and confirm) or a text field (input and editor). The Dot turns amber until the user answers.
@@ -169,7 +185,7 @@ The UI shows one endless chat: no conversations list, no new conversation, and t
 ### Menu bar
 
 - Template icon: the hand-drawn rose glyph (`docs/brand/rose-glyph.svg`), with one variant per state: ready, working (dashed outer petals; also used while thinking), needs you (a filled badge dot), and unavailable (dimmed; starting, restarting, and error).
-- Menu: Open (`⌥ Space`), New conversation, Open in browser, Restart assistant, Launch at login (toggle), Quit. In the single chat the UI ignores New conversation; hiding the item in the tray is a follow-up for `apps/desktop`.
+- Menu: Open (`⌥ Space`), Open in browser, Restart assistant, Launch at login (toggle), Quit. New conversation appears after Open only with the conversations list on (`GENTLE_DOT_CONVERSATIONS=1`).
 
 ### Web
 
@@ -241,7 +257,7 @@ The Dot drags with `getCurrentWindow().startDragging()` (permission `core:window
 
 ### Menu bar and shortcut
 
-Tray menu: Open (`⌥ Space`), New conversation, Open in browser, Restart assistant, Launch at login (check item), Quit. The global shortcut `Alt+Space` (configurable as `shortcut` in `config.json`) toggles the panel. Launch at login uses `tauri-plugin-autostart`; Open in browser uses `tauri-plugin-opener` with `webUrl`.
+Tray menu: Open (`⌥ Space`), New conversation (only with `GENTLE_DOT_CONVERSATIONS=1`, read like the daemon reads it), Open in browser, Restart assistant, Launch at login (check item), Quit. The global shortcut `Alt+Space` (configurable as `shortcut` in `config.json`) toggles the panel. Launch at login uses `tauri-plugin-autostart`; Open in browser uses `tauri-plugin-opener` with `webUrl`.
 
 ### Daemon lifecycle
 
@@ -257,4 +273,4 @@ On launch, the app checks `GET /health`. If the daemon does not answer, the app 
 
 All keys are optional. `workspace` is the user's preferred working folder: the engine is told about it but always runs in `<dataDir>/workspace`.
 
-Environment overrides: `GENTLE_DOT_AGENT_HOME` (default `~/.gentle-dot/agent`), `GENTLE_DOT_ENGRAM_DATA_DIR` (default: the user's Engram data folder), `GENTLE_DOT_ENGRAM` (`private` for a memory of the assistant's own), `GENTLE_DOT_ENGRAM_PORT` (private memory only, default `7438`), `GENTLE_DOT_PORT`, `GENTLE_DOT_HOST` (default `127.0.0.1`; `0.0.0.0` only inside a container), `GENTLE_DOT_DATA_DIR`, `GENTLE_DOT_WORKSPACE`, `GENTLE_DOT_UI_DIR`, `GENTLE_DOT_AGENT_BIN`, `GENTLE_DOT_AGENT_ARGS` (JSON array), `GENTLE_DOT_ALLOWED_ORIGINS` (JSON array), `GENTLE_DOT_CONVERSATIONS` (`1` turns the conversations list on), `GENTLE_DOT_ROTATE_BYTES` (default 20 MB), `GENTLE_DOT_ROTATE_COMPACTIONS` (default 10), `GENTLE_DOT_HISTORY_PAGE` (default 100).
+Environment overrides: `GENTLE_DOT_AGENT_HOME` (default `~/.gentle-dot/agent`), `GENTLE_DOT_ENGRAM_DATA_DIR` (default: the user's Engram data folder), `GENTLE_DOT_ENGRAM` (`private` for a memory of the assistant's own), `GENTLE_DOT_ENGRAM_PORT` (private memory only, default `7438`), `GENTLE_DOT_PORT`, `GENTLE_DOT_HOST` (default `127.0.0.1`; `0.0.0.0` only inside a container), `GENTLE_DOT_DATA_DIR`, `GENTLE_DOT_WORKSPACE`, `GENTLE_DOT_UI_DIR`, `GENTLE_DOT_AGENT_BIN`, `GENTLE_DOT_AGENT_ARGS` (JSON array), `GENTLE_DOT_ALLOWED_ORIGINS` (JSON array), `GENTLE_DOT_CONVERSATIONS` (`1` turns the conversations list on), `GENTLE_DOT_ROTATE_BYTES` (default 20 MB), `GENTLE_DOT_ROTATE_COMPACTIONS` (default 10), `GENTLE_DOT_HISTORY_PAGE` (default 100), `GENTLE_DOT_MCP_CLI` (JSON array: the command line used for connector sign-in, for tests; default the bundled engine's).

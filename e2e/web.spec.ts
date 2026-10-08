@@ -215,6 +215,79 @@ test("opens accounts with /login, offers subscriptions without Claude, and conne
 	await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
 });
 
+test("connects Notion from the Connectors screen, switches its mode, and removes it", async ({ page }) => {
+	// The sign-in page would open in a new tab; keep its address instead.
+	await page.addInitScript(() => {
+		const opened: string[] = [];
+		(window as unknown as { opened: string[] }).opened = opened;
+		window.open = (url?: string | URL) => {
+			opened.push(String(url));
+			return null;
+		};
+	});
+	await open(page);
+	await page.getByRole("button", { name: "Connectors" }).click();
+	const screen = page.getByRole("region", { name: "Connectors" });
+	for (const name of ["Notion", "Linear", "Atlassian"]) {
+		await expect(screen.getByRole("listitem", { name })).toBeVisible();
+	}
+	const notion = screen.getByRole("listitem", { name: "Notion" });
+	await expect(notion).toContainText("It cannot send or change anything.");
+	await notion.getByRole("button", { name: "Connect Notion" }).click();
+
+	await expect(screen).toContainText("Signing in to Notion");
+	await screen.getByRole("button", { name: "Open the sign-in page" }).click();
+	const link = await page.evaluate(() => (window as unknown as { opened: string[] }).opened[0] ?? "");
+	expect(link).toMatch(/^https:\/\/auth\.example\.com\/authorize\?/);
+	await page.screenshot({ path: "/tmp/gentle-dot-t18a/connectors-signin.png" });
+	// The browser could not reach this computer: paste the address it ended on.
+	const redirect = new URL(new URL(link).searchParams.get("redirect_uri") ?? "");
+	redirect.search = "?code=e2e-code&state=fake-state";
+	await screen.getByLabel(/paste it here/).fill(redirect.href);
+	await screen.getByRole("button", { name: "Continue" }).click();
+	await expect(screen.getByRole("status")).toHaveText("Connected to Notion.");
+	await screen.getByRole("button", { name: "Back to connectors" }).click();
+
+	await expect(notion.getByText("Connected", { exact: true })).toBeVisible();
+	await expect(notion.getByRole("radio", { name: "Read only" })).toBeChecked();
+	// The choice is the daemon's: the radio follows the list it sends back.
+	await notion.getByRole("radio", { name: "Read and send" }).click();
+	await expect(notion.getByRole("radio", { name: "Read and send" })).toBeChecked();
+	await expect(notion).toContainText("after you approve each one");
+	await page.screenshot({ path: "/tmp/gentle-dot-t18a/connectors-screen.png" });
+	const mcp = JSON.parse(readFileSync(join(E2E_DATA_DIR, "agent", "mcp.json"), "utf8"));
+	expect(mcp).toEqual({ mcpServers: { notion: { url: "https://mcp.notion.com/mcp", exposure: "direct" } } });
+
+	await notion.getByRole("button", { name: "Remove Notion" }).click();
+	await expect(notion.getByRole("button", { name: "Connect Notion" })).toBeVisible();
+	await expect(notion.getByText("Connected", { exact: true })).toHaveCount(0);
+	expect(JSON.parse(readFileSync(join(E2E_DATA_DIR, "agent", "mcp.json"), "utf8"))).toEqual({
+		mcpServers: {},
+	});
+	await screen.getByRole("button", { name: "Close connectors" }).click();
+
+	// Typing /connectors opens the screen; it never reaches the assistant.
+	const sent = await page.locator(".message-user").count();
+	await say(page, "/connectors");
+	await expect(screen).toBeVisible();
+	await expect(page.locator(".message-user")).toHaveCount(sent);
+});
+
+test("shows a connector action as an approval card with a preview", async ({ page }) => {
+	await open(page);
+	await say(page, "ask:approval");
+	const card = page.getByRole("region", { name: "The assistant needs your answer" });
+	await expect(card).toContainText("Allow Notion to create pages?");
+	await expect(card).toContainText("parent: Team notes");
+	await expect(card).toContainText("title: Weekly plan");
+	await expect(card.locator(".ask-message")).toHaveCSS("white-space", "pre-wrap");
+	await card.screenshot({ path: "/tmp/gentle-dot-t18a/approval-card.png" });
+	await page.screenshot({ path: "/tmp/gentle-dot-t18a/approval-card-panel.png" });
+	await card.getByRole("button", { name: "No" }).click();
+	await expect(card).toBeHidden();
+	await expect(page.locator(".message-assistant").last()).toHaveText("I did not create the page");
+});
+
 test("creates a profile with /profiles, edits a role, and switches to it", async ({ page }) => {
 	await open(page);
 	await say(page, "/profiles");

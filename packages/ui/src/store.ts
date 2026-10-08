@@ -5,6 +5,7 @@ import type {
 	AuthEvent,
 	AuthPrompt,
 	AuthProvider,
+	ConnectorInfo,
 	ConversationSummary,
 	Features,
 	MessageQueue,
@@ -39,6 +40,14 @@ export interface ProfilesState {
 	importable: boolean;
 	/** The last import's result, shown until the screen closes. */
 	lastImport?: { imported: { from: string; to: string }[]; missingProviders: string[] };
+}
+
+export interface ConnectorsState {
+	open: boolean;
+	/** Undefined until the first list arrives. */
+	list?: ConnectorInfo[];
+	/** A connector sign-in; `providerId` is the connector id. */
+	flow?: AuthFlowState;
 }
 
 export type ConnectionStatus = "connecting" | "open" | "closed" | "unauthorized";
@@ -78,6 +87,7 @@ export interface DotState {
 	notices: Notice[];
 	auth: AuthState;
 	profiles: ProfilesState;
+	connectors: ConnectorsState;
 }
 
 export type DotAction =
@@ -86,6 +96,8 @@ export type DotAction =
 	| { type: "dismiss"; id: number }
 	| { type: "accounts"; open: boolean }
 	| { type: "profiles"; open: boolean }
+	| { type: "connectors"; open: boolean }
+	| { type: "connector_started"; connectorId: string }
 	| { type: "auth_started"; providerId: string };
 
 export const initialState: DotState = {
@@ -101,6 +113,7 @@ export const initialState: DotState = {
 	notices: [],
 	auth: { open: false },
 	profiles: { open: false, roles: [], models: [], importable: false },
+	connectors: { open: false },
 };
 
 let nextNotice = 0;
@@ -119,12 +132,19 @@ export function reduce(state: DotState, action: DotAction): DotState {
 			// Closing drops the flow; reopening keeps a running one and leaves a finished one.
 			const keep = action.open && state.auth.flow !== undefined && state.auth.flow.done === undefined;
 			return {
-				...closeProfiles(state, action.open),
+				...closeConnectors(closeProfiles(state, action.open), action.open),
 				auth: { ...state.auth, open: action.open, flow: keep ? state.auth.flow : undefined },
 			};
 		}
 		case "profiles":
-			return openProfiles(state, action.open);
+			return closeConnectors(openProfiles(state, action.open), action.open);
+		case "connectors":
+			return openConnectors(state, action.open);
+		case "connector_started":
+			return {
+				...openConnectors(state, true),
+				connectors: { ...state.connectors, open: true, flow: { providerId: action.connectorId, events: [] } },
+			};
 		case "auth_started":
 			return {
 				...state,
@@ -212,16 +232,20 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 			return { ...state, queue: { steering: message.steering, followUp: message.followUp } };
 		case "auth_providers":
 			return {
-				...closeProfiles(state, message.open === true),
+				...closeConnectors(closeProfiles(state, message.open === true), message.open === true),
 				auth: { ...state.auth, providers: message.providers, open: message.open ? true : state.auth.open },
 			};
+		case "connectors": {
+			const updated = { ...state, connectors: { ...state.connectors, list: message.connectors } };
+			return message.open ? openConnectors(updated, true) : updated;
+		}
 		case "profiles": {
 			const { type: _type, seq: _seq, open, profiles, active, ...rest } = message;
 			const next = { ...state.profiles, ...rest, list: profiles };
 			if (active === undefined) delete next.active;
 			else next.active = active;
 			const updated = { ...state, profiles: next };
-			return open ? openProfiles(updated, true) : updated;
+			return open ? closeConnectors(openProfiles(updated, true), true) : updated;
 		}
 		case "profiles_imported":
 			return {
@@ -232,17 +256,28 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 				},
 			};
 		case "auth_event":
+			if (isConnectorFlow(message.flowId))
+				return updateConnectorFlow(state, message.flowId, (f) => ({
+					...f,
+					events: [...f.events, message.event],
+				}));
 			return updateFlow(state, message.flowId, (f) => ({ ...f, events: [...f.events, message.event] }));
 		case "auth_prompt":
+			if (isConnectorFlow(message.prompt.flowId))
+				return updateConnectorFlow(state, message.prompt.flowId, (f) => ({ ...f, prompt: message.prompt }));
 			return updateFlow(state, message.prompt.flowId, (f) => ({ ...f, prompt: message.prompt }));
-		case "auth_done":
-			return updateFlow(state, message.flowId, (f) => {
+		case "auth_done": {
+			const finish = (f: AuthFlowState): AuthFlowState => {
 				const { prompt: _prompt, ...rest } = f;
 				return {
 					...rest,
 					done: message.message ? { ok: message.ok, message: message.message } : { ok: message.ok },
 				};
-			});
+			};
+			return isConnectorFlow(message.flowId)
+				? updateConnectorFlow(state, message.flowId, finish)
+				: updateFlow(state, message.flowId, finish);
+		}
 		case "toast":
 			return addNotice(state, message.level, message.message);
 		case "error":
@@ -262,6 +297,36 @@ function openProfiles(state: DotState, open: boolean): DotState {
 
 function closeProfiles(state: DotState, when: boolean): DotState {
 	return when && state.profiles.open ? openProfiles(state, false) : state;
+}
+
+/**
+ * Connectors, accounts, and profiles share the screen: opening connectors closes the others.
+ * Closing drops the sign-in; reopening keeps a running one and leaves a finished one.
+ */
+function openConnectors(state: DotState, open: boolean): DotState {
+	const flow = state.connectors.flow;
+	const keep = open && flow !== undefined && flow.done === undefined;
+	const others = open ? openProfiles({ ...state, auth: { ...state.auth, open: false } }, false) : state;
+	return { ...others, connectors: { ...state.connectors, open, flow: keep ? flow : undefined } };
+}
+
+function closeConnectors(state: DotState, when: boolean): DotState {
+	return when && state.connectors.open
+		? { ...state, connectors: { ...state.connectors, open: false } }
+		: state;
+}
+
+/** Connector sign-ins reuse the sign-in messages, with flow ids of their own. */
+const isConnectorFlow = (flowId: string) => flowId.startsWith("connector-");
+
+function updateConnectorFlow(
+	state: DotState,
+	flowId: string,
+	update: (f: AuthFlowState) => AuthFlowState,
+): DotState {
+	const flow = state.connectors.flow;
+	if (!flow || (flow.flowId && flow.flowId !== flowId)) return state;
+	return { ...state, connectors: { ...state.connectors, flow: update({ ...flow, flowId }) } };
 }
 
 function updateFlow(state: DotState, flowId: string, update: (f: AuthFlowState) => AuthFlowState): DotState {

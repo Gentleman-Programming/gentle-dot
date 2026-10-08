@@ -33,6 +33,8 @@ export interface SupervisorOptions {
 	/** Directory for `sessions/` and `state.json` (the open session and the chains of rotated ones). */
 	dataDir: string;
 	env?: NodeJS.ProcessEnv;
+	/** Runs before every spawn (first start, restart, respawn); returns variables added to `env`. */
+	prepareSpawn?: () => NodeJS.ProcessEnv;
 	/** Respawn delays; the last value repeats. Default 1s, 2s, 4s, 8s, 16s, 30s. */
 	backoffMs?: number[];
 	/** Uptime after which the backoff starts over. Default 30s. */
@@ -201,10 +203,10 @@ export class AgentSupervisor {
 	}
 
 	private spawnChild(): ChildProcess {
-		const { command, args = [], extraArgs = [], cwd, env } = this.options;
+		const { command, args = [], extraArgs = [], cwd, env, prepareSpawn } = this.options;
 		const child = spawn(command, [...args, "--mode", "rpc", "--session-dir", this.sessionDir, ...extraArgs], {
 			cwd,
-			env: env ?? process.env,
+			env: { ...(env ?? process.env), ...prepareSpawn?.() },
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		this.child = child;

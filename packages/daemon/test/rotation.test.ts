@@ -94,6 +94,18 @@ describe("transparent rotation", () => {
 		expect(answers().at(-1)).toContain("keep this in mind: blue");
 	});
 
+	it("rotates once when the run settles in the same write as the prompt's answer", async () => {
+		const { supervisor, bridge, client, received } = await setup({ limits: { bytes: 3000 } });
+		const first = supervisor.sessionFile as string;
+		// The answer to the prompt and the whole run, up to agent_settled, arrive together.
+		await bridge.handle(client, { type: "send", text: "burst:pad:4000" });
+		await waitFor(() => supervisor.sessionFile !== first);
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(supervisor.previousSessions).toEqual([first]);
+		const marked = received.filter((p) => p.type === "history" && p.messages.some((m) => m.earlier));
+		expect(marked).toHaveLength(1);
+	});
+
 	it("keeps the chain of session files across a restart of the daemon", async () => {
 		const { supervisor, dataDir, say } = await setup({ limits: { compactions: 1 } });
 		const first = supervisor.sessionFile as string;
@@ -135,13 +147,15 @@ describe("transparent rotation", () => {
 		const first = supervisor.sessionFile as string;
 		await say("compact");
 		await waitFor(() => logs.some((line) => line.includes("fresh session")));
-		const current = supervisor.sessionFile as string;
-		expect(current).not.toBe(first);
+		const seed = logs.join("\n").match(/handoff session (\S+\.jsonl)/)?.[1];
+		// The log comes before the engine is asked for the fresh session.
+		const current = await waitFor(
+			() => supervisor.sessionFile !== first && supervisor.sessionFile !== seed && supervisor.sessionFile,
+		);
 		expect(headerOf(current)).toMatchObject({ parentSession: first });
 		expect(supervisor.previousSessions).toEqual([first]);
 		// The handoff file the engine could not use stays on disk.
-		const seed = logs.join("\n").match(/handoff session (\S+\.jsonl)/)?.[1];
-		expect(seed && seed !== current && existsSync(seed)).toBe(true);
+		expect(seed && existsSync(seed)).toBe(true);
 		await say("after");
 		expect(answers().at(-1)).toBe("Echo: after");
 	});

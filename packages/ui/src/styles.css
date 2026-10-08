@@ -835,8 +835,11 @@ textarea:focus {
 }
 
 .ask-message {
-	margin: 4px 0 0;
-	color: var(--muted);
+	margin: 6px 0 0;
+	color: var(--text);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	line-height: 20px;
 }
 
 .ask-options,

@@ -184,3 +184,43 @@ describe("profile messages", () => {
 		expect(THINKING_LEVELS).toEqual(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 	});
 });
+
+describe("connector messages", () => {
+	it("accepts every connector command", () => {
+		expect(parseClientMessage('{"type":"connectors_list"}')).toEqual({ type: "connectors_list" });
+		for (const type of [
+			"connector_connect",
+			"connector_signin",
+			"connector_disconnect",
+			"connector_remove",
+		]) {
+			expect(parseClientMessage(JSON.stringify({ type, connectorId: "notion" }))).toEqual({
+				type,
+				connectorId: "notion",
+			});
+		}
+		expect(
+			parseClientMessage('{"type":"connector_mode","connectorId":"linear","mode":"read_write"}'),
+		).toEqual({ type: "connector_mode", connectorId: "linear", mode: "read_write" });
+		expect(parseClientMessage('{"type":"connector_mode","connectorId":"linear","mode":"read_only"}')).toEqual(
+			{
+				type: "connector_mode",
+				connectorId: "linear",
+				mode: "read_only",
+			},
+		);
+	});
+
+	it("rejects bad connector ids and modes", () => {
+		expect(parseClientMessage('{"type":"connector_connect"}')).toBeUndefined();
+		expect(parseClientMessage('{"type":"connector_connect","connectorId":"../x"}')).toBeUndefined();
+		expect(parseClientMessage('{"type":"connector_remove","connectorId":"__proto__"}')).toBeUndefined();
+		expect(
+			parseClientMessage(`{"type":"connector_signin","connectorId":"${"a".repeat(41)}"}`),
+		).toBeUndefined();
+		expect(
+			parseClientMessage('{"type":"connector_mode","connectorId":"notion","mode":"all"}'),
+		).toBeUndefined();
+		expect(parseClientMessage('{"type":"connector_mode","connectorId":"notion"}')).toBeUndefined();
+	});
+});

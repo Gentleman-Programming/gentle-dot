@@ -39,6 +39,8 @@ The assistant keeps to its own instance. The agent works in `~/.gentle-dot/works
 
 Memory uses your global Engram (`~/.engram`, server on port 7437, or your own `ENGRAM_DATA_DIR`, `ENGRAM_PORT`, and `ENGRAM_URL`), and everything the assistant remembers goes to the project `gentle-dot`. If Engram is not running, the assistant starts it with your data folder. `GENTLE_DOT_ENGRAM_DATA_DIR` points at another data folder; `GENTLE_DOT_ENGRAM=private` gives the assistant a memory of its own instead (port 7438, `GENTLE_DOT_ENGRAM_PORT`). Memories saved by earlier versions in `~/.gentle-dot/home/.engram` are not moved to the global Engram.
 
+Connectors let the assistant use Notion, Linear, and Atlassian through their official MCP servers: open Connectors (the plug icon, or type `/connectors`), choose Connect, and approve access in the browser. Each connector is "Read only" (it can search and read) or "Read and send"; even then, the assistant asks you with a preview before every action that sends or changes something. The daemon alone writes the engine's `mcp.json` (`~/.gentle-dot/agent`) from `~/.gentle-dot/connectors.json` and puts it back if anything else changed it.
+
 ## Checks
 
 ```bash

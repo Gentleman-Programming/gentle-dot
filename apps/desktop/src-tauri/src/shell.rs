@@ -228,24 +228,49 @@ fn build_windows(app: &AppHandle, config: &DesktopConfig) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Whether the conversations list is on, read like the daemon reads it (`GENTLE_DOT_CONVERSATIONS=1`).
+fn conversations_on(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+/// The tray menu, top to bottom (`-` is a separator). "New conversation" only exists with the
+/// conversations list on; in the single continuous chat there is nothing new to start.
+fn tray_menu_ids(conversations: bool) -> Vec<&'static str> {
+    let mut ids = vec!["open"];
+    if conversations {
+        ids.push("new");
+    }
+    ids.extend(["browser", "-", "restart", "autostart", "-", "quit"]);
+    ids
+}
+
 fn build_tray(app: &AppHandle, config: &DesktopConfig) -> tauri::Result<TrayIcon> {
     let autostart = app.autolaunch().is_enabled().unwrap_or(false);
     // The accelerator is only a label here; an unparsable one must not break the menu.
     let open = MenuItem::with_id(app, "open", "Open", true, Some(config.shortcut.as_str()))
         .or_else(|_| MenuItem::with_id(app, "open", "Open", true, None::<&str>))?;
-    let menu = Menu::with_items(
-        app,
-        &[
-            &open,
-            &MenuItem::with_id(app, "new", "New conversation", true, None::<&str>)?,
-            &MenuItem::with_id(app, "browser", "Open in browser", true, None::<&str>)?,
-            &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "restart", "Restart assistant", true, None::<&str>)?,
-            &CheckMenuItem::with_id(app, "autostart", "Launch at login", true, autostart, None::<&str>)?,
-            &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?,
-        ],
-    )?;
+    let menu = Menu::new(app)?;
+    let conversations = conversations_on(std::env::var("GENTLE_DOT_CONVERSATIONS").ok().as_deref());
+    for id in tray_menu_ids(conversations) {
+        match id {
+            "open" => menu.append(&open)?,
+            "new" => menu.append(&MenuItem::with_id(app, "new", "New conversation", true, None::<&str>)?)?,
+            "browser" => menu.append(&MenuItem::with_id(app, "browser", "Open in browser", true, None::<&str>)?)?,
+            "restart" => {
+                menu.append(&MenuItem::with_id(app, "restart", "Restart assistant", true, None::<&str>)?)?;
+            }
+            "autostart" => menu.append(&CheckMenuItem::with_id(
+                app,
+                "autostart",
+                "Launch at login",
+                true,
+                autostart,
+                None::<&str>,
+            )?)?,
+            "quit" => menu.append(&MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?)?,
+            _ => menu.append(&PredefinedMenuItem::separator(app)?)?,
+        }
+    }
     TrayIconBuilder::with_id(TRAY)
         .icon(Image::from_bytes(TrayGlyph::Unavailable.png())?)
         .icon_as_template(true)
@@ -370,4 +395,33 @@ pub fn run() {
                 app.state::<Shell>().daemon.stop();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_hides_new_conversation_in_the_single_chat() {
+        assert_eq!(
+            tray_menu_ids(false),
+            vec!["open", "browser", "-", "restart", "autostart", "-", "quit"]
+        );
+    }
+
+    #[test]
+    fn tray_shows_new_conversation_with_the_conversations_list() {
+        assert_eq!(
+            tray_menu_ids(true),
+            vec!["open", "new", "browser", "-", "restart", "autostart", "-", "quit"]
+        );
+    }
+
+    #[test]
+    fn conversations_flag_reads_like_the_daemon() {
+        assert!(conversations_on(Some("1")));
+        assert!(!conversations_on(None));
+        assert!(!conversations_on(Some("0")));
+        assert!(!conversations_on(Some("true")));
+    }
 }
