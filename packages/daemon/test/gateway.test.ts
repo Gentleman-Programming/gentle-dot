@@ -1,5 +1,5 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import type { ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
@@ -459,6 +459,10 @@ describe("gateway", () => {
 	});
 });
 
+function escapeRegExp(text: string): string {
+	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 describe("own instance", () => {
 	it("runs the agent with the assistant's own home and profile store", async () => {
 		const scratch = tempDir();
@@ -523,7 +527,10 @@ describe("own instance", () => {
 			XDG_CACHE_HOME: join(home, ".cache"),
 			XDG_STATE_HOME: join(home, ".local", "state"),
 			GIT_CONFIG_GLOBAL: join(realHome, ".gitconfig"),
-			PATH: process.env.PATH,
+			// The bundled `pi` folder first, then the user's PATH unchanged.
+			PATH: expect.stringMatching(
+				new RegExp(`node_modules/\\.bin${delimiter}${escapeRegExp(process.env.PATH ?? "")}$`),
+			),
 			// The user's global Engram: its data dir, so the memory plugin accepts the user's server.
 			ENGRAM_DATA_DIR: join(realHome, ".engram"),
 			ENGRAM_URL: "http://127.0.0.1:7437",

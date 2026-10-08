@@ -15,6 +15,22 @@ afterEach(async () => {
 	await Promise.all(daemons.splice(0).map((d) => d.close()));
 });
 
+describe("isolatedAgentEnv PATH", () => {
+	it("puts the bundled `pi` first so the engine's first-run setup works on a clean machine", () => {
+		const env = isolatedAgentEnv({ PATH: "/usr/bin:/bin", HOME: tempDir() }, tempDir());
+		const [first, ...rest] = (env.PATH ?? "").split(":");
+		expect(first).toMatch(/node_modules\/\.bin$/);
+		expect(existsSync(join(first ?? "", "pi"))).toBe(true);
+		expect(rest).toEqual(["/usr/bin", "/bin"]);
+	});
+
+	it("does not add the bundled folder twice", () => {
+		const once = isolatedAgentEnv({ PATH: "/bin", HOME: tempDir() }, tempDir());
+		const twice = isolatedAgentEnv({ PATH: once.PATH, HOME: tempDir() }, tempDir());
+		expect(twice.PATH).toBe(once.PATH);
+	});
+});
+
 describe("isolatedAgentEnv memory", () => {
 	it("points the engine's memory at the user's global Engram data and server", () => {
 		const realHome = tempDir();

@@ -1,7 +1,21 @@
 import { execFile } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
+
+/**
+ * The folder with the `pi` executable bundled with the daemon. The engine's
+ * first-run setup needs `pi` on PATH, and a clean machine has none.
+ */
+function bundledBinDir(): string | undefined {
+	const require = createRequire(import.meta.url);
+	for (const dir of require.resolve.paths("@earendil-works/pi-coding-agent") ?? []) {
+		const bin = join(dir, ".bin");
+		if (existsSync(join(bin, "pi"))) return bin;
+	}
+	return undefined;
+}
 
 /** Creates `path` with mode 0700, and tightens it to 0700 when it already exists. */
 export function ensurePrivateDir(path: string): void {
@@ -33,7 +47,7 @@ export function ensureMemoryProject(workspace: string): void {
 /**
  * The engine's environment: its own HOME (`<dataDir>/home`, mode 0700) with
  * the XDG folders under it, because parts of the engine write to fixed places
- * under the home folder. PATH is kept, and so is the user's git identity,
+ * under the home folder. PATH is kept, with the bundled `pi` folder first, and so is the user's git identity,
  * through `GIT_CONFIG_GLOBAL` pointing at their real `~/.gitconfig`.
  *
  * Memory is the user's global Engram: Engram ties a server to its data folder
@@ -57,6 +71,11 @@ export function isolatedAgentEnv(base: NodeJS.ProcessEnv, dataDir: string): Node
 		XDG_STATE_HOME: join(home, ".local", "state"),
 	};
 	for (const key of INHERITED_HOMES) delete env[key];
+	const bin = bundledBinDir();
+	if (bin) {
+		const rest = (base.PATH ?? "").split(delimiter).filter((part) => part && part !== bin);
+		env.PATH = [bin, ...rest].join(delimiter);
+	}
 	// Subagent child engines do not load the approval guard, so subagents stay off until the
 	// daemon enforces connectors itself (S25).
 	env.GENTLE_PI_AGENTS = "0";
