@@ -66,22 +66,8 @@ describe("auth state", () => {
 });
 
 describe("AccountsPanel", () => {
-	it("lists providers with their status and sign-in options", async () => {
-		const send = vi.fn();
-		const dispatch = vi.fn();
-		render(<AccountsPanel auth={base().auth} send={send} dispatch={dispatch} openUrl={vi.fn()} />);
-		// A provider with both methods appears once in each section.
-		expect(screen.getAllByText("Anthropic")).toHaveLength(2);
-		expect(screen.getByText("Connected")).toBeInTheDocument();
-		await userEvent.click(screen.getByRole("button", { name: "Sign in with Claude Pro/Max" }));
-		expect(send).toHaveBeenCalledWith({ type: "auth_login", providerId: "anthropic", method: "oauth" });
-		expect(dispatch).toHaveBeenCalledWith({ type: "auth_started", providerId: "anthropic" });
-		await userEvent.click(screen.getAllByRole("button", { name: "Use an API key" })[0] as HTMLElement);
-		expect(send).toHaveBeenCalledWith({ type: "auth_login", providerId: "anthropic", method: "api_key" });
-	});
-
-	it("lists subscriptions first and API keys below", () => {
-		const auth = apply(base(), {
+	const mixed = () =>
+		apply(base(), {
 			type: "auth_providers",
 			providers: [
 				{ id: "anthropic", name: "Anthropic", methods: ["api_key"], configured: false },
@@ -99,32 +85,59 @@ describe("AccountsPanel", () => {
 					oauthName: "OpenAI (ChatGPT Plus/Pro)",
 					configured: false,
 				},
-				{ id: "openai", name: "OpenAI", methods: ["api_key"], configured: false },
+				{ id: "openai", name: "OpenAI", methods: ["api_key"], configured: true, source: "stored" },
 			],
 		}).auth;
-		render(<AccountsPanel auth={auth} send={vi.fn()} dispatch={vi.fn()} openUrl={vi.fn()} />);
-		const subscriptions = screen.getByRole("region", { name: "Use your subscription" });
-		const keys = screen.getByRole("region", { name: "Use an API key" });
-		expect(subscriptions.compareDocumentPosition(keys) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-		expect(
-			within(subscriptions)
-				.getAllByRole("button")
-				.map((b) => b.getAttribute("aria-label")),
-		).toEqual(["Sign in with GitHub Copilot", "Sign in with OpenAI (ChatGPT Plus/Pro)"]);
-		// Rows read like Pi's account list: the provider name, with the plan underneath when it differs.
-		expect(within(subscriptions).getByText("OpenAI Codex")).toBeInTheDocument();
-		expect(within(subscriptions).getByText("OpenAI (ChatGPT Plus/Pro)")).toHaveClass("provider-plan");
-		expect(within(subscriptions).queryAllByText("GitHub Copilot")).toHaveLength(1);
-		expect(within(keys).getByText("Anthropic")).toBeInTheDocument();
-		expect(within(keys).getByText("OpenAI")).toBeInTheDocument();
-		expect(within(keys).queryByText("GitHub Copilot")).toBeNull();
+
+	it("asks for the method first, like Pi's /login", () => {
+		render(<AccountsPanel auth={mixed()} send={vi.fn()} dispatch={vi.fn()} openUrl={vi.fn()} />);
+		expect(screen.getByRole("button", { name: /Use a subscription/ })).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: /Use an API key/ })).toBeInTheDocument();
+		expect(screen.queryByRole("searchbox")).toBeNull();
+		expect(screen.queryByText("GitHub Copilot")).toBeNull();
 	});
 
-	it("filters providers by name", async () => {
-		render(<AccountsPanel auth={base().auth} send={vi.fn()} dispatch={vi.fn()} openUrl={vi.fn()} />);
+	it("shows connected accounts on the first step and signs out", async () => {
+		const send = vi.fn();
+		render(<AccountsPanel auth={mixed()} send={send} dispatch={vi.fn()} openUrl={vi.fn()} />);
+		const connected = screen.getByRole("region", { name: "Connected" });
+		expect(within(connected).getByText("OpenAI")).toBeInTheDocument();
+		await userEvent.click(within(connected).getByRole("button", { name: "Sign out of OpenAI" }));
+		expect(send).toHaveBeenCalledWith({ type: "auth_logout", providerId: "openai" });
+	});
+
+	it("lists only subscriptions after choosing a subscription, named like Pi's account list", async () => {
+		const send = vi.fn();
+		const dispatch = vi.fn();
+		render(<AccountsPanel auth={mixed()} send={send} dispatch={dispatch} openUrl={vi.fn()} />);
+		await userEvent.click(screen.getByRole("button", { name: /Use a subscription/ }));
+		const list = screen.getByRole("region", { name: "Use a subscription" });
+		expect(
+			within(list)
+				.getAllByRole("button", { name: /^Sign in with/ })
+				.map((b) => b.getAttribute("aria-label")),
+		).toEqual(["Sign in with GitHub Copilot", "Sign in with OpenAI (ChatGPT Plus/Pro)"]);
+		expect(within(list).getByText("OpenAI Codex")).toBeInTheDocument();
+		expect(within(list).getByText("OpenAI (ChatGPT Plus/Pro)")).toHaveClass("provider-plan");
+		expect(within(list).queryByText("Anthropic")).toBeNull();
+		await userEvent.click(within(list).getByRole("button", { name: "Sign in with GitHub Copilot" }));
+		expect(dispatch).toHaveBeenCalledWith({ type: "auth_started", providerId: "github-copilot" });
+		expect(send).toHaveBeenCalledWith({ type: "auth_login", providerId: "github-copilot", method: "oauth" });
+	});
+
+	it("lists API keys after choosing an API key, with search and a way back", async () => {
+		const send = vi.fn();
+		render(<AccountsPanel auth={mixed()} send={send} dispatch={vi.fn()} openUrl={vi.fn()} />);
+		await userEvent.click(screen.getByRole("button", { name: /Use an API key/ }));
+		const list = screen.getByRole("region", { name: "Use an API key" });
+		expect(within(list).getByText("Anthropic")).toBeInTheDocument();
+		expect(within(list).queryByText("GitHub Copilot")).toBeNull();
 		await userEvent.type(screen.getByRole("searchbox", { name: "Search providers" }), "open");
-		expect(screen.queryByText("Anthropic")).toBeNull();
-		expect(screen.getByText("OpenAI")).toBeInTheDocument();
+		expect(within(list).queryByText("Anthropic")).toBeNull();
+		await userEvent.click(within(list).getByRole("button", { name: "Use an API key for OpenAI" }));
+		expect(send).toHaveBeenCalledWith({ type: "auth_login", providerId: "openai", method: "api_key" });
+		await userEvent.click(screen.getByRole("button", { name: "Back" }));
+		expect(screen.getByRole("button", { name: /Use a subscription/ })).toBeInTheDocument();
 	});
 
 	it("opens the sign-in page, takes the pasted code, and can cancel", async () => {

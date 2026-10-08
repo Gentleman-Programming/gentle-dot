@@ -12,6 +12,45 @@
 	color: var(--muted);
 }
 
+.method-choices {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	margin-top: 14px;
+}
+
+.method-choice {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 4px;
+	padding: 14px;
+	border-radius: 14px;
+	text-align: left;
+}
+
+.method-choice b {
+	font-size: 14px;
+}
+
+.method-choice span {
+	font-size: 12px;
+	line-height: 16px;
+	color: var(--muted);
+}
+
+.connected-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+button.back {
+	margin: 4px 0 10px;
+	padding: 0;
+}
+
 .provider-plan {
 	margin: -4px 0 8px;
 	font-size: 12px;

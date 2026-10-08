@@ -14,6 +14,7 @@ interface AccountsPanelProps {
 /** Sign-in for subscriptions and API keys, without a terminal. */
 export function AccountsPanel({ auth, send, dispatch, openUrl }: AccountsPanelProps) {
 	const [filter, setFilter] = useState("");
+	const [method, setMethod] = useState<"oauth" | "api_key" | undefined>(undefined);
 	const flow = auth.flow;
 	const busy = flow !== undefined && flow.done === undefined;
 	const login = (provider: AuthProvider, method: "oauth" | "api_key") => {
@@ -23,6 +24,7 @@ export function AccountsPanel({ auth, send, dispatch, openUrl }: AccountsPanelPr
 	const providers = (auth.providers ?? []).filter((p) =>
 		p.name.toLowerCase().includes(filter.trim().toLowerCase()),
 	);
+	const connected = (auth.providers ?? []).filter((p) => p.configured);
 	const providerName = (id: string) => auth.providers?.find((p) => p.id === id)?.name ?? id;
 
 	return (
@@ -74,8 +76,55 @@ export function AccountsPanel({ auth, send, dispatch, openUrl }: AccountsPanelPr
 						) : null}
 					</div>
 				</div>
+			) : method === undefined ? (
+				<>
+					{connected.length > 0 ? (
+						<section className="provider-section" aria-labelledby="accounts-connected">
+							<h3 id="accounts-connected">Connected</h3>
+							<ul className="providers">
+								{connected.map((provider) => (
+									<li key={provider.id} className="connected-row">
+										<b>{provider.name}</b>
+										{provider.source === "stored" ? (
+											<button
+												type="button"
+												className="link"
+												aria-label={`Sign out of ${provider.name}`}
+												onClick={() => send({ type: "auth_logout", providerId: provider.id })}
+											>
+												Sign out
+											</button>
+										) : (
+											<span className="muted">from your computer's settings</span>
+										)}
+									</li>
+								))}
+							</ul>
+						</section>
+					) : null}
+					<div className="method-choices">
+						<button type="button" className="method-choice" onClick={() => setMethod("oauth")}>
+							<b>Use a subscription</b>
+							<span>Sign in with a plan you already pay for, like ChatGPT, GitHub Copilot, or Grok.</span>
+						</button>
+						<button type="button" className="method-choice" onClick={() => setMethod("api_key")}>
+							<b>Use an API key</b>
+							<span>Paste a key from the provider's website. Works with every service.</span>
+						</button>
+					</div>
+				</>
 			) : (
 				<>
+					<button
+						type="button"
+						className="link back"
+						onClick={() => {
+							setMethod(undefined);
+							setFilter("");
+						}}
+					>
+						Back
+					</button>
 					<input
 						type="search"
 						className="accounts-search"
@@ -84,36 +133,43 @@ export function AccountsPanel({ auth, send, dispatch, openUrl }: AccountsPanelPr
 						value={filter}
 						onChange={(event) => setFilter(event.target.value)}
 					/>
-					<ProviderSection
-						title="Use your subscription"
-						hint="Sign in with a plan you already pay for."
-						providers={providers.filter((p) => p.methods.includes("oauth"))}
-						label={(p) => p.name}
-						plan={(p) => (p.oauthName && p.oauthName !== p.name ? p.oauthName : undefined)}
-						action={(p) => (
-							<button
-								type="button"
-								className="primary"
-								aria-label={`Sign in with ${p.oauthName ?? p.name}`}
-								onClick={() => login(p, "oauth")}
-							>
-								Sign in
-							</button>
-						)}
-						send={send}
-					/>
-					<ProviderSection
-						title="Use an API key"
-						hint="For every other service: paste the key from its website."
-						providers={providers.filter((p) => p.methods.includes("api_key"))}
-						label={(p) => p.name}
-						action={(p) => (
-							<button type="button" onClick={() => login(p, "api_key")}>
-								Use an API key
-							</button>
-						)}
-						send={send}
-					/>
+					{method === "oauth" ? (
+						<ProviderSection
+							title="Use a subscription"
+							hint="Sign in with a plan you already pay for."
+							providers={providers.filter((p) => p.methods.includes("oauth"))}
+							label={(p) => p.name}
+							plan={(p) => (p.oauthName && p.oauthName !== p.name ? p.oauthName : undefined)}
+							action={(p) => (
+								<button
+									type="button"
+									className="primary"
+									aria-label={`Sign in with ${p.oauthName ?? p.name}`}
+									onClick={() => login(p, "oauth")}
+								>
+									Sign in
+								</button>
+							)}
+							send={send}
+						/>
+					) : (
+						<ProviderSection
+							title="Use an API key"
+							hint="Paste the key from the provider's website."
+							providers={providers.filter((p) => p.methods.includes("api_key"))}
+							label={(p) => p.name}
+							action={(p) => (
+								<button
+									type="button"
+									aria-label={`Use an API key for ${p.name}`}
+									onClick={() => login(p, "api_key")}
+								>
+									Use an API key
+								</button>
+							)}
+							send={send}
+						/>
+					)}
 				</>
 			)}
 		</section>
