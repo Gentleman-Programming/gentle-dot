@@ -53,15 +53,21 @@ function Activities({ activities }: { activities: Activity[] }) {
 	);
 }
 
-export function MessageList({ messages }: { messages: ChatMessage[] }) {
+interface MessageListProps {
+	messages: ChatMessage[];
+	/** Messages waiting for the assistant, shown after the running answer. */
+	queued?: string[];
+}
+
+export function MessageList({ messages, queued = [] }: MessageListProps) {
 	const end = useRef<HTMLDivElement>(null);
 	const last = messages.at(-1);
 	// biome-ignore lint/correctness/useExhaustiveDependencies: scroll whenever the visible content grows
 	useEffect(() => {
 		end.current?.scrollIntoView?.({ block: "end" });
-	}, [messages.length, last?.text, last?.activities.length]);
+	}, [messages.length, last?.text, last?.activities.length, last?.note, queued.length]);
 
-	if (messages.length === 0) {
+	if (messages.length === 0 && queued.length === 0) {
 		return (
 			<div className="empty">
 				<p>Hi! What can I do for you?</p>
@@ -82,6 +88,25 @@ export function MessageList({ messages }: { messages: ChatMessage[] }) {
 						</div>
 					) : null}
 					{message.streaming ? <span className="caret" aria-hidden="true" /> : null}
+					{message.note ? (
+						<p
+							className={`message-note message-note-${message.note.kind}`}
+							role={message.note.kind === "error" ? "alert" : undefined}
+						>
+							{message.note.text}
+						</p>
+					) : null}
+				</article>
+			))}
+			{queued.map((text, i) => (
+				<article
+					// biome-ignore lint/suspicious/noArrayIndexKey: the same text can be queued twice
+					key={`${i}-${text}`}
+					className="message message-user message-queued"
+					aria-label="Queued message"
+				>
+					<span className="queued-label">Queued</span>
+					<div className="message-body message-plain">{text}</div>
 				</article>
 			))}
 			<div ref={end} />

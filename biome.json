@@ -8,7 +8,9 @@
 			"!apps/desktop/src-tauri/target",
 			"!apps/desktop/src-tauri/gen",
 			"!odd",
-			"!docs"
+			"!docs",
+			"!test-results",
+			"!playwright-report"
 		]
 	},
 	"formatter": {

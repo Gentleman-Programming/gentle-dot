@@ -6,6 +6,7 @@ import type {
 	AuthPrompt,
 	AuthProvider,
 	ConversationSummary,
+	MessageQueue,
 	ModelOption,
 	Profile,
 	ProfileRole,
@@ -47,6 +48,8 @@ export interface ChatMessage {
 	text: string;
 	streaming: boolean;
 	activities: Activity[];
+	/** How an answer ended when it did not finish normally. */
+	note?: { kind: "stopped" | "error"; text: string };
 }
 
 export interface Notice {
@@ -61,6 +64,8 @@ export interface DotState {
 	conversationId?: string;
 	model?: string;
 	messages: ChatMessage[];
+	/** Messages sent while the assistant works, not taken yet. */
+	queue: MessageQueue;
 	asks: Ask[];
 	conversations: ConversationSummary[];
 	interrupted: boolean;
@@ -81,6 +86,7 @@ export const initialState: DotState = {
 	connection: "connecting",
 	agentState: "starting",
 	messages: [],
+	queue: { steering: [], followUp: [] },
 	asks: [],
 	conversations: [],
 	interrupted: false,
@@ -127,6 +133,8 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 			return {
 				...state,
 				agentState: message.agentState,
+				// The daemon sends the queue right after ready when one exists.
+				queue: initialState.queue,
 				conversationId: message.conversationId ?? state.conversationId,
 				model: message.model ?? state.model,
 			};
@@ -148,11 +156,12 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 				streaming: true,
 			}));
 		case "message_done":
-			return updateAssistant(state, message.messageId, (m) => ({
-				...m,
-				text: message.text,
-				streaming: false,
-			}));
+			return updateAssistant(state, message.messageId, (m) => {
+				const done: ChatMessage = { ...m, text: message.text, streaming: false };
+				if (message.error !== undefined) done.note = { kind: "error", text: message.error };
+				else if (message.stopped) done.note = { kind: "stopped", text: "Stopped." };
+				return done;
+			});
 		case "activity":
 			return updateAssistant(state, message.messageId, (m) => {
 				const index = m.activities.findIndex((a) => a.id === message.activity.id);
@@ -182,6 +191,8 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 			};
 		case "interrupted":
 			return { ...state, interrupted: true };
+		case "queue":
+			return { ...state, queue: { steering: message.steering, followUp: message.followUp } };
 		case "auth_providers":
 			return {
 				...closeProfiles(state, message.open === true),

@@ -1,13 +1,13 @@
+/* Accounts screen (AccountsPanel). Uses the shared tokens and button styles from styles.css. */
+
 .provider-section {
 	margin-top: 18px;
 }
 
 .provider-section h3 {
 	margin: 0;
-	font-size: 12px;
-	line-height: 16px;
-	font-weight: 600;
-	letter-spacing: 0.04em;
+	font: 600 11px / 16px var(--font-mono);
+	letter-spacing: 0.12em;
 	text-transform: uppercase;
 	color: var(--muted);
 }
@@ -24,19 +24,25 @@
 	flex-direction: column;
 	align-items: flex-start;
 	gap: 4px;
-	padding: 14px;
-	border-radius: 14px;
+	padding: 14px 16px;
+	border-radius: var(--radius-md);
 	text-align: left;
 }
 
 .method-choice b {
-	font-size: 14px;
+	font-size: 15px;
+	font-weight: 700;
 }
 
 .method-choice span {
 	font-size: 12px;
-	line-height: 16px;
+	font-weight: 400;
+	line-height: 17px;
 	color: var(--muted);
+}
+
+.method-choice:hover:not(:disabled) b {
+	color: var(--accent);
 }
 
 .connected-row {

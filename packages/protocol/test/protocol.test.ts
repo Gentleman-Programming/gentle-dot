@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { isValidProfileName, PROTOCOL_VERSION, parseClientMessage, THINKING_LEVELS } from "../src/index.ts";
+import {
+	isValidProfileName,
+	PROTOCOL_VERSION,
+	parseClientMessage,
+	parseQueue,
+	THINKING_LEVELS,
+} from "../src/index.ts";
 
 describe("protocol", () => {
 	it("exposes version 1", () => {
@@ -53,6 +59,29 @@ describe("protocol", () => {
 			'{"type":"auth_reply","flowId":"f"}',
 		]) {
 			expect(parseClientMessage(raw), raw).toBeUndefined();
+		}
+	});
+});
+
+describe("queue", () => {
+	it("reads both complete queues from the engine's queue_update", () => {
+		expect(
+			parseQueue({
+				type: "queue_update",
+				steering: ["look at the tests"],
+				followUp: ["then deploy", "and tell me"],
+			}),
+		).toEqual({ steering: ["look at the tests"], followUp: ["then deploy", "and tell me"] });
+		expect(parseQueue({ steering: [], followUp: [] })).toEqual({ steering: [], followUp: [] });
+	});
+
+	it("treats a missing queue as empty and drops entries that are not text", () => {
+		expect(parseQueue({ steering: ["one", 2, null, ""] })).toEqual({ steering: ["one"], followUp: [] });
+	});
+
+	it("rejects a record whose queues are not lists", () => {
+		for (const value of [null, "queue", { steering: "one" }, { steering: [], followUp: { a: 1 } }]) {
+			expect(parseQueue(value), JSON.stringify(value)).toBeUndefined();
 		}
 	});
 });

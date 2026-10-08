@@ -4,6 +4,8 @@ import {
 	type Ask,
 	type ClientMessage,
 	isThinkingLevel,
+	type MessageQueue,
+	parseQueue,
 	type RoleRoute,
 	type ServerPayload,
 } from "@gentle-dot/protocol";
@@ -34,6 +36,8 @@ export interface BridgeOptions {
 	log?: (line: string) => void;
 	auth?: AuthManager;
 	profiles?: ProfileStore;
+	/** How long switching conversations waits for a running answer to stop. Default 10 s. */
+	stopTimeoutMs?: number;
 }
 
 type ProfileCommand = Extract<
@@ -55,6 +59,8 @@ const DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
 /** An open dialog; `options` keeps the agent's original option strings for the answer. */
 type PendingAsk = { ask: Ask; options?: string[]; timer?: NodeJS.Timeout };
 const REMEMBERED_REQUEST_IDS = 500;
+const READY_TIMEOUT_MS = 60_000;
+const ANSWER_FAILED = "Something went wrong while answering. Please try again.";
 
 /**
  * Translates between protocol v1 clients and the supervised agent: it keeps
@@ -74,6 +80,12 @@ export class DotBridge {
 	private nextMessage = 0;
 	private assistantId: string | undefined;
 	private restartPending = false;
+	/** The running answer is being stopped on purpose, so its end is not an error. */
+	private stopRequested = false;
+	/** The conversation switch in progress; messages sent meanwhile wait for it. */
+	private switching: Promise<void> = Promise.resolve();
+	/** Messages waiting for the agent, as shown to the user. */
+	private queue: MessageQueue = { steering: [], followUp: [] };
 	private readonly liveSwitch: LiveModelSwitch;
 
 	constructor(supervisor: AgentSupervisor, options: BridgeOptions) {
@@ -98,6 +110,7 @@ export class DotBridge {
 			...this.conversationRef(),
 			...(this.supervisor.model ? { model: this.supervisor.model } : {}),
 		});
+		if (this.queued()) this.deliver(client, { type: "queue", ...this.queue });
 		for (const { ask } of this.asks.values()) this.deliver(client, { type: "ask", ask });
 		if (this.interrupted) this.deliver(client, { type: "interrupted" });
 		return () => {
@@ -161,6 +174,7 @@ export class DotBridge {
 					await this.sendProfiles(client, true);
 					return;
 				}
+				await this.switching;
 				this.interrupted = false;
 				const busy = this.supervisor.busy;
 				await this.supervisor.request(
@@ -174,6 +188,7 @@ export class DotBridge {
 				await this.supervisor.request({ type: "steer", message: message.text });
 				return;
 			case "abort":
+				if (this.supervisor.busy) this.stopRequested = true;
 				await this.supervisor.request({ type: "abort" });
 				return;
 			case "ui_response": {
@@ -200,8 +215,10 @@ export class DotBridge {
 				return;
 			}
 			case "new_conversation":
-				await this.supervisor.request({ type: "new_session" });
-				this.afterConversationChange([]);
+				await this.changeConversation(async () => {
+					await this.switchAfterStop(() => this.supervisor.request({ type: "new_session" }));
+					this.afterConversationChange([]);
+				});
 				return;
 			case "list_conversations":
 				this.deliver(client, this.conversationsPayload());
@@ -216,8 +233,12 @@ export class DotBridge {
 					});
 					return;
 				}
-				await this.supervisor.request({ type: "switch_session", sessionPath: path });
-				this.afterConversationChange(await this.loadHistory());
+				await this.changeConversation(async () => {
+					await this.switchAfterStop(() =>
+						this.supervisor.request({ type: "switch_session", sessionPath: path }),
+					);
+					this.afterConversationChange(await this.loadHistory());
+				});
 				return;
 			}
 			case "auth_list":
@@ -257,13 +278,79 @@ export class DotBridge {
 				await this.profileCommand(client, message);
 				return;
 			case "get_history":
+				// Windows ask for history as soon as they connect, often while the agent starts.
+				await this.whenReady();
 				this.deliver(client, {
 					type: "history",
 					...this.conversationRef(),
-					messages: historyFromMessages(await this.loadHistory()),
+					messages: historyFromMessages(await this.currentHistory()),
 				});
 				return;
 		}
+	}
+
+	/** Runs a conversation switch; a message sent meanwhile goes to the new conversation, after its history. */
+	private changeConversation(change: () => Promise<void>): Promise<void> {
+		const run = change();
+		this.switching = run.catch(() => {});
+		return run;
+	}
+
+	/**
+	 * The engine aborts a running answer when it switches sessions, and its end
+	 * would land in the new conversation. Stop it first and wait (bounded) for
+	 * the run to settle, then switch; that stop is intentional, not an error.
+	 */
+	private async switchAfterStop(switchTo: () => Promise<unknown>): Promise<void> {
+		if (!this.supervisor.busy) {
+			await switchTo();
+			return;
+		}
+		this.stopRequested = true;
+		try {
+			const settled = this.nextSettle(this.options.stopTimeoutMs ?? 10_000);
+			await this.supervisor.request({ type: "abort" });
+			if (!(await settled)) this.log("the running answer did not stop in time; switching anyway");
+			await switchTo();
+		} finally {
+			this.stopRequested = false;
+		}
+	}
+
+	/** Resolves true when the run settles or the agent goes away, false after `timeoutMs`. */
+	private nextSettle(timeoutMs: number): Promise<boolean> {
+		return new Promise((resolve) => {
+			const finish = (settled: boolean) => {
+				clearTimeout(timer);
+				off();
+				resolve(settled);
+			};
+			const timer = setTimeout(() => finish(false), timeoutMs);
+			const off = this.supervisor.onEvent((event) => {
+				if (event.type === "agent_settled") finish(true);
+				else if (event.type === "supervisor_state" && event.state !== "ready") finish(true);
+			});
+		});
+	}
+
+	/** Waits until the agent can take commands; gives up after a minute or when it stopped. */
+	private whenReady(): Promise<void> {
+		if (this.supervisor.state === "ready") return Promise.resolve();
+		return new Promise((resolve, reject) => {
+			const finish = (error?: Error) => {
+				clearTimeout(timer);
+				off();
+				if (error) reject(error);
+				else resolve();
+			};
+			const timer = setTimeout(() => finish(new Error("the agent did not start in time")), READY_TIMEOUT_MS);
+			timer.unref();
+			const off = this.supervisor.onEvent((event) => {
+				if (event.type !== "supervisor_state") return;
+				if (event.state === "ready") finish();
+				else if (event.state === "stopped") finish(new Error("the agent stopped"));
+			});
+		});
 	}
 
 	private requireAuth(): AuthManager {
@@ -401,6 +488,18 @@ export class DotBridge {
 		this.broadcast(this.conversationsPayload());
 	}
 
+	/**
+	 * History replaces what a window shows, so it must not be older than the
+	 * messages already sent: read it again when one arrived while loading.
+	 */
+	private async currentHistory(): Promise<unknown[]> {
+		for (let attempt = 0; ; attempt++) {
+			const seen = this.nextMessage;
+			const messages = await this.loadHistory();
+			if (this.nextMessage === seen || attempt >= 2) return messages;
+		}
+	}
+
 	private async loadHistory(): Promise<unknown[]> {
 		const response = await this.supervisor.request({ type: "get_messages" });
 		return (response.data as { messages?: unknown[] } | undefined)?.messages ?? [];
@@ -423,8 +522,11 @@ export class DotBridge {
 	private onAgentEvent(event: SupervisorEvent): void {
 		switch (event.type) {
 			case "supervisor_state":
-				if (event.state !== "ready") this.clearRun();
-				else this.settleModelSwitch();
+				if (event.state !== "ready") {
+					this.stopRequested = false;
+					this.clearRun();
+					this.clearQueue();
+				} else this.settleModelSwitch();
 				break;
 			case "interrupted":
 				this.interrupted = true;
@@ -443,9 +545,15 @@ export class DotBridge {
 			case "tool_execution_end":
 				this.onTool(event);
 				break;
+			case "queue_update":
+				this.onQueueUpdate(event);
+				break;
 			case "agent_settled":
 				this.runningTools.clear();
 				this.assistantId = undefined;
+				this.stopRequested = false;
+				// Anything still queued will not be taken by this run.
+				this.clearQueue();
 				// The title of a new conversation comes from its first message.
 				this.broadcast(this.conversationsPayload());
 				this.settleModelSwitch();
@@ -456,6 +564,24 @@ export class DotBridge {
 				break;
 		}
 		this.refreshState();
+	}
+
+	/** The engine sends both complete queues on every change. */
+	private onQueueUpdate(event: AgentRecord): void {
+		const queue = parseQueue(event);
+		if (!queue) return;
+		this.queue = { steering: queue.steering.map(presentText), followUp: queue.followUp.map(presentText) };
+		this.broadcast({ type: "queue", ...this.queue });
+	}
+
+	private queued(): boolean {
+		return this.queue.steering.length > 0 || this.queue.followUp.length > 0;
+	}
+
+	private clearQueue(): void {
+		if (!this.queued()) return;
+		this.queue = { steering: [], followUp: [] };
+		this.broadcast({ type: "queue", ...this.queue });
 	}
 
 	private onMessageStart(event: AgentRecord): void {
@@ -479,10 +605,15 @@ export class DotBridge {
 			| undefined;
 		if (message?.role !== "assistant") return;
 		const messageId = this.assistantId ?? `m${++this.nextMessage}`;
-		this.broadcast({ type: "message_done", messageId, text: presentText(textOf(message)) });
-		if (message.stopReason === "error") {
+		const text = presentText(textOf(message));
+		// The engine ends a stopped answer as "aborted", or as an error when a session switch tore it down.
+		if (message.stopReason === "aborted" || (message.stopReason === "error" && this.stopRequested)) {
+			this.broadcast({ type: "message_done", messageId, text, stopped: true });
+		} else if (message.stopReason === "error") {
 			this.log(`assistant error: ${message.errorMessage ?? "unknown"}`);
-			this.broadcast({ type: "toast", level: "error", message: "Something went wrong while answering." });
+			this.broadcast({ type: "message_done", messageId, text, error: ANSWER_FAILED });
+		} else {
+			this.broadcast({ type: "message_done", messageId, text });
 		}
 	}
 

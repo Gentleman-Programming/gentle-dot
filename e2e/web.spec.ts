@@ -68,6 +68,68 @@ test("offers to continue after the assistant was interrupted", async ({ page }) 
 	await expect(page.getByText("I was interrupted. Continue?")).toBeHidden();
 });
 
+test("shows a message sent while the assistant works as queued, then delivers it", async ({ page }) => {
+	await open(page);
+	await page.getByRole("button", { name: "New conversation" }).click();
+	await expect(page.getByText("Hi! What can I do for you?")).toBeVisible();
+	await say(page, "slow");
+	await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
+	await say(page, "queued one");
+	const queued = page.getByRole("article", { name: "Queued message" });
+	await expect(queued).toHaveCount(1);
+	await expect(queued).toContainText("Queued");
+	await expect(queued.locator(".message-body")).toHaveText("queued one");
+	await expect(page.locator(".message-assistant").last()).toHaveText("Echo: queued one", { timeout: 10_000 });
+	await expect(queued).toHaveCount(0);
+	await expect(page.locator(".message-user")).toHaveText(["slow", "queued one"]);
+	await expect(page.locator(".message-assistant")).toHaveText(["Echo: slow", "Echo: queued one"]);
+});
+
+test("asks before leaving a running answer, then opens the other conversation with no error", async ({
+	page,
+}) => {
+	await open(page);
+	await page.getByRole("button", { name: "New conversation" }).click();
+	await expect(page.getByText("Hi! What can I do for you?")).toBeVisible();
+	await say(page, "first chat");
+	await expect(page.locator(".message-assistant").last()).toHaveText("Echo: first chat");
+	await page.getByRole("button", { name: "New conversation" }).click();
+	await expect(page.getByText("Hi! What can I do for you?")).toBeVisible();
+	await say(page, "hang");
+	await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
+
+	await page.getByRole("button", { name: "Conversations" }).click();
+	await page
+		.getByRole("navigation", { name: "Earlier conversations" })
+		.getByRole("button", { name: /first chat/ })
+		.click();
+	const dialog = page.getByRole("alertdialog", { name: "Stop and switch?" });
+	await expect(dialog).toContainText(
+		"The assistant is still answering. Stop it and open the other conversation?",
+	);
+	await dialog.getByRole("button", { name: "Stop and switch" }).click();
+
+	await expect(page.getByRole("heading", { level: 1 })).toHaveText("first chat");
+	await expect(page.locator(".message-user")).toHaveText(["first chat"]);
+	await expect(page.locator(".message-assistant")).toHaveText(["Echo: first chat"]);
+	await expect(page.getByRole("button", { name: "Stop" })).toBeHidden();
+	await expect(dialog).toBeHidden();
+	await expect(page.locator(".notice")).toHaveCount(0);
+	await expect(page.locator(".message-note-error")).toHaveCount(0);
+});
+
+test("closes open options when the user starts typing, with titled header icons", async ({ page }) => {
+	await open(page);
+	for (const name of ["Conversations", "Accounts", "Profiles", "New conversation"]) {
+		await expect(page.getByRole("button", { name })).toHaveAttribute("title", name);
+	}
+	await page.getByRole("button", { name: "Profiles" }).click();
+	await expect(page.getByRole("region", { name: "Profiles" })).toBeVisible();
+	await page.getByRole("textbox", { name: "Message" }).pressSequentially("h");
+	await expect(page.getByRole("region", { name: "Profiles" })).toBeHidden();
+	await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue("h");
+});
+
 test("keeps the conversation after a page reload", async ({ page }) => {
 	await open(page);
 	await say(page, "remember this");

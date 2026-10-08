@@ -1,4 +1,5 @@
 import { type KeyboardEvent, useEffect, useRef, useState } from "react";
+import { SendIcon } from "./icons.tsx";
 import { newRequestId, type Send } from "./types.ts";
 
 interface ComposerProps {
@@ -7,9 +8,11 @@ interface ComposerProps {
 	send: Send;
 	/** Changes to this value move focus to the text box. */
 	focusKey?: number;
+	/** Called when the text box goes from empty to having text. */
+	onStartTyping?: () => void;
 }
 
-export function Composer({ busy, disabled, send, focusKey }: ComposerProps) {
+export function Composer({ busy, disabled, send, focusKey, onStartTyping }: ComposerProps) {
 	const [text, setText] = useState("");
 	const box = useRef<HTMLTextAreaElement>(null);
 
@@ -46,7 +49,10 @@ export function Composer({ busy, disabled, send, focusKey }: ComposerProps) {
 				rows={1}
 				value={text}
 				disabled={disabled}
-				onChange={(event) => setText(event.target.value)}
+				onChange={(event) => {
+					if (text === "" && event.target.value !== "") onStartTyping?.();
+					setText(event.target.value);
+				}}
 				onKeyDown={onKeyDown}
 			/>
 			{busy ? (
@@ -59,8 +65,9 @@ export function Composer({ busy, disabled, send, focusKey }: ComposerProps) {
 				className="composer-send"
 				disabled={disabled || text.trim() === ""}
 				aria-label="Send"
+				title="Send"
 			>
-				↑
+				<SendIcon />
 			</button>
 		</form>
 	);

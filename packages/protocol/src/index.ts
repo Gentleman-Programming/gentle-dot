@@ -42,6 +42,14 @@ export interface ConversationSummary {
 	updatedAt: string;
 }
 
+/** Messages the user sent while the assistant was busy, waiting to be taken. */
+export interface MessageQueue {
+	/** Delivered after the current step. */
+	steering: string[];
+	/** Delivered when the assistant finishes. */
+	followUp: string[];
+}
+
 export type AuthMethod = "oauth" | "api_key";
 
 export interface AuthProvider {
@@ -167,7 +175,15 @@ export type ServerPayload =
 	| { type: "agent_state"; state: AgentState }
 	| { type: "user_message"; messageId: string; text: string }
 	| { type: "message_delta"; messageId: string; delta: string }
-	| { type: "message_done"; messageId: string; text: string }
+	| {
+			type: "message_done";
+			messageId: string;
+			text: string;
+			/** The answer was stopped on purpose (Stop, or switching conversations). */
+			stopped?: true;
+			/** The answer failed; a plain-language explanation for the chat. */
+			error?: string;
+	  }
 	| { type: "activity"; messageId: string; activity: Activity }
 	| { type: "ask"; ask: Ask }
 	| { type: "ask_resolved"; requestId: string }
@@ -175,6 +191,7 @@ export type ServerPayload =
 	| { type: "history"; conversationId?: string; messages: HistoryMessage[] }
 	| { type: "conversations"; conversations: ConversationSummary[]; activeId?: string }
 	| { type: "interrupted" }
+	| ({ type: "queue" } & MessageQueue)
 	| { type: "error"; code: string; message: string }
 	| { type: "auth_providers"; providers: AuthProvider[]; open?: boolean }
 	| { type: "auth_prompt"; prompt: AuthPrompt }
@@ -199,6 +216,19 @@ export type ServerMessage = ServerPayload & { seq: number };
 const isString = (value: unknown): value is string => typeof value === "string";
 const isOptional = (value: unknown, check: (v: unknown) => boolean) => value === undefined || check(value);
 const MAX_TEXT = 100_000;
+
+/**
+ * Reads the complete queues from the engine's `queue_update` record. A missing
+ * queue is empty and entries that are not text are dropped; returns undefined
+ * when a queue is not a list.
+ */
+export function parseQueue(value: unknown): MessageQueue | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+	const { steering = [], followUp = [] } = value as Record<string, unknown>;
+	if (!Array.isArray(steering) || !Array.isArray(followUp)) return undefined;
+	const texts = (list: unknown[]) => list.filter((item): item is string => isString(item) && item !== "");
+	return { steering: texts(steering), followUp: texts(followUp) };
+}
 
 /** Validates one raw client frame; returns undefined when it is not a known, well-formed message. */
 export function parseClientMessage(raw: string): ClientMessage | undefined {

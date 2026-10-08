@@ -4,7 +4,7 @@ import type { ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { type DotDaemon, ensureToken, startDaemon, startupMessage } from "../src/daemon.ts";
-import { HIDDEN_NAMES } from "../src/white-label.ts";
+import { HIDDEN_NAMES, presentText } from "../src/white-label.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
 const daemons: DotDaemon[] = [];
@@ -234,6 +234,195 @@ describe("gateway", () => {
 		expect((await find(client, "error")).code).toBe("bad_message");
 		send(client, { type: "get_history" });
 		await find(client, "history");
+	});
+
+	it("shows a message sent while busy as queued in every window, then delivers it when the run ends", async () => {
+		const d = await daemon();
+		const a = await authed(d);
+		const b = await authed(d);
+		send(a, { type: "send", text: "slow" });
+		await find(a, "agent_state", (m) => m.state === "thinking");
+		send(a, { type: "send", text: "ask Gentle Shell later" });
+		const shown = presentText("ask Gentle Shell later");
+		expect(shown).not.toContain("Gentle Shell");
+		for (const client of [a, b]) {
+			const queued = await find(client, "queue", (m) => m.steering.length > 0);
+			expect(queued).toMatchObject({ steering: [shown], followUp: [] });
+		}
+		// The final answer is white-labeled too; the user's own words are shown as typed.
+		const echo = presentText("Echo: ask Gentle Shell later");
+		const done = await find(b, "message_done", (m) => m.text === echo);
+		const types = b.messages.map((m) => m.type);
+		const emptied = b.messages.findIndex(
+			(m) => m.type === "queue" && m.steering.length === 0 && m.followUp.length === 0,
+		);
+		const delivered = b.messages.findIndex(
+			(m) => m.type === "user_message" && m.text === "ask Gentle Shell later",
+		);
+		expect(emptied).toBeGreaterThan(types.indexOf("queue"));
+		expect(delivered).toBeGreaterThan(emptied);
+		expect(b.messages.indexOf(done)).toBeGreaterThan(delivered);
+		expect(b.messages.filter((m) => m.type === "message_done").map((m) => m.text)).toEqual([
+			"Echo: slow",
+			echo,
+		]);
+		await find(b, "agent_state", (m) => m.state === "idle");
+	});
+
+	it("gives a window that connects later the current queue, and nothing once it is empty", async () => {
+		const d = await daemon();
+		const a = await authed(d);
+		send(a, { type: "send", text: "slow" });
+		await find(a, "agent_state", (m) => m.state === "thinking");
+		send(a, { type: "send", text: "queued one" });
+		await find(a, "queue", (m) => m.steering.length > 0);
+		const late = await authed(d);
+		const queued = await find(late, "queue");
+		expect(queued).toMatchObject({ steering: ["queued one"], followUp: [] });
+		expect(late.messages.map((m) => m.type).slice(0, 2)).toEqual(["ready", "queue"]);
+		await find(a, "agent_state", (m) => m.state === "idle");
+		const after = await authed(d);
+		send(after, { type: "list_conversations" });
+		await find(after, "conversations");
+		expect(after.messages.some((m) => m.type === "queue")).toBe(false);
+	});
+
+	it("clears the queue when the run settles without the engine emptying it", async () => {
+		const d = await daemon({ ...process.env, FAKE_AGENT_DROP_QUEUE: "1" });
+		const a = await authed(d);
+		send(a, { type: "send", text: "slow" });
+		await find(a, "agent_state", (m) => m.state === "thinking");
+		send(a, { type: "send", text: "never delivered" });
+		await find(a, "queue", (m) => m.steering.length > 0);
+		await find(a, "agent_state", (m) => m.state === "idle");
+		const cleared = await find(a, "queue", (m) => m.steering.length === 0 && m.followUp.length === 0);
+		expect(cleared).toMatchObject({ steering: [], followUp: [] });
+		expect(a.messages.some((m) => m.type === "user_message" && m.text === "never delivered")).toBe(false);
+		const late = await authed(d);
+		send(late, { type: "list_conversations" });
+		await find(late, "conversations");
+		expect(late.messages.some((m) => m.type === "queue")).toBe(false);
+	});
+
+	it("clears the queue when the agent restarts", async () => {
+		const d = await daemon();
+		const a = await authed(d);
+		send(a, { type: "send", text: "hang" });
+		await find(a, "agent_state", (m) => m.state === "thinking");
+		send(a, { type: "send", text: "lost in the crash" });
+		await find(a, "queue", (m) => m.steering.length > 0);
+		const pid = d.supervisor.pid;
+		if (!pid) throw new Error("the agent is not running");
+		process.kill(pid, "SIGKILL");
+		await find(a, "agent_state", (m) => m.state === "restarting");
+		const cleared = await find(a, "queue", (m) => m.steering.length === 0);
+		expect(cleared).toMatchObject({ steering: [], followUp: [] });
+		await find(a, "agent_state", (m) => m.state === "idle");
+	});
+
+	it("stops a running answer before opening another conversation, with no error", async () => {
+		const d = await daemon();
+		const client = await authed(d);
+		send(client, { type: "send", text: "first chat" });
+		await find(client, "message_done", (m) => m.text === "Echo: first chat");
+		await find(client, "agent_state", (m) => m.state === "idle");
+		const firstId = (await find(client, "ready")).conversationId;
+		send(client, { type: "new_conversation" });
+		await find(client, "history", (m) => m.conversationId !== firstId);
+		const hangs = () => client.messages.filter((m) => m.type === "user_message" && m.text === "hang").length;
+		send(client, { type: "send", text: "hang" });
+		await waitFor(() => hangs() === 1);
+		const before = client.messages.length;
+
+		send(client, { type: "open_conversation", conversationId: firstId });
+		const history = await find(client, "history", (m) => m.conversationId === firstId);
+		expect(history.messages.map((m) => m.text)).toEqual(["first chat", "Echo: first chat"]);
+		const after = client.messages.slice(before);
+		const stopped = after.findIndex((m) => m.type === "message_done" && m.stopped === true);
+		expect(stopped).toBeGreaterThanOrEqual(0);
+		expect(stopped).toBeLessThan(after.indexOf(history));
+		expect(after.filter((m) => m.type === "toast" || m.type === "error")).toEqual([]);
+		expect(after.some((m) => m.type === "message_done" && m.error !== undefined)).toBe(false);
+		await find(client, "agent_state", (m) => m.state === "idle");
+
+		send(client, { type: "send", text: "hang" });
+		await waitFor(() => hangs() === 2);
+		const mark = client.messages.length;
+		send(client, { type: "new_conversation" });
+		const fresh = await waitFor(() =>
+			client.messages
+				.slice(mark)
+				.find((m): m is Extract<ServerMessage, { type: "history" }> => m.type === "history"),
+		);
+		expect(fresh.conversationId).not.toBe(firstId);
+		expect(fresh.messages).toEqual([]);
+		const later = client.messages.slice(mark);
+		expect(later.some((m) => m.type === "message_done" && m.stopped === true)).toBe(true);
+		expect(later.filter((m) => m.type === "toast" || m.type === "error")).toEqual([]);
+	});
+
+	it("sends a message typed during a switch to the new conversation, after its history", async () => {
+		const d = await daemon();
+		const client = await authed(d);
+		const oldId = (await find(client, "ready")).conversationId;
+		send(client, { type: "new_conversation" });
+		send(client, { type: "send", text: "right away" });
+		const done = await find(client, "message_done");
+		expect(done.text).toBe("Echo: right away");
+		await find(client, "agent_state", (m) => m.state === "idle");
+		const types = client.messages.map((m) => m.type);
+		const history = client.messages.findIndex((m) => m.type === "history");
+		const user = types.indexOf("user_message");
+		expect(history).toBeGreaterThanOrEqual(0);
+		expect(history).toBeLessThan(user);
+		expect(types.lastIndexOf("history")).toBe(history);
+		const listed = await find(client, "conversations", (m) =>
+			m.conversations.some((c) => c.title === "right away"),
+		);
+		expect(listed.activeId).not.toBe(oldId);
+		expect(listed.conversations.find((c) => c.title === "right away")?.id).toBe(listed.activeId);
+	});
+
+	it("marks an answer the user stopped as stopped, not as an error", async () => {
+		const d = await daemon();
+		const client = await authed(d);
+		send(client, { type: "send", text: "hang" });
+		await find(client, "agent_state", (m) => m.state === "thinking");
+		send(client, { type: "abort" });
+		const done = await find(client, "message_done");
+		expect(done).toMatchObject({ stopped: true });
+		expect(done.error).toBeUndefined();
+		await find(client, "agent_state", (m) => m.state === "idle");
+		expect(client.messages.filter((m) => m.type === "toast" || m.type === "error")).toEqual([]);
+	});
+
+	it("reports an error while answering inside the conversation, in plain words", async () => {
+		const d = await daemon();
+		const client = await authed(d);
+		send(client, { type: "send", text: "fail" });
+		const done = await find(client, "message_done");
+		expect(done.error).toBe("Something went wrong while answering. Please try again.");
+		expect(done.stopped).toBeUndefined();
+		const shown = JSON.stringify(client.messages);
+		expect(shown).not.toContain("exploded");
+		for (const name of HIDDEN_NAMES) expect(shown).not.toMatch(name);
+		await find(client, "agent_state", (m) => m.state === "idle");
+		expect(client.messages.filter((m) => m.type === "toast")).toEqual([]);
+	});
+
+	it("answers a history request made while the agent restarts once it is back", async () => {
+		const d = await daemon({ ...process.env, FAKE_AGENT_START_DELAY_MS: "400" });
+		const client = await authed(d);
+		send(client, { type: "send", text: "keep me" });
+		await find(client, "agent_state", (m) => m.state === "idle");
+		const pid = d.supervisor.pid;
+		if (!pid) throw new Error("the agent is not running");
+		process.kill(pid, "SIGKILL");
+		await find(client, "agent_state", (m) => m.state === "restarting");
+		send(client, { type: "get_history" });
+		const history = await find(client, "history");
+		expect(history.messages.map((m) => m.text)).toEqual(["keep me", "Echo: keep me"]);
+		expect(client.messages.filter((m) => m.type === "error")).toEqual([]);
 	});
 
 	it("tells clients about an interrupted run after the agent restarts", async () => {

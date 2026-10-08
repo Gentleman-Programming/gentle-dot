@@ -1,14 +1,20 @@
 import type { Ask } from "@gentle-dot/protocol";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Send } from "./types.ts";
 
 export function AskCard({ ask, send }: { ask: Ask; send: Send }) {
 	const [value, setValue] = useState(ask.prefill ?? "");
+	const card = useRef<HTMLElement>(null);
+	// A question that arrives below a long conversation must be seen.
+	useEffect(() => {
+		card.current?.scrollIntoView?.({ block: "nearest" });
+	}, []);
 	const answer = (fields: { value?: string; confirmed?: boolean; cancelled?: boolean }) =>
 		send({ type: "ui_response", requestId: ask.requestId, ...fields });
 
 	return (
-		<section className="ask-card" aria-label="The assistant needs your answer">
+		<section ref={card} className="ask-card" aria-label="The assistant needs your answer">
+			<p className="eyebrow">Needs your answer</p>
 			<p className="ask-title">{ask.title}</p>
 			{ask.message ? <p className="ask-message">{ask.message}</p> : null}
 			{ask.method === "select" ? (
