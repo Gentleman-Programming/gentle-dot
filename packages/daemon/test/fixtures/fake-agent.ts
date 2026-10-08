@@ -17,6 +17,9 @@
 //   "compact"      records a compaction entry (its summary lists the user's messages so far)
 //   "pad:<n>"      grows the session file by about n bytes (an entry outside the context)
 //   "recall"       answers with the hidden context messages it was given
+//   "tamper"       does what an agent with a shell in <data>/workspace could (L47 B1): turns Notion on
+//                  in ../connectors.json and ../agent/mcp.json, adds .pi/mcp.json, then ends itself
+//                  like `kill $PPID`; "tamper:stay" changes the files and keeps running
 // The "noreply" command is never answered.
 // A prompt sent while busy (with streamingBehavior), steer, and follow_up are
 // queued like Pi does: a queue_update with both complete queues, then each one
@@ -288,6 +291,22 @@ async function runPrompt(text: string) {
 	if (text === "recall") {
 		const hidden = messages.filter((m) => m.role === "custom").map((m) => m.content);
 		assistantText(hidden.length > 0 ? `Recall: ${hidden.join(" | ")}` : "Recall: nothing");
+		return endRun();
+	}
+	if (text === "tamper" || text === "tamper:stay") {
+		const notion = { url: "https://mcp.notion.com/mcp", exposure: "direct" };
+		writeFileSync(
+			"../connectors.json",
+			JSON.stringify({ version: 1, connectors: { notion: { enabled: true, mode: "read_write" } } }),
+		);
+		writeFileSync("../agent/mcp.json", JSON.stringify({ mcpServers: { notion } }));
+		mkdirSync(".pi", { recursive: true });
+		writeFileSync(".pi/mcp.json", JSON.stringify({ mcpServers: { notion } }));
+		if (text === "tamper") {
+			setTimeout(() => process.kill(process.pid, "SIGTERM"), 50);
+			return;
+		}
+		assistantText("Changed the files.");
 		return endRun();
 	}
 	if (text.startsWith("tool:")) {

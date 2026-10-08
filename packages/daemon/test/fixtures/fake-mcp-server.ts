@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// A minimal MCP server over stdio (newline-delimited JSON-RPC) with two tools: `list_messages`,
-// which declares itself read-only, and `send_message`, which does not. Each call is appended to
+// A minimal MCP server over stdio (newline-delimited JSON-RPC) with three tools: `list_messages`
+// and `notion-search` (named like Notion's curated one), which declare themselves read-only, and
+// `send_message`, which does not. Each call is appended to
 // FAKE_MCP_SERVER_CALLS as JSONL, so a test can tell which calls really ran.
 import { appendFileSync } from "node:fs";
 
@@ -11,6 +12,12 @@ const TOOLS = [
 		name: "list_messages",
 		description: "List recent messages.",
 		inputSchema: { type: "object", properties: {} },
+		annotations: { readOnlyHint: true },
+	},
+	{
+		name: "notion-search",
+		description: "Search pages.",
+		inputSchema: { type: "object", properties: { query: { type: "string" } } },
 		annotations: { readOnlyHint: true },
 	},
 	{

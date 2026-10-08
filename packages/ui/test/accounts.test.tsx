@@ -252,6 +252,23 @@ describe("ChatSurface onboarding", () => {
 		expect(dispatch).toHaveBeenCalledWith({ type: "accounts", open: true });
 	});
 
+	it("puts the banner in the chat, above the first message, not over it", () => {
+		const s = apply(
+			{ ...initialState, connection: "open", agentState: "idle" },
+			{ type: "auth_providers", providers: providers.map((p) => ({ ...p, configured: false })) },
+			{ type: "user_message", messageId: "u1", text: "hello" },
+		);
+		const { container } = render(
+			<ChatSurface variant="web" state={s} send={vi.fn()} dismiss={vi.fn()} dispatch={vi.fn()} />,
+		);
+		const banner = container.querySelector(".onboarding");
+		const first = screen.getByText("hello");
+		const chat = banner?.closest("main.chat-body");
+		expect(chat).not.toBeNull();
+		expect(chat?.contains(first)).toBe(true);
+		expect(banner && banner.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+	});
+
 	it("opens accounts from the header", async () => {
 		const dispatch = vi.fn();
 		const send = vi.fn();

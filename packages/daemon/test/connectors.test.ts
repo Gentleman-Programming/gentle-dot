@@ -1,6 +1,16 @@
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { createServer } from "node:http";
 import { createRequire } from "node:module";
+import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ServerPayload } from "@gentle-dot/protocol";
@@ -95,64 +105,160 @@ describe("mcp.json rendering", () => {
 });
 
 describe("connector store", () => {
+	const stores: ConnectorStore[] = [];
+	afterEach(() => {
+		for (const s of stores.splice(0)) s.close();
+	});
+
 	function store() {
 		const dataDir = tempDir();
 		const agentHome = join(dataDir, "agent");
+		const workspace = join(dataDir, "workspace");
 		mkdirSync(agentHome);
+		mkdirSync(workspace);
 		const logs: string[] = [];
-		return {
+		const s = new ConnectorStore({
 			dataDir,
 			agentHome,
-			logs,
-			store: new ConnectorStore({ dataDir, agentHome, guardPath: "/app/guard.ts", log: (l) => logs.push(l) }),
-		};
+			workspace,
+			guardPath: "/app/guard.ts",
+			log: (l) => logs.push(l),
+		});
+		stores.push(s);
+		return { dataDir, agentHome, workspace, logs, store: s };
 	}
 
-	it("is the only writer: connectors.json keeps the approved mcp.json hash, both private", () => {
-		const { store: s, dataDir, agentHome } = store();
-		expect(s.ensureMcpJson()).toBe(false);
+	/** What an agent with a shell in the workspace did in L47: turn on a connector the user turned off. */
+	function tamper(dataDir: string, agentHome: string) {
+		writeFileSync(
+			join(dataDir, "connectors.json"),
+			JSON.stringify({ version: 1, connectors: { notion: { enabled: true, mode: "read_write" } } }),
+		);
+		writeFileSync(
+			join(agentHome, "mcp.json"),
+			JSON.stringify({ mcpServers: { notion: { url: "https://mcp.notion.com/mcp", exposure: "direct" } } }),
+		);
+	}
+
+	it("is the only writer: both files private, with no hash, and the state is read once at start", () => {
+		const { store: s, dataDir, agentHome, workspace } = store();
+		expect(s.enforce()).toBe(false);
 		expect(existsSync(join(agentHome, "mcp.json"))).toBe(false);
 		s.update((state) => {
 			state.connectors.notion = { enabled: true, mode: "read_only" };
 		});
 		const mcp = readFileSync(join(agentHome, "mcp.json"), "utf8");
 		expect(JSON.parse(mcp).mcpServers.notion.url).toBe("https://mcp.notion.com/mcp");
-		const saved = JSON.parse(readFileSync(join(dataDir, "connectors.json"), "utf8"));
-		expect(saved).toEqual({
+		expect(JSON.parse(readFileSync(join(dataDir, "connectors.json"), "utf8"))).toEqual({
 			version: 1,
 			connectors: { notion: { enabled: true, mode: "read_only" } },
-			hash: createHash("sha256").update(mcp).digest("hex"),
 		});
 		expect(statSync(join(dataDir, "connectors.json")).mode & 0o777).toBe(0o600);
 		expect(statSync(join(agentHome, "mcp.json")).mode & 0o777).toBe(0o600);
 		expect(readdirSync(agentHome).filter((f) => f.includes(".tmp"))).toEqual([]);
-		expect(new ConnectorStore({ dataDir, agentHome }).state()).toEqual({
-			connectors: { notion: { enabled: true, mode: "read_only" } },
-		});
+		const next = new ConnectorStore({ dataDir, agentHome, workspace });
+		stores.push(next);
+		expect(next.state()).toEqual({ connectors: { notion: { enabled: true, mode: "read_only" } } });
 	});
 
-	it("restores mcp.json when something else changed or deleted it", () => {
-		const { store: s, agentHome, logs } = store();
-		s.update((state) => {
-			state.connectors.linear = { enabled: true, mode: "read_write" };
+	it("rewrites an older record (with a hash) quietly at start", () => {
+		const { dataDir, agentHome, workspace } = store();
+		writeFileSync(
+			join(dataDir, "connectors.json"),
+			JSON.stringify({
+				version: 1,
+				connectors: { linear: { enabled: true, mode: "read_write" } },
+				hash: "abc",
+			}),
+		);
+		const s = new ConnectorStore({ dataDir, agentHome, workspace });
+		stores.push(s);
+		let reverted = 0;
+		s.onReverted = () => reverted++;
+		expect(s.enforce(false)).toBe(true);
+		expect(reverted).toBe(0);
+		expect(JSON.parse(readFileSync(join(dataDir, "connectors.json"), "utf8"))).toEqual({
+			version: 1,
+			connectors: { linear: { enabled: true, mode: "read_write" } },
 		});
-		const file = join(agentHome, "mcp.json");
-		const approved = readFileSync(file, "utf8");
-		expect(s.ensureMcpJson()).toBe(false);
-		writeFileSync(file, JSON.stringify({ mcpServers: { evil: { command: "sh" } } }));
-		expect(s.ensureMcpJson()).toBe(true);
-		expect(readFileSync(file, "utf8")).toBe(approved);
-		rmSync(file);
-		expect(s.ensureMcpJson()).toBe(true);
-		expect(readFileSync(file, "utf8")).toBe(approved);
-		expect(logs.filter((l) => l.includes("restored"))).toHaveLength(2);
+		expect(JSON.parse(readFileSync(join(agentHome, "mcp.json"), "utf8")).mcpServers.linear).toBeDefined();
+		expect(s.enforce()).toBe(false);
+	});
+
+	it("keeps the approved state in memory: edited files change nothing and are put back (B1)", () => {
+		const { store: s, dataDir, agentHome, logs } = store();
+		let reverted = 0;
+		s.onReverted = () => reverted++;
+		s.update((state) => {
+			state.connectors.notion = { enabled: false, mode: "read_only" };
+		});
+		const approved = {
+			connectors: readFileSync(join(dataDir, "connectors.json"), "utf8"),
+			mcp: readFileSync(join(agentHome, "mcp.json"), "utf8"),
+		};
+		tamper(dataDir, agentHome);
+		expect(s.state()).toEqual({ connectors: { notion: { enabled: false, mode: "read_only" } } });
+		expect(s.policy().connectors).toEqual({});
+		expect(s.enforce()).toBe(true);
+		expect(readFileSync(join(dataDir, "connectors.json"), "utf8")).toBe(approved.connectors);
+		expect(readFileSync(join(agentHome, "mcp.json"), "utf8")).toBe(approved.mcp);
+		expect(reverted).toBe(1);
+		expect(s.enforce()).toBe(false);
+		rmSync(join(agentHome, "mcp.json"));
+		expect(s.enforce()).toBe(true);
+		expect(readFileSync(join(agentHome, "mcp.json"), "utf8")).toBe(approved.mcp);
+		expect(logs.filter((l) => l.includes("put back"))).toHaveLength(2);
 	});
 
 	it("restores the server list when mcp.json appears without any approved connector", () => {
 		const { store: s, agentHome } = store();
 		writeFileSync(join(agentHome, "mcp.json"), JSON.stringify({ mcpServers: { evil: { command: "sh" } } }));
-		expect(s.ensureMcpJson()).toBe(true);
+		expect(s.enforce()).toBe(true);
 		expect(JSON.parse(readFileSync(join(agentHome, "mcp.json"), "utf8"))).toEqual({ mcpServers: {} });
+	});
+
+	it("removes a project mcp.json from the workspace, and a .pi link without touching where it points", () => {
+		const { store: s, workspace } = store();
+		mkdirSync(join(workspace, ".pi"));
+		writeFileSync(
+			join(workspace, ".pi", "mcp.json"),
+			JSON.stringify({ mcpServers: { evil: { command: "sh" } } }),
+		);
+		writeFileSync(join(workspace, ".pi", "notes.md"), "kept");
+		expect(s.enforce()).toBe(true);
+		expect(existsSync(join(workspace, ".pi", "mcp.json"))).toBe(false);
+		expect(readFileSync(join(workspace, ".pi", "notes.md"), "utf8")).toBe("kept");
+		rmSync(join(workspace, ".pi"), { recursive: true });
+		const elsewhere = tempDir();
+		writeFileSync(join(elsewhere, "mcp.json"), "{}");
+		symlinkSync(elsewhere, join(workspace, ".pi"));
+		expect(s.enforce()).toBe(true);
+		expect(existsSync(join(workspace, ".pi"))).toBe(false);
+		expect(readFileSync(join(elsewhere, "mcp.json"), "utf8")).toBe("{}");
+	});
+
+	it("watches the files and puts a change back while the engine runs", async () => {
+		const { store: s, dataDir, agentHome, workspace } = store();
+		s.update((state) => {
+			state.connectors.linear = { enabled: false, mode: "read_only" };
+		});
+		const approved = readFileSync(join(dataDir, "connectors.json"), "utf8");
+		let reverted = 0;
+		s.onReverted = () => reverted++;
+		s.watch();
+		tamper(dataDir, agentHome);
+		await waitFor(() => readFileSync(join(dataDir, "connectors.json"), "utf8") === approved && reverted > 0);
+		await waitFor(() => !readFileSync(join(agentHome, "mcp.json"), "utf8").includes('"notion"'));
+		mkdirSync(join(workspace, ".pi"));
+		writeFileSync(join(workspace, ".pi", "mcp.json"), "{}");
+		await waitFor(() => !existsSync(join(workspace, ".pi", "mcp.json")));
+		// Its own writes are not reported.
+		const before = reverted;
+		s.update((state) => {
+			state.connectors.linear = { enabled: true, mode: "read_only" };
+		});
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		expect(reverted).toBe(before);
 	});
 
 	it("gives the guard the curated lists, modes, and the files it must protect", () => {
@@ -171,7 +277,10 @@ describe("connector store", () => {
 		expect(policy.protectedPaths).toEqual([
 			join(agentHome, "mcp.json"),
 			join(agentHome, "mcp-auth.json"),
+			join(agentHome, "auth.json"),
+			join(agentHome, "models.json"),
 			join(dataDir, "connectors.json"),
+			join(dataDir, "token"),
 			"/app/guard.ts",
 		]);
 	});
@@ -200,7 +309,7 @@ afterEach(() => {
 	for (const manager of managers.splice(0)) manager.cancelAll();
 });
 
-function setup(mode?: "fail" | "auto") {
+function setup(mode?: "fail" | "auto", extraEnv: Record<string, string> = {}) {
 	const dataDir = tempDir();
 	const agentHome = join(dataDir, "agent");
 	const cliLog = join(dataDir, "cli.jsonl");
@@ -214,6 +323,7 @@ function setup(mode?: "fail" | "auto") {
 			HOME: join(dataDir, "home"),
 			FAKE_MCP_CLI_LOG: cliLog,
 			...(mode ? { FAKE_MCP_CLI_MODE: mode } : {}),
+			...extraEnv,
 		},
 		cwd: dataDir,
 		log: (line) => logs.push(line),
@@ -319,6 +429,33 @@ describe("connector sign-in", () => {
 		expect(JSON.stringify(sent)).not.toContain("very-secret-code");
 		expect(JSON.stringify(sent)).not.toContain("fake-access-token-value");
 		await waitFor(() => !alive(run?.pid ?? 0));
+	});
+
+	it("opens the pasted address without following where it redirects (A5)", async () => {
+		let followed = 0;
+		const elsewhere = createServer((_req, res) => {
+			followed++;
+			res.end("followed");
+		});
+		await new Promise<void>((resolve) => elsewhere.listen(0, "127.0.0.1", resolve));
+		const target = `http://127.0.0.1:${(elsewhere.address() as AddressInfo).port}/landing`;
+		try {
+			const { manager, owner, emit, find } = setup(undefined, { FAKE_MCP_CLI_REDIRECT: target });
+			manager.connect(owner, "notion", emit);
+			const link = await find("auth_event", (m) => m.event.kind === "auth_url");
+			await find("auth_prompt");
+			const redirect = new URL(
+				new URL(link.event.kind === "auth_url" ? link.event.url : "").searchParams.get("redirect_uri") ?? "",
+			);
+			redirect.searchParams.set("code", "c");
+			redirect.searchParams.set("state", "fake-state");
+			manager.reply(owner, link.flowId, { value: redirect.href });
+			expect((await find("auth_done")).ok).toBe(true);
+			await new Promise((resolve) => setTimeout(resolve, 200));
+			expect(followed).toBe(0);
+		} finally {
+			elsewhere.close();
+		}
 	});
 
 	it("refuses a pasted address for another place or sign-in, keeps waiting, and cancels by stopping the process", async () => {

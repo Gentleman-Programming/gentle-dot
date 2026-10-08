@@ -120,7 +120,10 @@ export class DotBridge {
 		});
 		supervisor.onEvent((event) => this.onAgentEvent(event));
 		if (options.auth) options.auth.onCredentialsChanged = () => this.afterCredentialsChange();
-		if (options.connectors) options.connectors.onChanged = (restart) => this.afterConnectorsChange(restart);
+		if (options.connectors) {
+			options.connectors.onChanged = (restart) => this.afterConnectorsChange(restart);
+			options.connectors.onBlocked = () => this.connectorChangeBlocked();
+		}
 		this.state = this.deriveState();
 	}
 
@@ -476,6 +479,12 @@ export class DotBridge {
 		if (refused) this.deliver(client, { type: "error", ...refused });
 	}
 
+	/** The connector files were changed outside the Connectors screen and put back. */
+	private connectorChangeBlocked(): void {
+		this.broadcast({ type: "toast", level: "warning", message: "A change to your connectors was blocked." });
+		this.broadcast({ type: "connectors", connectors: this.requireConnectors().list() });
+	}
+
 	/** Every window sees the new statuses; a new mcp.json needs an agent restart, once it is idle. */
 	private afterConnectorsChange(restart: boolean): void {
 		this.broadcast({ type: "connectors", connectors: this.requireConnectors().list() });
@@ -686,6 +695,8 @@ export class DotBridge {
 				this.onQueueUpdate(event);
 				break;
 			case "agent_settled":
+				// The run may have changed the connector files.
+				this.options.connectors?.enforce();
 				this.runningTools.clear();
 				this.assistantId = undefined;
 				this.stopRequested = false;

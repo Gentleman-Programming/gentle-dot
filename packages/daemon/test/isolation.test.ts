@@ -61,6 +61,15 @@ describe("isolatedAgentEnv memory", () => {
 	});
 });
 
+describe("isolatedAgentEnv subagents", () => {
+	it("turns the engine's subagents off until S25, whatever the user's environment says", () => {
+		expect(isolatedAgentEnv({ HOME: tempDir() }, tempDir()).GENTLE_PI_AGENTS).toBe("0");
+		expect(isolatedAgentEnv({ HOME: tempDir(), GENTLE_PI_AGENTS: "1" }, tempDir()).GENTLE_PI_AGENTS).toBe(
+			"0",
+		);
+	});
+});
+
 describe("ensureMemoryProject", () => {
 	it("names the workspace's memory project gentle-dot, replacing any other name", () => {
 		const workspace = tempDir();

@@ -203,16 +203,16 @@ export function ChatSurface({
 				</main>
 			) : null}
 
-			{!covered && needsAccount(state) ? (
-				<div className="onboarding">
-					<p>To start, connect the AI service you use (a subscription or an API key).</p>
-					<button type="button" className="primary" onClick={openAccounts}>
-						Connect an AI account
-					</button>
-				</div>
-			) : null}
-
 			<main className="chat-body" hidden={covered}>
+				{/* In the chat's own flow, so messages start below it instead of sliding under it. */}
+				{needsAccount(state) ? (
+					<div className="onboarding">
+						<p>To start, connect the AI service you use (a subscription or an API key).</p>
+						<button type="button" className="primary" onClick={openAccounts}>
+							Connect an AI account
+						</button>
+					</div>
+				) : null}
 				<MessageList
 					messages={state.messages}
 					queued={[...state.queue.steering, ...state.queue.followUp]}

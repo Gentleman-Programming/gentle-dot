@@ -1,4 +1,5 @@
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -41,6 +42,7 @@ export function ensureMemoryProject(workspace: string): void {
  * user's server. The user's own `ENGRAM_PORT` and `ENGRAM_URL` are kept.
  * `GENTLE_DOT_ENGRAM=private` instead runs a memory of its own under the
  * engine's home, on port 7438 (`GENTLE_DOT_ENGRAM_PORT` overrides it).
+ * Subagents are off (`GENTLE_PI_AGENTS=0`) until S25.
  */
 export function isolatedAgentEnv(base: NodeJS.ProcessEnv, dataDir: string): NodeJS.ProcessEnv {
 	const home = join(dataDir, "home");
@@ -55,6 +57,9 @@ export function isolatedAgentEnv(base: NodeJS.ProcessEnv, dataDir: string): Node
 		XDG_STATE_HOME: join(home, ".local", "state"),
 	};
 	for (const key of INHERITED_HOMES) delete env[key];
+	// Subagent child engines do not load the approval guard, so subagents stay off until the
+	// daemon enforces connectors itself (S25).
+	env.GENTLE_PI_AGENTS = "0";
 	if (base.GENTLE_DOT_ENGRAM === "private") {
 		env.ENGRAM_PORT = base.GENTLE_DOT_ENGRAM_PORT || PRIVATE_ENGRAM_PORT;
 		delete env.ENGRAM_URL;
@@ -66,4 +71,54 @@ export function isolatedAgentEnv(base: NodeJS.ProcessEnv, dataDir: string): Node
 	const gitConfig = join(realHome, ".gitconfig");
 	if (!base.GIT_CONFIG_GLOBAL && existsSync(gitConfig)) env.GIT_CONFIG_GLOBAL = gitConfig;
 	return env;
+}
+
+/**
+ * In private memory mode (`GENTLE_DOT_ENGRAM=private`) the engine's memory plugin starts a memory
+ * server on the private port, and it outlives the engine. When nothing listened on that port as the
+ * daemon started, the daemon caused it, so `stop()` ends it when the daemon closes: the PID that
+ * listens on the port, and only after its `/health` instance id matches the private data folder's
+ * (`<dataDir>/home/.engram/.instance-id`). Undefined outside private mode or when it already ran.
+ */
+export async function privateMemory(
+	base: NodeJS.ProcessEnv,
+	dataDir: string,
+	log: (line: string) => void,
+): Promise<{ stop(): Promise<void> } | undefined> {
+	if (base.GENTLE_DOT_ENGRAM !== "private") return undefined;
+	const port = base.GENTLE_DOT_ENGRAM_PORT || PRIVATE_ENGRAM_PORT;
+	if ((await listeningPid(port)) !== undefined) return undefined;
+	return {
+		async stop() {
+			const pid = await listeningPid(port);
+			if (pid === undefined) return;
+			let expected: string;
+			try {
+				expected = readFileSync(join(dataDir, "home", ".engram", ".instance-id"), "utf8").trim();
+			} catch {
+				return;
+			}
+			const health = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) })
+				.then((response) => response.json() as Promise<{ instance_id?: unknown }>)
+				.catch(() => undefined);
+			if (!expected || health?.instance_id !== expected) {
+				log(`the memory server on port ${port} serves other data; left running`);
+				return;
+			}
+			try {
+				process.kill(pid, "SIGTERM");
+				log(`stopped the private memory server (pid ${pid})`);
+			} catch {}
+		},
+	};
+}
+
+/** The one PID listening on `port` on this computer (`lsof`), if any. */
+function listeningPid(port: string): Promise<number | undefined> {
+	return new Promise((resolve) => {
+		execFile("lsof", ["-t", "-n", "-P", `-iTCP:${port}`, "-sTCP:LISTEN"], (error, stdout) => {
+			const pids = [...new Set(String(stdout).trim().split("\n").filter(Boolean))];
+			resolve(!error && pids.length === 1 && /^\d+$/.test(pids[0] ?? "") ? Number(pids[0]) : undefined);
+		});
+	});
 }

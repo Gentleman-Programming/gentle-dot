@@ -16,7 +16,13 @@ export function AskCard({ ask, send }: { ask: Ask; send: Send }) {
 		<section ref={card} className="ask-card" aria-label="The assistant needs your answer">
 			<p className="eyebrow">Needs your answer</p>
 			<p className="ask-title">{ask.title}</p>
-			{ask.message ? <p className="ask-message">{ask.message}</p> : null}
+			{/* The whole text the user approves; long previews scroll inside the card. */}
+			{ask.message ? (
+				// biome-ignore lint/a11y/noNoninteractiveTabindex: a scrollable region must be reachable by keyboard.
+				<section className="ask-message" aria-label="Details" tabIndex={0}>
+					{ask.message}
+				</section>
+			) : null}
 			{ask.method === "select" ? (
 				<div className="ask-options">
 					{(ask.options ?? []).map((option) => (

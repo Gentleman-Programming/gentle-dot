@@ -15,7 +15,7 @@ import {
 	type McpCli,
 	policyEnv,
 } from "./connectors.ts";
-import { ensureMemoryProject, ensurePrivateDir, isolatedAgentEnv } from "./isolation.ts";
+import { ensureMemoryProject, ensurePrivateDir, isolatedAgentEnv, privateMemory } from "./isolation.ts";
 import { defaultImportPath, ProfileStore } from "./profiles.ts";
 import { type RotationLimits, rotationLimits } from "./rotation.ts";
 import { AgentSupervisor } from "./supervisor.ts";
@@ -115,6 +115,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		: [];
 	let agentEnv = { ...(options.agentEnv ?? process.env) };
 	const homeArgs: string[] = [];
+	const memory = options.agentHome ? await privateMemory(agentEnv, options.dataDir, log) : undefined;
 	if (options.agentHome) {
 		homeArgs.push("--home", options.agentHome);
 		// The engine also writes under the home folder; it gets one of its own.
@@ -122,9 +123,11 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		agentEnv.GENTLE_PI_CONFIG_HOME = join(options.dataDir, "gentle-ai");
 	}
 	const agentHome = options.agentHome ?? resolveAgentHome(process.env, options.dataDir);
+	// The approved connectors are read once, here; the engine cannot change them (docs/design.md).
 	const connectorStore = new ConnectorStore({
 		dataDir: options.dataDir,
 		agentHome,
+		workspace: options.workspace,
 		guardPath: APPROVAL_GUARD,
 		log,
 	});
@@ -142,13 +145,10 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		cwd: options.workspace,
 		dataDir: options.dataDir,
 		env: agentEnv,
-		// mcp.json is read when a session starts: put back anything not approved, and hand the guard its policy.
+		// mcp.json is read when a session starts: put back anything not approved, and hand the guard
+		// its policy from the daemon's memory, never from the files.
 		prepareSpawn: () => {
-			try {
-				connectorStore.ensureMcpJson();
-			} catch (error) {
-				log(`could not check mcp.json: ${(error as Error).message}`);
-			}
+			connectors.enforce();
 			return policyEnv(connectorStore);
 		},
 		// The first start in a new home installs the engine's companion packages.
@@ -184,6 +184,10 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		...(Number.isInteger(historyPage) && historyPage > 0 ? { historyPage } : {}),
 	});
 
+	// The files as the daemon writes them (an older version kept a hash), then watched.
+	connectorStore.enforce(false);
+	connectorStore.watch();
+
 	const server = createServer((req, res) => handleHttp(req, res, options.uiDir, bridge));
 	const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 	let port = options.port;
@@ -217,6 +221,8 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 			wss.close();
 			await new Promise<void>((done) => server.close(() => done()));
 			await supervisor.stop();
+			connectorStore.close();
+			await memory?.stop();
 		},
 	};
 }

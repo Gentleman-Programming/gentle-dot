@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, symlinkSync } from "node:fs";
+import { linkSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -50,10 +50,11 @@ describe("approval guard decisions", () => {
 		}
 	});
 
-	it("asks before any other connector tool, with a readable, truncated preview", () => {
+	it("asks before any other connector tool, with the full arguments as the preview", () => {
 		const body = `Hello team,\n${"x".repeat(400)}`;
+		const extra = Object.fromEntries(["a", "b", "c", "d", "e", "f"].map((key) => [key, key.repeat(3)]));
 		const decision = decide(
-			call("mcp__notion__notion_create_pages", { parent: "Weekly notes", title: "Plan", body, icon: "🚀" }),
+			call("mcp__notion__notion_create_pages", { ...extra, parent: "Weekly notes", title: "Plan", body }),
 			policy(),
 		);
 		expect(decision.action).toBe("ask");
@@ -62,12 +63,26 @@ describe("approval guard decisions", () => {
 		expect(decision.message).toContain("The assistant wants to create pages in Notion.");
 		expect(decision.message).toContain("parent: Weekly notes");
 		expect(decision.message).toContain("title: Plan");
-		expect(decision.message).toContain("body: Hello team,\n  xxx");
-		expect(decision.message).toContain("…");
-		expect(decision.message).not.toContain("x".repeat(300));
+		// Every field and every character the user approves is shown.
+		expect(decision.message).toContain(`body: Hello team,\n  ${"x".repeat(400)}`);
+		for (const key of Object.keys(extra)) expect(decision.message).toContain(`${key}: ${key.repeat(3)}`);
+		expect(decision.message).not.toContain("more");
+		expect(decision.message).not.toContain("…");
 		// Key fields come before the rest.
-		expect(decision.message.indexOf("parent:")).toBeLessThan(decision.message.indexOf("icon:"));
+		expect(decision.message.indexOf("parent:")).toBeLessThan(decision.message.indexOf("a: aaa"));
 		expect(decision.message).not.toMatch(/gentle|\bpi\b|mcp__/i);
+	});
+
+	it("says how much of a very long preview was cut", () => {
+		const decision = decide(call("mcp__notion__notion_create_pages", { body: "y".repeat(9000) }), policy());
+		if (decision.action !== "ask") throw new Error("expected a question");
+		const preview = decision.message.slice(decision.message.indexOf("body: "));
+		expect(preview).toContain("y".repeat(7000));
+		expect(preview).toMatch(/\n\(truncated, \d+ more characters\)$/);
+		const shown = preview.split("\n(truncated")[0] ?? "";
+		const more = Number(/truncated, (\d+) more/.exec(preview)?.[1]);
+		expect(shown.length).toBe(8000);
+		expect(shown.length + more).toBe("body: ".length + 9000);
 	});
 
 	it("asks when a curated tool does not declare itself read-only", () => {
@@ -99,7 +114,7 @@ describe("approval guard decisions", () => {
 	});
 
 	it("leaves ordinary tools alone", () => {
-		expect(decide(call("read", { path: `${AGENT}/mcp.json` }), policy())).toEqual({ action: "pass" });
+		expect(decide(call("read", { path: "notes.md" }), policy())).toEqual({ action: "pass" });
 		expect(decide(call("bash", { command: "ls -la" }), policy())).toEqual({ action: "pass" });
 		expect(decide(call("write", { path: "notes.md", content: "mcp.json" }), policy())).toEqual({
 			action: "pass",
@@ -153,6 +168,111 @@ describe("approval guard decisions", () => {
 				action: "block",
 				reason: expect.stringContaining("Connectors screen"),
 			});
+		}
+	});
+});
+
+/** A data folder like the assistant's: credentials and control files next to the agent's workspace. */
+function credentialTree() {
+	const data = mkdtempSync(join(tmpdir(), "guard-data-"));
+	const agent = join(data, "agent");
+	const workspace = join(data, "workspace");
+	mkdirSync(agent);
+	mkdirSync(workspace);
+	const files = {
+		auth: join(agent, "auth.json"),
+		mcpAuth: join(agent, "mcp-auth.json"),
+		models: join(agent, "models.json"),
+		mcp: join(agent, "mcp.json"),
+		connectors: join(data, "connectors.json"),
+		token: join(data, "token"),
+	};
+	for (const file of Object.values(files)) writeFileSync(file, '{"secret":"value"}');
+	const guarded: ConnectorPolicy = { connectors: {}, protectedPaths: Object.values(files) };
+	const at = (toolName: string, input: Record<string, unknown>) => ({ toolName, input, cwd: workspace });
+	return { data, agent, workspace, files, guarded, at };
+}
+
+describe("credential and control files (B2)", () => {
+	it("blocks reading them with the read tool, by any path spelling", () => {
+		const { files, guarded, at, workspace, data } = credentialTree();
+		symlinkSync(files.mcpAuth, join(workspace, "notes.json"));
+		linkSync(files.auth, join(workspace, "copy.json"));
+		for (const path of [
+			"../agent/mcp-auth.json",
+			files.mcpAuth,
+			realpathSync(files.mcpAuth),
+			`@../agent/mcp-auth.json`,
+			"../agent/./../agent/MCP-AUTH.JSON",
+			"../agent/auth.json",
+			"../agent/models.json",
+			"../agent/mcp.json",
+			"../connectors.json",
+			"../token",
+			`${data}/token`,
+			"notes.json",
+			"copy.json",
+		]) {
+			expect(decide(at("read", { path }), guarded), path).toEqual({
+				action: "block",
+				reason: expect.stringContaining("private"),
+			});
+		}
+		writeFileSync(join(workspace, "plan.md"), "# Plan");
+		expect(decide(at("read", { path: "plan.md" }), guarded)).toEqual({ action: "pass" });
+		expect(decide(at("read", { path: "../agent/settings.json" }), guarded)).toEqual({ action: "pass" });
+	});
+
+	it("blocks file tools that would show them: grep over them or a folder above them, find and ls on them", () => {
+		const { guarded, at } = credentialTree();
+		for (const [toolName, input] of [
+			["grep", { pattern: "access_token", path: "../agent/mcp-auth.json" }],
+			["grep", { pattern: "access_token", path: ".." }],
+			["grep", { pattern: "access_token", path: "../agent" }],
+			["find", { pattern: "*", path: "../agent/mcp-auth.json" }],
+			["ls", { path: "../agent/auth.json" }],
+		] as const) {
+			expect(decide(at(toolName, input), guarded).action, `${toolName} ${input.path}`).toBe("block");
+		}
+		expect(decide(at("grep", { pattern: "todo" }), guarded)).toEqual({ action: "pass" });
+		expect(decide(at("grep", { pattern: "todo", path: "." }), guarded)).toEqual({ action: "pass" });
+		expect(decide(at("ls", { path: "../agent" }), guarded)).toEqual({ action: "pass" });
+		expect(decide(at("find", { pattern: "*.md" }), guarded)).toEqual({ action: "pass" });
+	});
+
+	it("blocks commands that name them, however the name is written (best effort)", () => {
+		const { guarded, at } = credentialTree();
+		for (const command of [
+			"cat ../agent/mcp-auth.json",
+			"cd ..; cat agent/mcp-auth.json",
+			`cat ../agent/"mcp-"'auth.json'`,
+			"cat ../agent/mcp-\\auth.json",
+			"cat ../agent/MCP-AUTH.JSON",
+			`python3 -c "print(open('../agent/mcp-auth.json').read())"`,
+			`node -e "console.log(require('fs').readFileSync('../agent/' + 'mcp-auth.json', 'utf8'))"`,
+			`python3 -c "import os; print(open(os.path.join('..', 'agent', 'auth' + '.json')).read())"`,
+			"ln -s ../agent/mcp-auth.json x && cat x",
+			"cat ../agent/mcp-a*",
+			"cat ../agent/models.json",
+			"cp ../connectors.json /tmp/c",
+			"cat ../token",
+			"cat ~/.gentle-dot/agent/settings.json",
+			"security find-generic-password -s notion -w",
+			"echo $PI_CODING_AGENT_DIR",
+		]) {
+			expect(decide(at("bash", { command }), guarded), command).toEqual({
+				action: "block",
+				reason: expect.stringContaining("private"),
+			});
+		}
+		for (const command of [
+			"ls -la",
+			"cat README.md",
+			"git status",
+			"grep -rn todo src",
+			'curl -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com',
+		]) {
+			expect(decide(at("bash", { command }), guarded), command).toEqual({ action: "pass" });
 		}
 	});
 });

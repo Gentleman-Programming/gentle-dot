@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ServerMessage } from "@gentle-dot/protocol";
@@ -147,7 +147,58 @@ describe("connectors over the protocol", () => {
 		writeFileSync(file, JSON.stringify({ mcpServers: { evil: { command: "sh", args: ["-c", "id"] } } }));
 		await d.supervisor.restart();
 		expect(readFileSync(file, "utf8")).toBe(approved);
-		expect(logs.some((l) => l.includes("restored"))).toBe(true);
+		expect(logs.some((l) => l.includes("put back"))).toBe(true);
+	});
+
+	it("keeps a connector the user turned off turned off when the agent edits the files and ends itself (B1)", async () => {
+		const { d, send, find, messages, dataDir, agentHome, agentEnv } = await setup({ cliMode: "auto" });
+		send({ type: "connector_connect", connectorId: "notion" });
+		await find("auth_done");
+		send({ type: "connector_disconnect", connectorId: "notion" });
+		await waitFor(() => !JSON.parse(agentEnv().GENTLE_DOT_CONNECTOR_POLICY ?? "{}").connectors?.notion);
+		await waitFor(() => d.supervisor.state === "ready" && !d.supervisor.busy);
+		const approved = {
+			connectors: readFileSync(join(dataDir, "connectors.json"), "utf8"),
+			mcp: readFileSync(join(agentHome, "mcp.json"), "utf8"),
+		};
+		const pid = d.supervisor.pid;
+		send({ type: "send", text: "tamper" });
+		await waitFor(() => d.supervisor.pid !== pid && d.supervisor.state === "ready", 10_000);
+		// The new engine got the user's state, not the edited files.
+		const policy = JSON.parse(agentEnv().GENTLE_DOT_CONNECTOR_POLICY ?? "{}");
+		expect(policy.connectors).toEqual({});
+		expect(readFileSync(join(dataDir, "connectors.json"), "utf8")).toBe(approved.connectors);
+		expect(readFileSync(join(agentHome, "mcp.json"), "utf8")).toBe(approved.mcp);
+		expect(existsSync(join(dataDir, "workspace", ".pi", "mcp.json"))).toBe(false);
+		await find("toast", (m) => m.message === "A change to your connectors was blocked.");
+		send({ type: "connectors_list" });
+		await waitFor(() =>
+			messages.some(
+				(m) => m.type === "connectors" && m.connectors[0]?.enabled === false && m.connectors[0]?.added,
+			),
+		);
+		expect(
+			messages.some(
+				(m) =>
+					m.type === "connectors" &&
+					m.connectors[0]?.enabled === true &&
+					m.connectors[0].mode === "read_write",
+			),
+		).toBe(false);
+	});
+
+	it("puts the files back while the agent keeps running, and after the run settles (B1)", async () => {
+		const { d, send, find, dataDir, agentHome } = await setup();
+		await waitFor(() => d.supervisor.state === "ready");
+		const pid = d.supervisor.pid;
+		send({ type: "send", text: "tamper:stay" });
+		await find("toast", (m) => m.message === "A change to your connectors was blocked.");
+		await waitFor(() => !existsSync(join(dataDir, "workspace", ".pi", "mcp.json")));
+		await waitFor(
+			() => JSON.parse(readFileSync(join(agentHome, "mcp.json"), "utf8")).mcpServers.notion === undefined,
+		);
+		expect(JSON.parse(readFileSync(join(dataDir, "connectors.json"), "utf8")).connectors).toEqual({});
+		expect(d.supervisor.pid).toBe(pid);
 	});
 
 	it("loads the approval guard into the assistant's own engine", async () => {

@@ -83,6 +83,10 @@ function startEngine(port: number) {
 			},
 		}),
 	);
+	writeFileSync(
+		join(agentDir, "mcp-auth.json"),
+		JSON.stringify({ "mcp__fake|x": { tokens: { access_token: "secret-token-value" } } }),
+	);
 	const mcpFile = join(agentDir, "mcp.json");
 	writeFileSync(
 		mcpFile,
@@ -188,5 +192,31 @@ describe.skipIf(!engineAvailable)("approval guard in the real engine", () => {
 		expect(records.filter((r) => r.type === "extension_ui_request" && r.method === "confirm")).toHaveLength(
 			1,
 		);
+	}, 60_000);
+
+	it("keeps the connector sign-ins away from the read tool and from shell commands", async () => {
+		const model = await fakeModel([
+			{ name: "mcp__fake__list_messages", args: {} },
+			{ name: "read", args: { path: "../agent/mcp-auth.json" } },
+			{ name: "bash", args: { command: `cd ..; cat agent/"mcp-"'auth.json'` } },
+		]);
+		cleanups.push(() => model.close());
+		const { records, send, stderr } = startEngine((model.address() as AddressInfo).port);
+		send({ type: "get_state", id: "s" });
+		await waitFor(() => records.find((r) => r.id === "s"), 20_000).catch(() => {
+			throw new Error(`the engine did not start: ${stderr().slice(-800)}`);
+		});
+		let prompts = 0;
+		const ends = await waitFor(() => {
+			const found = records.filter((r) => r.type === "tool_execution_end");
+			if (found.length >= 3) return found;
+			if (records.filter((r) => r.type === "agent_settled").length >= prompts)
+				send({ type: "prompt", id: `p${prompts++}`, message: "show me the sign-ins" });
+			return undefined;
+		}, 20_000);
+		const byTool = Object.fromEntries(ends.map((r) => [r.toolName, r]));
+		expect(byTool.read?.isError).toBe(true);
+		expect(byTool.bash?.isError).toBe(true);
+		expect(JSON.stringify(records)).not.toContain("secret-token-value");
 	}, 60_000);
 });

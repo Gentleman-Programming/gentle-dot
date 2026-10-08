@@ -1,6 +1,16 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+	existsSync,
+	type FSWatcher,
+	lstatSync,
+	mkdirSync,
+	readFileSync,
+	renameSync,
+	unlinkSync,
+	watch,
+	writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -123,8 +133,6 @@ export function renderMcpJson(state: ConnectorsState): string {
 	return `${JSON.stringify({ mcpServers: servers }, null, 2)}\n`;
 }
 
-const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
-
 function writePrivate(path: string, text: string): void {
 	const temp = `${path}.${process.pid}.tmp`;
 	writeFileSync(temp, text, { mode: 0o600 });
@@ -135,20 +143,29 @@ export interface ConnectorStoreOptions {
 	dataDir: string;
 	/** The engine's home, which holds `mcp.json` and `mcp-auth.json`. */
 	agentHome: string;
+	/** The engine's working folder; a project `.pi/mcp.json` there would add servers. */
+	workspace?: string;
 	/** The approval guard's own file, protected like the connector files. */
 	guardPath?: string;
 	log?: (line: string) => void;
 }
 
 /**
- * The daemon's record of the connectors (`<data>/connectors.json`) and the only writer of the
- * engine's `mcp.json`, which it renders from that record. The record keeps the hash of the
- * approved `mcp.json`, so a file changed by anything else is put back before the engine starts.
+ * The connectors the user approved. The daemon reads `<data>/connectors.json` once, when it
+ * starts, and from then on the state lives in memory and changes only through the Connectors
+ * screen. The files (`connectors.json`, the engine's `mcp.json`) are written from memory; a change
+ * made by anything else (the assistant has a shell) is put back, and a project `.pi/mcp.json` in
+ * the workspace is removed. Checked on every file event, before every engine start, and after
+ * every run. A change made while the daemon is not running is loaded at its next start (stage 2, S25).
  */
 export class ConnectorStore {
 	readonly file: string;
 	readonly mcpFile: string;
 	readonly authFile: string;
+	/** Called after a change made outside the Connectors screen was put back. */
+	onReverted: () => void = () => {};
+	private saved: ConnectorsState;
+	private watchers: FSWatcher[] = [];
 	private readonly options: ConnectorStoreOptions;
 
 	constructor(options: ConnectorStoreOptions) {
@@ -156,6 +173,7 @@ export class ConnectorStore {
 		this.file = join(options.dataDir, "connectors.json");
 		this.mcpFile = join(options.agentHome, "mcp.json");
 		this.authFile = join(options.agentHome, "mcp-auth.json");
+		this.saved = this.load();
 	}
 
 	get agentHome(): string {
@@ -163,36 +181,80 @@ export class ConnectorStore {
 	}
 
 	state(): ConnectorsState {
-		return { connectors: this.read().connectors };
+		return structuredClone(this.saved);
 	}
 
-	/** Changes the record, then writes both files (each atomically, mode 0600). */
+	/** Changes the state, then writes both files (each atomically, mode 0600). */
 	update(change: (state: ConnectorsState) => void): void {
 		const state = this.state();
 		change(state);
-		const rendered = renderMcpJson(state);
+		this.saved = state;
 		mkdirSync(this.options.agentHome, { recursive: true, mode: 0o700 });
-		writePrivate(
-			this.file,
-			`${JSON.stringify({ version: 1, connectors: state.connectors, hash: sha256(rendered) }, null, 2)}\n`,
-		);
-		writePrivate(this.mcpFile, rendered);
+		writePrivate(this.file, this.recordText());
+		writePrivate(this.mcpFile, renderMcpJson(state));
 	}
 
-	/** Puts the approved `mcp.json` back when it changed; true when it had to. */
-	ensureMcpJson(): boolean {
-		const saved = this.read();
-		const current = existsSync(this.mcpFile) ? readFileSync(this.mcpFile, "utf8") : undefined;
-		const nothingAdded = saved.hash === undefined && Object.keys(saved.connectors).length === 0;
-		if (current === undefined && nothingAdded) return false;
-		if (current !== undefined && saved.hash !== undefined && sha256(current) === saved.hash) return false;
-		const rendered = renderMcpJson({ connectors: saved.connectors });
-		mkdirSync(this.options.agentHome, { recursive: true, mode: 0o700 });
-		writePrivate(this.mcpFile, rendered);
+	/**
+	 * Puts back every connector file that differs from the approved state; true when one did.
+	 * `report: false` only writes them (the daemon's start, where the files are what it just read).
+	 */
+	enforce(report = true): boolean {
+		const untouched = Object.keys(this.saved.connectors).length === 0;
+		const changed: string[] = [];
+		for (const [file, text] of [
+			[this.file, this.recordText()],
+			[this.mcpFile, renderMcpJson(this.saved)],
+		] as const) {
+			const current = existsSync(file) ? readFileSync(file, "utf8") : undefined;
+			if (current === text || (current === undefined && untouched)) continue;
+			mkdirSync(this.options.agentHome, { recursive: true, mode: 0o700 });
+			writePrivate(file, text);
+			changed.push(file);
+		}
+		if (this.removeProjectConfig()) changed.push("the workspace's .pi/mcp.json");
+		if (changed.length === 0 || !report) return changed.length > 0;
 		this.options.log?.(
-			"mcp.json was changed outside the Connectors screen; restored the approved connectors",
+			`connector files were changed outside the Connectors screen; put back ${changed.join(", ")}`,
 		);
+		this.onReverted();
 		return true;
+	}
+
+	/**
+	 * Puts changes back as soon as the files change (the folders are watched, so renames count).
+	 * File events on macOS can be missed right after a watch starts, so a check every second backs them up.
+	 */
+	watch(): void {
+		this.close();
+		let timer: NodeJS.Timeout | undefined;
+		const check = () => {
+			clearTimeout(timer);
+			timer = setTimeout(() => {
+				try {
+					this.enforce();
+				} catch (error) {
+					this.options.log?.(`could not check the connector files: ${(error as Error).message}`);
+				}
+				this.watchProjectConfig();
+			}, 20);
+		};
+		const folders = [this.options.dataDir, this.options.agentHome, this.options.workspace];
+		for (const folder of folders) {
+			if (!folder) continue;
+			mkdirSync(folder, { recursive: true, mode: 0o700 });
+			this.watchers.push(watch(folder, check));
+		}
+		this.check = check;
+		this.watchProjectConfig();
+		this.poll = setInterval(check, 1000);
+		this.poll.unref();
+	}
+
+	close(): void {
+		clearInterval(this.poll);
+		for (const watcher of this.watchers.splice(0)) watcher.close();
+		this.projectWatcher?.close();
+		this.projectWatcher = undefined;
 	}
 
 	/** What the approval guard enforces: the turned-on connectors and the files only the daemon writes. */
@@ -205,10 +267,14 @@ export class ConnectorStore {
 		}
 		return {
 			connectors,
+			// Sign-ins and keys, connector state, and the daemon's access key.
 			protectedPaths: [
 				this.mcpFile,
 				this.authFile,
+				join(this.options.agentHome, "auth.json"),
+				join(this.options.agentHome, "models.json"),
 				this.file,
+				join(this.options.dataDir, "token"),
 				...(this.options.guardPath ? [this.options.guardPath] : []),
 			],
 		};
@@ -231,11 +297,52 @@ export class ConnectorStore {
 		}
 	}
 
-	private read(): { connectors: ConnectorsState["connectors"]; hash?: string } {
+	private check: () => void = () => {};
+	private poll: NodeJS.Timeout | undefined;
+	private projectWatcher: FSWatcher | undefined;
+
+	/** `.pi` appears after the watch starts; its folder is watched once it is there. */
+	private watchProjectConfig(): void {
+		const folder = this.options.workspace && join(this.options.workspace, ".pi");
+		if (this.projectWatcher || !folder || this.watchers.length === 0 || !isFolder(folder)) return;
+		try {
+			const watcher = watch(folder, this.check);
+			watcher.on("error", () => {
+				watcher.close();
+				if (this.projectWatcher === watcher) this.projectWatcher = undefined;
+			});
+			this.projectWatcher = watcher;
+		} catch {}
+	}
+
+	/** Removes `<workspace>/.pi/mcp.json`; a `.pi` that is a link loses the link, never what it points to. */
+	private removeProjectConfig(): boolean {
+		if (!this.options.workspace) return false;
+		const folder = join(this.options.workspace, ".pi");
+		const link = lstatOrUndefined(folder);
+		if (link?.isSymbolicLink()) {
+			const target = join(folder, "mcp.json");
+			if (!existsSync(target)) return false;
+			unlinkSync(folder);
+			return true;
+		}
+		const file = join(folder, "mcp.json");
+		const stat = link && lstatOrUndefined(file);
+		if (!stat || stat.isDirectory()) return false;
+		unlinkSync(file);
+		this.projectWatcher?.close();
+		this.projectWatcher = undefined;
+		return true;
+	}
+
+	private recordText(): string {
+		return `${JSON.stringify({ version: 1, connectors: this.saved.connectors }, null, 2)}\n`;
+	}
+
+	private load(): ConnectorsState {
 		try {
 			const saved = JSON.parse(readFileSync(this.file, "utf8")) as {
 				connectors?: Record<string, { enabled?: unknown; mode?: unknown }>;
-				hash?: unknown;
 			};
 			const connectors: ConnectorsState["connectors"] = {};
 			for (const [id, value] of Object.entries(saved.connectors ?? {})) {
@@ -245,12 +352,22 @@ export class ConnectorStore {
 					mode: value?.mode === "read_write" ? "read_write" : "read_only",
 				};
 			}
-			return { connectors, ...(typeof saved.hash === "string" ? { hash: saved.hash } : {}) };
+			return { connectors };
 		} catch {
 			return { connectors: {} };
 		}
 	}
 }
+
+function lstatOrUndefined(path: string) {
+	try {
+		return lstatSync(path);
+	} catch {
+		return undefined;
+	}
+}
+
+const isFolder = (path: string) => lstatOrUndefined(path)?.isDirectory() === true;
 
 /** How to run the engine's command line: `command ...args mcp <subcommand> <server>`. */
 export interface McpCli {
@@ -320,12 +437,24 @@ export interface ConnectorManagerOptions {
 export class ConnectorManager {
 	/** `restart`: the engine must restart (when idle) to read the new `mcp.json`. */
 	onChanged: (restart: boolean) => void = () => {};
+	/** A change to the connector files made outside the Connectors screen was put back. */
+	onBlocked: () => void = () => {};
 	private flow: Flow | undefined;
 	private readonly failed = new Set<string>();
 	private readonly options: ConnectorManagerOptions;
 
 	constructor(options: ConnectorManagerOptions) {
 		this.options = options;
+		options.store.onReverted = () => this.onBlocked();
+	}
+
+	/** Puts back connector files changed outside the Connectors screen (for example after a run). */
+	enforce(): void {
+		try {
+			this.options.store.enforce();
+		} catch (error) {
+			this.log(`could not check the connector files: ${(error as Error).message}`);
+		}
 	}
 
 	list(): ConnectorInfo[] {
@@ -531,7 +660,8 @@ export class ConnectorManager {
 		}
 		if (url.hostname === "localhost") url.hostname = "127.0.0.1";
 		try {
-			await fetch(url, { signal: AbortSignal.timeout(10_000) });
+			// Only this loopback address; where it redirects is not followed.
+			await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(10_000) });
 		} catch {
 			if (this.flow === flow) this.askForAddress(flow, true);
 		}

@@ -281,6 +281,7 @@ test("shows a connector action as an approval card with a preview", async ({ pag
 	await expect(card).toContainText("parent: Team notes");
 	await expect(card).toContainText("title: Weekly plan");
 	await expect(card.locator(".ask-message")).toHaveCSS("white-space", "pre-wrap");
+	await expect(card.locator(".ask-message")).toHaveCSS("overflow-y", "auto");
 	await card.screenshot({ path: "/tmp/gentle-dot-t18a/approval-card.png" });
 	await page.screenshot({ path: "/tmp/gentle-dot-t18a/approval-card-panel.png" });
 	await card.getByRole("button", { name: "No" }).click();
@@ -344,4 +345,19 @@ test("explains a rejected access key", async ({ page }) => {
 test("asks for the access key when there is none", async ({ page }) => {
 	await page.goto("/");
 	await expect(page.getByRole("status")).toContainText("This page needs your access key");
+});
+
+test("keeps the onboarding banner in its own space, above the first message", async ({ page }) => {
+	await page.setViewportSize({ width: 360, height: 300 });
+	await open(page);
+	for (const text of ["one", "two", "three"]) {
+		await say(page, text);
+		await expect(page.locator(".message-assistant").last()).toHaveText(`Echo: ${text}`);
+	}
+	const banner = page.locator(".onboarding");
+	await expect(banner).toBeVisible();
+	await page.screenshot({ path: "test-results/onboarding-banner.png" });
+	const top = await banner.boundingBox();
+	const first = await page.locator(".message").first().boundingBox();
+	expect(top && first && top.y + top.height <= first.y).toBe(true);
 });

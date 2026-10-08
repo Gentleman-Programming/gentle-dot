@@ -67,6 +67,21 @@ describe("AskCard", () => {
 		expect(send).toHaveBeenCalledWith({ type: "ui_response", requestId: "q2", confirmed: false });
 	});
 
+	it("shows a long approval preview in full, in its own scrollable block (A3)", () => {
+		const message = `The assistant wants to create pages in Notion.\n\nbody: ${"z".repeat(7900)}`;
+		render(
+			<AskCard
+				ask={{ requestId: "q4", method: "confirm", title: "Allow Notion to create pages?", message }}
+				send={vi.fn()}
+			/>,
+		);
+		const preview = screen.getByRole("region", { name: "Details" });
+		expect(preview).toHaveClass("ask-message");
+		expect(preview.textContent).toBe(message);
+		// Keyboard users can scroll it too.
+		expect(preview).toHaveAttribute("tabindex", "0");
+	});
+
 	it("answers an input with typed text and can be dismissed", async () => {
 		const send = vi.fn();
 		render(

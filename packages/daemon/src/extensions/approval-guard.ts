@@ -11,12 +11,20 @@
  * daemon in this process's environment, which the assistant cannot change. Without a valid
  * policy nothing counts as read-only, so every connector call asks.
  *
- * Connectors are the user's to change: writes, edits, and commands that touch the connector
- * files or run `mcp add/login/logout/remove` are blocked with a note to use the Connectors screen.
+ * Connectors are the user's to change: writes and edits of the connector files and commands that
+ * run `mcp add/login/logout/remove` are blocked with a note to use the Connectors screen. The
+ * credential and control files (sign-ins, keys, connector state, the daemon's access key) cannot be
+ * read with the file tools either, by any path, symlink, or hard link.
+ *
+ * Commands are checked by text: one that names one of those files (by its name, with quotes
+ * removed), the data folder, the keychain, or the engine's home variable is blocked. That check is
+ * best effort, NOT a security boundary: the assistant runs as the user with a shell, so a command
+ * can still build a name the check does not see. The daemon keeps the connector state in memory
+ * and puts changed files back (docs/design.md, Connectors), and stage 2 (S25) moves tokens out of reach.
  * This file has no dependencies besides Node, so the engine loads it as is.
  */
-import { realpathSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { realpathSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export const POLICY_ENV = "GENTLE_DOT_CONNECTOR_POLICY";
@@ -26,7 +34,7 @@ export type ConnectorMode = "read_only" | "read_write";
 export interface ConnectorPolicy {
 	/** Approved connectors by server name; undefined when the policy is missing or invalid. */
 	connectors?: Record<string, { name: string; mode: ConnectorMode; readOnlyTools: string[] }>;
-	/** Files only the daemon may change. */
+	/** Files only the daemon may read or change: credentials and connector control files. */
 	protectedPaths: string[];
 }
 
@@ -46,16 +54,25 @@ export interface GuardCall {
 
 const USE_CONNECTORS_SCREEN =
 	"Connectors are managed by the user in the Connectors screen. Ask the user to make this change there.";
+const PRIVATE_FILE =
+	"That file holds the user's private sign-ins or settings, so the assistant cannot use it. Connectors are managed by the user in the Connectors screen; for anything else there, ask the user.";
 const DECLINED = "The user did not allow this action. Do not try it again unless the user asks.";
 const NO_UI = "This action needs the user's approval, and no one can approve it right now.";
 const CONNECTOR_COMMAND = /\bmcp\s+(?:add|login|logout|remove)\b/;
+/** Reads of the macOS keychain. */
+const KEYCHAIN_COMMAND = /\bsecurity\s+(?:find-(?:generic|internet)-password|dump-keychain|export)\b/;
+/** Names a command must not mention: the engine's home variable and the data folder. */
+const PRIVATE_NAMES = ["pi_coding_agent_dir", ".gentle-dot"];
+/** The engine's file tools, by the path they take. */
+const FILE_TOOLS = new Set(["read", "write", "edit", "grep", "find", "ls"]);
+const COMMAND_TOOLS = new Set(["bash", "powershell"]);
 /** Arguments that say where an action goes and what it says, shown first in the preview. */
 const KEY_FIELDS = [
 	/^(to|cc|bcc|recipients?|channel|chat|parent|page|database|space|project|team|issue|title|subject|name)/i,
 	/^(body|text|content|message|comment|description|markdown)/i,
 ];
-const MAX_FIELDS = 6;
-const MAX_VALUE = 160;
+/** The preview shows every argument, up to this many characters. */
+const PREVIEW_LIMIT = 8000;
 
 /** Like the engine's tool names: everything but letters, digits, and `_` becomes `_`. */
 const toolId = (server: string, tool: string) => `mcp__${server}__${tool}`.replace(/[^A-Za-z0-9_]/g, "_");
@@ -100,19 +117,23 @@ export function parsePolicy(raw: string | undefined): ConnectorPolicy | undefine
 
 export function decide(call: GuardCall, policy: ConnectorPolicy): GuardDecision {
 	const { toolName, input } = call;
-	if (toolName === "write" || toolName === "edit") {
-		const path = input.path ?? input.file_path;
-		if (typeof path === "string" && isProtected(resolvePath(path, call.cwd), policy.protectedPaths))
-			return { action: "block", reason: USE_CONNECTORS_SCREEN };
-		return { action: "pass" };
-	}
-	if (toolName === "bash") {
-		const command = typeof input.command === "string" ? input.command : "";
+	if (FILE_TOOLS.has(toolName)) {
+		const raw = input.path ?? input.file_path;
+		const target = resolvePath(typeof raw === "string" && raw !== "" ? raw : ".", call.cwd);
 		const touches =
-			CONNECTOR_COMMAND.test(command) ||
-			command.includes("PI_CODING_AGENT_DIR") ||
-			policy.protectedPaths.flatMap(spellings).some((path) => command.includes(path));
-		return touches ? { action: "block", reason: USE_CONNECTORS_SCREEN } : { action: "pass" };
+			isProtected(target, policy.protectedPaths) ||
+			// A search reads every file below its folder.
+			(toolName === "grep" && policy.protectedPaths.some((path) => isInside(path, target)));
+		if (!touches) return { action: "pass" };
+		const writes = toolName === "write" || toolName === "edit";
+		return { action: "block", reason: writes ? USE_CONNECTORS_SCREEN : PRIVATE_FILE };
+	}
+	if (COMMAND_TOOLS.has(toolName)) {
+		const command = typeof input.command === "string" ? input.command : "";
+		if (CONNECTOR_COMMAND.test(command)) return { action: "block", reason: USE_CONNECTORS_SCREEN };
+		return namesPrivateFile(command, policy.protectedPaths)
+			? { action: "block", reason: PRIVATE_FILE }
+			: { action: "pass" };
 	}
 	if (!toolName.startsWith("mcp__")) return { action: "pass" };
 
@@ -138,9 +159,7 @@ export function decide(call: GuardCall, policy: ConnectorPolicy): GuardDecision 
 	return {
 		action: "ask",
 		title: `Allow ${name} to ${action}?`,
-		message: [`The assistant wants to ${action} in ${name}.`, "", ...previewLines(input)]
-			.join("\n")
-			.trimEnd(),
+		message: `The assistant wants to ${action} in ${name}.\n\n${preview(input)}`.trimEnd(),
 	};
 }
 
@@ -152,27 +171,66 @@ function describeAction(toolName: string, server: string): string {
 	return words ? words.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase() : "use a tool";
 }
 
-function previewLines(input: Record<string, unknown>): string[] {
+/** Every argument, key fields first, so the user approves what they saw; very long ones say what was cut. */
+function preview(input: Record<string, unknown>): string {
 	const rank = (key: string) => {
 		const index = KEY_FIELDS.findIndex((pattern) => pattern.test(key));
 		return index < 0 ? KEY_FIELDS.length : index;
 	};
-	const keys = Object.keys(input).sort((a, b) => rank(a) - rank(b));
-	const lines = keys.slice(0, MAX_FIELDS).map((key) => `${key}: ${shorten(input[key])}`);
-	if (keys.length > MAX_FIELDS) lines.push(`…and ${keys.length - MAX_FIELDS} more`);
-	return lines;
+	const text = Object.keys(input)
+		.sort((a, b) => rank(a) - rank(b))
+		.map((key) => `${key}: ${show(input[key])}`)
+		.join("\n");
+	if (text.length <= PREVIEW_LIMIT) return text;
+	return `${text.slice(0, PREVIEW_LIMIT)}\n(truncated, ${text.length - PREVIEW_LIMIT} more characters)`;
 }
 
-function shorten(value: unknown): string {
-	const text = typeof value === "string" ? value : (JSON.stringify(value) ?? String(value));
-	const short = text.length > MAX_VALUE ? `${text.slice(0, MAX_VALUE)}…` : text;
+function show(value: unknown): string {
+	const text = typeof value === "string" ? value : (JSON.stringify(value, null, 2) ?? String(value));
 	// Lines inside one value are indented, so they do not read as fields of their own.
-	return short.replace(/\n/g, "\n  ");
+	return text.replace(/\n/g, "\n  ");
 }
 
+/**
+ * True when a command mentions a private file by name (quotes, backslashes, and string
+ * concatenation removed, any case), the data folder, the engine's home variable, or the keychain.
+ * Best effort: a shell can always spell a name some other way.
+ */
+function namesPrivateFile(command: string, protectedPaths: string[]): boolean {
+	const text = command
+		.replace(/(["'`])\s*\+\s*(["'`])/g, "")
+		.replace(/["'`\\]/g, "")
+		.toLowerCase();
+	if (KEYCHAIN_COMMAND.test(text) || PRIVATE_NAMES.some((name) => text.includes(name))) return true;
+	const words = text.split(/[\s;|&()<>=,+]+/).map((word) => word.slice(word.lastIndexOf("/") + 1));
+	return protectedPaths.some((path) => {
+		const name = basename(path).toLowerCase();
+		// A name without a dot (`token`) counts only as a word of its own, not inside `$GITHUB_TOKEN`.
+		if (name.includes(".") ? text.includes(name) : words.includes(name)) return true;
+		return words.some(
+			(word) => /[*?[]/.test(word) && word.replace(/[*?[\]]/g, "").length >= 3 && glob(word).test(name),
+		);
+	});
+}
+
+/** A shell pattern (`mcp-a*`) as a regular expression for one file name. */
+function glob(pattern: string): RegExp {
+	const source = pattern
+		.replace(/[.+^${}()|\\]/g, "\\$&")
+		.replace(/\*/g, ".*")
+		.replace(/\?/g, ".");
+	try {
+		return new RegExp(`^${source}$`);
+	} catch {
+		return /^$/;
+	}
+}
+
+/** Like the engine: `@` in front is dropped, `~` is the home folder, relative paths start at `cwd`. */
 function resolvePath(path: string, cwd: string): string {
 	const home = process.env.HOME;
-	const expanded = home && (path === "~" || path.startsWith("~/")) ? `${home}${path.slice(1)}` : path;
+	const bare = path.startsWith("@") ? path.slice(1) : path;
+	const expanded = home && (bare === "~" || bare.startsWith("~/")) ? `${home}${bare.slice(1)}` : bare;
 	return isAbsolute(expanded) ? resolve(expanded) : resolve(cwd, expanded);
 }
 
@@ -190,16 +248,39 @@ function spellings(path: string): string[] {
 	return real === absolute ? [absolute] : [absolute, real];
 }
 
+/** The same file by name (any case: macOS and Windows folders usually ignore it), symlink, or hard link. */
 function isProtected(path: string, protectedPaths: string[]): boolean {
-	// macOS and Windows folders usually ignore case.
 	const candidates = spellings(path).map((p) => p.toLowerCase());
-	return protectedPaths.some((p) => spellings(p).some((s) => candidates.includes(s.toLowerCase())));
+	const id = fileId(path);
+	return protectedPaths.some(
+		(p) =>
+			spellings(p).some((s) => candidates.includes(s.toLowerCase())) ||
+			(id !== undefined && fileId(p) === id),
+	);
+}
+
+/** True when `file` is below `folder`. */
+function isInside(file: string, folder: string): boolean {
+	return spellings(file).some((f) =>
+		spellings(folder).some((d) => f.toLowerCase().startsWith((d.endsWith(sep) ? d : d + sep).toLowerCase())),
+	);
+}
+
+function fileId(path: string): string | undefined {
+	try {
+		const stat = statSync(path);
+		return stat.isFile() ? `${stat.dev}:${stat.ino}` : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 export default function approvalGuard(pi: ExtensionAPI): void {
 	const parsed = parsePolicy(process.env[POLICY_ENV]);
 	const agentDir = process.env.PI_CODING_AGENT_DIR;
-	const fallback = agentDir ? [resolve(agentDir, "mcp.json"), resolve(agentDir, "mcp-auth.json")] : [];
+	const fallback = agentDir
+		? ["mcp.json", "mcp-auth.json", "auth.json", "models.json"].map((name) => resolve(agentDir, name))
+		: [];
 	const policy: ConnectorPolicy = parsed ?? { protectedPaths: fallback };
 
 	pi.on("tool_call", async (event, ctx) => {

@@ -7,6 +7,7 @@
 //   FAKE_MCP_CLI_LOG   append {argv, env} as JSONL for every run
 //   FAKE_MCP_CLI_MODE  "fail": exit 1 after printing the URL; "auto": finish without a callback
 //   FAKE_MCP_CLI_URL   the server URL stored with the sign-in (default Notion's)
+//   FAKE_MCP_CLI_REDIRECT  the callback answers with a redirect to this address
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join } from "node:path";
@@ -53,7 +54,9 @@ const server = createServer((req, res) => {
 		res.writeHead(400).end("bad callback");
 		return;
 	}
-	res.writeHead(200).end("You can close this page.");
+	const elsewhere = process.env.FAKE_MCP_CLI_REDIRECT;
+	if (elsewhere) res.writeHead(302, { Location: elsewhere }).end();
+	else res.writeHead(200).end("You can close this page.");
 	finish();
 });
 
