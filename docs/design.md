@@ -77,7 +77,7 @@ Client to daemon:
 
 | type | fields | maps to Pi RPC |
 |---|---|---|
-| `send` | `text`, `requestId` | `prompt` (or `follow_up` while busy) |
+| `send` | `text`, `requestId` | `prompt` (with `streamingBehavior: "steer"` while busy); a repeated `requestId` is ignored |
 | `steer` | `text` | `steer` |
 | `abort` | — | `abort` |
 | `ui_response` | `requestId`, `value` \| `confirmed` \| `cancelled` | `extension_ui_response` |
@@ -90,11 +90,15 @@ Daemon to client:
 
 | type | meaning |
 |---|---|
-| `ready` | `agentState`, `conversationId`, `model` (display name only) |
+| `ready` | `agentState`, `conversationId`, `model` (display name only); pending asks and an `interrupted` notice follow it |
+| `user_message` | a user message entered from any client |
 | `agent_state` | `starting` \| `idle` \| `thinking` \| `working` \| `needs_you` \| `restarting` \| `error` |
 | `message_delta` | assistant text delta for message `messageId` |
 | `message_done` | final assistant message |
-| `activity` | sanitized tool activity: `id`, `kind` (`read`, `edit`, `run`, `search`, `memory`, `delegate`, `other`), `title`, `status` |
+| `ask_resolved` | an ask was answered or timed out |
+| `conversations` | `conversations` (`id`, `title`, `updatedAt`) and `activeId` |
+| `interrupted` | the agent restarted while a run was active |
+| `activity` | `messageId` plus sanitized tool activity: `id`, `kind` (`read`, `edit`, `run`, `search`, `memory`, `delegate`, `other`), `title`, `status` |
 | `ask` | sanitized `extension_ui_request` dialog: `requestId`, `method` (`select`, `confirm`, `input`, `editor`), `title`, `message`, `options`, `timeoutMs` |
 | `toast` | sanitized `notify` |
 | `history` | conversation messages for rendering |
@@ -105,8 +109,8 @@ Every daemon message carries `seq` (monotonic per connection) so the UI can dete
 ## 5. White-label layer
 
 - **Identity**: `--append-system-prompt` with `identity.md`: the assistant is "Gentle Dot", a personal assistant; it must not mention Gentle Shell, Pi, el Gentleman, ODD, or Engram by name, and describes them as "my workflow" and "my memory" when needed. It keeps every behavior.
-- **Event sanitizer** (pure function, unit-tested): renames or drops branding in `notify`, `setStatus`, `setWidget`, `setTitle`; drops terminal-only requests; maps tool names to activity kinds and neutral titles (for example `mem_search` -> `memory` "Checking my notes").
-- **Commands**: `gentle:*` slash commands are never exposed; the UI has no command palette in this version.
+- **Event sanitizer** (`packages/daemon/src/white-label.ts`, unit-tested): rewrites internal names in toasts, ask titles, messages, and options (answers are mapped back to the agent's original option strings), final assistant text, and history. Informational `notify` records are harness chatter and are hidden; warnings and errors are shown. `setStatus`, `setWidget`, `setTitle`, and terminal-only requests are dropped. Tool names map to activity kinds and neutral titles (for example `mem_search` -> `memory` "Checking my notes"). Streamed deltas are not rewritten; the UI replaces them with the final text.
+- **Commands**: `gentle:*` slash commands are never exposed, and a message starting with `/gentle:` is refused with `unsupported`; the UI has no command palette in this version.
 - **Errors**: provider or process errors become neutral messages; raw details go to the daemon log only.
 
 ## 6. User experience
@@ -175,4 +179,4 @@ Every daemon message carries `seq` (monotonic per connection) so the UI can dete
 { "port": 4317, "workspace": "~", "shortcut": "Alt+Space", "launchAtLogin": false }
 ```
 
-Environment overrides: `GENTLE_DOT_PORT`, `GENTLE_DOT_DATA_DIR`, `GENTLE_DOT_AGENT_BIN`, `GENTLE_DOT_WORKSPACE`.
+Environment overrides: `GENTLE_DOT_PORT`, `GENTLE_DOT_HOST` (default `127.0.0.1`; `0.0.0.0` only inside a container), `GENTLE_DOT_DATA_DIR`, `GENTLE_DOT_WORKSPACE`, `GENTLE_DOT_UI_DIR`, `GENTLE_DOT_AGENT_BIN`, `GENTLE_DOT_AGENT_ARGS` (JSON array), `GENTLE_DOT_ALLOWED_ORIGINS` (JSON array).

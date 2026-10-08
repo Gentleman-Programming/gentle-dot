@@ -1,9 +1,10 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { HIDDEN_NAMES } from "../src/white-label.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
 const daemons: DotDaemon[] = [];
@@ -230,6 +231,44 @@ describe("gateway", () => {
 		await find(client, "agent_state", (m) => m.state === "restarting");
 		await find(client, "interrupted");
 		await find(client, "agent_state", (m) => m.state === "idle");
+	});
+});
+
+describe("white label", () => {
+	it("passes the product identity to the agent", async () => {
+		const argsFile = join(tempDir(), "argv.json");
+		const d = await daemon({ ...process.env, FAKE_AGENT_ARGS_FILE: argsFile });
+		const argv = JSON.parse(readFileSync(argsFile, "utf8")) as string[];
+		const at = argv.indexOf("--append-system-prompt");
+		expect(at).toBeGreaterThan(-1);
+		const identity = readFileSync(argv[at + 1] ?? "", "utf8");
+		expect(identity).toContain("You are Gentle Dot");
+		expect(d.supervisor.state).toBe("ready");
+	});
+
+	it("hides branded startup chatter", async () => {
+		const d = await daemon({ ...process.env, FAKE_AGENT_BRANDING: "1" });
+		const client = await authed(d);
+		send(client, { type: "get_history" });
+		await find(client, "history");
+		const text = JSON.stringify(client.messages);
+		for (const name of HIDDEN_NAMES) expect(text).not.toMatch(name);
+	});
+
+	it("rewrites branded ask text", async () => {
+		const d = await daemon();
+		const client = await authed(d);
+		send(client, { type: "send", text: "ask:confirm" });
+		const ask = await find(client, "ask");
+		expect(ask.ask.message).toBe("Gentle Dot wants to continue");
+	});
+
+	it("refuses internal slash commands", async () => {
+		const d = await daemon();
+		const client = await authed(d);
+		send(client, { type: "send", text: "/gentle:yolo" });
+		expect((await find(client, "error")).code).toBe("unsupported");
+		expect(client.messages.some((m) => m.type === "user_message")).toBe(false);
 	});
 });
 

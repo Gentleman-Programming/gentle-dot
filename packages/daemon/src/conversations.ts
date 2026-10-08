@@ -2,6 +2,7 @@ import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from
 import { join, relative, resolve, sep } from "node:path";
 import type { Activity, ConversationSummary, HistoryMessage } from "@gentle-dot/protocol";
 import { describeTool, textOf } from "./presentation.ts";
+import { presentText } from "./white-label.ts";
 
 const TITLE_SCAN_BYTES = 256 * 1024;
 const TITLE_LENGTH = 60;
@@ -98,7 +99,7 @@ export function historyFromMessages(messages: unknown[]): HistoryMessage[] {
 			turn = { id: `h${++index}`, role: "assistant", text: "", activities: [] };
 			history.push(turn);
 		}
-		const text = textOf(m);
+		const text = presentText(textOf(m));
 		if (text) turn.text = turn.text ? `${turn.text}\n\n${text}` : text;
 		turn.activities.push(...activitiesOf(m, failed));
 	}

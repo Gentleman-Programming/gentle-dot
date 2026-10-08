@@ -14,7 +14,8 @@
 		"e2e": "playwright test",
 		"typecheck": "tsc -b",
 		"lint": "biome check .",
-		"format": "biome format --write ."
+		"format": "biome format --write .",
+		"test:real": "GENTLE_DOT_REAL_AGENT=1 vitest run packages/daemon/test/real-agent.test.ts"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.15",

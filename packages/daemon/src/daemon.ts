@@ -3,16 +3,11 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { extname, join, resolve, sep } from "node:path";
-import {
-	type ClientMessage,
-	CloseCode,
-	PROTOCOL_VERSION,
-	parseClientMessage,
-	type ServerPayload,
-} from "@gentle-dot/protocol";
+import { type ClientMessage, CloseCode, PROTOCOL_VERSION, parseClientMessage } from "@gentle-dot/protocol";
 import { type WebSocket, WebSocketServer } from "ws";
 import { type BridgeClient, DotBridge } from "./bridge.ts";
 import { AgentSupervisor } from "./supervisor.ts";
+import { identityArgs } from "./white-label.ts";
 
 export interface DaemonOptions {
 	port: number;
@@ -28,7 +23,6 @@ export interface DaemonOptions {
 	/** Origins allowed to open the WebSocket, besides the daemon's own and the desktop app's. */
 	allowedOrigins?: string[];
 	backoffMs?: number[];
-	filter?: (payload: ServerPayload) => ServerPayload | undefined;
 	log?: (line: string) => void;
 }
 
@@ -72,18 +66,14 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	const supervisor = new AgentSupervisor({
 		command: options.agentCommand,
 		args: options.agentArgs ?? [],
-		extraArgs: options.agentExtraArgs ?? [],
+		extraArgs: [...identityArgs(options.dataDir), ...(options.agentExtraArgs ?? [])],
 		cwd: options.workspace,
 		dataDir: options.dataDir,
 		env: options.agentEnv ?? process.env,
 		...(options.backoffMs ? { backoffMs: options.backoffMs } : {}),
 		log: (line) => log(`[agent] ${line}`),
 	});
-	const bridge = new DotBridge(supervisor, {
-		dataDir: options.dataDir,
-		log,
-		...(options.filter ? { filter: options.filter } : {}),
-	});
+	const bridge = new DotBridge(supervisor, { dataDir: options.dataDir, log });
 
 	const server = createServer((req, res) => handleHttp(req, res, options.uiDir, bridge));
 	const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });

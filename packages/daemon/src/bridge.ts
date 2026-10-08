@@ -8,6 +8,7 @@ import {
 } from "./conversations.ts";
 import { describeTool, textOf } from "./presentation.ts";
 import type { AgentRecord, AgentSupervisor, SupervisorEvent } from "./supervisor.ts";
+import { isBlockedInput, presentText, shouldShowToast } from "./white-label.ts";
 
 export interface BridgeClient {
 	send(payload: ServerPayload): void;
@@ -16,11 +17,12 @@ export interface BridgeClient {
 export interface BridgeOptions {
 	dataDir: string;
 	log?: (line: string) => void;
-	/** Rewrites or drops UI-bound payloads (white-label layer). Identity by default. */
-	filter?: (payload: ServerPayload) => ServerPayload | undefined;
 }
 
 const DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
+
+/** An open dialog; `options` keeps the agent's original option strings for the answer. */
+type PendingAsk = { ask: Ask; options?: string[]; timer?: NodeJS.Timeout };
 const REMEMBERED_REQUEST_IDS = 500;
 
 /**
@@ -30,7 +32,7 @@ const REMEMBERED_REQUEST_IDS = 500;
  */
 export class DotBridge {
 	private readonly clients = new Set<BridgeClient>();
-	private readonly asks = new Map<string, { ask: Ask; timer?: NodeJS.Timeout }>();
+	private readonly asks = new Map<string, PendingAsk>();
 	private readonly runningTools = new Set<string>();
 	private readonly seenRequestIds: string[] = [];
 	private readonly sessionDir: string;
@@ -87,6 +89,14 @@ export class DotBridge {
 			case "hello":
 				return;
 			case "send": {
+				if (isBlockedInput(message.text)) {
+					this.deliver(client, {
+						type: "error",
+						code: "unsupported",
+						message: "I can't run that command here.",
+					});
+					return;
+				}
 				if (message.requestId && this.alreadySeen(message.requestId)) return;
 				this.interrupted = false;
 				const busy = this.supervisor.busy;
@@ -113,9 +123,16 @@ export class DotBridge {
 					});
 					return;
 				}
-				const { requestId, ...answer } = message;
-				const { type: _type, ...fields } = answer;
-				this.supervisor.send({ type: "extension_ui_response", id: requestId, ...fields });
+				const { requestId } = message;
+				const answer: Record<string, unknown> = {};
+				if (message.cancelled) answer.cancelled = true;
+				else if (message.confirmed !== undefined) answer.confirmed = message.confirmed;
+				else if (message.value !== undefined) {
+					// Options are shown rewritten; answer with the agent's original string.
+					const index = pending.ask.options?.indexOf(message.value) ?? -1;
+					answer.value = index >= 0 ? (pending.options?.[index] ?? message.value) : message.value;
+				}
+				this.supervisor.send({ type: "extension_ui_response", id: requestId, ...answer });
 				this.resolveAsk(requestId);
 				return;
 			}
@@ -230,7 +247,7 @@ export class DotBridge {
 			| undefined;
 		if (message?.role !== "assistant") return;
 		const messageId = this.assistantId ?? `m${++this.nextMessage}`;
-		this.broadcast({ type: "message_done", messageId, text: textOf(message) });
+		this.broadcast({ type: "message_done", messageId, text: presentText(textOf(message)) });
 		if (message.stopReason === "error") {
 			this.log(`assistant error: ${message.errorMessage ?? "unknown"}`);
 			this.broadcast({ type: "toast", level: "error", message: "Something went wrong while answering." });
@@ -256,16 +273,24 @@ export class DotBridge {
 		if (method === "notify") {
 			const level =
 				event.notifyType === "error" ? "error" : event.notifyType === "warning" ? "warning" : "info";
-			this.broadcast({ type: "toast", level, message: String(event.message ?? "") });
+			if (shouldShowToast(level))
+				this.broadcast({ type: "toast", level, message: presentText(String(event.message ?? "")) });
 			return;
 		}
 		if (!DIALOG_METHODS.has(method) || !requestId) return;
-		const ask: Ask = { requestId, method: method as Ask["method"], title: String(event.title ?? "") };
-		if (typeof event.message === "string") ask.message = event.message;
-		if (Array.isArray(event.options)) ask.options = event.options.map(String);
-		if (typeof event.placeholder === "string") ask.placeholder = event.placeholder;
+		const ask: Ask = {
+			requestId,
+			method: method as Ask["method"],
+			title: presentText(String(event.title ?? "")),
+		};
+		const entry: PendingAsk = { ask };
+		if (typeof event.message === "string") ask.message = presentText(event.message);
+		if (Array.isArray(event.options)) {
+			entry.options = event.options.map(String);
+			ask.options = entry.options.map(presentText);
+		}
+		if (typeof event.placeholder === "string") ask.placeholder = presentText(event.placeholder);
 		if (typeof event.prefill === "string") ask.prefill = event.prefill;
-		const entry: { ask: Ask; timer?: NodeJS.Timeout } = { ask };
 		if (typeof event.timeout === "number" && event.timeout > 0) {
 			ask.timeoutMs = event.timeout;
 			// Pi resolves the dialog by itself when it times out; drop it here too.
@@ -323,8 +348,7 @@ export class DotBridge {
 	}
 
 	private deliver(client: BridgeClient, payload: ServerPayload): void {
-		const filtered = this.options.filter ? this.options.filter(payload) : payload;
-		if (filtered) client.send(filtered);
+		client.send(payload);
 	}
 
 	private log(line: string): void {
