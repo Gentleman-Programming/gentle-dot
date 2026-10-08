@@ -33,7 +33,7 @@ The app puts the Dot on the desktop and an item in the menu bar, and `⌥ Space`
 
 ## How it works
 
-The daemon starts the agent (`gentle-shell --mode rpc`) as a child process and gives it the Gentle Dot identity. It restarts the agent if it crashes, reopening the same conversation, and translates its events into a small WebSocket protocol for the desktop and web interfaces. Conversations live in `~/.gentle-dot/sessions`; the access key is in `~/.gentle-dot/token`, and `~/.gentle-dot` is private to your user (mode 0700).
+The daemon starts the agent (`gentle-shell --mode rpc`) as a child process and gives it the Gentle Dot identity. It restarts the agent if it crashes, reopening the same conversation, and translates its events into a small WebSocket protocol for the desktop and web interfaces. You get one continuous chat: when its session grows too large, the daemon quietly continues it in a fresh session seeded with a summary, and earlier messages stay one "Show earlier" away (set `GENTLE_DOT_CONVERSATIONS=1` for several conversations). Sessions live in `~/.gentle-dot/sessions`; the access key is in `~/.gentle-dot/token`, and `~/.gentle-dot` is private to your user (mode 0700).
 
 The assistant keeps to its own instance. The agent works in `~/.gentle-dot/workspace` and runs with its own home folder (`~/.gentle-dot/home`), so it never writes to your own Gentle Shell or Pi setup. To point it at a folder of yours, set `GENTLE_DOT_WORKSPACE` or `"workspace"` in `~/.gentle-dot/config.json`: the agent is told to work there, but nothing is written into that folder for setup. It keeps `PATH` and reads your `~/.gitconfig` for your git identity.
 

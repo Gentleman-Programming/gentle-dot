@@ -141,6 +141,7 @@ describe("ChatSurface", () => {
 			<ChatSurface
 				variant="web"
 				state={state({
+					features: { conversations: true },
 					conversationId: "b.jsonl",
 					conversations: [
 						{ id: "b.jsonl", title: "Current", updatedAt: "2026-10-08T10:00:00.000Z" },

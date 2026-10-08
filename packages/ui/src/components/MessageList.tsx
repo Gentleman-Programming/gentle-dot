@@ -1,5 +1,5 @@
 import type { Activity, ActivityKind } from "@gentle-dot/protocol";
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage } from "../store.ts";
@@ -57,15 +57,20 @@ interface MessageListProps {
 	messages: ChatMessage[];
 	/** Messages waiting for the assistant, shown after the running answer. */
 	queued?: string[];
+	/** Offers "Show earlier" at the top, which calls `onShowEarlier`. */
+	hasEarlier?: boolean;
+	onShowEarlier?: () => void;
 }
 
-export function MessageList({ messages, queued = [] }: MessageListProps) {
+export function MessageList({ messages, queued = [], hasEarlier = false, onShowEarlier }: MessageListProps) {
 	const end = useRef<HTMLDivElement>(null);
 	const last = messages.at(-1);
-	// biome-ignore lint/correctness/useExhaustiveDependencies: scroll whenever the visible content grows
+	const lastEarlier = messages.findLastIndex((m) => m.earlier);
+	// Earlier pages are added on top, so only the newest message moves the view.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: scroll whenever the newest content grows
 	useEffect(() => {
 		end.current?.scrollIntoView?.({ block: "end" });
-	}, [messages.length, last?.text, last?.activities.length, last?.note, queued.length]);
+	}, [last?.id, last?.text, last?.activities.length, last?.note, queued.length]);
 
 	if (messages.length === 0 && queued.length === 0) {
 		return (
@@ -76,27 +81,41 @@ export function MessageList({ messages, queued = [] }: MessageListProps) {
 	}
 	return (
 		<div className="messages" aria-live="polite">
-			{messages.map((message) => (
-				<article key={message.id} className={`message message-${message.role}`}>
-					{message.activities.length > 0 ? <Activities activities={message.activities} /> : null}
-					{message.text && message.role === "user" ? (
-						<div className="message-body message-plain">{message.text}</div>
-					) : null}
-					{message.text && message.role === "assistant" ? (
-						<div className="message-body">
-							<Markdown remarkPlugins={[remarkGfm]}>{message.text}</Markdown>
+			{hasEarlier ? (
+				<button type="button" className="show-earlier" onClick={onShowEarlier}>
+					Show earlier
+				</button>
+			) : null}
+			{messages.map((message, index) => (
+				<Fragment key={message.id}>
+					<article className={`message message-${message.role}`}>
+						{message.activities.length > 0 ? <Activities activities={message.activities} /> : null}
+						{message.text && message.role === "user" ? (
+							<div className="message-body message-plain">{message.text}</div>
+						) : null}
+						{message.text && message.role === "assistant" ? (
+							<div className="message-body">
+								<Markdown remarkPlugins={[remarkGfm]}>{message.text}</Markdown>
+							</div>
+						) : null}
+						{message.streaming ? <span className="caret" aria-hidden="true" /> : null}
+						{message.note ? (
+							<p
+								className={`message-note message-note-${message.note.kind}`}
+								role={message.note.kind === "error" ? "alert" : undefined}
+							>
+								{message.note.text}
+							</p>
+						) : null}
+					</article>
+					{index === lastEarlier ? (
+						<div className="earlier-divider">
+							<hr aria-label="Earlier messages" />
+							<span aria-hidden="true">Earlier messages</span>
+							<span className="earlier-line" />
 						</div>
 					) : null}
-					{message.streaming ? <span className="caret" aria-hidden="true" /> : null}
-					{message.note ? (
-						<p
-							className={`message-note message-note-${message.note.kind}`}
-							role={message.note.kind === "error" ? "alert" : undefined}
-						>
-							{message.note.text}
-						</p>
-					) : null}
-				</article>
+				</Fragment>
 			))}
 			{queued.map((text, i) => (
 				<article

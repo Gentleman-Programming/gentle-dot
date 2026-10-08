@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // A deterministic stand-in for `gentle-shell --mode rpc`. It speaks the same JSONL
-// records the daemon relies on, persists messages per session file, and has
-// scripted prompts for tests:
+// records the daemon relies on, persists messages per session file in Pi's format
+// (a `session` header, then `message`, `compaction`, and `custom_message` entries;
+// custom messages are hidden context the model sees), and has scripted prompts for tests:
 //   "tool:<name>"  runs one fake tool call
 //   "ask:select"   asks a select dialog and echoes the answer
 //   "ask:confirm"  asks a confirm dialog and echoes the answer
@@ -11,6 +12,9 @@
 //   "slow"         answers after 1.5 s, leaving time to queue messages
 //   "crash"        starts a run and exits with code 1
 //   "burst"        answers and finishes the run in a single stdout write
+//   "compact"      records a compaction entry (its summary lists the user's messages so far)
+//   "pad:<n>"      grows the session file by about n bytes (an entry outside the context)
+//   "recall"       answers with the hidden context messages it was given
 // The "noreply" command is never answered.
 // A prompt sent while busy (with streamingBehavior), steer, and follow_up are
 // queued like Pi does: a queue_update with both complete queues, then each one
@@ -25,6 +29,7 @@
 //   FAKE_AGENT_DROP_QUEUE settle without taking or reporting queued messages
 //   FAKE_AGENT_IGNORE_ABORT  answer abort but keep running (a session switch still ends the run)
 //   FAKE_AGENT_START_DELAY_MS  answer the first get_state only after this delay
+//   FAKE_AGENT_DROP_CUSTOM  load session files without their custom messages (a format drift)
 // get_available_models lists MODELS; set_model and set_thinking_level change what
 // get_state reports, so tests can read the last values back.
 import { randomUUID } from "node:crypto";
@@ -32,7 +37,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { join } from "node:path";
 
 type Rec = Record<string, unknown>;
-type Message = { role: "user" | "assistant"; content: string };
+type Message = { role: "user" | "assistant" | "custom"; content: string; customType?: string };
 
 const MODELS: Rec[] = [
 	{
@@ -84,6 +89,7 @@ mkdirSync(sessionDir, { recursive: true });
 let sessionId = "";
 let sessionFile = "";
 let messages: Message[] = [];
+let lastEntryId: string | null = null;
 let busy = false;
 let hanging: ((stopReason: "aborted" | "error") => void) | undefined;
 /** Resolves when the current run has ended. */
@@ -112,31 +118,56 @@ function out(rec: Rec): void {
 	else process.stdout.write(`${JSON.stringify(rec)}\n`);
 }
 
-function newSession(): void {
+function newSession(parentSession?: unknown): void {
 	sessionId = randomUUID();
 	sessionFile = join(sessionDir, `${sessionId}.jsonl`);
 	messages = [];
-	writeFileSync(sessionFile, "");
+	lastEntryId = null;
+	const header: Rec = { type: "session", version: 3, id: sessionId, timestamp: new Date().toISOString() };
+	header.cwd = process.cwd();
+	if (typeof parentSession === "string") header.parentSession = parentSession;
+	writeFileSync(sessionFile, `${JSON.stringify(header)}\n`);
 }
 
 function loadSession(path: string): boolean {
 	if (!existsSync(path)) return false;
-	sessionFile = path;
-	sessionId =
-		path
-			.split("/")
-			.pop()
-			?.replace(/\.jsonl$/, "") ?? "";
-	messages = readFileSync(path, "utf8")
+	const entries = readFileSync(path, "utf8")
 		.split("\n")
 		.filter(Boolean)
-		.map((line) => JSON.parse(line) as Message);
+		.map((line) => JSON.parse(line) as Rec);
+	if (entries[0]?.type !== "session") return false;
+	sessionFile = path;
+	sessionId = String(entries[0].id);
+	messages = [];
+	for (const entry of entries.slice(1)) {
+		lastEntryId = String(entry.id);
+		if (entry.type === "message") {
+			const message = entry.message as { role: "user" | "assistant"; content: unknown };
+			messages.push({ role: message.role, content: textOf(message.content) });
+		}
+		if (entry.type === "custom_message" && !process.env.FAKE_AGENT_DROP_CUSTOM) {
+			messages.push({ role: "custom", content: textOf(entry.content), customType: String(entry.customType) });
+		}
+	}
 	return true;
+}
+
+function textOf(content: unknown): string {
+	if (typeof content === "string") return content;
+	return Array.isArray(content) ? content.map((block: { text?: string }) => block.text ?? "").join("") : "";
+}
+
+function appendEntry(entry: Rec): void {
+	const id = randomUUID().slice(0, 8);
+	const full = { ...entry, id, parentId: lastEntryId, timestamp: new Date().toISOString() };
+	lastEntryId = id;
+	appendFileSync(sessionFile, `${JSON.stringify(full)}\n`);
 }
 
 function remember(message: Message): void {
 	messages.push(message);
-	appendFileSync(sessionFile, `${JSON.stringify(message)}\n`);
+	const content = message.role === "assistant" ? [{ type: "text", text: message.content }] : message.content;
+	appendEntry({ type: "message", message: { role: message.role, content } });
 }
 
 function respond(id: unknown, command: string, data?: unknown, error?: string): void {
@@ -240,6 +271,22 @@ async function runPrompt(text: string) {
 		assistantText("Echo: slow");
 		return endRun();
 	}
+	if (text === "compact") {
+		const said = messages.filter((m) => m.role === "user").map((m) => m.content);
+		appendEntry({ type: "compaction", summary: `Summary: ${said.join(", ")}`, tokensBefore: 1000 });
+		assistantText("Compacted.");
+		return endRun();
+	}
+	if (text.startsWith("pad:")) {
+		appendEntry({ type: "custom", customType: "pad", data: "x".repeat(Number(text.slice(4))) });
+		assistantText("Padded.");
+		return endRun();
+	}
+	if (text === "recall") {
+		const hidden = messages.filter((m) => m.role === "custom").map((m) => m.content);
+		assistantText(hidden.length > 0 ? `Recall: ${hidden.join(" | ")}` : "Recall: nothing");
+		return endRun();
+	}
 	if (text.startsWith("tool:")) {
 		const toolName = text.slice(5);
 		const toolCallId = randomUUID();
@@ -281,6 +328,7 @@ function handle(rec: Rec) {
 				model: { id: model.id, name: model.name, provider: model.provider },
 				thinkingLevel,
 				isStreaming: busy,
+				isCompacting: false,
 				sessionFile,
 				sessionId,
 				messageCount: messages.length,
@@ -288,11 +336,14 @@ function handle(rec: Rec) {
 		}
 		case "get_messages":
 			return respond(id, "get_messages", {
-				messages: messages.map((m) =>
-					m.role === "user"
+				messages: messages.map((m) => {
+					if (m.role === "custom") {
+						return { role: "custom", customType: m.customType, content: m.content, display: false };
+					}
+					return m.role === "user"
 						? { role: "user", content: m.content }
-						: { role: "assistant", content: [{ type: "text", text: m.content }] },
-				),
+						: { role: "assistant", content: [{ type: "text", text: m.content }] };
+				}),
 			});
 		case "get_commands":
 			return respond(id, "get_commands", { commands: [{ name: "gentle:status" }, { name: "history" }] });
@@ -367,7 +418,7 @@ async function switchSession(rec: Rec): Promise<void> {
 	}
 	const type = String(rec.type);
 	if (type === "new_session") {
-		newSession();
+		newSession(rec.parentSession);
 		return respond(rec.id, type, { cancelled: false });
 	}
 	if (!loadSession(String(rec.sessionPath))) return respond(rec.id, type, undefined, "Session not found");

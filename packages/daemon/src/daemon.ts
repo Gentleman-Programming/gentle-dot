@@ -9,6 +9,7 @@ import { AuthManager, type AuthRuntime, createModelAuthRuntime, resolveAgentHome
 import { type BridgeClient, DotBridge } from "./bridge.ts";
 import { ensureMemoryProject, ensurePrivateDir, isolatedAgentEnv } from "./isolation.ts";
 import { defaultImportPath, ProfileStore } from "./profiles.ts";
+import { type RotationLimits, rotationLimits } from "./rotation.ts";
 import { AgentSupervisor } from "./supervisor.ts";
 import { identityArgs } from "./white-label.ts";
 
@@ -35,6 +36,12 @@ export interface DaemonOptions {
 	/** Origins allowed to open the WebSocket, besides the daemon's own and the desktop app's. */
 	allowedOrigins?: string[];
 	backoffMs?: number[];
+	/** Several conversations instead of one continuous chat; default `GENTLE_DOT_CONVERSATIONS=1`. */
+	conversations?: boolean;
+	/** When the chat's session is rotated; default from `GENTLE_DOT_ROTATE_BYTES` and `GENTLE_DOT_ROTATE_COMPACTIONS`. */
+	rotation?: RotationLimits;
+	/** Messages per history page; default `GENTLE_DOT_HISTORY_PAGE` or 100. */
+	historyPage?: number;
 	log?: (line: string) => void;
 }
 
@@ -126,7 +133,16 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		agentHome,
 		importPath: options.profilesImportPath ?? defaultImportPath(process.env),
 	});
-	const bridge = new DotBridge(supervisor, { dataDir: options.dataDir, log, auth, profiles });
+	const historyPage = options.historyPage ?? Number(process.env.GENTLE_DOT_HISTORY_PAGE);
+	const bridge = new DotBridge(supervisor, {
+		dataDir: options.dataDir,
+		log,
+		auth,
+		profiles,
+		features: { conversations: options.conversations ?? process.env.GENTLE_DOT_CONVERSATIONS === "1" },
+		rotation: options.rotation ?? rotationLimits(process.env),
+		...(Number.isInteger(historyPage) && historyPage > 0 ? { historyPage } : {}),
+	});
 
 	const server = createServer((req, res) => handleHttp(req, res, options.uiDir, bridge));
 	const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });

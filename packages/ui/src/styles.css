@@ -524,6 +524,19 @@ textarea:focus {
 	text-overflow: ellipsis;
 }
 
+/* The single chat's header: the assistant, not a conversation title. */
+.chat-header h1.assistant-name {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.rose-glyph {
+	flex: none;
+	color: #ff2d7a;
+	filter: drop-shadow(0 0 4px rgba(255, 45, 122, 0.45));
+}
+
 .state-dot {
 	flex: none;
 	width: 8px;
@@ -630,6 +643,37 @@ textarea:focus {
 
 .message {
 	margin: 0 0 14px;
+}
+
+.show-earlier {
+	display: block;
+	margin: 0 auto 14px;
+	padding: 5px 14px;
+	border-radius: var(--radius-pill);
+	color: var(--muted);
+	font-size: 12px;
+	line-height: 16px;
+}
+
+/* Where the earlier session of the chat ends: a hairline with a quiet label. */
+.earlier-divider {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin: 4px 0 18px;
+	color: var(--muted);
+	font: 600 10px / 14px var(--font-mono);
+	letter-spacing: 0.12em;
+	text-transform: uppercase;
+}
+
+.earlier-divider hr,
+.earlier-line {
+	flex: 1;
+	height: 1px;
+	margin: 0;
+	border: 0;
+	background: var(--line);
 }
 
 .message-user {
@@ -966,8 +1010,14 @@ textarea:focus {
 	color: var(--muted);
 }
 
+/* A fixed height with the global button padding left the text low; center it instead. */
 .composer-stop {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
 	height: 32px;
+	padding: 0 14px;
+	line-height: 1;
 	border-radius: var(--radius-pill);
 }
 

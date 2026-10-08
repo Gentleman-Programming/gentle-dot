@@ -30,7 +30,7 @@ export interface SupervisorOptions {
 	/** Arguments placed after the RPC arguments. */
 	extraArgs?: string[];
 	cwd: string;
-	/** Directory for `sessions/` and `state.json`. */
+	/** Directory for `sessions/` and `state.json` (the open session and the chains of rotated ones). */
 	dataDir: string;
 	env?: NodeJS.ProcessEnv;
 	/** Respawn delays; the last value repeats. Default 1s, 2s, 4s, 8s, 16s, 30s. */
@@ -79,6 +79,8 @@ export class AgentSupervisor {
 	private interrupted = false;
 	private restartTimer: NodeJS.Timeout | undefined;
 	private closeWaiters: (() => void)[] = [];
+	/** For a session started by rotation, the session files it continues, oldest first. */
+	private chains: Record<string, string[]> = {};
 	private readonly sessionDir: string;
 	private readonly stateFile: string;
 	private readonly options: SupervisorOptions;
@@ -92,6 +94,17 @@ export class AgentSupervisor {
 
 	get pid(): number | undefined {
 		return this.child?.pid;
+	}
+
+	/** The earlier session files of the open chat, oldest first. */
+	get previousSessions(): string[] {
+		return (this.sessionFile && this.chains[this.sessionFile]) || [];
+	}
+
+	/** Records that `sessionFile` continues the chat held in `previous` (oldest first). */
+	linkSessions(sessionFile: string, previous: string[]): void {
+		this.chains[sessionFile] = previous;
+		if (this.sessionFile) this.persistSession(this.sessionFile);
 	}
 
 	onEvent(listener: (event: SupervisorEvent) => void): () => void {
@@ -304,7 +317,16 @@ export class AgentSupervisor {
 
 	private readPersistedSession(): string | undefined {
 		try {
-			const saved = JSON.parse(readFileSync(this.stateFile, "utf8")) as { sessionFile?: string };
+			const saved = JSON.parse(readFileSync(this.stateFile, "utf8")) as {
+				sessionFile?: string;
+				chains?: unknown;
+			};
+			if (typeof saved.chains === "object" && saved.chains !== null) {
+				for (const [file, previous] of Object.entries(saved.chains)) {
+					if (Array.isArray(previous) && previous.every((p) => typeof p === "string"))
+						this.chains[file] = previous;
+				}
+			}
 			return typeof saved.sessionFile === "string" ? saved.sessionFile : undefined;
 		} catch {
 			return undefined;
@@ -314,7 +336,7 @@ export class AgentSupervisor {
 	private persistSession(sessionFile: string): void {
 		mkdirSync(this.options.dataDir, { recursive: true });
 		const temp = `${this.stateFile}.${process.pid}.tmp`;
-		writeFileSync(temp, `${JSON.stringify({ sessionFile })}\n`, { mode: 0o600 });
+		writeFileSync(temp, `${JSON.stringify({ sessionFile, chains: this.chains })}\n`, { mode: 0o600 });
 		renameSync(temp, this.stateFile);
 	}
 

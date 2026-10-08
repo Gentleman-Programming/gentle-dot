@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, type Page, test } from "@playwright/test";
-import { E2E_COMMANDS_FILE, E2E_DATA_DIR, E2E_TOKEN } from "./token.ts";
+import { E2E_COMMANDS_FILE, E2E_CONVERSATIONS_PORT, E2E_DATA_DIR, E2E_TOKEN } from "./token.ts";
 
 const readJson = (path: string) =>
 	existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as unknown) : undefined;
@@ -13,8 +13,11 @@ const agentCommands = () =>
 				.map((line) => JSON.parse(line) as unknown)
 		: [];
 
-async function open(page: Page) {
-	await page.goto(`/#token=${E2E_TOKEN}`);
+/** The daemon with the conversations list on; the default one keeps a single chat. */
+const WITH_CONVERSATIONS = `http://127.0.0.1:${E2E_CONVERSATIONS_PORT}`;
+
+async function open(page: Page, base = "") {
+	await page.goto(`${base}/#token=${E2E_TOKEN}`);
 	await expect(page.getByRole("textbox", { name: "Message" })).toBeEnabled();
 }
 
@@ -43,7 +46,7 @@ test("answers a question card", async ({ page }) => {
 });
 
 test("starts a new conversation and reopens the previous one", async ({ page }) => {
-	await open(page);
+	await open(page, WITH_CONVERSATIONS);
 	await page.getByRole("button", { name: "New conversation" }).click();
 	await expect(page.getByText("Hi! What can I do for you?")).toBeVisible();
 	await say(page, "plan my trip");
@@ -70,8 +73,6 @@ test("offers to continue after the assistant was interrupted", async ({ page }) 
 
 test("shows a message sent while the assistant works as queued, then delivers it", async ({ page }) => {
 	await open(page);
-	await page.getByRole("button", { name: "New conversation" }).click();
-	await expect(page.getByText("Hi! What can I do for you?")).toBeVisible();
 	await say(page, "slow");
 	await expect(page.getByRole("button", { name: "Stop" })).toBeVisible();
 	await say(page, "queued one");
@@ -81,14 +82,16 @@ test("shows a message sent while the assistant works as queued, then delivers it
 	await expect(queued.locator(".message-body")).toHaveText("queued one");
 	await expect(page.locator(".message-assistant").last()).toHaveText("Echo: queued one", { timeout: 10_000 });
 	await expect(queued).toHaveCount(0);
-	await expect(page.locator(".message-user")).toHaveText(["slow", "queued one"]);
-	await expect(page.locator(".message-assistant")).toHaveText(["Echo: slow", "Echo: queued one"]);
+	// One continuous chat: the earlier tests' messages are above these.
+	const lastTwo = async (selector: string) => (await page.locator(selector).allTextContents()).slice(-2);
+	await expect.poll(() => lastTwo(".message-user")).toEqual(["slow", "queued one"]);
+	await expect.poll(() => lastTwo(".message-assistant")).toEqual(["Echo: slow", "Echo: queued one"]);
 });
 
 test("asks before leaving a running answer, then opens the other conversation with no error", async ({
 	page,
 }) => {
-	await open(page);
+	await open(page, WITH_CONVERSATIONS);
 	await page.getByRole("button", { name: "New conversation" }).click();
 	await expect(page.getByText("Hi! What can I do for you?")).toBeVisible();
 	await say(page, "first chat");
@@ -120,7 +123,7 @@ test("asks before leaving a running answer, then opens the other conversation wi
 
 test("closes open options when the user starts typing, with titled header icons", async ({ page }) => {
 	await open(page);
-	for (const name of ["Conversations", "Accounts", "Profiles", "New conversation"]) {
+	for (const name of ["Accounts", "Profiles"]) {
 		await expect(page.getByRole("button", { name })).toHaveAttribute("title", name);
 	}
 	await page.getByRole("button", { name: "Profiles" }).click();
@@ -128,6 +131,40 @@ test("closes open options when the user starts typing, with titled header icons"
 	await page.getByRole("textbox", { name: "Message" }).pressSequentially("h");
 	await expect(page.getByRole("region", { name: "Profiles" })).toBeHidden();
 	await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue("h");
+});
+
+test("keeps one continuous chat: the header shows the assistant, with no conversations", async ({ page }) => {
+	await open(page);
+	await expect(page.getByRole("heading", { level: 1 })).toHaveText("Gentle Dot");
+	await expect(page.getByRole("button", { name: "New conversation" })).toHaveCount(0);
+	await expect(page.getByRole("button", { name: "Conversations" })).toHaveCount(0);
+});
+
+test("crosses a session rotation without a seam, and shows earlier messages on request", async ({ page }) => {
+	await open(page);
+	await say(page, "rotation alpha");
+	await expect(page.locator(".message-assistant").last()).toHaveText("Echo: rotation alpha");
+	await say(page, "compact");
+	await expect(page.locator(".message-assistant").last()).toHaveText("Compacted.");
+	await say(page, "compact");
+	// The second compaction rotates the session (GENTLE_DOT_ROTATE_COMPACTIONS=2 in serve.ts).
+	const divider = page.locator(".earlier-divider");
+	await expect(divider).toHaveText("Earlier messages");
+	await say(page, "recall");
+	// The new session knows the earlier one through the hidden handoff, which never shows as a message.
+	await expect(page.locator(".message-assistant").last()).toContainText("Summary: ");
+	await expect(page.locator(".message-assistant").last()).toContainText("rotation alpha");
+	await expect(page.locator(".message-user").last()).toHaveText("recall");
+
+	// Only the latest page (4 messages, GENTLE_DOT_HISTORY_PAGE=4) loads after a reload.
+	await page.reload();
+	await expect(page.locator(".message-assistant").last()).toContainText("Recall: ");
+	await expect(divider).toBeVisible();
+	const alpha = page.locator(".message-user", { hasText: /^rotation alpha$/ });
+	await expect(alpha).toHaveCount(0);
+	await page.getByRole("button", { name: "Show earlier" }).click();
+	await expect(alpha).toHaveCount(1);
+	await expect(page.locator(".earlier-divider")).toHaveCount(1);
 });
 
 test("keeps the conversation after a page reload", async ({ page }) => {

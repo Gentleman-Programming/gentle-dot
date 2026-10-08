@@ -1,9 +1,15 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ServerMessage } from "@gentle-dot/protocol";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
-import { type DotDaemon, ensureToken, startDaemon, startupMessage } from "../src/daemon.ts";
+import {
+	type DaemonOptions,
+	type DotDaemon,
+	ensureToken,
+	startDaemon,
+	startupMessage,
+} from "../src/daemon.ts";
 import { HIDDEN_NAMES, presentText } from "../src/white-label.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
@@ -12,7 +18,11 @@ afterEach(async () => {
 	await Promise.all(daemons.splice(0).map((d) => d.close()));
 });
 
-async function daemon(env: NodeJS.ProcessEnv = process.env) {
+/** Most tests here cover the conversations list, so it is on unless `extra` says otherwise. */
+async function daemon(
+	env: NodeJS.ProcessEnv = process.env,
+	extra: Partial<DaemonOptions> = { conversations: true },
+) {
 	const dataDir = tempDir();
 	const uiDir = join(dataDir, "ui");
 	mkdirSync(uiDir);
@@ -28,6 +38,7 @@ async function daemon(env: NodeJS.ProcessEnv = process.env) {
 		agentArgs: [FAKE_AGENT],
 		agentEnv: env,
 		backoffMs: [50],
+		...extra,
 	});
 	daemons.push(d);
 	return d;
@@ -103,6 +114,19 @@ describe("gateway", () => {
 		const client = await connect(d, "tauri://localhost");
 		send(client, { type: "hello", token: d.token, protocol: 1 });
 		await waitFor(() => client.messages.some((m) => m.type === "ready"));
+	});
+
+	it("keeps one continuous chat unless GENTLE_DOT_CONVERSATIONS=1 turns the conversations list on", async () => {
+		vi.stubEnv("GENTLE_DOT_CONVERSATIONS", "");
+		try {
+			const single = await authed(await daemon(process.env, {}));
+			expect(single.messages[0]).toMatchObject({ type: "ready", features: { conversations: false } });
+			vi.stubEnv("GENTLE_DOT_CONVERSATIONS", "1");
+			const several = await authed(await daemon(process.env, {}));
+			expect(several.messages[0]).toMatchObject({ type: "ready", features: { conversations: true } });
+		} finally {
+			vi.unstubAllEnvs();
+		}
 	});
 
 	it("sends ready with the agent state and numbers every message", async () => {

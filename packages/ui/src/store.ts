@@ -6,6 +6,7 @@ import type {
 	AuthPrompt,
 	AuthProvider,
 	ConversationSummary,
+	Features,
 	MessageQueue,
 	ModelOption,
 	Profile,
@@ -50,6 +51,8 @@ export interface ChatMessage {
 	activities: Activity[];
 	/** How an answer ended when it did not finish normally. */
 	note?: { kind: "stopped" | "error"; text: string };
+	/** From an earlier session of the chat; a divider follows the last one. */
+	earlier?: boolean;
 }
 
 export interface Notice {
@@ -63,7 +66,10 @@ export interface DotState {
 	agentState: AgentState;
 	conversationId?: string;
 	model?: string;
+	features: Features;
 	messages: ChatMessage[];
+	/** More messages exist before the first one shown. */
+	hasEarlier: boolean;
 	/** Messages sent while the assistant works, not taken yet. */
 	queue: MessageQueue;
 	asks: Ask[];
@@ -85,7 +91,9 @@ export type DotAction =
 export const initialState: DotState = {
 	connection: "connecting",
 	agentState: "starting",
+	features: { conversations: false },
 	messages: [],
+	hasEarlier: false,
 	queue: { steering: [], followUp: [] },
 	asks: [],
 	conversations: [],
@@ -137,6 +145,7 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 				queue: initialState.queue,
 				conversationId: message.conversationId ?? state.conversationId,
 				model: message.model ?? state.model,
+				features: message.features ?? initialState.features,
 			};
 		case "agent_state":
 			return { ...state, agentState: message.state };
@@ -182,7 +191,15 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 				interrupted: false,
 				conversationId: message.conversationId ?? state.conversationId,
 				messages: message.messages.map((m) => ({ ...m, streaming: false })),
+				hasEarlier: message.hasEarlier === true,
 			};
+		case "earlier": {
+			// A page for messages this window no longer starts with (a newer history replaced them) is dropped.
+			if (state.messages[0]?.id !== message.before) return state;
+			const shown = new Set(state.messages.map((m) => m.id));
+			const page = message.messages.filter((m) => !shown.has(m.id)).map((m) => ({ ...m, streaming: false }));
+			return { ...state, messages: [...page, ...state.messages], hasEarlier: message.hasEarlier };
+		}
 		case "conversations":
 			return {
 				...state,

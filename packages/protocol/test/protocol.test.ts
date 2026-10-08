@@ -57,9 +57,19 @@ describe("protocol", () => {
 			'{"type":"shell","cmd":"rm"}',
 			'{"type":"auth_login","providerId":"x","method":"password"}',
 			'{"type":"auth_reply","flowId":"f"}',
+			'{"type":"get_earlier"}',
+			'{"type":"get_earlier","before":7}',
+			`{"type":"get_earlier","before":"${"x".repeat(201)}"}`,
 		]) {
 			expect(parseClientMessage(raw), raw).toBeUndefined();
 		}
+	});
+
+	it("asks for the messages before one the window already shows", () => {
+		expect(parseClientMessage('{"type":"get_earlier","before":"s0-12"}')).toEqual({
+			type: "get_earlier",
+			before: "s0-12",
+		});
 	});
 });
 

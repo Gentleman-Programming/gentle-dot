@@ -12,7 +12,13 @@ function apply(state: DotState, ...payloads: ServerPayload[]): DotState {
 	);
 }
 
-const open: DotState = { ...initialState, connection: "open", agentState: "idle" };
+// Switching only exists with the conversations list on.
+const open: DotState = {
+	...initialState,
+	connection: "open",
+	agentState: "idle",
+	features: { conversations: true },
+};
 
 describe("answer outcome", () => {
 	it("keeps an error and a stop on the answer they belong to", () => {

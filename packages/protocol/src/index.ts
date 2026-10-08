@@ -34,6 +34,14 @@ export interface HistoryMessage {
 	role: "user" | "assistant";
 	text: string;
 	activities: Activity[];
+	/** From an earlier session of the same chat, before the daemon last rotated it. */
+	earlier?: true;
+}
+
+/** Optional parts of the app the daemon turns on. */
+export interface Features {
+	/** Several conversations (list, new conversation); off means one continuous chat. */
+	conversations: boolean;
 }
 
 export interface ConversationSummary {
@@ -157,6 +165,8 @@ export type ClientMessage =
 	| { type: "list_conversations" }
 	| { type: "open_conversation"; conversationId: string }
 	| { type: "get_history" }
+	/** The page of messages before `before`, the id of the oldest message the window shows. */
+	| { type: "get_earlier"; before: string }
 	| { type: "auth_list" }
 	| { type: "auth_login"; providerId: string; method: AuthMethod }
 	| { type: "auth_reply"; flowId: string; value?: string; cancelled?: boolean }
@@ -171,7 +181,7 @@ export type ClientMessage =
 	| { type: "profile_save_current"; name: string };
 
 export type ServerPayload =
-	| { type: "ready"; agentState: AgentState; conversationId?: string; model?: string }
+	| { type: "ready"; agentState: AgentState; conversationId?: string; model?: string; features?: Features }
 	| { type: "agent_state"; state: AgentState }
 	| { type: "user_message"; messageId: string; text: string }
 	| { type: "message_delta"; messageId: string; delta: string }
@@ -188,7 +198,14 @@ export type ServerPayload =
 	| { type: "ask"; ask: Ask }
 	| { type: "ask_resolved"; requestId: string }
 	| { type: "toast"; level: "info" | "warning" | "error"; message: string }
-	| { type: "history"; conversationId?: string; messages: HistoryMessage[] }
+	| {
+			type: "history";
+			conversationId?: string;
+			/** Only the most recent messages; `hasEarlier` says whether `get_earlier` has more. */
+			messages: HistoryMessage[];
+			hasEarlier?: boolean;
+	  }
+	| { type: "earlier"; before: string; messages: HistoryMessage[]; hasEarlier: boolean }
 	| { type: "conversations"; conversations: ConversationSummary[]; activeId?: string }
 	| { type: "interrupted" }
 	| ({ type: "queue" } & MessageQueue)
@@ -280,6 +297,10 @@ export function parseClientMessage(raw: string): ClientMessage | undefined {
 			return isString(m.providerId) ? { type: "auth_logout", providerId: m.providerId } : undefined;
 		case "auth_list":
 			return { type: "auth_list" };
+		case "get_earlier":
+			return isString(m.before) && m.before.length <= 200
+				? { type: "get_earlier", before: m.before }
+				: undefined;
 		case "open_conversation":
 			return isString(m.conversationId)
 				? { type: "open_conversation", conversationId: m.conversationId }

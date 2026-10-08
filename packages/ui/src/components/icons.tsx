@@ -78,6 +78,33 @@ export function SendIcon() {
 	);
 }
 
+/** The rose (the app's favicon drawing): who the user is talking to. */
+export function RoseGlyph() {
+	return (
+		<svg
+			className="rose-glyph"
+			width="18"
+			height="18"
+			viewBox="0 0 18 18"
+			fill="none"
+			stroke="currentColor"
+			strokeWidth="1.25"
+			strokeLinecap="round"
+			strokeLinejoin="round"
+			aria-hidden="true"
+			focusable="false"
+		>
+			<path d="M6.6 11.1C4.2 10.3 3 8.3 3.1 5.3L5.4 6.5" />
+			<path d="M11.4 11.1C13.8 10.3 15 8.3 14.9 5.3L12.6 6.5" />
+			<path d="M5.4 6.5C5.5 3.9 7.1 2.5 9 2.5S12.5 3.9 12.6 6.5" />
+			<path d="M5.4 6.5C5.8 9.6 7.2 11.2 9 11.6C10.8 11.2 12.2 9.6 12.6 6.5" />
+			<path d="M9.05 8.7C7.7 8.7 7.2 7.3 7.9 6.5C8.6 5.8 9.9 6 10.1 6.95C10.25 7.6 9.7 8 9.15 7.8" />
+			<path d="M9 11.6C9 13.6 8.6 15.1 7.5 16.6" />
+			<path d="M8.85 13.7C10.1 12.6 12.2 12.6 13.1 13.5C12 14.6 10.2 14.7 8.85 13.7Z" />
+		</svg>
+	);
+}
+
 export function MinusIcon() {
 	return (
 		<Icon>

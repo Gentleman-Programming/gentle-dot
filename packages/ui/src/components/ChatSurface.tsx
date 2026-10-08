@@ -5,7 +5,7 @@ import { activeTitle, type DotAction, type DotState, isBusy, needsAccount } from
 import { AccountsPanel } from "./AccountsPanel.tsx";
 import { AskCard } from "./AskCard.tsx";
 import { Composer } from "./Composer.tsx";
-import { AccountsIcon, ConversationsIcon, MinusIcon, PlusIcon, ProfilesIcon } from "./icons.tsx";
+import { AccountsIcon, ConversationsIcon, MinusIcon, PlusIcon, ProfilesIcon, RoseGlyph } from "./icons.tsx";
 import { MessageList } from "./MessageList.tsx";
 import { ProfilesPanel } from "./ProfilesPanel.tsx";
 import { newRequestId, type Send } from "./types.ts";
@@ -69,6 +69,8 @@ export function ChatSurface({
 		if (state.profiles.open) dispatch({ type: "profiles", open: false });
 	};
 	const covered = state.auth.open || state.profiles.open;
+	// One continuous chat unless the daemon turns the conversations list on.
+	const conversations = state.features.conversations;
 	const status = statusText(state);
 	const ready =
 		state.connection === "open" && state.agentState !== "restarting" && state.agentState !== "starting";
@@ -77,36 +79,47 @@ export function ChatSurface({
 		<div className={`chat chat-${variant}`} data-state={state.agentState}>
 			<header className="chat-header" data-tauri-drag-region={variant === "panel" ? "" : undefined}>
 				<span className={`state-dot state-${state.agentState}`} aria-hidden="true" />
-				<h1 className="gradient-text">{activeTitle(state)}</h1>
-				<button
-					type="button"
-					className="icon"
-					aria-label="Conversations"
-					title="Conversations"
-					aria-expanded={showConversations}
-					onClick={() => {
-						if (!showConversations) send({ type: "list_conversations" });
-						setShowConversations(!showConversations);
-					}}
-				>
-					<ConversationsIcon />
-				</button>
+				{conversations ? (
+					<>
+						<h1 className="gradient-text">{activeTitle(state)}</h1>
+						<button
+							type="button"
+							className="icon"
+							aria-label="Conversations"
+							title="Conversations"
+							aria-expanded={showConversations}
+							onClick={() => {
+								if (!showConversations) send({ type: "list_conversations" });
+								setShowConversations(!showConversations);
+							}}
+						>
+							<ConversationsIcon />
+						</button>
+					</>
+				) : (
+					<h1 className="assistant-name">
+						<RoseGlyph />
+						<span className="gradient-text">Gentle Dot</span>
+					</h1>
+				)}
 				<button type="button" className="icon" aria-label="Accounts" title="Accounts" onClick={openAccounts}>
 					<AccountsIcon />
 				</button>
 				<button type="button" className="icon" aria-label="Profiles" title="Profiles" onClick={openProfiles}>
 					<ProfilesIcon />
 				</button>
-				<button
-					type="button"
-					className="icon"
-					aria-label="New conversation"
-					title="New conversation"
-					disabled={!ready}
-					onClick={() => switchTo({ type: "new_conversation" })}
-				>
-					<PlusIcon />
-				</button>
+				{conversations ? (
+					<button
+						type="button"
+						className="icon"
+						aria-label="New conversation"
+						title="New conversation"
+						disabled={!ready}
+						onClick={() => switchTo({ type: "new_conversation" })}
+					>
+						<PlusIcon />
+					</button>
+				) : null}
 				{onHide ? (
 					<button type="button" className="icon" aria-label="Hide" title="Hide" onClick={onHide}>
 						<MinusIcon />
@@ -114,7 +127,7 @@ export function ChatSurface({
 				) : null}
 			</header>
 
-			{showConversations ? (
+			{conversations && showConversations ? (
 				<nav className="conversations" aria-label="Earlier conversations">
 					<p className="eyebrow">Conversations</p>
 					{state.conversations.length === 0 ? <p className="muted">No conversations yet.</p> : null}
@@ -170,7 +183,15 @@ export function ChatSurface({
 			) : null}
 
 			<main className="chat-body" hidden={covered}>
-				<MessageList messages={state.messages} queued={[...state.queue.steering, ...state.queue.followUp]} />
+				<MessageList
+					messages={state.messages}
+					queued={[...state.queue.steering, ...state.queue.followUp]}
+					hasEarlier={state.hasEarlier}
+					onShowEarlier={() => {
+						const first = state.messages[0];
+						if (first) send({ type: "get_earlier", before: first.id });
+					}}
+				/>
 				{state.interrupted ? (
 					<div className="interrupted">
 						<p>I was interrupted. Continue?</p>

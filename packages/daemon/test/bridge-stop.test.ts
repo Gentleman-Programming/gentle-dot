@@ -13,7 +13,12 @@ async function setup(env: NodeJS.ProcessEnv) {
 	const { supervisor, dataDir } = fakeSupervisor({ env: { ...process.env, ...env } });
 	supervisors.push(supervisor);
 	const logs: string[] = [];
-	const bridge = new DotBridge(supervisor, { dataDir, log: (line) => logs.push(line), stopTimeoutMs: 300 });
+	const bridge = new DotBridge(supervisor, {
+		dataDir,
+		log: (line) => logs.push(line),
+		stopTimeoutMs: 300,
+		features: { conversations: true },
+	});
 	const received: ServerPayload[] = [];
 	const client = { send: (payload: ServerPayload) => received.push(payload) };
 	bridge.attach(client);

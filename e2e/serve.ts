@@ -1,13 +1,31 @@
 // Starts the daemon for Playwright with the fake agent, a fresh data dir, and a known token.
+// It also starts a second daemon, with the conversations list on, and waits for it first.
+import { spawn } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { E2E_COMMANDS_FILE, E2E_DATA_DIR, E2E_TOKEN } from "./token.ts";
+import {
+	E2E_COMMANDS_FILE,
+	E2E_CONVERSATIONS_DATA_DIR,
+	E2E_CONVERSATIONS_PORT,
+	E2E_DATA_DIR,
+	E2E_TOKEN,
+} from "./token.ts";
 
-const dataDir = E2E_DATA_DIR;
+const conversations = process.env.E2E_CONVERSATIONS === "1";
+const dataDir = conversations ? E2E_CONVERSATIONS_DATA_DIR : E2E_DATA_DIR;
 rmSync(dataDir, { recursive: true, force: true });
 mkdirSync(dataDir, { recursive: true });
 writeFileSync(join(dataDir, "token"), `${E2E_TOKEN}\n`, { mode: 0o600 });
+
+if (!conversations) {
+	const child = spawn(process.execPath, [fileURLToPath(import.meta.url)], {
+		env: { ...process.env, E2E_CONVERSATIONS: "1", GENTLE_DOT_PORT: String(E2E_CONVERSATIONS_PORT) },
+		stdio: "inherit",
+	});
+	process.on("exit", () => child.kill());
+	await waitForHealth(`http://127.0.0.1:${E2E_CONVERSATIONS_PORT}/health`);
+}
 
 // Provider keys in the developer's environment would mark accounts as connected.
 delete process.env.OPENAI_API_KEY;
@@ -15,12 +33,34 @@ delete process.env.OPENAI_API_KEY;
 process.env.GENTLE_PI_CONFIG_HOME = join(dataDir, "no-shell-profiles");
 // Profiles are applied to <dataDir>/agent; the fake agent records the live model switch.
 delete process.env.GENTLE_DOT_AGENT_HOME;
-process.env.FAKE_AGENT_COMMANDS_FILE = E2E_COMMANDS_FILE;
+process.env.FAKE_AGENT_COMMANDS_FILE = conversations
+	? join(dataDir, "agent-commands.jsonl")
+	: E2E_COMMANDS_FILE;
 process.env.GENTLE_DOT_DATA_DIR = dataDir;
 process.env.GENTLE_DOT_AGENT_BIN = process.execPath;
 process.env.GENTLE_DOT_AGENT_ARGS = JSON.stringify([
 	fileURLToPath(new URL("../packages/daemon/test/fixtures/fake-agent.ts", import.meta.url)),
 ]);
+if (conversations) {
+	process.env.GENTLE_DOT_CONVERSATIONS = "1";
+} else {
+	delete process.env.GENTLE_DOT_CONVERSATIONS;
+	// Rotate after two compactions and send short history pages, so one test can cross a rotation.
+	process.env.GENTLE_DOT_ROTATE_COMPACTIONS = "2";
+	process.env.GENTLE_DOT_HISTORY_PAGE = "4";
+}
 // A non-literal specifier keeps the daemon sources out of this tsconfig project.
 const cli = "../packages/daemon/src/cli.ts";
 await import(cli);
+
+async function waitForHealth(url: string): Promise<void> {
+	for (let attempt = 0; attempt < 300; attempt++) {
+		const up = await fetch(url).then(
+			(response) => response.ok,
+			() => false,
+		);
+		if (up) return;
+		await new Promise((resolve) => setTimeout(resolve, 100));
+	}
+	throw new Error(`the conversations daemon did not start: ${url}`);
+}

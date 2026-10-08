@@ -3,6 +3,7 @@ import {
 	type AgentState,
 	type Ask,
 	type ClientMessage,
+	type Features,
 	isThinkingLevel,
 	type MessageQueue,
 	parseQueue,
@@ -12,8 +13,9 @@ import {
 import type { AuthManager } from "./auth.ts";
 import {
 	conversationIdOf,
-	historyFromMessages,
+	type HistoryPage,
 	listConversations,
+	pageHistory,
 	resolveConversation,
 } from "./conversations.ts";
 import { describeTool, textOf } from "./presentation.ts";
@@ -24,6 +26,7 @@ import {
 	type SwitchOutcome,
 	toModelOptions,
 } from "./profiles.ts";
+import { DEFAULT_ROTATION, type RotationLimits, SessionRotator } from "./rotation.ts";
 import type { AgentRecord, AgentSupervisor, SupervisorEvent } from "./supervisor.ts";
 import { isBlockedInput, presentText, shouldShowToast } from "./white-label.ts";
 
@@ -38,6 +41,12 @@ export interface BridgeOptions {
 	profiles?: ProfileStore;
 	/** How long switching conversations waits for a running answer to stop. Default 10 s. */
 	stopTimeoutMs?: number;
+	/** Optional parts of the app; by default one continuous chat. */
+	features?: Features;
+	/** When the open session is replaced by a fresh one (docs/design.md §7). */
+	rotation?: RotationLimits;
+	/** How many messages `history` and each `get_earlier` page carry. Default 100. */
+	historyPage?: number;
 }
 
 type ProfileCommand = Extract<
@@ -61,6 +70,7 @@ type PendingAsk = { ask: Ask; options?: string[]; timer?: NodeJS.Timeout };
 const REMEMBERED_REQUEST_IDS = 500;
 const READY_TIMEOUT_MS = 60_000;
 const ANSWER_FAILED = "Something went wrong while answering. Please try again.";
+const HISTORY_PAGE = 100;
 
 /**
  * Translates between protocol v1 clients and the supervised agent: it keeps
@@ -86,6 +96,10 @@ export class DotBridge {
 	private switching: Promise<void> = Promise.resolve();
 	/** Messages waiting for the agent, as shown to the user. */
 	private queue: MessageQueue = { steering: [], followUp: [] };
+	/** Messages on their way to the agent; the session is never rotated under them. */
+	private sending = 0;
+	private readonly features: Features;
+	private readonly rotator: SessionRotator;
 	private readonly liveSwitch: LiveModelSwitch;
 
 	constructor(supervisor: AgentSupervisor, options: BridgeOptions) {
@@ -93,6 +107,13 @@ export class DotBridge {
 		this.options = options;
 		this.liveSwitch = new LiveModelSwitch(supervisor, (line) => this.log(line));
 		this.sessionDir = join(options.dataDir, "sessions");
+		this.features = options.features ?? { conversations: false };
+		this.rotator = new SessionRotator(supervisor, {
+			limits: options.rotation ?? DEFAULT_ROTATION,
+			canRotate: () =>
+				supervisor.state === "ready" && !supervisor.busy && this.asks.size === 0 && this.sending === 0,
+			log: (line) => this.log(line),
+		});
 		supervisor.onEvent((event) => this.onAgentEvent(event));
 		if (options.auth) options.auth.onCredentialsChanged = () => this.afterCredentialsChange();
 		this.state = this.deriveState();
@@ -109,6 +130,7 @@ export class DotBridge {
 			agentState: this.state,
 			...this.conversationRef(),
 			...(this.supervisor.model ? { model: this.supervisor.model } : {}),
+			features: this.features,
 		});
 		if (this.queued()) this.deliver(client, { type: "queue", ...this.queue });
 		for (const { ask } of this.asks.values()) this.deliver(client, { type: "ask", ask });
@@ -177,11 +199,16 @@ export class DotBridge {
 				await this.switching;
 				this.interrupted = false;
 				const busy = this.supervisor.busy;
-				await this.supervisor.request(
-					busy
-						? { type: "prompt", message: message.text, streamingBehavior: "steer" }
-						: { type: "prompt", message: message.text },
-				);
+				this.sending += 1;
+				try {
+					await this.supervisor.request(
+						busy
+							? { type: "prompt", message: message.text, streamingBehavior: "steer" }
+							: { type: "prompt", message: message.text },
+					);
+				} finally {
+					this.sending -= 1;
+				}
 				return;
 			}
 			case "steer":
@@ -215,15 +242,17 @@ export class DotBridge {
 				return;
 			}
 			case "new_conversation":
+				if (!this.conversationsOn(client)) return;
 				await this.changeConversation(async () => {
 					await this.switchAfterStop(() => this.supervisor.request({ type: "new_session" }));
-					this.afterConversationChange([]);
+					this.afterConversationChange();
 				});
 				return;
 			case "list_conversations":
 				this.deliver(client, this.conversationsPayload());
 				return;
 			case "open_conversation": {
+				if (!this.conversationsOn(client)) return;
 				const path = resolveConversation(this.sessionDir, message.conversationId);
 				if (!path) {
 					this.deliver(client, {
@@ -237,7 +266,7 @@ export class DotBridge {
 					await this.switchAfterStop(() =>
 						this.supervisor.request({ type: "switch_session", sessionPath: path }),
 					);
-					this.afterConversationChange(await this.loadHistory());
+					this.afterConversationChange(await this.currentHistory());
 				});
 				return;
 			}
@@ -283,10 +312,28 @@ export class DotBridge {
 				this.deliver(client, {
 					type: "history",
 					...this.conversationRef(),
-					messages: historyFromMessages(await this.currentHistory()),
+					...(await this.currentHistory()),
+				});
+				return;
+			case "get_earlier":
+				this.deliver(client, {
+					type: "earlier",
+					before: message.before,
+					...pageHistory(this.chain(), this.pageSize(), message.before),
 				});
 				return;
 		}
+	}
+
+	/** With the conversations list off there is one chat; starting or opening another is refused. */
+	private conversationsOn(client: BridgeClient): boolean {
+		if (this.features.conversations) return true;
+		this.deliver(client, {
+			type: "error",
+			code: "conversations_off",
+			message: "This assistant keeps one continuous chat.",
+		});
+		return false;
 	}
 
 	/** Runs a conversation switch; a message sent meanwhile goes to the new conversation, after its history. */
@@ -481,28 +528,44 @@ export class DotBridge {
 		void this.liveSwitch.settle().then((outcome) => this.reportSwitch(outcome));
 	}
 
-	private afterConversationChange(messages: unknown[]): void {
+	private afterConversationChange(page: HistoryPage = { messages: [], hasEarlier: false }): void {
 		this.interrupted = false;
 		this.assistantId = undefined;
-		this.broadcast({ type: "history", ...this.conversationRef(), messages: historyFromMessages(messages) });
+		this.broadcast({ type: "history", ...this.conversationRef(), ...page });
 		this.broadcast(this.conversationsPayload());
+	}
+
+	/** After a run settles, replace an oversized session; every window gets the same chat, now marked earlier. */
+	private rotateWhenIdle(): void {
+		void this.changeConversation(async () => {
+			if (!(await this.rotator.maybeRotate())) return;
+			this.broadcast({ type: "history", ...this.conversationRef(), ...(await this.currentHistory()) });
+		});
 	}
 
 	/**
 	 * History replaces what a window shows, so it must not be older than the
 	 * messages already sent: read it again when one arrived while loading.
 	 */
-	private async currentHistory(): Promise<unknown[]> {
+	private async currentHistory(): Promise<HistoryPage> {
 		for (let attempt = 0; ; attempt++) {
 			const seen = this.nextMessage;
-			const messages = await this.loadHistory();
-			if (this.nextMessage === seen || attempt >= 2) return messages;
+			// The engine writes a message to its session file right after announcing it;
+			// one round trip makes sure everything announced so far is on disk.
+			await this.supervisor.request({ type: "get_state" });
+			const page = pageHistory(this.chain(), this.pageSize());
+			if (this.nextMessage === seen || attempt >= 2) return page;
 		}
 	}
 
-	private async loadHistory(): Promise<unknown[]> {
-		const response = await this.supervisor.request({ type: "get_messages" });
-		return (response.data as { messages?: unknown[] } | undefined)?.messages ?? [];
+	/** The open chat's session files, oldest first. */
+	private chain(): string[] {
+		const file = this.supervisor.sessionFile;
+		return file ? [...this.supervisor.previousSessions, file] : [];
+	}
+
+	private pageSize(): number {
+		return this.options.historyPage ?? HISTORY_PAGE;
 	}
 
 	private conversationsPayload(): ServerPayload {
@@ -558,6 +621,7 @@ export class DotBridge {
 				this.broadcast(this.conversationsPayload());
 				this.settleModelSwitch();
 				if (this.restartPending) this.restartAgent();
+				else this.rotateWhenIdle();
 				break;
 			case "extension_ui_request":
 				this.onUiRequest(event);

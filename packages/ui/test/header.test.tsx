@@ -16,7 +16,8 @@ function apply(state: DotState, ...payloads: ServerPayload[]): DotState {
 const providers = [{ id: "openai", name: "OpenAI", methods: ["api_key" as const], configured: true }];
 
 const ready = apply(
-	{ ...initialState, connection: "open", agentState: "idle" },
+	// The conversations list is on here; single-chat.test.tsx covers the default header.
+	{ ...initialState, connection: "open", agentState: "idle", features: { conversations: true } },
 	{ type: "auth_providers", providers },
 	{ type: "profiles", profiles: [{ name: "daily", roles: {} }], roles: [], models: [], importable: false },
 );

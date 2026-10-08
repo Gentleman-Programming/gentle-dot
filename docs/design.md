@@ -83,10 +83,11 @@ Client to daemon:
 | `steer` | `text` | `steer` |
 | `abort` | — | `abort` |
 | `ui_response` | `requestId`, `value` \| `confirmed` \| `cancelled` | `extension_ui_response` |
-| `new_conversation` | — | `new_session` |
+| `new_conversation` | — | `new_session`; refused with `conversations_off` unless the conversations list is on |
 | `list_conversations` | — | daemon reads the session dir |
-| `open_conversation` | `conversationId` | `switch_session` |
-| `get_history` | — | `get_messages` |
+| `open_conversation` | `conversationId` | `switch_session`; refused with `conversations_off` unless the conversations list is on |
+| `get_history` | — | daemon reads the chat's session files (one `get_state` round trip first); waits for the agent to be ready instead of failing |
+| `get_earlier` | `before` (id of the oldest message the window shows) | daemon reads the page before it, from the open session file and then the earlier files of the chain |
 | `auth_list` | — | daemon `ModelRuntime.getProviders()` and `getProviderAuthStatus()` |
 | `auth_login` | `providerId`, `method` (`oauth` \| `api_key`) | daemon `ModelRuntime.login()`; one flow at a time |
 | `auth_reply` | `flowId`, `value` \| `cancelled` | answers the flow's current prompt |
@@ -96,18 +97,20 @@ Daemon to client:
 
 | type | meaning |
 |---|---|
-| `ready` | `agentState`, `conversationId`, `model` (display name only); pending asks and an `interrupted` notice follow it |
+| `ready` | `agentState`, `conversationId`, `model` (display name only), `features` (`conversations`: the list and new conversation are on; default off); the current `queue`, pending asks, and an `interrupted` notice follow it |
 | `user_message` | a user message entered from any client |
 | `agent_state` | `starting` \| `idle` \| `thinking` \| `working` \| `needs_you` \| `restarting` \| `error` |
 | `message_delta` | assistant text delta for message `messageId` |
-| `message_done` | final assistant message |
+| `message_done` | final assistant message; `stopped: true` when the user stopped it (Stop, or a switch), `error` with a plain-language explanation when it failed (shown inline in the chat, not as a toast) |
+| `queue` | `steering` and `followUp`: the complete lists of messages sent while the assistant works and not taken yet (from Pi's `queue_update`); empty lists clear it, and it is cleared when the run settles or the agent restarts |
 | `ask_resolved` | an ask was answered or timed out |
 | `conversations` | `conversations` (`id`, `title`, `updatedAt`) and `activeId` |
 | `interrupted` | the agent restarted while a run was active |
 | `activity` | `messageId` plus sanitized tool activity: `id`, `kind` (`read`, `edit`, `run`, `search`, `memory`, `delegate`, `other`), `title`, `status` |
 | `ask` | sanitized `extension_ui_request` dialog: `requestId`, `method` (`select`, `confirm`, `input`, `editor`), `title`, `message`, `options`, `timeoutMs` |
 | `toast` | sanitized `notify` |
-| `history` | conversation messages for rendering |
+| `history` | the most recent messages (100 by default, `GENTLE_DOT_HISTORY_PAGE`), `hasEarlier`; messages from earlier sessions of the chat carry `earlier: true`, and the UI draws an "Earlier messages" divider after the last one |
+| `earlier` | `before`, one page of `messages` before it, `hasEarlier`; message ids are `s<file index>-<turn>` in the chain |
 | `error` | `code`, `message` safe for the user |
 | `auth_providers` | providers with `methods`, `oauthName`, `configured`, `source`; `open: true` when the user typed `/login` |
 | `auth_prompt` | `flowId`, `kind` (`text`, `secret`, `select`, `manual_code`), `message`, `options` — sent only to the window that started the flow |
@@ -120,6 +123,16 @@ The daemon runs the Gentle Shell bundled as its `gentle-pi` dependency, with `--
 
 Every daemon message carries `seq` (monotonic per connection) so the UI can detect gaps and request `get_history`.
 
+### Switching and history races (S21)
+
+- Opening or starting another conversation while the assistant answers first asks the user ("Stop and switch" or "Cancel"). The daemon then aborts the run and waits, bounded to 10 s, for it to settle before it sends `new_session` or `switch_session` (abort-then-switch): Pi would otherwise end the run inside the new session. That stop is reported as `stopped`, never as an error.
+- A message sent while a switch or a rotation runs waits for it, so it lands in the new session after that session's `history`.
+- History replaces what a window shows, so it is read again (up to twice) when a message arrived while it was loading. Pi writes a message to its session file right after announcing it, so the daemon makes one `get_state` round trip before each read.
+
+### One continuous chat (S22)
+
+The UI shows one endless chat: no conversations list, no new conversation, and the header shows the assistant (the rose glyph and "Gentle Dot"). The code and protocol for several conversations stay behind `features.conversations` (`GENTLE_DOT_CONVERSATIONS=1`); with it off, the UI also ignores the menu bar's `dot://new-conversation`. The daemon rotates the session underneath when it grows (§7), and `history` / `get_earlier` read through the chain of session files, so earlier messages, including those before any compaction, stay reachable with "Show earlier".
+
 ## 5. White-label layer
 
 - **Identity**: `--append-system-prompt` with `identity.md`: the assistant is "Gentle Dot", a personal assistant; it must not mention Gentle Shell, Pi, el Gentleman, ODD, or Engram by name, and describes them as "my workflow" and "my memory" when needed. It keeps every behavior.
@@ -131,7 +144,7 @@ Every daemon message carries `seq` (monotonic per connection) so the UI can dete
 
 ### The Dot (collapsed)
 
-- Our neon rose, 64 × 84 px, in a transparent window: no circle, no container. It is always on top, draggable, snaps to the nearest screen edge, and its position is persisted. Design sheet: `docs/brand/rose-design.html`.
+- Our neon rose inside a black circle (S9, L24): a 66 pt disc in a 72 pt transparent window. It is always on top, draggable, snaps to the nearest screen edge, and its position is persisted. Design sheet: `docs/brand/rose-design.html`.
 - The rose is inline SVG built from the 178 strokes traced from the logo (`docs/brand/rose-lines.svg` → `packages/ui/src/rose/strokes.ts`, generated by `docs/brand/tools/build-rose-strokes.mjs`). The strokes carry the glow (`#FF2D7A` neon, `#FFD6E8` light core), and a light layer on the 60 longest strokes travels along them.
 - The state is shown by motion and glow:
   - `idle`: the outline breathes a soft glow; sparkles twinkle
@@ -146,7 +159,8 @@ Every daemon message carries `seq` (monotonic per connection) so the UI can dete
 ### The panel (expanded)
 
 - 420 × 640 px, rounded 20 px, translucent (macOS vibrancy), anchored to the Dot.
-- Header: conversation title, new-conversation button, conversations list, collapse.
+- Header (one continuous chat): the rose glyph and "Gentle Dot", then Accounts, Profiles, and Hide as 18 px stroke icons with tooltips. With `features.conversations` on, the conversation title, the conversations list, and New conversation return.
+- "Show earlier" at the top of the chat loads the previous page; a subtle "Earlier messages" divider marks where the chat's earlier session ends.
 - Body: message list with streaming Markdown and code blocks; activity rows are collapsed one-liners grouped under the assistant turn ("Read 3 files · Ran tests").
 - Ask cards: when the agent needs the user, an inline card with the question and buttons (select and confirm) or a text field (input and editor). The Dot turns amber until the user answers.
 - Composer: multiline, Enter sends, Shift+Enter adds a new line. While the agent works, the composer offers "Stop", and sending a message steers the current run.
@@ -155,7 +169,7 @@ Every daemon message carries `seq` (monotonic per connection) so the UI can dete
 ### Menu bar
 
 - Template icon: the hand-drawn rose glyph (`docs/brand/rose-glyph.svg`), with one variant per state: ready, working (dashed outer petals; also used while thinking), needs you (a filled badge dot), and unavailable (dimmed; starting, restarting, and error).
-- Menu: Open (`⌥ Space`), New conversation, Open in browser, Restart assistant, Launch at login (toggle), Quit.
+- Menu: Open (`⌥ Space`), New conversation, Open in browser, Restart assistant, Launch at login (toggle), Quit. In the single chat the UI ignores New conversation; hiding the item in the tray is a follow-up for `apps/desktop`.
 
 ### Web
 
@@ -163,21 +177,27 @@ Every daemon message carries `seq` (monotonic per connection) so the UI can dete
 
 ### Visual system
 
-- Dark-first, with a light theme that follows the system setting.
-- Tokens:
-  - `--bg` `#0E0F13`
-  - `--surface` `rgba(28,30,38,0.72)`
-  - `--text` `#ECEDEF`
-  - `--muted` `#8A8F98`
-  - `--accent` `#7C5CFF`
-  - `--amber` `#F5A524`
-  - `--danger` `#F0506E`
-- Type: system UI (SF Pro), 14/20 body, 12/16 meta; monospace SF Mono for code.
+- The panel and the web view follow gentlemanprogramming.com (S15, measured from the live site, L30). Dark only; there is no light theme.
+- Tokens (`packages/ui/src/styles.css`):
+  - `--bg` `#1a1218`, translucent header `--bg-glass` `rgba(26,18,24,0.82)` with a 12 px blur and a bottom border
+  - `--surface` `#20161e`, `--surface-2` `#241822`, `--line` `#342230`
+  - `--text` `#f6eff3`, `--muted` `#a78e9b`
+  - `--accent` `#f095c8`; the primary button has `0 10px 30px rgba(240,149,200,.3)` and `#1a1218` text (8.60:1; white is 2.13:1)
+  - notes: green `#b4e7c7`, red `#ff718f`, yellow `#e0c27a`
+  - radii 8 / 12 / 16 px, pills 999 px
+- Type: Inter for text, 14/20 body; an uppercase monospace eyebrow (Iosevka Term / JetBrains Mono, 12 px, letter-spacing .12em, accent color); headings in 800 weight with a light-to-pink gradient.
+- The rose Dot keeps its own look (S9): neon `#FF2D7A` strokes in a black circle, with the amber `#F5A524` badge.
 - Motion: 180 ms ease-out for expand and collapse; the Dot animations respect "Reduce motion".
 
 ## 7. Recovery
 
-- Pi sessions persist under `~/.gentle-dot/sessions`, and the daemon reopens the last active one after any restart.
+- Pi sessions persist under `~/.gentle-dot/sessions`, and the daemon reopens the last active one after any restart (`state.json` `sessionFile`).
+- Rotation (S22): Pi's auto-compaction keeps the model context bounded, but the session file keeps every entry and grows forever, and detail fades with each summary. After a run settles, when the agent is idle (no run, no compaction, no open ask, no message on its way), the daemon checks the open session file. Past 20 MB (`GENTLE_DOT_ROTATE_BYTES`) or 10 compaction entries (`GENTLE_DOT_ROTATE_COMPACTIONS`), it rotates:
+  1. It writes a new session file next to the old one, in Pi's own format (a v3 `session` header with `parentSession`, then one `custom_message` with `customType` `gentle-dot.handoff` and `display: false`). The handoff text is the latest compaction `summary` from the old file, with no extra model call, or, before any compaction, the previous handoff plus the last 12 messages.
+  2. It sends `switch_session` to that file and checks that Pi opened it (`get_state` reports it) and that `get_messages` holds the handoff. Pi sends a custom message to the model as user-role context, but it is never a user message, so the chat never shows it.
+  3. If Pi did not load it (for example, its session format changed), the daemon deletes nothing, logs it, and sends `new_session` with `parentSession` instead: a fresh session without the handoff, so the user always keeps a working chat. If the handoff file cannot be written, the chat stays in the current session.
+  4. `state.json` `chains` maps the new file to the earlier ones (oldest first), so history pages read through them, and every window gets a fresh `history` with the earlier messages marked.
+- Rotation never happens while the assistant is busy or an ask is open, and a failure is logged and leaves the current session working.
 - After a crash, the turn that was in flight is lost. The conversation history remains, and the UI shows "I was interrupted. Continue?" with a Continue button that sends "Continue where you left off."
 - The user's global Engram (project `gentle-dot`) keeps decisions and progress across conversations; the Gentle workflow already consults it when resuming.
 - Pi Durable is reconsidered only for unattended or scheduled work.
@@ -216,7 +236,7 @@ The Dot drags with `getCurrentWindow().startDragging()` (permission `core:window
 
 | Event | Payload | Meaning |
 |---|---|---|
-| `dot://new-conversation` | — | the tray item "New conversation" was chosen; the panel starts a new conversation and opens |
+| `dot://new-conversation` | — | the tray item "New conversation" was chosen; with the conversations list on, the panel starts a new conversation and opens; in the single chat (default) the UI ignores it |
 | `dot://panel-shown` | — | the panel became visible; the UI focuses the composer |
 
 ### Menu bar and shortcut
@@ -237,4 +257,4 @@ On launch, the app checks `GET /health`. If the daemon does not answer, the app 
 
 All keys are optional. `workspace` is the user's preferred working folder: the engine is told about it but always runs in `<dataDir>/workspace`.
 
-Environment overrides: `GENTLE_DOT_AGENT_HOME` (default `~/.gentle-dot/agent`), `GENTLE_DOT_ENGRAM_DATA_DIR` (default: the user's Engram data folder), `GENTLE_DOT_ENGRAM` (`private` for a memory of the assistant's own), `GENTLE_DOT_ENGRAM_PORT` (private memory only, default `7438`), `GENTLE_DOT_PORT`, `GENTLE_DOT_HOST` (default `127.0.0.1`; `0.0.0.0` only inside a container), `GENTLE_DOT_DATA_DIR`, `GENTLE_DOT_WORKSPACE`, `GENTLE_DOT_UI_DIR`, `GENTLE_DOT_AGENT_BIN`, `GENTLE_DOT_AGENT_ARGS` (JSON array), `GENTLE_DOT_ALLOWED_ORIGINS` (JSON array).
+Environment overrides: `GENTLE_DOT_AGENT_HOME` (default `~/.gentle-dot/agent`), `GENTLE_DOT_ENGRAM_DATA_DIR` (default: the user's Engram data folder), `GENTLE_DOT_ENGRAM` (`private` for a memory of the assistant's own), `GENTLE_DOT_ENGRAM_PORT` (private memory only, default `7438`), `GENTLE_DOT_PORT`, `GENTLE_DOT_HOST` (default `127.0.0.1`; `0.0.0.0` only inside a container), `GENTLE_DOT_DATA_DIR`, `GENTLE_DOT_WORKSPACE`, `GENTLE_DOT_UI_DIR`, `GENTLE_DOT_AGENT_BIN`, `GENTLE_DOT_AGENT_ARGS` (JSON array), `GENTLE_DOT_ALLOWED_ORIGINS` (JSON array), `GENTLE_DOT_CONVERSATIONS` (`1` turns the conversations list on), `GENTLE_DOT_ROTATE_BYTES` (default 20 MB), `GENTLE_DOT_ROTATE_COMPACTIONS` (default 10), `GENTLE_DOT_HISTORY_PAGE` (default 100).

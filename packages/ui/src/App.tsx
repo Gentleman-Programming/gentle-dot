@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { type ConnectionInfo, tokenFromLocation } from "./client.ts";
 import { ChatSurface } from "./components/ChatSurface.tsx";
 import { DotSurface } from "./components/DotSurface.tsx";
@@ -37,6 +37,8 @@ export function App() {
 	const [missingToken, setMissingToken] = useState(false);
 	const [focusKey, setFocusKey] = useState(0);
 	const { state, send, dismiss, dispatch } = useDot(info);
+	const conversations = useRef(state.features.conversations);
+	conversations.current = state.features.conversations;
 
 	useEffect(() => {
 		if (inDesktop()) {
@@ -55,7 +57,10 @@ export function App() {
 	useEffect(() => {
 		if (surface !== "panel") return;
 		const subscriptions = [
-			onDesktopEvent("dot://new-conversation", () => send({ type: "new_conversation" })),
+			// The menu bar item starts a new chat only when the conversations list is on.
+			onDesktopEvent("dot://new-conversation", () => {
+				if (conversations.current) send({ type: "new_conversation" });
+			}),
 			onDesktopEvent("dot://panel-shown", () => setFocusKey((k) => k + 1)),
 		];
 		const onKey = (event: KeyboardEvent) => {
