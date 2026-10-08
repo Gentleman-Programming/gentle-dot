@@ -1,0 +1,60 @@
+# Gentle Dot — always-on desktop and web assistant backed by Gentle Shell
+
+Objective: a local, always-available assistant (floating Dot on macOS, menu bar, global shortcut, and browser) whose hidden engine is Gentle Shell with Engram. Design: `docs/design.md`.
+Branch: `feat/gentle-dot` · Delivery strategy: `single-pr` (user choice, L7; forecast ~3,500 authored lines, recorded as a size exception) · Test runner: Vitest (`pnpm test`), Playwright (`pnpm e2e`), `cargo test` for `apps/desktop`.
+
+## Specs
+
+- **S1 — Always available on the Mac desktop.** User: "un asistente que esté todo el tiempo disponible, que puedas levantarlo, por así decirlo, y ejecutarlo, por ejemplo, desde el escritorio, que esté flotando ahí en el escritorio, que lo puedas convocar también, no sé, en la barra de tareas". "Vamos a empezar con Mac, al principio."
+  - Acceptance: a Tauri 2 macOS app shows a floating, always-on-top, draggable Dot (design §6). It also has a menu bar item with the menu listed in §6 and a global shortcut (default `⌥ Space`) that expands and collapses the panel. The Dot position persists across restarts.
+  - Checks: `cargo test` for config and position persistence; a manual macOS checklist (T9) with observed results.
+- **S2 — Also from a web page.** User: "también que lo puedas levantar desde una web, también podría ser, sin ningún tipo de problema".
+  - Acceptance: the daemon serves the same React UI at `http://127.0.0.1:4317`. A browser with the token can chat, answer asks, and switch conversations exactly like the desktop panel.
+  - Checks: Playwright against the daemon with the fake agent.
+- **S3 — Gentle Shell runs behind it, unchanged.** User: "la idea es que por detrás corra GentlyAI, ¿bien? Gentle Shell, en este caso." "el agente va a hacer todo como lo hace Gentle Shell, literalmente. Todo lo mismo, usando Engram, usando todo."
+  - Acceptance: the daemon spawns `gentle-shell --mode rpc` with the Gentle extensions loaded and its existing configuration and auth. No Gentle Shell source is modified.
+  - Checks: an integration test with the real binary asserts that `get_state` succeeds and that `get_commands` lists the Gentle commands. Tag it `@real-agent`; it is skipped when `gentle-shell` is absent.
+- **S4 — The user does not know it is Gentle Shell.** User: "pero que el usuario no lo sepa."
+  - Acceptance: identity is appended through `--append-system-prompt` (design §5). The sanitizer removes Gentle, Pi, el Gentleman, ODD, and Engram names from every UI-bound event. `gentle:*` commands are never exposed, and asked "who are you", the agent answers as Gentle Dot.
+  - Checks: unit tests for the sanitizer over recorded real events; one `@real-agent` test that asserts the identity answer contains "Gentle Dot" and none of the hidden names.
+  - Assumption: the `gentle-shell` launcher forwards `--append-system-prompt` to Pi. T4 verifies it first; if it does not, T4 stops with **Needs your decision**.
+- **S5 — Resume after a cut.** User: "Lo que tú decías de que si se corta, después no puede volver, con Engram sí es que se puede volver. porque la gente lo primero que va a hacer es ir a consultar a Engram para continuar. o si no tiene los datos de la misma sesión donde él existe."
+  - Acceptance: sessions persist in `~/.gentle-dot/sessions`. After the agent process dies, the supervisor respawns it with backoff and reopens the same conversation. The UI shows "I was interrupted. Continue?" with a Continue action (design §7), and Engram stays enabled.
+  - Checks: an integration test kills the fake agent mid-run and asserts the respawn, the same conversation id, the history intact, and the interruption prompt.
+- **S6 — Local only, verified working.** User: "No lo vamos a desplegar en HostGator, solamente lo vamos a hacer a nivel local para probar y demás, bien, que todo funcione. Es más, quiero que vos también te fijes si funciona, ¿sí? Que todo ande correctamente."
+  - Acceptance: everything binds `127.0.0.1` with token auth (design §8). The agent itself runs the full verification: unit, integration, Playwright, and `@real-agent` tests, plus the desktop app build and launch. Every result is recorded in the Log; no deployment is performed.
+  - Checks: T9.
+- **S7 — VPS deployment explained, not executed.** User: "si tengo que hacer un video para HostGator o algo explicando esto, podría decirle, lo podés, por ejemplo, subir en la VPS de HostGator, taca taca taca, ¿bien? sin ningún tipo de drama."
+  - Acceptance: `docs/deploy-vps.md` covers the Dockerfile, `docker compose` service, reverse proxy with HTTPS and authentication, token handling, and the security warnings. It closes with a short step list suitable for a video.
+  - Checks: `docker build` of the image succeeds locally if Docker is available; otherwise the build is reported as not run.
+- **S8 — Design defined before implementation.** User: "quiero que me hagas un diseño, que me hagas ya todas las especificaciones, todo y ya lo dejes en el ODD". "dejamos todo, todo definido, cosa que la implementación sea muy bonita."
+  - Acceptance: `docs/design.md` holds the architecture, protocol v1, white-label layer, UX, visual system, recovery, and security, and this document holds the specs and tasks.
+  - Checks: structural readback (done in T0).
+
+## Tasks
+
+| ID | Specs | Route | Status | Commit / evidence | Scope |
+|---|---|---|---|---|---|
+| T0 | S8 | inline | done (uncommitted) | readback OK; no commit yet | Design (`docs/design.md`) and this plan |
+| T1 | S3, S6 | inline | pending | — | Scaffold the pnpm workspace (`packages/protocol`, `packages/daemon`, `packages/ui`, `apps/desktop` placeholder), TypeScript strict, Vitest, lint, README |
+| T2 | S3, S5 | inline | pending | — | Agent supervisor: spawn, strict JSONL framing, id correlation, fake agent for tests, restart with backoff, reopen last session |
+| T3 | S2, S6 | inline | pending | — | Gateway: HTTP static + `/health`, WebSocket protocol v1, token + Origin checks, Pi RPC mapping (design §4) |
+| T4 | S4 | inline | pending | — | White-label: verify `--append-system-prompt` passthrough, `identity.md`, event sanitizer, tool-kind mapping, error neutralization |
+| T5 | S2 | inline (writer only if parallel with T7) | pending | — | Web UI: chat, streaming Markdown, activity rows, conversations, composer with Stop/steer, visual tokens |
+| T6 | S2, S4, S5 | inline | pending | — | Ask cards (select/confirm/input/editor with timeout), toasts, interrupted-run Continue prompt, reconnect with `seq` gap recovery |
+| T7 | S1 | inline (writer only if parallel with T5) | pending | — | Tauri 2 app: tray menu, floating Dot window, expand panel, `⌥ Space` shortcut, daemon spawn/attach, position persistence, launch at login |
+| T8 | S7 | inline | pending | — | `Dockerfile`, `compose.yaml`, `docs/deploy-vps.md`, security checklist, video step list |
+| T9 | S1–S6 | delegated verifier (high risk: process supervision, auth) | pending | — | Full verification: unit, integration, Playwright, `@real-agent`, `tauri build` + launch, manual macOS checklist with observed results |
+
+Environment notes: Node v24.14.1 and pnpm are present. `cargo` is on PATH but `rustc` is not, so T7 must first install or repair the Rust toolchain (rustup) and asks before installing. Xcode is present.
+
+## Log
+
+- **L1 (2026-10-08, user, original request):** "quiero hacer algo, nuestro propio https://www.copilotkit.ai/opendots pero con gentle ai, se podra hacer algo asi que por detras use gentle shell ? con nuestro propio diseño y tambien evalua si pi durable vale la pena o engram ya esta bien"
+- **L2 (2026-10-08, user):** "Lo que yo quiero es un asistente, ¿bien? Es un asistente que esté todo el tiempo disponible, que puedas levantarlo, por así decirlo, y ejecutarlo, por ejemplo, desde el escritorio, que esté flotando ahí en el escritorio, que lo puedas convocar también, no sé, en la barra de tareas, algo así, ¿bien? Vamos a empezar con Mac, al principio. Entonces, esa sería la idea principal. Si no, también que lo puedas levantar desde una web, también podría ser, sin ningún tipo de problema, ¿bien? Que lo puedas levantar, desplegar, por ejemplo, en HostGator, se podría hacer sin ningún tipo de drama. y lo puedas también ejecutar desde ahí. Entonces puedes acceder a esa gente desde cualquier lugar. Bien, una cosa sí podríamos hacer. No sé qué te parece. Y la idea es que por detrás corra GentlyAI, ¿bien? Gentle Shell, en este caso. pero que el usuario no lo sepa. Entonces, el agente va a hacer todo como lo hace Gentle Shell, literalmente. Todo lo mismo, usando Engram, usando todo. Lo que tú decías de que si se corta, después no puede volver, con Engram sí es que se puede volver. porque la gente lo primero que va a hacer es ir a consultar a Engram para continuar. o si no tiene los datos de la misma sesión donde él existe."
+- **L3 (2026-10-08, user):** "No, no, lo que vamos a hacer es lo siguiente, mirá. No lo vamos a desplegar en HostGator, solamente lo vamos a hacer a nivel local para probar y demás, bien, que todo funcione. Es más, quiero que vos también te fijes si funciona, ¿sí? Que todo ande correctamente. Quiero que me crees un diseño y después yo, si tengo que hacer un video para HostGator o algo explicando esto, podría decirle, lo podés, por ejemplo, subir en la VPS de HostGator, taca taca taca, ¿bien? sin ningún tipo de drama. Entonces, yo lo que quiero ahora es que me hagas un diseño, que me hagas ya todas las especificaciones, todo y ya lo dejes en el ODD, porque vamos a tener que hacer con el ODD, es largo esto, ¿bien? y nada, dejamos todo, todo definido, cosa que la implementación sea muy bonita. ¿Te parece?"
+- **L4 (2026-10-08, user decisions):** Repository: "Repo nuevo ~/work/gentle-assistant (Recomendado)". Name: "Gentle Dot". Desktop: "Tauri 2 (Recomendado)".
+- **L5 (2026-10-08, evidence):** `gentle-shell --mode rpc --no-session` returned `get_state` success (model reported) and `get_commands` with 82 commands including `gentle:*`, and emitted `extension_ui_request` `setStatus`/`setWidget`/`notify` at startup, so branding reaches RPC clients and S4 needs the sanitizer. Pi RPC docs: `custom()` returns undefined in RPC mode, while `select`/`confirm`/`input`/`editor`/`notify`/`setStatus`/`setWidget`/`setTitle` are forwarded. `extensions/ask-user-choice.ts` already falls back to `ctx.ui.select` + `ctx.ui.input` for RPC hosts. Pi CLI has `--append-system-prompt` and `--session-dir`.
+- **L6 (2026-10-08, decision):** Pi Durable deferred. Recovery relies on persisted Pi sessions plus Engram, per L2; it is reconsidered only for unattended or scheduled work.
+- **L7 (2026-10-08, user):** "Un solo pr, instala lo que necesites y dale nomás" — plan approved, delivery `single-pr` with size exception, installs authorized (Rust stable via rustup).
+- **Next step:** T1.
