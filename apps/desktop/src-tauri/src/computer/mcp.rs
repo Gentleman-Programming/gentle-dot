@@ -29,6 +29,8 @@ const NOT_ALLOWED: &str = "Computer control was not allowed by the user. Nothing
 const NEEDS_PERMISSION: &str = "Gentle Dot needs the";
 const GRANT_IT: &str = "Ask the user to grant it in Connectors → Computer.";
 const NEEDS_SCREENSHOT: &str = "Take a screenshot first: coordinates are pixels of the latest screenshot.";
+const UNKNOWN_TARGET: &str = "Cannot tell which app is under that point, so the action was refused. \
+Take a new screenshot and try again.";
 
 const INSTRUCTIONS: &str = "Controls this Mac. Take a screenshot first; x and y are pixels of the latest \
 screenshot. Every action returns a fresh screenshot. The user must allow a session, risky actions ask \
@@ -181,7 +183,14 @@ fn parse_call(name: &str, args: &Value) -> Option<Result<Call, String>> {
                 let delta = |key| integer(args, key).and_then(|v| i32::try_from(v).map_err(|e| e.to_string()));
                 Tool::Scroll { x, y, dx: delta("dx")?, dy: delta("dy")? }
             }
-            "type" => Tool::Type { text: string(args, "text")? },
+            "type" => {
+                let text = string(args, "text")?;
+                // Newlines press Return (and are checked); tabs move the focus. Nothing else.
+                if text.chars().any(|c| c.is_ascii_control() && !matches!(c, '\n' | '\r' | '\t')) {
+                    return Err("`text` must not contain control characters other than newline and tab".into());
+                }
+                Tool::Type { text }
+            }
             "key" => Tool::Key { combo: parse_combo(&string(args, "combo")?)? },
             "open_app" => {
                 let name = string(args, "name")?.trim().to_string();
@@ -336,6 +345,8 @@ impl Helper {
             return Err(STOPPED.into());
         }
         if !self.control.is_active(self.clock.now_ms()) {
+            // The screenshot of an ended session no longer describes the screen.
+            *latest = None;
             if !self.with_dialog(|| self.dialogs.ask_grant()) {
                 return Err(NOT_ALLOWED.into());
             }
@@ -399,18 +410,21 @@ impl Helper {
         }
     }
 
-    /// The app owning the window under `at`, refused when blocked. Its name, for messages.
+    /// The app owning the window under `at`, refused when blocked or unknown. Its name, for messages.
     fn pointer_target(&self, at: Point) -> Result<String, String> {
-        match self.desktop.window_owner_at(at) {
-            Some(app) => self.refuse_blocked(&app).map(|()| app.name),
-            None => Ok("the desktop".into()),
-        }
+        let app = self.desktop.window_owner_at(at).ok_or(UNKNOWN_TARGET)?;
+        self.refuse_blocked(&app).map(|()| app.name)
     }
 
-    /// The frontmost app, refused when blocked. Its name, for messages.
+    /// The frontmost app and the app owning the focused element (they differ for a
+    /// non-activating panel), each refused when blocked. The one receiving the keys, for messages.
     fn keyboard_target(&self) -> Result<String, String> {
-        let app = self.desktop.frontmost_app().ok_or("Cannot tell which app is in front.")?;
-        self.refuse_blocked(&app).map(|()| app.name)
+        let front = self.desktop.frontmost_app().ok_or("Cannot tell which app is in front.")?;
+        self.refuse_blocked(&front)?;
+        match self.desktop.focused_app().filter(|focused| focused.pid != front.pid) {
+            Some(focused) => self.refuse_blocked(&focused).map(|()| focused.name),
+            None => Ok(front.name),
+        }
     }
 
     fn confirm_if_risky(&self, risk: Option<String>, action: &str, target: &str) -> Result<(), String> {
@@ -486,7 +500,8 @@ impl Helper {
                 let destination = self.pointer_target(end)?;
                 let action = format!("Drag from ({}, {}) to ({}, {})", from.0, from.1, to.0, to.1);
                 let target = if source == destination { source } else { format!("{source} and {destination}") };
-                self.confirm_if_risky(assess(Act::Other, intent), &action, &target)?;
+                let (from_chain, to_chain) = (self.desktop.element_at(start), self.desktop.element_at(end));
+                self.confirm_if_risky(assess(Act::Drag(&from_chain, &to_chain), intent), &action, &target)?;
                 self.post(epoch, InputEvent::Drag { from: start, to: end })?;
                 self.after(latest, format!("{action}: done."), SETTLE_MS)
             }
@@ -502,9 +517,8 @@ impl Helper {
                 let target = self.keyboard_target()?;
                 let typed = typed.replace("\r\n", "\n").replace('\r', "\n");
                 let focus = self.desktop.focused_element();
-                let act = if typed.contains('\n') { Act::Return(focus.as_ref()) } else { Act::Other };
                 let action = format!("Type {} characters", typed.chars().count());
-                self.confirm_if_risky(assess(act, intent), &action, &target)?;
+                self.confirm_if_risky(assess(Act::Type(&typed, focus.as_ref()), intent), &action, &target)?;
                 let return_key = parse_combo("return")?;
                 for (i, line) in typed.split('\n').enumerate() {
                     if i > 0 {
@@ -519,7 +533,13 @@ impl Helper {
             Tool::Key { combo } => {
                 let target = self.keyboard_target()?;
                 let focus = self.desktop.focused_element();
-                let act = if combo.is_return() { Act::Return(focus.as_ref()) } else { Act::Other };
+                let act = if combo.is_return() {
+                    Act::Return(focus.as_ref())
+                } else if combo.is_space() {
+                    Act::Space(focus.as_ref())
+                } else {
+                    Act::Other
+                };
                 let action = format!("Press {}", combo.key);
                 self.confirm_if_risky(assess(act, intent), &action, &target)?;
                 self.post(epoch, InputEvent::Key(combo))?;
@@ -817,6 +837,26 @@ mod tests {
     }
 
     #[test]
+    fn a_new_session_needs_a_new_screenshot() {
+        for end in ["stop", "timeout"] {
+            let rig = rig();
+            rig.ready();
+            match end {
+                "stop" => rig.control.end(Reason::Stopped),
+                _ => rig.clock.advance(SESSION_MS),
+            }
+            let result = rig.call("click", json!({"x": 10, "y": 10}));
+            assert!(is_error(&result), "{end}");
+            assert!(first_text(&result).contains("screenshot"), "{result}");
+            // The grant comes first; only then is the missing screenshot reported.
+            assert_eq!(rig.dialogs.grants.load(Ordering::SeqCst), 2, "{end}");
+            assert!(rig.desktop.events().is_empty());
+            rig.ready();
+            assert!(!is_error(&rig.call("click", json!({"x": 10, "y": 10}))));
+        }
+    }
+
+    #[test]
     fn click_maps_pixels_to_points_and_returns_a_fresh_screenshot() {
         let rig = rig();
         rig.ready();
@@ -939,6 +979,36 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_actions_check_the_focused_app_too() {
+        let rig = rig();
+        rig.ready();
+        // A non-activating panel takes the keys while Safari stays frontmost.
+        *rig.desktop.focused_app.lock().unwrap() = Some(app(303, "com.1password.1password", "1Password"));
+        let result = rig.call("type", json!({"text": "hello"}));
+        assert!(first_text(&result).contains("1Password"), "{result}");
+        assert!(is_error(&rig.call("key", json!({"combo": "return"}))));
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn pointer_actions_where_no_app_owns_the_point_are_refused() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.owner_at.lock().unwrap() = Box::new(|_| None);
+        for (name, args) in [
+            ("click", json!({"x": 10, "y": 10})),
+            ("move", json!({"x": 10, "y": 10})),
+            ("scroll", json!({"x": 10, "y": 10, "dx": 0, "dy": 10})),
+            ("drag", json!({"fromX": 10, "fromY": 10, "toX": 20, "toY": 20})),
+        ] {
+            let result = rig.call(name, args);
+            assert!(is_error(&result), "{name}");
+            assert!(first_text(&result).contains("which app"), "{result}");
+        }
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
     fn opening_a_blocked_app_is_refused() {
         let rig = rig();
         rig.ready();
@@ -1001,6 +1071,29 @@ mod tests {
     }
 
     #[test]
+    fn a_drag_over_a_risky_button_is_confirmed() {
+        let rig = rig_with(true, false);
+        rig.ready();
+        *rig.desktop.elements.lock().unwrap() = send_button();
+        let result = rig.call("drag", json!({"fromX": 10, "fromY": 10, "toX": 10, "toY": 10}));
+        assert!(first_text(&result).contains("declined"), "{result}");
+        assert_eq!(rig.dialogs.confirmations.lock().unwrap().len(), 1);
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn space_on_a_focused_send_button_is_confirmed() {
+        let rig = rig_with(true, false);
+        rig.ready();
+        *rig.desktop.focus.lock().unwrap() = Some(Focus { element: send_button().remove(0), ..Focus::default() });
+        assert!(is_error(&rig.call("key", json!({"combo": "space"}))));
+        assert!(is_error(&rig.call("type", json!({"text": " "}))));
+        assert!(rig.desktop.events().is_empty());
+        assert!(!is_error(&rig.call("type", json!({"text": "ok"}))));
+        assert_eq!(rig.dialogs.confirmations.lock().unwrap().len(), 2);
+    }
+
+    #[test]
     fn return_in_a_send_like_field_is_confirmed() {
         let rig = rig_with(true, false);
         rig.ready();
@@ -1054,6 +1147,20 @@ mod tests {
         *rig.desktop.focus.lock().unwrap() = Some(Focus { element: composer, ..Focus::default() });
         assert!(is_error(&rig.call("type", json!({"text": "ok\n"}))));
         assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn typing_control_characters_is_refused() {
+        let rig = rig();
+        rig.ready();
+        for text in ["\u{1b}[A", "a\u{0}b", "\u{7f}", "\u{8}\u{8}"] {
+            let result = rig.call("type", json!({"text": text}));
+            assert!(is_error(&result), "{text:?}");
+            assert!(first_text(&result).contains("control character"), "{result}");
+        }
+        assert!(rig.desktop.events().is_empty());
+        assert!(!is_error(&rig.call("type", json!({"text": "a\tb"}))));
+        assert_eq!(rig.desktop.events(), vec![InputEvent::Text("a\tb".into())]);
     }
 
     #[test]

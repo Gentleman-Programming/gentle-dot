@@ -216,7 +216,7 @@ describe("computer control registration (S24.7)", () => {
 		expect(computerOf(await second.list())).toBeUndefined();
 	});
 
-	it("cannot be changed or removed through the connector messages, and no saved connector takes its name", async () => {
+	it("cannot be changed or removed through the connector messages, and a saved connector with its name is renamed", async () => {
 		const { servers, send, messages, list } = await setup({
 			saved: {
 				version: 1,
@@ -231,6 +231,11 @@ describe("computer control registration (S24.7)", () => {
 		});
 		expect(computerOf(await list())).toBeUndefined();
 		expect(servers().computer).toBeUndefined();
+		expect((await list()).find((c) => c.id === "computer-2")).toMatchObject({
+			name: "Computer",
+			enabled: true,
+		});
+		expect(servers()["computer-2"]).toMatchObject({ url: "http://127.0.0.1:9/mcp" });
 
 		send({ type: "computer_register", url: HELPER, token: KEY });
 		await waitFor(() => servers().computer);

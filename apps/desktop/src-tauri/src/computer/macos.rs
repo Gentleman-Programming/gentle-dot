@@ -6,6 +6,7 @@ use super::coords::{fit_long_edge, Point, ScreenshotGeometry, MAX_LONG_EDGE};
 use super::encode::{bgra_to_jpeg, JPEG_QUALITY};
 use super::keys::KeyCombo;
 use super::risk::{AxElement, Focus};
+use super::windows::{owner_row_at, WindowRow};
 use super::{AppInfo, Capture, Desktop, InputEvent, MouseButton, PermissionKind, Permissions};
 use block2::RcBlock;
 use objc2::rc::Retained;
@@ -14,7 +15,8 @@ use objc2_app_kit::{NSApplicationActivationOptions, NSApplicationActivationPolic
 use objc2_application_services::{AXError, AXIsProcessTrusted, AXIsProcessTrustedWithOptions, AXUIElement};
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
-    kCGNullWindowID, kCGWindowAlpha, kCGWindowBounds, kCGWindowOwnerName, kCGWindowOwnerPID, CGDataProvider, CGDirectDisplayID, CGError, CGEvent, CGEventField, CGEventFlags,
+    kCGNullWindowID, kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer, kCGWindowOwnerName, kCGWindowOwnerPID,
+    CGDataProvider, CGDirectDisplayID, CGError, CGEvent, CGEventField, CGEventFlags,
     CGEventTapLocation, CGEventType, CGGetDisplaysWithPoint, CGImage, CGMouseButton,
     CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess, CGScrollEventUnit, CGWindowListCopyWindowInfo,
     CGWindowListOption,
@@ -57,6 +59,17 @@ fn identity(app: &NSRunningApplication) -> AppIdentity {
         pid: app.processIdentifier(),
         bundle_id: app.bundleIdentifier().map(|b| b.to_string()),
         name: app.localizedName().map(|n| n.to_string()).unwrap_or_default(),
+    }
+}
+
+/// The running app with `pid`; a process without one (an agent) keeps `name`.
+fn identity_of(pid: i32, name: &str) -> AppIdentity {
+    match NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
+        Some(app) => identity(&app),
+        None => {
+            let name = if name.is_empty() { format!("process {pid}") } else { name.to_string() };
+            AppIdentity { pid, bundle_id: None, name }
+        }
     }
 }
 
@@ -236,6 +249,23 @@ fn ax_element(element: &AXUIElement, attribute: &str) -> Option<CFRetained<AXUIE
     ax_value(element, attribute)?.downcast::<AXUIElement>().ok()
 }
 
+fn ax_pid(element: &AXUIElement) -> Option<i32> {
+    let mut pid: libc::pid_t = 0;
+    // SAFETY: `pid` is a valid out-pointer.
+    let error = unsafe { element.pid(NonNull::from(&mut pid)) };
+    (error == AXError::Success && pid > 0).then_some(pid)
+}
+
+/// The Accessibility element at a global point, as hit-tested by the app that owns it.
+fn ax_element_at(at: Point) -> Option<CFRetained<AXUIElement>> {
+    let mut found: *const AXUIElement = std::ptr::null();
+    // SAFETY: `found` is a valid out-pointer; on success it holds a +1 reference.
+    let out = NonNull::from(&mut found);
+    let error = unsafe { system_wide().copy_element_at_position(at.x as f32, at.y as f32, out) };
+    let found = NonNull::new(found.cast_mut()).filter(|_| error == AXError::Success)?;
+    Some(unsafe { CFRetained::from_raw(found) })
+}
+
 fn describe(element: &AXUIElement) -> AxElement {
     AxElement {
         role: ax_string(element, "AXRole").unwrap_or_default(),
@@ -272,6 +302,39 @@ fn window_bounds(entry: &WindowInfo) -> Option<CGRect> {
     };
     let origin = CGPoint::new(number("X")?, number("Y")?);
     Some(CGRect::new(origin, CGSize::new(number("Width")?, number("Height")?)))
+}
+
+/// The on-screen windows, front to back, desktop windows included (the desktop is Finder's).
+fn window_rows() -> Vec<WindowRow> {
+    let Some(list) = CGWindowListCopyWindowInfo(CGWindowListOption::OptionOnScreenOnly, kCGNullWindowID) else {
+        return Vec::new();
+    };
+    // SAFETY: CFArray of CFDictionary is toll-free bridged to NSArray of NSDictionary.
+    let list: &NSArray<WindowInfo> = unsafe { &*(CFRetained::as_ptr(&list).as_ptr() as *const _) };
+    // SAFETY: extern constants provided by CoreGraphics.
+    let (alpha_key, layer_key, pid_key, name_key) = unsafe {
+        (info_key(kCGWindowAlpha), info_key(kCGWindowLayer), info_key(kCGWindowOwnerPID), info_key(kCGWindowOwnerName))
+    };
+    let number = |entry: &WindowInfo, key| entry.objectForKey(key).and_then(|n| n.downcast::<NSNumber>().ok());
+    list.iter()
+        .filter_map(|entry| {
+            let bounds = window_bounds(&entry)?;
+            Some(WindowRow {
+                pid: number(&entry, pid_key)?.intValue(),
+                owner_name: entry
+                    .objectForKey(name_key)
+                    .and_then(|n| n.downcast::<NSString>().ok())
+                    .map(|n| n.to_string())
+                    .unwrap_or_default(),
+                layer: number(&entry, layer_key).map_or(0, |l| l.longLongValue()),
+                alpha: number(&entry, alpha_key).map_or(1.0, |a| a.doubleValue()),
+                x: bounds.origin.x,
+                y: bounds.origin.y,
+                width: bounds.size.width,
+                height: bounds.size.height,
+            })
+        })
+        .collect()
 }
 
 impl Desktop for MacDesktop {
@@ -358,14 +421,9 @@ impl Desktop for MacDesktop {
     }
 
     fn element_at(&self, at: Point) -> Vec<AxElement> {
-        let mut found: *const AXUIElement = std::ptr::null();
-        // SAFETY: `found` is a valid out-pointer; on success it holds a +1 reference.
-        let out = NonNull::from(&mut found);
-        let error = unsafe { system_wide().copy_element_at_position(at.x as f32, at.y as f32, out) };
-        let Some(found) = NonNull::new(found.cast_mut()).filter(|_| error == AXError::Success) else {
+        let Some(mut element) = ax_element_at(at) else {
             return Vec::new();
         };
-        let mut element = unsafe { CFRetained::from_raw(found) };
         let mut chain = vec![describe(&element)];
         while chain.len() <= AX_ANCESTORS {
             let Some(parent) = ax_element(&element, "AXParent") else { break };
@@ -386,42 +444,19 @@ impl Desktop for MacDesktop {
         NSWorkspace::sharedWorkspace().frontmostApplication().map(|app| identity(&app))
     }
 
+    fn focused_app(&self) -> Option<AppIdentity> {
+        let focused = ax_element(&system_wide(), "AXFocusedUIElement")?;
+        ax_pid(&focused).map(|pid| identity_of(pid, ""))
+    }
+
+    /// The owner of the frontmost app window under the point (the pointer and other window
+    /// server layers skipped), else the app whose Accessibility element is there.
     fn window_owner_at(&self, at: Point) -> Option<AppIdentity> {
-        let options = CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements;
-        let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID)?;
-        // SAFETY: CFArray of CFDictionary is toll-free bridged to NSArray of NSDictionary.
-        let list: &NSArray<WindowInfo> = unsafe { &*(CFRetained::as_ptr(&list).as_ptr() as *const _) };
-        // SAFETY: extern constants provided by CoreGraphics.
-        let (alpha_key, pid_key, name_key) =
-            unsafe { (info_key(kCGWindowAlpha), info_key(kCGWindowOwnerPID), info_key(kCGWindowOwnerName)) };
-        let point = CGPoint { x: at.x, y: at.y };
-        // Front to back: the first visible window containing the point owns it.
-        let entry = list.iter().find(|entry| {
-            let alpha = entry
-                .objectForKey(alpha_key)
-                .and_then(|a| a.downcast::<NSNumber>().ok())
-                .map_or(1.0, |a| a.doubleValue());
-            let bounds = window_bounds(entry);
-            alpha > 0.0
-                && bounds.is_some_and(|b| {
-                    point.x >= b.origin.x
-                        && point.y >= b.origin.y
-                        && point.x < b.origin.x + b.size.width
-                        && point.y < b.origin.y + b.size.height
-                })
-        })?;
-        let pid = entry.objectForKey(pid_key)?.downcast::<NSNumber>().ok()?.intValue();
-        match NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
-            Some(app) => Some(identity(&app)),
-            None => {
-                let name = entry
-                    .objectForKey(name_key)
-                    .and_then(|n| n.downcast::<NSString>().ok())
-                    .map(|n| n.to_string())
-                    .unwrap_or_default();
-                Some(AppIdentity { pid, bundle_id: None, name })
-            }
+        if let Some(row) = owner_row_at(&window_rows(), at) {
+            return Some(identity_of(row.pid, &row.owner_name));
         }
+        let element = ax_element_at(at)?;
+        ax_pid(&element).map(|pid| identity_of(pid, ""))
     }
 
     fn activate(&self, pid: i32) {

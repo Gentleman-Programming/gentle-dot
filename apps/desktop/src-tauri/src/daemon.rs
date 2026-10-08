@@ -5,7 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ExitStatus};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -48,8 +48,58 @@ pub fn open_private_log(data_dir: &Path) -> io::Result<File> {
     Ok(log)
 }
 
+/// A spawned process the app polls, stops, and reaps: a `std::process::Child`, or on macOS a
+/// daemon spawned with its TCC responsibility disclaimed (`disclaimed`).
+pub trait ChildProcess: Send {
+    fn id(&self) -> u32;
+    /// The exit status once the process ended (reaping it), `None` while it runs.
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>>;
+    /// Sends SIGKILL unless the process was already reaped.
+    fn kill(&mut self) -> io::Result<()>;
+    fn wait(&mut self) -> io::Result<ExitStatus>;
+}
+
+impl ChildProcess for Child {
+    fn id(&self) -> u32 {
+        Child::id(self)
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        Child::try_wait(self)
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        Child::kill(self)
+    }
+
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        Child::wait(self)
+    }
+}
+
+/// Starts the daemon with stdin from `/dev/null` and its output in `log`. On macOS the app
+/// disclaims responsibility for it, so it never inherits the app's TCC grants (S24.1).
+#[cfg(target_os = "macos")]
+fn spawn_daemon(spec: &LaunchSpec, log: File) -> io::Result<Box<dyn ChildProcess>> {
+    let child = crate::disclaimed::spawn_disclaimed(&spec.program, &spec.args, &spec.envs, &log)?;
+    Ok(Box::new(child))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn spawn_daemon(spec: &LaunchSpec, log: File) -> io::Result<Box<dyn ChildProcess>> {
+    use std::process::{Command, Stdio};
+    let child = Command::new(&spec.program)
+        .args(&spec.args)
+        .envs(spec.envs.iter().map(|(k, v)| (k, v)))
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .spawn()?;
+    Ok(Box::new(child))
+}
+
 /// Sends SIGTERM, waits up to `grace` for a clean exit, then kills.
-pub fn stop_child(child: &mut Child, grace: Duration) {
+pub fn stop_child(child: &mut dyn ChildProcess, grace: Duration) {
     if !matches!(child.try_wait(), Ok(None)) {
         return;
     }
@@ -82,7 +132,7 @@ pub enum RestartOutcome {
 pub struct Daemon {
     port: u16,
     data_dir: PathBuf,
-    child: Mutex<Option<Child>>,
+    child: Mutex<Option<Box<dyn ChildProcess>>>,
 }
 
 impl Daemon {
@@ -130,14 +180,7 @@ impl Daemon {
         }
         let spec = launch_spec(|key| std::env::var(key).ok(), cfg!(debug_assertions));
         let log = open_private_log(&self.data_dir).map_err(|e| format!("cannot open daemon.log: {e}"))?;
-        let child = Command::new(&spec.program)
-            .args(&spec.args)
-            .envs(spec.envs.iter().map(|(k, v)| (k, v)))
-            .stdin(Stdio::null())
-            .stdout(log.try_clone().map_err(|e| e.to_string())?)
-            .stderr(log)
-            .spawn()
-            .map_err(|e| format!("cannot start {}: {e}", spec.program))?;
+        let child = spawn_daemon(&spec, log).map_err(|e| format!("cannot start {}: {e}", spec.program))?;
         *slot = Some(child);
         Ok(())
     }
@@ -151,7 +194,7 @@ impl Daemon {
     /// Stops the daemon only if this app spawned it.
     pub fn stop(&self) {
         if let Some(mut child) = self.child.lock().unwrap().take() {
-            stop_child(&mut child, STOP_GRACE);
+            stop_child(child.as_mut(), STOP_GRACE);
         }
     }
 
@@ -171,6 +214,7 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
         move |key| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string())

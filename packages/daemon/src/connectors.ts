@@ -525,7 +525,9 @@ export class ConnectorStore {
 		this.file = join(options.dataDir, "connectors.json");
 		this.mcpFile = join(options.agentHome, "mcp.json");
 		this.authFile = join(options.agentHome, "mcp-auth.json");
-		this.saved = this.load();
+		const { state, renamed } = this.load();
+		this.saved = state;
+		if (renamed) writePrivate(this.file, this.recordText());
 	}
 
 	get agentHome(): string {
@@ -711,16 +713,29 @@ export class ConnectorStore {
 		return `${JSON.stringify({ version: 1, connectors: this.saved.connectors }, null, 2)}\n`;
 	}
 
-	private load(): ConnectorsState {
+	/** The saved state; a connector saved as `computer` (the built-in helper's name) gets `computer-2`. */
+	private load(): { state: ConnectorsState; renamed: boolean } {
 		try {
 			const saved = JSON.parse(readFileSync(this.file, "utf8")) as {
 				connectors?: Record<string, Record<string, unknown> | undefined>;
 			};
 			const connectors: ConnectorsState["connectors"] = {};
-			for (const [id, value] of Object.entries(saved.connectors ?? {})) {
-				if (id === COMPUTER_ID) continue;
+			const entries = Object.entries(saved.connectors ?? {});
+			const ordered = [
+				...entries.filter(([id]) => id !== COMPUTER_ID),
+				...entries.filter(([id]) => id === COMPUTER_ID),
+			];
+			let renamed = false;
+			for (const [savedId, value] of ordered) {
+				let id = savedId;
+				if (id === COMPUTER_ID) {
+					let n = 2;
+					while (`${COMPUTER_ID}-${n}` in connectors || catalogEntry(`${COMPUTER_ID}-${n}`)) n++;
+					id = `${COMPUTER_ID}-${n}`;
+				}
 				const custom = catalogEntry(id) ? undefined : parseCustom(value?.custom);
 				if (!catalogEntry(id) && !custom) continue;
+				renamed ||= id !== savedId;
 				const entry: SavedConnector = {
 					enabled: value?.enabled === true,
 					mode: value?.mode === "read_write" ? "read_write" : "read_only",
@@ -730,9 +745,9 @@ export class ConnectorStore {
 				if (custom) entry.custom = custom;
 				connectors[id] = entry;
 			}
-			return { connectors };
+			return { state: { connectors }, renamed };
 		} catch {
-			return { connectors: {} };
+			return { state: { connectors: {} }, renamed: false };
 		}
 	}
 }

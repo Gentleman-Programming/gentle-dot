@@ -28,6 +28,23 @@ const BLOCKED: &[Entry] = &[
     },
     Entry { label: "SecurityAgent", bundles: &["com.apple.SecurityAgent"], names: &["SecurityAgent"] },
     Entry { label: "loginwindow", bundles: &["com.apple.loginwindow"], names: &["loginwindow"] },
+    // System prompts: permission (TCC) requests, Touch ID and password sheets, and the
+    // "open this app?" confirmations.
+    Entry {
+        label: "UserNotificationCenter",
+        bundles: &["com.apple.UserNotificationCenter"],
+        names: &["UserNotificationCenter"],
+    },
+    Entry {
+        label: "LocalAuthentication",
+        bundles: &["com.apple.LocalAuthentication.UIAgent"],
+        names: &["LocalAuthenticationUIAgent"],
+    },
+    Entry {
+        label: "CoreServicesUIAgent",
+        bundles: &["com.apple.CoreServicesUIAgent"],
+        names: &["CoreServicesUIAgent"],
+    },
     Entry { label: "Keychain Access", bundles: &["com.apple.keychainaccess"], names: &["Keychain Access"] },
     Entry {
         label: "1Password",
@@ -94,6 +111,9 @@ mod tests {
             ("com.lastpass.LastPass", "LastPass"),
             ("com.apple.Passwords", "Passwords"),
             ("dev.gentleman.gentle-dot", "Gentle Dot"),
+            ("com.apple.UserNotificationCenter", "UserNotificationCenter"),
+            ("com.apple.LocalAuthentication.UIAgent", "LocalAuthentication"),
+            ("com.apple.CoreServicesUIAgent", "CoreServicesUIAgent"),
         ];
         for (bundle, label) in cases {
             assert_eq!(blocked_reason(&app(Some(bundle), "x"), OWN_PID), Some(label), "{bundle}");
@@ -131,6 +151,8 @@ mod tests {
     #[test]
     fn an_app_without_a_bundle_id_is_checked_by_name() {
         assert_eq!(blocked_reason(&app(None, "SecurityAgent"), OWN_PID), Some("SecurityAgent"));
+        assert_eq!(blocked_reason(&app(None, "UserNotificationCenter"), OWN_PID), Some("UserNotificationCenter"));
+        assert_eq!(blocked_reason(&app(None, "CoreServicesUIAgent"), OWN_PID), Some("CoreServicesUIAgent"));
     }
 
     #[test]

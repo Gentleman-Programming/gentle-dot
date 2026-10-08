@@ -20,6 +20,7 @@ pub mod rate;
 pub mod risk;
 pub mod server;
 pub mod session;
+pub mod windows;
 
 use blocklist::AppIdentity;
 use coords::{Point, ScreenshotGeometry};
@@ -97,6 +98,9 @@ pub trait Desktop: Send + Sync {
     fn element_at(&self, at: Point) -> Vec<AxElement>;
     fn focused_element(&self) -> Option<Focus>;
     fn frontmost_app(&self) -> Option<AppIdentity>;
+    /// The app owning the focused Accessibility element, which can differ from the frontmost
+    /// app (a non-activating panel such as a password manager's quick access).
+    fn focused_app(&self) -> Option<AppIdentity>;
     /// The app owning the topmost window under a point.
     fn window_owner_at(&self, at: Point) -> Option<AppIdentity>;
     /// Brings an app back to the front (after a dialog took the focus).

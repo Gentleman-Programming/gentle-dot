@@ -40,8 +40,14 @@ pub struct Focus {
 pub enum Act<'a> {
     /// A click: the element under the point first, then its ancestors.
     Click(&'a [AxElement]),
-    /// Return (or Enter), from `key` or a newline in `type`.
+    /// A drag: the chains under the start point and under the end point.
+    Drag(&'a [AxElement], &'a [AxElement]),
+    /// Return (or Enter), from `key`.
     Return(Option<&'a Focus>),
+    /// Space, from `key`: it presses a focused button.
+    Space(Option<&'a Focus>),
+    /// Text from `type`: a newline presses Return and a space presses a focused button.
+    Type(&'a str, Option<&'a Focus>),
     /// Every other action: only the intent can make it risky.
     Other,
 }
@@ -115,11 +121,35 @@ fn risky_return(focus: &Focus) -> Option<String> {
     risky_word(&default).map(|_| format!("Return may press the default button “{default}”"))
 }
 
+/// Space presses the focused button; in a field it only types a space.
+fn risky_space(focus: &Focus) -> Option<String> {
+    let element = &focus.element;
+    let label = element.label();
+    if focus.is_default_button {
+        return Some(format!("Space presses the default button “{label}”"));
+    }
+    if element.is_pressable() && risky_word(&label).is_some() {
+        return Some(format!("Space presses the {} “{label}”", kind(&element.role)));
+    }
+    None
+}
+
+fn risky_typing(text: &str, focus: &Focus) -> Option<String> {
+    let newline = text.contains('\n').then(|| risky_return(focus)).flatten();
+    newline.or_else(|| text.contains(' ').then(|| risky_space(focus)).flatten())
+}
+
 /// Why `act` needs a confirmation, or `None` when it does not.
 pub fn assess(act: Act<'_>, intent: Option<&str>) -> Option<String> {
     let target = match act {
         Act::Click(chain) => risky_click(chain),
+        Act::Drag(from, to) => match (risky_click(from), risky_click(to)) {
+            (Some(from), Some(to)) if from != to => Some(format!("{from} and {to}")),
+            (from, to) => from.or(to),
+        },
         Act::Return(focus) => focus.and_then(risky_return),
+        Act::Space(focus) => focus.and_then(risky_space),
+        Act::Type(text, focus) => focus.and_then(|focus| risky_typing(text, focus)),
         Act::Other => None,
     };
     let intent = intent.filter(|i| risky_word(i).is_some()).map(|i| format!("the declared intent “{}”", i.trim()));
@@ -221,6 +251,47 @@ mod tests {
         };
         assert_eq!(assess(Act::Return(Some(&search)), None), None);
         assert_eq!(assess(Act::Return(None), None), None);
+    }
+
+    #[test]
+    fn a_drag_from_or_onto_a_risky_button_is_risky() {
+        let send = [element("AXButton", "Send")];
+        let open = [element("AXButton", "Open")];
+        assert!(assess(Act::Drag(&send, &send), None).is_some());
+        assert!(assess(Act::Drag(&send, &open), None).is_some());
+        assert!(assess(Act::Drag(&open, &send), None).is_some());
+        assert_eq!(assess(Act::Drag(&open, &[]), None), None);
+    }
+
+    #[test]
+    fn space_on_a_focused_risky_or_default_button_is_risky() {
+        assert!(assess(Act::Space(Some(&focus(element("AXButton", "Send")))), None).is_some());
+        let default = Focus { element: element("AXButton", "OK"), is_default_button: true, default_button: None };
+        assert!(assess(Act::Space(Some(&default)), None).is_some());
+    }
+
+    #[test]
+    fn space_elsewhere_is_not_risky() {
+        assert_eq!(assess(Act::Space(Some(&focus(element("AXButton", "Open")))), None), None);
+        // Space types in a field, even a send-like one or one with a risky default button.
+        let composer = Focus {
+            element: element("AXTextArea", "Message"),
+            is_default_button: false,
+            default_button: Some(element("AXButton", "Send")),
+        };
+        assert_eq!(assess(Act::Space(Some(&composer)), None), None);
+        assert_eq!(assess(Act::Space(None), None), None);
+    }
+
+    #[test]
+    fn typed_text_checks_its_spaces_and_newlines() {
+        let send = focus(element("AXButton", "Send"));
+        assert!(assess(Act::Type(" ", Some(&send)), None).is_some());
+        assert_eq!(assess(Act::Type("ok", Some(&send)), None), None);
+        let composer = focus(element("AXTextArea", "Message"));
+        assert_eq!(assess(Act::Type("hello there", Some(&composer)), None), None);
+        assert!(assess(Act::Type("hello\n", Some(&composer)), None).is_some());
+        assert_eq!(assess(Act::Type("a b\n", None), None), None);
     }
 
     #[test]

@@ -166,6 +166,40 @@ describe("connector store", () => {
 		expect(next.state()).toEqual({ connectors: { notion: { enabled: true, mode: "read_only" } } });
 	});
 
+	it("renames a saved connector called `computer` (the helper's name) instead of dropping it, and keeps the rename", () => {
+		const { dataDir, agentHome, workspace } = store();
+		const custom = (name: string) => ({
+			name,
+			origin: "x",
+			server: { url: "http://127.0.0.1:9/mcp" },
+			fields: [],
+		});
+		writeFileSync(
+			join(dataDir, "connectors.json"),
+			JSON.stringify({
+				version: 1,
+				connectors: {
+					computer: { enabled: true, mode: "read_write", custom: custom("Computer") },
+					"computer-2": { enabled: false, mode: "read_only", custom: custom("Computer 2") },
+				},
+			}),
+		);
+		const s = new ConnectorStore({ dataDir, agentHome, workspace });
+		stores.push(s);
+		const { connectors } = s.state();
+		expect(Object.keys(connectors).sort()).toEqual(["computer-2", "computer-3"]);
+		expect(connectors["computer-3"]).toMatchObject({
+			enabled: true,
+			mode: "read_write",
+			custom: { name: "Computer" },
+		});
+		const saved = JSON.parse(readFileSync(join(dataDir, "connectors.json"), "utf8"));
+		expect(Object.keys(saved.connectors).sort()).toEqual(["computer-2", "computer-3"]);
+		const next = new ConnectorStore({ dataDir, agentHome, workspace });
+		stores.push(next);
+		expect(next.state()).toEqual(s.state());
+	});
+
 	it("rewrites an older record (with a hash) quietly at start", () => {
 		const { dataDir, agentHome, workspace } = store();
 		writeFileSync(

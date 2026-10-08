@@ -17,6 +17,7 @@ pub struct FakeDesktop {
     pub events: Mutex<Vec<InputEvent>>,
     pub permissions: Mutex<Permissions>,
     pub frontmost: Mutex<Option<AppIdentity>>,
+    pub focused_app: Mutex<Option<AppIdentity>>,
     pub owner_at: Mutex<OwnerAt>,
     pub elements: Mutex<Vec<AxElement>>,
     pub focus: Mutex<Option<Focus>>,
@@ -35,6 +36,7 @@ impl Default for FakeDesktop {
             events: Mutex::new(Vec::new()),
             permissions: Mutex::new(Permissions { accessibility: true, screen_recording: true, screenshots_supported: true }),
             frontmost: Mutex::new(Some(safari)),
+            focused_app: Mutex::new(None),
             owner_at: Mutex::new(Box::new(move |_| Some(owner.clone()))),
             elements: Mutex::new(Vec::new()),
             focus: Mutex::new(None),
@@ -89,6 +91,10 @@ impl Desktop for FakeDesktop {
 
     fn frontmost_app(&self) -> Option<AppIdentity> {
         self.frontmost.lock().unwrap().clone()
+    }
+
+    fn focused_app(&self) -> Option<AppIdentity> {
+        self.focused_app.lock().unwrap().clone()
     }
 
     fn window_owner_at(&self, at: Point) -> Option<AppIdentity> {

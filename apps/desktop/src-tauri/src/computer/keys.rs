@@ -24,6 +24,11 @@ impl KeyCombo {
     pub fn is_return(&self) -> bool {
         self.key == "return"
     }
+
+    /// Space with any modifiers: it presses the focused button.
+    pub fn is_space(&self) -> bool {
+        self.key == "space"
+    }
 }
 
 /// Named keys and their virtual key codes. Single characters use the ANSI layout.
