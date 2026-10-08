@@ -1,22 +1,28 @@
 //! The real Mac behind `Desktop`: ScreenCaptureKit screenshots (macOS 14+), Quartz events,
 //! the Accessibility API, and NSWorkspace. Nothing here decides policy; `mcp` does.
+//! It also reads what the glow overlay (S28) needs: display frames, the focused element's
+//! frame, and the overlay window's own setup.
 
 use super::blocklist::AppIdentity;
 use super::coords::{fit_long_edge, Point, ScreenshotGeometry, MAX_LONG_EDGE};
 use super::encode::{bgra_to_jpeg, JPEG_QUALITY};
+use super::glow::Frame;
 use super::keys::KeyCombo;
 use super::risk::{AxElement, Focus};
-use super::windows::{owner_row_at, WindowRow};
+use super::windows::{hit_test_app, owner_row_at, WindowRow};
 use super::{AppInfo, Capture, Desktop, InputEvent, MouseButton, PermissionKind, Permissions};
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::{available, AnyThread};
+use objc2::runtime::AnyObject;
+use objc2::{available, msg_send, AnyThread};
 use objc2_app_kit::{NSApplicationActivationOptions, NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};
-use objc2_application_services::{AXError, AXIsProcessTrusted, AXIsProcessTrustedWithOptions, AXUIElement};
+use objc2_application_services::{
+    AXError, AXIsProcessTrusted, AXIsProcessTrustedWithOptions, AXUIElement, AXValue, AXValueType,
+};
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
-    kCGNullWindowID, kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer, kCGWindowOwnerName, kCGWindowOwnerPID,
-    CGDataProvider, CGDirectDisplayID, CGError, CGEvent, CGEventField, CGEventFlags,
+    kCGNullWindowID, kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer, kCGWindowNumber, kCGWindowOwnerName,
+    kCGWindowOwnerPID, CGDataProvider, CGDirectDisplayID, CGDisplayBounds, CGError, CGEvent, CGEventField, CGEventFlags,
     CGEventTapLocation, CGEventType, CGGetDisplaysWithPoint, CGImage, CGMouseButton,
     CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess, CGScrollEventUnit, CGWindowListCopyWindowInfo,
     CGWindowListOption,
@@ -25,8 +31,10 @@ use objc2_foundation::{NSArray, NSDictionary, NSError, NSNumber, NSString};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration, SCWindow,
 };
+use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
@@ -46,11 +54,33 @@ unsafe impl<T> Send for Handoff<T> {}
 
 pub struct MacDesktop {
     own_pid: i32,
+    /// The glow overlay's window number (S28), 0 until it exists.
+    overlay: Arc<AtomicU32>,
 }
 
-impl Default for MacDesktop {
-    fn default() -> Self {
-        MacDesktop { own_pid: std::process::id() as i32 }
+impl MacDesktop {
+    pub fn new(overlay: Arc<AtomicU32>) -> Self {
+        MacDesktop { own_pid: std::process::id() as i32, overlay }
+    }
+
+    fn overlay(&self) -> Option<u32> {
+        Some(self.overlay.load(Ordering::SeqCst)).filter(|&n| n != 0)
+    }
+
+    /// The element under `at`. A hit test that went through the click-through overlay lands on
+    /// Gentle Dot, so it is redone inside the app that owns the window there.
+    fn hit_test(&self, at: Point) -> Option<CFRetained<AXUIElement>> {
+        let element = ax_element_at(&system_wide(), at)?;
+        let Some(hit_pid) = ax_pid(&element) else {
+            return Some(element);
+        };
+        let rows = window_rows();
+        let owner = owner_row_at(&rows, at, self.overlay()).map(|row| row.pid);
+        match hit_test_app(self.own_pid, hit_pid, owner) {
+            // SAFETY: plain constructor.
+            Some(pid) => ax_element_at(&with_timeout(unsafe { AXUIElement::new_application(pid) }), at),
+            None => Some(element),
+        }
     }
 }
 
@@ -256,12 +286,13 @@ fn ax_pid(element: &AXUIElement) -> Option<i32> {
     (error == AXError::Success && pid > 0).then_some(pid)
 }
 
-/// The Accessibility element at a global point, as hit-tested by the app that owns it.
-fn ax_element_at(at: Point) -> Option<CFRetained<AXUIElement>> {
+/// The Accessibility element at a global point, as hit-tested by the app that owns it
+/// (`scope` is the system-wide element, or one app's element to test only that app).
+fn ax_element_at(scope: &AXUIElement, at: Point) -> Option<CFRetained<AXUIElement>> {
     let mut found: *const AXUIElement = std::ptr::null();
     // SAFETY: `found` is a valid out-pointer; on success it holds a +1 reference.
     let out = NonNull::from(&mut found);
-    let error = unsafe { system_wide().copy_element_at_position(at.x as f32, at.y as f32, out) };
+    let error = unsafe { scope.copy_element_at_position(at.x as f32, at.y as f32, out) };
     let found = NonNull::new(found.cast_mut()).filter(|_| error == AXError::Success)?;
     Some(unsafe { CFRetained::from_raw(found) })
 }
@@ -277,10 +308,80 @@ fn describe(element: &AXUIElement) -> AxElement {
 
 fn system_wide() -> CFRetained<AXUIElement> {
     // SAFETY: plain constructor.
-    let element = unsafe { AXUIElement::new_system_wide() };
-    // A hung app must not stall the helper.
+    with_timeout(unsafe { AXUIElement::new_system_wide() })
+}
+
+/// A hung app must not stall the helper.
+fn with_timeout(element: CFRetained<AXUIElement>) -> CFRetained<AXUIElement> {
+    // SAFETY: setting a timeout on a valid element.
     unsafe { element.set_messaging_timeout(0.5) };
     element
+}
+
+/// A `CGPoint` or `CGSize` attribute (`AXPosition`, `AXSize`).
+fn ax_struct<T: Default>(element: &AXUIElement, attribute: &str, kind: AXValueType) -> Option<T> {
+    let value = ax_value(element, attribute)?.downcast::<AXValue>().ok()?;
+    let mut out = T::default();
+    // SAFETY: `out` has the layout of `kind` (CGPoint or CGSize).
+    let ok = unsafe { value.value(kind, NonNull::from(&mut out).cast()) };
+    ok.then_some(out)
+}
+
+/// The focused element's frame in global points, when it reports one (S28).
+pub fn focused_frame() -> Option<Frame> {
+    let focused = ax_element(&system_wide(), "AXFocusedUIElement")?;
+    let origin: CGPoint = ax_struct(&focused, "AXPosition", AXValueType::CGPoint)?;
+    let size: CGSize = ax_struct(&focused, "AXSize", AXValueType::CGSize)?;
+    Some(Frame { x: origin.x, y: origin.y, width: size.width, height: size.height })
+}
+
+/// The frame of the display showing `at`, in global points (S28).
+pub fn display_frame_at(at: Point) -> Option<Frame> {
+    let bounds = CGDisplayBounds(display_at(at)?);
+    Some(Frame { x: bounds.origin.x, y: bounds.origin.y, width: bounds.size.width, height: bounds.size.height })
+}
+
+/// `NSPopUpMenuWindowLevel + 1`: the glow shows above menus the agent clicks.
+const OVERLAY_LEVEL: isize = 102;
+/// `canJoinAllSpaces | stationary | ignoresCycle | fullScreenAuxiliary`.
+const OVERLAY_COLLECTION: usize = (1 << 0) | (1 << 4) | (1 << 6) | (1 << 8);
+
+/// Readies the glow overlay's NSWindow: above menus, on every Space (full-screen ones too),
+/// out of window cycling, never taking mouse events. Main thread only. Returns its number.
+///
+/// # Safety
+/// `ns_window` must be a live NSWindow.
+pub unsafe fn prepare_overlay(ns_window: *mut c_void) -> u32 {
+    let window = unsafe { &*ns_window.cast::<AnyObject>() };
+    unsafe {
+        let _: () = msg_send![window, setLevel: OVERLAY_LEVEL];
+        let _: () = msg_send![window, setCollectionBehavior: OVERLAY_COLLECTION];
+        let _: () = msg_send![window, setIgnoresMouseEvents: true];
+        let _: () = msg_send![window, setHasShadow: false];
+        overlay_number(window)
+    }
+}
+
+/// Orders the overlay in without making it key or activating the app, or orders it out.
+/// Main thread only. Returns its window number.
+///
+/// # Safety
+/// `ns_window` must be a live NSWindow.
+pub unsafe fn order_overlay(ns_window: *mut c_void, visible: bool) -> u32 {
+    let window = unsafe { &*ns_window.cast::<AnyObject>() };
+    unsafe {
+        if visible {
+            let _: () = msg_send![window, orderFrontRegardless];
+        } else {
+            let _: () = msg_send![window, orderOut: std::ptr::null::<AnyObject>()];
+        }
+        overlay_number(window)
+    }
+}
+
+unsafe fn overlay_number(window: &AnyObject) -> u32 {
+    let number: isize = unsafe { msg_send![window, windowNumber] };
+    u32::try_from(number).unwrap_or(0)
 }
 
 type WindowInfo = NSDictionary<NSString, objc2::runtime::AnyObject>;
@@ -312,14 +413,21 @@ fn window_rows() -> Vec<WindowRow> {
     // SAFETY: CFArray of CFDictionary is toll-free bridged to NSArray of NSDictionary.
     let list: &NSArray<WindowInfo> = unsafe { &*(CFRetained::as_ptr(&list).as_ptr() as *const _) };
     // SAFETY: extern constants provided by CoreGraphics.
-    let (alpha_key, layer_key, pid_key, name_key) = unsafe {
-        (info_key(kCGWindowAlpha), info_key(kCGWindowLayer), info_key(kCGWindowOwnerPID), info_key(kCGWindowOwnerName))
+    let (alpha_key, layer_key, pid_key, name_key, number_key) = unsafe {
+        (
+            info_key(kCGWindowAlpha),
+            info_key(kCGWindowLayer),
+            info_key(kCGWindowOwnerPID),
+            info_key(kCGWindowOwnerName),
+            info_key(kCGWindowNumber),
+        )
     };
     let number = |entry: &WindowInfo, key| entry.objectForKey(key).and_then(|n| n.downcast::<NSNumber>().ok());
     list.iter()
         .filter_map(|entry| {
             let bounds = window_bounds(&entry)?;
             Some(WindowRow {
+                number: number(&entry, number_key).map_or(0, |n| n.unsignedIntValue()),
                 pid: number(&entry, pid_key)?.intValue(),
                 owner_name: entry
                     .objectForKey(name_key)
@@ -421,7 +529,7 @@ impl Desktop for MacDesktop {
     }
 
     fn element_at(&self, at: Point) -> Vec<AxElement> {
-        let Some(mut element) = ax_element_at(at) else {
+        let Some(mut element) = self.hit_test(at) else {
             return Vec::new();
         };
         let mut chain = vec![describe(&element)];
@@ -449,13 +557,14 @@ impl Desktop for MacDesktop {
         ax_pid(&focused).map(|pid| identity_of(pid, ""))
     }
 
-    /// The owner of the frontmost app window under the point (the pointer and other window
-    /// server layers skipped), else the app whose Accessibility element is there.
+    /// The owner of the frontmost app window under the point (the pointer, other window
+    /// server layers, and the glow overlay skipped), else the app whose Accessibility element
+    /// is there (Gentle Dot, and so refused, if that lands on the overlay).
     fn window_owner_at(&self, at: Point) -> Option<AppIdentity> {
-        if let Some(row) = owner_row_at(&window_rows(), at) {
+        if let Some(row) = owner_row_at(&window_rows(), at, self.overlay()) {
             return Some(identity_of(row.pid, &row.owner_name));
         }
-        let element = ax_element_at(at)?;
+        let element = ax_element_at(&system_wide(), at)?;
         ax_pid(&element).map(|pid| identity_of(pid, ""))
     }
 

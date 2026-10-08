@@ -1,25 +1,35 @@
 {
 	"$schema": "../gen/schemas/desktop-schema.json",
-	"identifier": "default",
-	"description": "What the Dot and panel UI may call: event listening, Dot dragging, opening web pages (sign-in), the shell commands (hiding the rose and the full-screen panel included), and the computer-control commands (yolo mode included: its native confirmation decides).",
-	"windows": ["dot", "panel"],
-	"permissions": [
-		"core:event:allow-listen",
-		"core:event:allow-unlisten",
-		"core:window:allow-start-dragging",
-		"opener:default",
-		"allow-connection-info",
-		"allow-toggle-panel",
-		"allow-hide-panel",
-		"allow-set-dot-state",
-		"allow-rose-hidden",
-		"allow-set-rose-hidden",
-		"allow-set-panel-fullscreen",
-		"allow-computer-endpoint",
-		"allow-computer-permissions",
-		"allow-computer-request-permission",
-		"allow-computer-stop",
-		"allow-computer-status",
-		"allow-computer-set-yolo"
+	"capabilities": [
+		{
+			"identifier": "default",
+			"description": "What the Dot and panel UI may call: event listening, Dot dragging, opening web pages (sign-in), the shell commands (hiding the rose and the full-screen panel included), and the computer-control commands (yolo mode included: its native confirmation decides).",
+			"windows": ["dot", "panel"],
+			"permissions": [
+				"core:event:allow-listen",
+				"core:event:allow-unlisten",
+				"core:window:allow-start-dragging",
+				"opener:default",
+				"allow-connection-info",
+				"allow-toggle-panel",
+				"allow-hide-panel",
+				"allow-set-dot-state",
+				"allow-rose-hidden",
+				"allow-set-rose-hidden",
+				"allow-set-panel-fullscreen",
+				"allow-computer-endpoint",
+				"allow-computer-permissions",
+				"allow-computer-request-permission",
+				"allow-computer-stop",
+				"allow-computer-status",
+				"allow-computer-set-yolo"
+			]
+		},
+		{
+			"identifier": "glow",
+			"description": "What the computer-control glow overlay (S28) may call: listening to the glow and session events, nothing else.",
+			"windows": ["glow"],
+			"permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+		}
 	]
 }

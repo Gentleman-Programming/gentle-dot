@@ -35,7 +35,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFArray", "CFCGTypes", "CFData", "CFDictionary", "CFNumber", "CFString"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGDataProvider", "CGDirectDisplay", "CGError", "CGEvent", "CGEventTypes", "CGImage", "CGRemoteOperation", "CGWindow"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSRunningApplication", "NSWorkspace"] }
-objc2-application-services = { version = "0.3", default-features = false, features = ["std", "libc", "AXError", "AXUIElement", "HIServices"] }
+objc2-application-services = { version = "0.3", default-features = false, features = ["std", "libc", "AXError", "AXUIElement", "AXValue", "HIServices"] }
 objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["std", "block2", "libc", "objc2-core-foundation", "objc2-core-graphics", "SCScreenshotManager", "SCShareableContent", "SCStream"] }
 
 # Debug builds encode screenshots fast too (S24.8): `image` holds the JPEG encoder and `zune-*`

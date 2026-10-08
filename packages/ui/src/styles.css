@@ -1348,3 +1348,123 @@ button.link:hover:not(:disabled) {
 		transition: none !important;
 	}
 }
+
+/* The glow where the agent acts (S28), in the desktop's click-through overlay: the accent pink, like
+   the neon rose. A pulse on a click, a trail along a drag, short markers for moves and scrolls, and an
+   outline around the focused element for keys. Shown while the agent acts, faded about 1.5 s later. */
+html[data-surface="glow"] body {
+	background: transparent;
+	overflow: hidden;
+	pointer-events: none;
+}
+
+.glow-layer {
+	position: fixed;
+	inset: 0;
+	pointer-events: none;
+	transition: opacity 300ms var(--ease);
+}
+
+.glow-layer.glow-fading {
+	opacity: 0;
+}
+
+.glow-mark {
+	position: absolute;
+	width: 28px;
+	height: 28px;
+	margin: -14px 0 0 -14px;
+	border-radius: 50%;
+	background: radial-gradient(
+		circle,
+		rgba(255, 255, 255, 0.9) 0 12%,
+		var(--accent) 28%,
+		rgba(240, 149, 200, 0) 70%
+	);
+	box-shadow:
+		0 0 12px 4px rgba(240, 149, 200, 0.55),
+		0 0 32px 10px rgba(240, 149, 200, 0.25);
+}
+
+.glow-click::after {
+	content: "";
+	position: absolute;
+	inset: -6px;
+	border: 2px solid var(--accent);
+	border-radius: 50%;
+	animation: glow-pulse 700ms var(--ease) both;
+}
+
+.glow-move,
+.glow-scroll {
+	width: 16px;
+	height: 16px;
+	margin: -8px 0 0 -8px;
+	box-shadow: 0 0 10px 3px rgba(240, 149, 200, 0.45);
+	animation: glow-blip 600ms var(--ease) both;
+}
+
+.glow-trail {
+	position: absolute;
+	height: 6px;
+	margin-top: -3px;
+	border-radius: var(--radius-pill);
+	transform-origin: 0 50%;
+	background: linear-gradient(90deg, rgba(240, 149, 200, 0), var(--accent));
+	box-shadow: 0 0 14px 3px rgba(240, 149, 200, 0.45);
+	animation: glow-trail 450ms var(--ease) both;
+}
+
+.glow-key {
+	margin: -4px 0 0 -4px;
+	padding: 4px;
+	box-sizing: content-box;
+	border: 2px solid var(--accent);
+	border-radius: var(--radius-sm);
+	background: var(--accent-soft);
+	box-shadow:
+		0 0 14px 2px rgba(240, 149, 200, 0.5),
+		inset 0 0 10px rgba(240, 149, 200, 0.3);
+	animation: glow-blip 600ms var(--ease) both;
+}
+
+/* Reduce motion: the glow stays still (no pulse, no trail; the overlay draws only the drag's end). */
+.glow-static .glow-mark,
+.glow-static .glow-mark::after {
+	animation: none;
+}
+
+.glow-static .glow-click::after {
+	display: none;
+}
+
+@keyframes glow-pulse {
+	from {
+		opacity: 1;
+		transform: scale(0.4);
+	}
+	to {
+		opacity: 0;
+		transform: scale(1.8);
+	}
+}
+
+@keyframes glow-blip {
+	from {
+		opacity: 0;
+		transform: scale(0.6);
+	}
+	to {
+		opacity: 1;
+		transform: scale(1);
+	}
+}
+
+@keyframes glow-trail {
+	from {
+		clip-path: inset(0 100% 0 0);
+	}
+	to {
+		clip-path: inset(0 0 0 0);
+	}
+}

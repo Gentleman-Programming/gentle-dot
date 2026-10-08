@@ -10,6 +10,7 @@ pub mod blocklist;
 pub mod control;
 pub mod coords;
 pub mod encode;
+pub mod glow;
 #[cfg(test)]
 mod fake;
 pub mod keys;

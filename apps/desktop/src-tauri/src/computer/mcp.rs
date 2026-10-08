@@ -7,10 +7,15 @@
 //! (`perform`) and counts as one action for the rate limit; a full window delays the step
 //! instead of refusing it. Coordinates refer to the screenshot taken before the batch, and one
 //! screenshot follows it. The first refused, declined, or failed step stops the batch.
+//!
+//! The glow (S28): once an action's input is posted, `perform` reports where it acted to the
+//! glow sink, so a refused, declined, stopped, or failed action (or batch step) reports
+//! nothing. The sink only queues the mark; it never changes a check, the order, or a result.
 
 use super::blocklist::{blocked_name, blocked_reason, AppIdentity};
 use super::control::Control;
 use super::coords::{Point, ScreenshotGeometry};
+use super::glow::Mark;
 use super::keys::{parse_combo, KeyCombo};
 use super::rate::{RateLimiter, MAX_ACTIONS_PER_SECOND};
 use super::risk::{assess, Act};
@@ -307,6 +312,8 @@ pub struct Helper {
     limiter: Mutex<RateLimiter>,
     /// Serializes actions and holds the geometry of the latest screenshot.
     actions: Mutex<Option<ScreenshotGeometry>>,
+    /// Where an action that went through acted (S28); must return at once.
+    glow: Box<dyn Fn(Mark) + Send + Sync>,
 }
 
 impl Helper {
@@ -327,7 +334,14 @@ impl Helper {
             own_pid,
             limiter: Mutex::new(RateLimiter::new(MAX_ACTIONS_PER_SECOND, 1000)),
             actions: Mutex::new(None),
+            glow: Box::new(|_| {}),
         }
+    }
+
+    /// Reports each action that went through to `glow`, which must only queue it (S28).
+    pub fn with_glow(mut self, glow: impl Fn(Mark) + Send + Sync + 'static) -> Self {
+        self.glow = Box::new(glow);
+        self
     }
 
     fn authorized(&self, header: Option<&str>) -> bool {
@@ -637,6 +651,7 @@ impl Helper {
                 };
                 self.confirm_if_risky(assess(Act::Click(&chain), intent), &action, &target)?;
                 self.post(epoch, InputEvent::Click { at, button, count })?;
+                (self.glow)(Mark::Click(at));
                 Ok((format!("{action} in {target}: done."), SETTLE_MS))
             }
             Tool::Move { x, y } => {
@@ -645,6 +660,7 @@ impl Helper {
                 let action = format!("Move the pointer to ({x}, {y})");
                 self.confirm_if_risky(assess(Act::Other, intent), &action, &target)?;
                 self.post(epoch, InputEvent::Move(at))?;
+                (self.glow)(Mark::Move(at));
                 Ok((format!("{action}: done."), SETTLE_MS))
             }
             Tool::Drag { from, to } => {
@@ -656,6 +672,7 @@ impl Helper {
                 let (from_chain, to_chain) = (self.desktop.element_at(start), self.desktop.element_at(end));
                 self.confirm_if_risky(assess(Act::Drag(&from_chain, &to_chain), intent), &action, &target)?;
                 self.post(epoch, InputEvent::Drag { from: start, to: end })?;
+                (self.glow)(Mark::Drag { from: start, to: end });
                 Ok((format!("{action}: done."), SETTLE_MS))
             }
             Tool::Scroll { x, y, dx, dy } => {
@@ -664,6 +681,7 @@ impl Helper {
                 let action = format!("Scroll by ({dx}, {dy}) at ({x}, {y})");
                 self.confirm_if_risky(assess(Act::Other, intent), &action, &target)?;
                 self.post(epoch, InputEvent::Scroll { at, dx, dy })?;
+                (self.glow)(Mark::Scroll(at));
                 Ok((format!("{action}: done."), SETTLE_MS))
             }
             Tool::Type { text: typed } => {
@@ -681,6 +699,7 @@ impl Helper {
                         self.post(epoch, InputEvent::Text(chunk))?;
                     }
                 }
+                (self.glow)(Mark::Key);
                 Ok((format!("{action} in {target}: done."), SETTLE_MS))
             }
             Tool::Key { combo } => {
@@ -696,6 +715,7 @@ impl Helper {
                 let action = format!("Press {}", combo.key);
                 self.confirm_if_risky(assess(act, intent), &action, &target)?;
                 self.post(epoch, InputEvent::Key(combo))?;
+                (self.glow)(Mark::Key);
                 Ok((format!("{action} in {target}: done."), SETTLE_MS))
             }
             Tool::OpenApp { name } => {
@@ -727,6 +747,7 @@ mod tests {
     use super::super::blocklist::AppIdentity;
     use super::super::coords::Point;
     use super::super::fake::{app, FakeClock, FakeDesktop, FakeDialogs};
+    use super::super::glow::Mark;
     use super::super::keys::parse_combo;
     use super::super::risk::{AxElement, Focus};
     use super::super::session::{Reason, StateEvent, SESSION_MS};
@@ -747,6 +768,8 @@ mod tests {
         clock: Arc<FakeClock>,
         control: Arc<Control>,
         states: Arc<Mutex<Vec<StateEvent>>>,
+        /// Each glow mark (S28), with how many input events were posted when it came.
+        marks: Arc<Mutex<Vec<(Mark, usize)>>>,
     }
 
     fn rig_with(allow: bool, confirm: bool) -> Rig {
@@ -756,9 +779,26 @@ mod tests {
         let states = Arc::new(Mutex::new(Vec::new()));
         let sink = states.clone();
         let control = Arc::new(Control::new(move |event| sink.lock().unwrap().push(event.clone())));
+        let marks = Arc::new(Mutex::new(Vec::new()));
+        let (seen, posted) = (marks.clone(), desktop.clone());
         let helper =
-            Helper::new(desktop.clone(), dialogs.clone(), clock.clone(), control.clone(), TOKEN.into(), OWN_PID);
-        Rig { helper, desktop, dialogs, clock, control, states }
+            Helper::new(desktop.clone(), dialogs.clone(), clock.clone(), control.clone(), TOKEN.into(), OWN_PID)
+                .with_glow(move |mark| seen.lock().unwrap().push((mark, posted.events().len())));
+        Rig { helper, desktop, dialogs, clock, control, states, marks }
+    }
+
+    /// A rig whose helper has no glow sink, as before S28.
+    fn rig_without_glow(allow: bool, confirm: bool) -> Rig {
+        let rig = rig_with(allow, confirm);
+        let helper = Helper::new(
+            rig.desktop.clone(),
+            rig.dialogs.clone(),
+            rig.clock.clone(),
+            rig.control.clone(),
+            TOKEN.into(),
+            OWN_PID,
+        );
+        Rig { helper, ..rig }
     }
 
     fn rig() -> Rig {
@@ -1648,5 +1688,140 @@ mod tests {
         let result = rig.call("list_apps", json!({}));
         let apps: Value = serde_json::from_str(&first_text(&result)).unwrap();
         assert_eq!(apps[0], json!({"name": "Safari", "bundleId": "com.apple.Safari", "active": true}));
+    }
+
+    // --- The pink glow (S28) ---
+
+    fn marks(rig: &Rig) -> Vec<(Mark, usize)> {
+        rig.marks.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn each_action_that_went_through_marks_where_it_acted_after_posting() {
+        let rig = rig();
+        rig.ready();
+        let p = |x, y| Point { x, y };
+        rig.call("click", json!({"x": 100, "y": 50}));
+        rig.call("move", json!({"x": 1, "y": 2}));
+        rig.call("drag", json!({"fromX": 10, "fromY": 20, "toX": 30, "toY": 40}));
+        rig.call("scroll", json!({"x": 5, "y": 6, "dx": 0, "dy": 120}));
+        rig.call("key", json!({"combo": "tab"}));
+        // A text with a newline is three input events and one mark, after the last of them.
+        rig.call("type", json!({"text": "hi\nthere"}));
+        assert_eq!(
+            marks(&rig),
+            vec![
+                (Mark::Click(p(200.0, 100.0)), 1),
+                (Mark::Move(p(2.0, 4.0)), 2),
+                (Mark::Drag { from: p(20.0, 40.0), to: p(60.0, 80.0) }, 3),
+                (Mark::Scroll(p(10.0, 12.0)), 4),
+                (Mark::Key, 5),
+                (Mark::Key, 8),
+            ]
+        );
+    }
+
+    #[test]
+    fn refused_declined_and_stopped_actions_mark_nothing() {
+        // Declined: a risky click the user says no to.
+        let declined = rig_with(true, false);
+        declined.ready();
+        *declined.desktop.elements.lock().unwrap() = send_button();
+        assert!(first_text(&declined.call("click", json!({"x": 10, "y": 10}))).contains("declined"));
+        assert!(is_error(&declined.call("type", json!({"text": "hello\t "}))));
+        // Refused: a blocked window, a point no app owns, a blocked app in front, invalid arguments.
+        let rig_blocked = rig();
+        rig_blocked.ready();
+        *rig_blocked.desktop.owner_at.lock().unwrap() =
+            Box::new(|_| Some(app(300, "com.apple.systempreferences", "System Settings")));
+        assert!(is_error(&rig_blocked.call("click", json!({"x": 10, "y": 10}))));
+        assert!(is_error(&rig_blocked.call("drag", json!({"fromX": 1, "fromY": 1, "toX": 2, "toY": 2}))));
+        *rig_blocked.desktop.owner_at.lock().unwrap() = Box::new(|_| None);
+        assert!(is_error(&rig_blocked.call("scroll", json!({"x": 1, "y": 1, "dx": 0, "dy": 1}))));
+        *rig_blocked.desktop.frontmost.lock().unwrap() = Some(app(302, "com.apple.keychainaccess", "Keychain Access"));
+        assert!(is_error(&rig_blocked.call("key", json!({"combo": "cmd+a"}))));
+        assert!(is_error(&rig_blocked.call("click", json!({"x": 1}))));
+        // Stopped: queued before a panic, no session (denied), no screenshot yet.
+        let rig_stopped = rig();
+        rig_stopped.ready();
+        let queued_at = rig_stopped.control.epoch();
+        rig_stopped.control.end(Reason::Panic);
+        assert!(is_error(&rig_stopped.helper.call_tool_from(queued_at, "move", &json!({"x": 1, "y": 1})).unwrap()));
+        let rig_denied = rig_with(false, true);
+        assert!(is_error(&rig_denied.call("key", json!({"combo": "tab"}))));
+        let rig_fresh = rig();
+        assert!(is_error(&rig_fresh.call("click", json!({"x": 1, "y": 1}))));
+        for r in [&declined, &rig_blocked, &rig_stopped, &rig_denied, &rig_fresh] {
+            assert!(r.desktop.events().is_empty());
+            assert!(marks(r).is_empty(), "{:?}", marks(r));
+        }
+    }
+
+    #[test]
+    fn screenshots_lists_open_app_and_wait_mark_nothing() {
+        let rig = rig();
+        rig.ready();
+        rig.call("list_apps", json!({}));
+        rig.call("open_app", json!({"name": "Mail"}));
+        rig.call("wait", json!({"ms": 200}));
+        assert!(marks(&rig).is_empty());
+    }
+
+    #[test]
+    fn a_batch_marks_each_step_that_ran_and_none_after_it_stopped() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.owner_at.lock().unwrap() = Box::new(|at: Point| {
+            if at.x > 100.0 {
+                Some(app(300, "com.apple.systempreferences", "System Settings"))
+            } else {
+                Some(safari())
+            }
+        });
+        let result = rig.call(
+            "batch",
+            batch(json!([
+                {"tool": "click", "x": 10, "y": 10},
+                {"tool": "wait", "ms": 0},
+                {"tool": "type", "text": "Ana"},
+                {"tool": "click", "x": 200, "y": 10},
+                {"tool": "click", "x": 20, "y": 20},
+            ])),
+        );
+        assert!(is_error(&result));
+        assert_eq!(marks(&rig), vec![(Mark::Click(Point { x: 20.0, y: 20.0 }), 1), (Mark::Key, 2)]);
+    }
+
+    #[test]
+    fn the_glow_changes_no_check_order_or_result() {
+        // The same calls, with and without the glow, give the same results, dialogs, and events.
+        let script = |rig: &Rig| -> Vec<Value> {
+            *rig.desktop.elements.lock().unwrap() = send_button();
+            let mut results = vec![rig.call("screenshot", json!({}))];
+            for (name, args) in [
+                ("click", json!({"x": 10, "y": 10})),
+                ("move", json!({"x": 3, "y": 3})),
+                ("type", json!({"text": "a\nb"})),
+                (
+                    "batch",
+                    batch(json!([
+                        {"tool": "scroll", "x": 1, "y": 1, "dx": 0, "dy": 5},
+                        {"tool": "click", "x": 9, "y": 9},
+                    ])),
+                ),
+                ("click", json!({"x": 5000, "y": 1})),
+            ] {
+                results.push(rig.call(name, args));
+            }
+            results
+        };
+        for confirm in [true, false] {
+            let (with, without) = (rig_with(true, confirm), rig_without_glow(true, confirm));
+            assert_eq!(script(&with), script(&without), "confirm {confirm}");
+            assert_eq!(with.desktop.events(), without.desktop.events());
+            assert_eq!(*with.dialogs.confirmations.lock().unwrap(), *without.dialogs.confirmations.lock().unwrap());
+            assert_eq!(with.clock.now_ms(), without.clock.now_ms());
+            assert!(without.marks.lock().unwrap().is_empty());
+        }
     }
 }

@@ -81,10 +81,60 @@ export async function computerStatus(): Promise<ComputerState> {
 	return stateOf(await invoke<ComputerStateEvent>("computer_status"));
 }
 
+/** The event API, imported once: the glow overlay subscribes to two events at the same time. */
+let eventApi: Promise<typeof import("@tauri-apps/api/event")> | undefined;
+function events() {
+	eventApi ??= import("@tauri-apps/api/event");
+	return eventApi;
+}
+
 export async function onComputerState(handler: (state: ComputerState) => void) {
 	if (!isTauri()) return () => {};
-	const { listen } = await import("@tauri-apps/api/event");
+	const { listen } = await events();
 	return listen<ComputerStateEvent>("computer://state", (event) => handler(stateOf(event.payload)));
+}
+
+/**
+ * Where the agent just acted (S28), in points from the top-left corner of the glow overlay. A drag
+ * runs from `x, y` to `toX, toY`; a keyboard action outlines the focused element (`width × height`).
+ */
+export type ComputerGlow =
+	| { kind: "click" | "move" | "scroll"; x: number; y: number }
+	| { kind: "drag"; x: number; y: number; toX: number; toY: number }
+	| { kind: "key"; x: number; y: number; width: number; height: number };
+
+/** The overlay window's `computer://glow` events; anything it cannot place is dropped. */
+export async function onComputerGlow(handler: (glow: ComputerGlow) => void) {
+	if (!isTauri()) return () => {};
+	const { listen } = await events();
+	return listen<unknown>("computer://glow", (event) => {
+		const glow = glowOf(event.payload);
+		if (glow) handler(glow);
+	});
+}
+
+function glowOf(payload: unknown): ComputerGlow | undefined {
+	if (typeof payload !== "object" || payload === null) return undefined;
+	const event = payload as Record<string, unknown>;
+	const finite = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+	const { kind, x, y } = event;
+	if (!finite(x) || !finite(y)) return undefined;
+	switch (kind) {
+		case "click":
+		case "move":
+		case "scroll":
+			return { kind, x, y };
+		case "drag":
+			return finite(event.toX) && finite(event.toY)
+				? { kind, x, y, toX: event.toX, toY: event.toY }
+				: undefined;
+		case "key":
+			return finite(event.width) && finite(event.height) && event.width > 0 && event.height > 0
+				? { kind, x, y, width: event.width, height: event.height }
+				: undefined;
+		default:
+			return undefined;
+	}
 }
 
 function stateOf(state: ComputerStateEvent | null | undefined): ComputerState {

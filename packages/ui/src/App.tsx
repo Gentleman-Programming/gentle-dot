@@ -3,6 +3,7 @@ import { type ConnectionInfo, tokenFromLocation } from "./client.ts";
 import { ChatSurface } from "./components/ChatSurface.tsx";
 import type { ComputerControls } from "./components/Computer.tsx";
 import { DotSurface } from "./components/DotSurface.tsx";
+import { GlowSurface } from "./components/GlowSurface.tsx";
 import { computerPermissions, requestComputerPermission, setComputerYolo, stopComputer } from "./computer.ts";
 import {
 	connectionInfo,
@@ -19,9 +20,9 @@ import { usePanelWindow } from "./usePanelWindow.ts";
 
 type Surface = "dot" | "panel" | "web";
 
-function currentSurface(): Surface {
+function currentSurface(): Surface | "glow" {
 	const surface = new URLSearchParams(window.location.search).get("surface");
-	return surface === "dot" || surface === "panel" ? surface : "web";
+	return surface === "dot" || surface === "panel" || surface === "glow" ? surface : "web";
 }
 
 /**
@@ -50,8 +51,13 @@ function isFullscreenShortcut(event: KeyboardEvent): boolean {
 	);
 }
 
+/** The desktop's glow overlay (S28) is its own surface: it never connects to the assistant. */
 export function App() {
 	const surface = currentSurface();
+	return surface === "glow" ? <GlowSurface /> : <Assistant surface={surface} />;
+}
+
+function Assistant({ surface }: { surface: Surface }) {
 	const [info, setInfo] = useState<ConnectionInfo | undefined>(undefined);
 	const [missingToken, setMissingToken] = useState(false);
 	const [focusKey, setFocusKey] = useState(0);
