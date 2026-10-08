@@ -568,14 +568,16 @@ export class ConnectorStore {
 	 * `report: false` only writes them (the daemon's start, where the files are what it just read).
 	 */
 	enforce(report = true): boolean {
-		const untouched = Object.keys(this.saved.connectors).length === 0 && !this.computer;
+		// A missing file is untouched while it would hold nothing: the record before any connector is saved,
+		// and mcp.json before any connector or the computer helper is in it.
+		const noConnectors = Object.keys(this.saved.connectors).length === 0;
 		const changed: string[] = [];
-		for (const [file, text] of [
-			[this.file, this.recordText()],
-			[this.mcpFile, renderMcpJson(this.saved, this.computer)],
+		for (const [file, text, empty] of [
+			[this.file, this.recordText(), noConnectors],
+			[this.mcpFile, renderMcpJson(this.saved, this.computer), noConnectors && !this.computer],
 		] as const) {
 			const current = existsSync(file) ? readFileSync(file, "utf8") : undefined;
-			if (current === text || (current === undefined && untouched)) continue;
+			if (current === text || (current === undefined && empty)) continue;
 			mkdirSync(this.options.agentHome, { recursive: true, mode: 0o700 });
 			writePrivate(file, text);
 			changed.push(file);

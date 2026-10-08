@@ -121,6 +121,17 @@ async function restarted(d: DotDaemon, pid: number | undefined) {
 }
 
 describe("computer control registration (S24.7)", () => {
+	it("registering on an install with no saved connectors is not reported as a blocked change", async () => {
+		const { send, logs, messages, servers, dataDir } = await setup();
+		send({ type: "computer_register", url: HELPER, token: KEY });
+		await waitFor(() => servers().computer);
+		// Longer than the one-second backup check, so a late revert would show.
+		await new Promise((resolve) => setTimeout(resolve, 1300));
+		expect(logs.filter((line) => line.includes("put back"))).toEqual([]);
+		expect(messages.filter((m) => m.type === "toast")).toEqual([]);
+		expect(existsSync(join(dataDir, "connectors.json"))).toBe(false);
+	});
+
 	it("renders the helper as a built-in direct server with the key in its header, and the key goes nowhere else", async () => {
 		const {
 			d,
@@ -169,13 +180,16 @@ describe("computer control registration (S24.7)", () => {
 
 		await find("connectors", (m) => computerOf(m.connectors) !== undefined);
 		expect(computerOf(await second.list())).toBeDefined();
-		expect(readFileSync(join(dataDir, "connectors.json"), "utf8")).not.toContain("computer");
+		// With no saved connector the record is never written; when it is, it never holds the helper.
+		const recordFile = join(dataDir, "connectors.json");
+		const record = existsSync(recordFile) ? readFileSync(recordFile, "utf8") : "";
+		expect(record).not.toContain("computer");
 		for (const text of [
 			JSON.stringify(messages),
 			JSON.stringify(second.messages),
 			logs.join("\n"),
 			agentEnv(),
-			readFileSync(join(dataDir, "connectors.json"), "utf8"),
+			record,
 		]) {
 			expect(text).not.toContain(KEY);
 			expect(text).not.toContain("51234");
