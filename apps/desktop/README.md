@@ -1,6 +1,6 @@
-# Gentle Dot desktop (macOS)
+# Gentle Dot desktop (macOS and Linux)
 
-The Tauri 2 shell around the Gentle Dot UI: a floating Dot, an expandable panel, a menu bar item, and a global shortcut. The contract between Rust and the UI is §9 of [`docs/design.md`](../../docs/design.md).
+The Tauri 2 shell around the Gentle Dot UI: a floating Dot, an expandable panel, a menu bar item, and a global shortcut. The contract between Rust and the UI is §9 of [`docs/design.md`](../../docs/design.md). Linux is covered [below](#linux).
 
 ## Requirements
 
@@ -11,7 +11,7 @@ The Tauri 2 shell around the Gentle Dot UI: a floating Dot, an expandable panel,
   export PATH=/opt/homebrew/opt/rustup/bin:$PATH
   ```
 
-- `src-tauri/.cargo/config.toml` pins the linker and C compiler to Apple's `/usr/bin/cc`, because a Nix GCC `cc` on `PATH` cannot link against the macOS SDK.
+- `src-tauri/.cargo/config.toml` pins the linker and C compiler to Apple's `/usr/bin/cc` for the macOS targets only (`CC_<target>`), because a Nix GCC `cc` on `PATH` cannot link against the macOS SDK. Linux builds use the system `cc`.
 
 ## Run
 
@@ -74,4 +74,33 @@ pnpm --filter @gentle-dot/desktop tauri icon src-tauri/icons/source.png -o /tmp/
 cp /tmp/gentle-dot-icons/{32x32,64x64,128x128,128x128@2x}.png /tmp/gentle-dot-icons/icon.{icns,png} src-tauri/icons/
 ```
 
+`node scripts/make-icon.mjs --linux-tray` renders only `src-tauri/icons/tray/linux/<glyph>.png` (32 px): the same four states for Linux trays, which do not tint icons and can be light or dark, so the glyph is light gray over a dark outline, with an amber badge for `needs-you`.
+
 `tauri icon` also writes Android, iOS, and Windows icons, which this macOS app does not use, so they go to a scratch directory and only the files `tauri.conf.json` lists (plus `64x64.png`) are copied.
+
+## Linux
+
+Debian and Ubuntu (GNOME) and Omarchy (Arch with Hyprland) are built from source on the user's machine, because the app records the build machine's `node` and daemon paths (see above). The setup scripts install the system libraries (the only step that uses sudo, after asking), Node 24 under `~/.local/share/gentle-dot` when no Node 24+ is present, pnpm through corepack, and Rust through rustup, then build with `tauri build --no-bundle` and install `~/.local/bin/gentle-dot` and a menu entry:
+
+```sh
+scripts/linux/setup-debian.sh    # Debian, Ubuntu (apt)
+scripts/linux/setup-arch.sh      # Omarchy, Arch (pacman)
+scripts/linux/uninstall.sh       # removes the launcher, menu entry, and private Node; --purge also ~/.gentle-dot
+```
+
+The binary is `src-tauri/target/release/gentle-dot`. Tester checklist: [`docs/linux-testing.md`](../../docs/linux-testing.md).
+
+What differs from macOS (decided in `src/platform.rs`, unit-tested on both systems):
+
+| Topic | macOS | GNOME on Wayland (Debian, Ubuntu) | Hyprland (Omarchy) |
+|---|---|---|---|
+| Display backend | — | XWayland: the app sets `GDK_BACKEND=x11` before GTK starts, when the session is Wayland, the desktop is not Hyprland, `DISPLAY` is set, and the user did not choose a `GDK_BACKEND` | Native Wayland |
+| Dot placement, snapping, panel next to the Dot | The app | The app | Hyprland window rules, matched by title (`Gentle Dot`, `Gentle Dot Panel`): [`scripts/linux/hyprland/`](../../scripts/linux/hyprland/) has a `hyprland.lua` form (Omarchy 4) and a `hyprland.conf` form |
+| Global shortcut | `Alt+Space` from the app | A desktop custom shortcut running `gentle-dot --toggle` (XWayland only sees keys while an X11 window has focus, and `Alt+Space` is GNOME's window menu) | A Hyprland `bind` running `gentle-dot --toggle` (the app does not register one) |
+| Panel background | `HudWindow` vibrancy | Opaque: the panel URL carries `effects=none` | Same as GNOME |
+| Tray glyphs | Template images | `icons/tray/linux/` (needs the AppIndicator GNOME extension; Ubuntu ships it on) | Same, shown by Waybar |
+
+`gentle-dot --toggle` reaches the running app through `tauri-plugin-single-instance` (D-Bus on Linux), which toggles the panel; any other second launch shows it. Started with `--toggle` while not running, the app opens the panel once it is up.
+
+macOS-only calls (`accept_first_mouse`, the `HudWindow` effect, the accessory activation policy) are behind `cfg(target_os = "macos")`; the template flag follows `status::is_template`. The `macos-private-api` feature and `macOSPrivateApi: true` stay on every platform: tauri-build checks the `tauri` features in `Cargo.toml` against the merged `tauri.conf.json`, every `tauri` dependency entry including target-specific ones, so splitting them per target fails the build. They only change macOS code; the Linux build in a Debian container compiles with them. `Info.plist` (`LSUIElement`) is read only by the macOS bundle.
+

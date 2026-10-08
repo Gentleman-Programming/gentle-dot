@@ -494,6 +494,13 @@ textarea:focus {
 	-webkit-backdrop-filter: blur(24px) saturate(1.3);
 }
 
+/* No vibrancy behind the window (Linux): nothing to blur, so the panel is opaque. */
+html[data-effects="none"] .chat-panel {
+	background: var(--bg);
+	backdrop-filter: none;
+	-webkit-backdrop-filter: none;
+}
+
 .chat-web {
 	max-width: 780px;
 	margin: 0 auto;

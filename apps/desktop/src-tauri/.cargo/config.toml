@@ -1,11 +1,15 @@
 # Use Apple's toolchain even when another `cc` (for example Nix GCC) comes first
 # on PATH; GCC cannot link against the macOS SDK (`-liconv` is not found).
+# Everything here is scoped to macOS targets, so Linux builds use the system `cc`.
 [target.aarch64-apple-darwin]
 linker = "/usr/bin/cc"
 
 [target.x86_64-apple-darwin]
 linker = "/usr/bin/cc"
 
+# `[env]` cannot be scoped to a target, but the `cc` crate prefers `CC_<target>` over `CC`.
 [env]
-CC = "/usr/bin/cc"
-CXX = "/usr/bin/c++"
+CC_aarch64_apple_darwin = "/usr/bin/cc"
+CXX_aarch64_apple_darwin = "/usr/bin/c++"
+CC_x86_64_apple_darwin = "/usr/bin/cc"
+CXX_x86_64_apple_darwin = "/usr/bin/c++"

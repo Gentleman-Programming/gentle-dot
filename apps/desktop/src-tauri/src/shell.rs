@@ -4,14 +4,16 @@
 use crate::config::{self, ConnectionInfo, DesktopConfig, DEFAULT_SHORTCUT};
 use crate::daemon::{Daemon, RestartOutcome};
 use crate::geometry::{self, Rect};
+use crate::platform::{self, LaunchRequest, Os, DOT_TITLE, PANEL_TITLE};
 use crate::position::{self, DotPosition};
-use crate::status::{tray_status, TrayGlyph};
+use crate::status::{is_template, tray_status, TrayGlyph};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
+#[cfg(target_os = "macos")]
 use tauri::window::{Effect, EffectState, EffectsBuilder};
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, RunEvent, WebviewUrl, WebviewWindow,
@@ -39,6 +41,8 @@ struct Shell {
     config: DesktopConfig,
     daemon: Arc<Daemon>,
     snap: mpsc::Sender<()>,
+    /// False on native Wayland, where the compositor places windows (Hyprland window rules).
+    places_windows: bool,
 }
 
 type CommandResult<T = ()> = Result<T, String>;
@@ -90,8 +94,8 @@ fn set_dot_state(app: AppHandle, state: String) -> CommandResult {
     let status = tray_status(&state).ok_or_else(|| format!("unknown state `{state}`"))?;
     let tray = app.tray_by_id(TRAY).ok_or("tray icon is missing")?;
     tray.set_tooltip(Some(&status.tooltip)).map_err(err)?;
-    tray.set_icon(Some(Image::from_bytes(status.glyph.png()).map_err(err)?)).map_err(err)?;
-    tray.set_icon_as_template(true).map_err(err)
+    tray.set_icon(Some(Image::from_bytes(status.glyph.image(Os::CURRENT)).map_err(err)?)).map_err(err)?;
+    tray.set_icon_as_template(is_template(Os::CURRENT)).map_err(err)
 }
 
 /// The window frame in points. Tao reports it in pixels of the window's current scale factor.
@@ -129,13 +133,18 @@ fn keep_dot_size(dot: &WebviewWindow, current: Rect) -> CommandResult {
 }
 
 fn place_panel_next_to_dot(app: &AppHandle) -> CommandResult {
+    if !app.state::<Shell>().places_windows {
+        return Ok(());
+    }
     let (dot, panel) = (window(app, DOT)?, window(app, PANEL)?);
-    let dot_rect = rect_of(&dot)?;
+    let mut dot_rect = rect_of(&dot)?;
+    (dot_rect.width, dot_rect.height) = (DOT_SIZE.0 as i32, DOT_SIZE.1 as i32);
     let Some(monitor) = geometry::monitor_for(dot_rect, &monitor_rects(&dot)?) else {
         return Ok(());
     };
-    let size = rect_of(&panel)?;
-    let position = geometry::place_panel(dot_rect, (size.width, size.height), monitor, PANEL_GAP, EDGE_MARGIN);
+    // Both windows have fixed sizes. On Linux a panel that was never shown reports 0 × 0.
+    let size = (PANEL_SIZE.0 as i32, PANEL_SIZE.1 as i32);
+    let position = geometry::place_panel(dot_rect, size, monitor, PANEL_GAP, EDGE_MARGIN);
     move_to(&panel, position)
 }
 
@@ -185,9 +194,9 @@ fn spawn_snapper(app: AppHandle) -> mpsc::Sender<()> {
     tx
 }
 
-fn build_windows(app: &AppHandle, config: &DesktopConfig) -> tauri::Result<()> {
+fn build_windows(app: &AppHandle, config: &DesktopConfig, places_windows: bool) -> tauri::Result<()> {
     let dot = WebviewWindowBuilder::new(app, DOT, WebviewUrl::App("index.html?surface=dot".into()))
-        .title("Gentle Dot")
+        .title(DOT_TITLE)
         .inner_size(DOT_SIZE.0, DOT_SIZE.1)
         .transparent(true)
         .decorations(false)
@@ -196,20 +205,34 @@ fn build_windows(app: &AppHandle, config: &DesktopConfig) -> tauri::Result<()> {
         .skip_taskbar(true)
         .visible_on_all_workspaces(true)
         .shadow(false)
-        .accept_first_mouse(true)
-        .visible(false)
-        .build()?;
-    WebviewWindowBuilder::new(app, PANEL, WebviewUrl::App("index.html?surface=panel".into()))
-        .title("Gentle Dot")
+        .visible(false);
+    #[cfg(target_os = "macos")]
+    let dot = dot.accept_first_mouse(true);
+    // GTK sizes a non-resizable window to its content (200 × 200 in an X11 test), so on Linux
+    // the Dot stays resizable and equal minimum and maximum sizes pin it at DOT_SIZE.
+    #[cfg(target_os = "linux")]
+    let dot = dot.resizable(true).min_inner_size(DOT_SIZE.0, DOT_SIZE.1).max_inner_size(DOT_SIZE.0, DOT_SIZE.1);
+    let dot = dot.build()?;
+    // Linux has no window effects; the panel URL tells the UI to paint an opaque background.
+    let panel = WebviewWindowBuilder::new(app, PANEL, WebviewUrl::App(platform::panel_url(Os::CURRENT).into()))
+        .title(PANEL_TITLE)
         .inner_size(PANEL_SIZE.0, PANEL_SIZE.1)
         .transparent(true)
-        .effects(EffectsBuilder::new().effect(Effect::HudWindow).state(EffectState::Active).radius(20.0).build())
         .decorations(false)
         .always_on_top(true)
         .resizable(false)
         .skip_taskbar(true)
-        .visible(false)
-        .build()?;
+        .visible(false);
+    #[cfg(target_os = "macos")]
+    let panel = panel
+        .effects(EffectsBuilder::new().effect(Effect::HudWindow).state(EffectState::Active).radius(20.0).build());
+    panel.build()?;
+
+    if !places_windows {
+        // Native Wayland ignores positions; Hyprland window rules place and pin the Dot.
+        dot.show()?;
+        return Ok(());
+    }
 
     // Restore the saved position (re-snapped in case the monitors changed), or
     // default to the right edge of the primary monitor, vertically centered.
@@ -272,8 +295,8 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig) -> tauri::Result<TrayIcon
         }
     }
     TrayIconBuilder::with_id(TRAY)
-        .icon(Image::from_bytes(TrayGlyph::Unavailable.png())?)
-        .icon_as_template(true)
+        .icon(Image::from_bytes(TrayGlyph::Unavailable.image(Os::CURRENT))?)
+        .icon_as_template(is_template(Os::CURRENT))
         .tooltip("Gentle Dot")
         .menu(&menu)
         .show_menu_on_left_click(true)
@@ -353,9 +376,29 @@ fn register_shortcut(app: &AppHandle, shortcut: &str) {
     }
 }
 
+/// A launch of `gentle-dot` (usually `--toggle` from a desktop shortcut) reaches the running app.
+fn handle_launch(app: &AppHandle, args: &[String]) {
+    let result = match platform::launch_request(args) {
+        LaunchRequest::Toggle => toggle_panel(app.clone()),
+        LaunchRequest::Show => show_panel(app),
+    };
+    if let Err(error) = result {
+        eprintln!("gentle-dot: cannot show the panel: {error}");
+    }
+}
+
 pub fn run() {
+    // GNOME on Wayland: run under XWayland so the Dot can place itself, stay on top, and snap.
+    // This must happen before GTK starts.
+    #[cfg(target_os = "linux")]
+    if let Some(backend) = platform::forced_gdk_backend(|key| std::env::var(key).ok()) {
+        std::env::set_var("GDK_BACKEND", backend);
+    }
+    let places_windows = !platform::compositor_places_windows(|key| std::env::var(key).ok());
     let config = config::load_config();
     tauri::Builder::default()
+        // First, so a second launch forwards its arguments and exits before anything else starts.
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| handle_launch(app, &args)))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .plugin(tauri_plugin_opener::init())
@@ -373,19 +416,29 @@ pub fn run() {
                     eprintln!("gentle-dot: {error}");
                 }
             });
-            app.manage(Shell { config: config.clone(), daemon, snap: spawn_snapper(handle.clone()) });
+            app.manage(Shell { config: config.clone(), daemon, snap: spawn_snapper(handle.clone()), places_windows });
 
-            build_windows(&handle, &config)?;
+            build_windows(&handle, &config, places_windows)?;
             build_tray(&handle, &config)?;
-            register_shortcut(&handle, &config.shortcut);
-
-            let snap = app.state::<Shell>().snap.clone();
-            window(&handle, DOT)?.on_window_event(move |event| {
-                // A move, or a new monitor scale, re-snaps the Dot and restores its size.
-                if let WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } = event {
-                    let _ = snap.send(());
-                }
-            });
+            if places_windows {
+                register_shortcut(&handle, &config.shortcut);
+                let snap = app.state::<Shell>().snap.clone();
+                window(&handle, DOT)?.on_window_event(move |event| {
+                    // A move, or a new monitor scale, re-snaps the Dot and restores its size.
+                    if let WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } = event {
+                        let _ = snap.send(());
+                    }
+                });
+            } else {
+                eprintln!(
+                    "gentle-dot: native Wayland: the desktop places the windows and owns shortcuts; bind `gentle-dot --toggle` (docs/linux-testing.md)"
+                );
+            }
+            // Started by the shortcut while not running: open the panel right away.
+            let args: Vec<String> = std::env::args().collect();
+            if platform::launch_request(&args) == LaunchRequest::Toggle {
+                handle_launch(&handle, &args);
+            }
             Ok(())
         })
         .build(tauri::generate_context!())

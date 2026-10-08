@@ -20,6 +20,14 @@ function currentSurface(): Surface {
 	return surface === "dot" || surface === "panel" ? surface : "web";
 }
 
+/**
+ * Whether the window behind the panel blurs the desktop (macOS vibrancy). The shell adds
+ * `effects=none` to the panel URL where it cannot (Linux), and the panel paints its own background.
+ */
+export function windowEffects(search: string): "native" | "none" {
+	return new URLSearchParams(search).get("effects") === "none" ? "none" : "native";
+}
+
 function browserConnection(): ConnectionInfo | undefined {
 	const token = tokenFromLocation(window.location, window.sessionStorage, (url) =>
 		window.history.replaceState(null, "", url),
@@ -75,6 +83,7 @@ export function App() {
 
 	useEffect(() => {
 		document.documentElement.dataset.surface = surface;
+		document.documentElement.dataset.effects = windowEffects(window.location.search);
 	}, [surface]);
 
 	if (surface === "dot") {

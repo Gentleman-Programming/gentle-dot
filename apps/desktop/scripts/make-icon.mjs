@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 // Renders the rose icons with Playwright's Chromium (design sheet: docs/brand/rose-design.html):
 //   src-tauri/icons/tray/<glyph>.png, <glyph>@2x.png  menu bar template images, 18 and 36 px
+//   src-tauri/icons/tray/linux/<glyph>.png             Linux tray glyphs, 32 px, for light and dark panels
 //   src-tauri/icons/source.png                         1024 px app icon master (neon rose, black squircle)
 //   packages/ui/public/favicon.svg, favicon.png        the menu bar glyph in neon pink (the traced
 //                                                       strokes are illegible at tab size), and a 64 px PNG
 // Usage: node scripts/make-icon.mjs, then regenerate the bundle icons from source.png (see README).
+//        node scripts/make-icon.mjs --linux-tray renders only the Linux tray glyphs.
 import { readFileSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -39,6 +41,28 @@ const glyphs = {
 	working: glyph({ dashed: true }),
 	"needs-you": glyph({ badge: true }),
 	unavailable: glyph({ opacity: 0.4 }),
+};
+
+// Linux panels are light or dark and do not tint icons: a light gray glyph over a dark
+// outline reads on both. The badge keeps the Dot's amber.
+function linuxGlyph(options) {
+	const outline = glyph(options)
+		.replace('stroke-width="1.25"', 'stroke-width="2.9"')
+		.replaceAll("#000", "#161015")
+		.replace('fill="#161015" stroke="none"', 'fill="#161015" stroke="#161015" stroke-width="1.6"');
+	const face = glyph(options)
+		.replaceAll('id="m"', 'id="m2"')
+		.replace("url(#m)", "url(#m2)")
+		.replace('stroke="#000"', 'stroke="#ececec"')
+		.replace('fill="#000"', 'fill="#f5a524"');
+	return `<g opacity="0.85">${outline}</g>${face}`;
+}
+
+const linuxGlyphs = {
+	ready: linuxGlyph({}),
+	working: linuxGlyph({ dashed: true }),
+	"needs-you": linuxGlyph({ badge: true }),
+	unavailable: linuxGlyph({ opacity: 0.45 }),
 };
 
 const favicon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18"><title>Gentle Dot</title>${glyph({}).replaceAll("#000", "#ff2d7a")}</svg>\n`;
@@ -88,7 +112,15 @@ async function render(svg, size, out) {
 	console.log(`wrote ${out} (${size}px)`);
 }
 
-await mkdir(path("../src-tauri/icons/tray"), { recursive: true });
+await mkdir(path("../src-tauri/icons/tray/linux"), { recursive: true });
+for (const [name, body] of Object.entries(linuxGlyphs)) {
+	const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18">${body}</svg>`;
+	await render(svg, 32, path(`../src-tauri/icons/tray/linux/${name}.png`));
+}
+if (process.argv.includes("--linux-tray")) {
+	await browser.close();
+	process.exit(0);
+}
 for (const [name, body] of Object.entries(glyphs)) {
 	const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18">${body}</svg>`;
 	await render(svg, 18, path(`../src-tauri/icons/tray/${name}.png`));

@@ -236,14 +236,14 @@ The UI shows one endless chat: no conversations list, no new conversation, and t
 
 ## 9. Desktop shell contract (Tauri 2 <-> UI)
 
-The desktop app bundles the built UI (`packages/ui/dist/app`) as its frontend, so its origin is `tauri://localhost`, which the daemon allows. It has no dock icon (macOS accessory activation policy).
+The desktop app bundles the built UI (`packages/ui/dist/app`) as its frontend, so its origin is `tauri://localhost`, which the daemon allows. It has no dock icon (macOS accessory activation policy). It also runs on Linux (S13); the differences are under "Linux" below.
 
 ### Windows
 
 | Label | Size | URL | Properties |
 |---|---|---|---|
-| `dot` | 72 × 72 pt (the rose in a 66 pt black disc) | `index.html?surface=dot` | transparent outside the disc, no decorations, always on top, not resizable, skip taskbar, visible on all workspaces, shadow off; placed in logical points |
-| `panel` | 420 × 640 | `index.html?surface=panel` | transparent with macOS vibrancy (`HudWindow`), no decorations, always on top, hidden at start, skip taskbar |
+| `dot` | 72 × 72 pt (the rose in a 66 pt black disc) | `index.html?surface=dot` | title `Gentle Dot`; transparent outside the disc, no decorations, always on top, not resizable, skip taskbar, visible on all workspaces, shadow off; placed in logical points |
+| `panel` | 420 × 640 | `index.html?surface=panel` (Linux: `&effects=none`) | title `Gentle Dot Panel`; transparent with macOS vibrancy (`HudWindow`), no decorations, always on top, hidden at start, skip taskbar. With `effects=none` the UI sets `data-effects="none"` on `<html>` and paints the panel opaque (`--bg`, no backdrop blur). |
 
 When the panel opens, it is placed next to the Dot on the side with more room, and it stays inside the monitor.
 
@@ -268,6 +268,20 @@ The Dot drags with `getCurrentWindow().startDragging()` (permission `core:window
 ### Menu bar and shortcut
 
 Tray menu: Open (`⌥ Space`), New conversation (only with `GENTLE_DOT_CONVERSATIONS=1`, read like the daemon reads it), Open in browser, Restart assistant, Launch at login (check item), Quit. The global shortcut `Alt+Space` (configurable as `shortcut` in `config.json`) toggles the panel. Launch at login uses `tauri-plugin-autostart`; Open in browser uses `tauri-plugin-opener` with `webUrl`.
+
+### Second launch and `--toggle`
+
+The app is single-instance (`tauri-plugin-single-instance`; D-Bus on Linux). A second launch hands its arguments to the running app and exits: `--toggle` toggles the panel, anything else shows it. A first launch with `--toggle` opens the panel once the app is up. Desktop shortcuts bind `gentle-dot --toggle` where the app cannot register its own (Wayland).
+
+### Linux
+
+`src/platform.rs` holds the decisions, as pure functions of the environment:
+
+- GNOME on Wayland (Debian, Ubuntu): before GTK starts, the app sets `GDK_BACKEND=x11` when the session is Wayland, the desktop is not Hyprland (`HYPRLAND_INSTANCE_SIGNATURE`, or `Hyprland` in `XDG_CURRENT_DESKTOP`), `DISPLAY` is set (XWayland), and `GDK_BACKEND` is unset. Under XWayland the app places, raises, and snaps its windows as on macOS. The `Alt+Space` grab only sees keys while an X11 window has focus, so the documented shortcut is a GNOME custom shortcut running `gentle-dot --toggle`.
+- Native Wayland (Hyprland on Omarchy, or a user-chosen `GDK_BACKEND=wayland`): the compositor places windows, so the app skips restoring and snapping the Dot, skips placing the panel, and does not register the global shortcut. Hyprland window rules matched by title float and pin both windows and place them; a `bind` runs `gentle-dot --toggle` (`scripts/linux/hyprland/`, in `hyprland.lua` and `hyprland.conf` forms).
+- Window sizes: GTK sizes a non-resizable window to its content (the Dot came out 200 × 200 in an X11 test), so on Linux the Dot is resizable with equal minimum and maximum sizes of 72 × 72. A panel that was never shown reports 0 × 0, so placement uses the fixed `PANEL_SIZE`.
+- Tray: Linux trays do not tint template images, so `icons/tray/linux/` holds 32 px glyphs in light gray over a dark outline; GNOME shows them through the AppIndicator extension.
+- Delivery is from source (`scripts/linux/setup-debian.sh`, `setup-arch.sh`), because `build.rs` records the build machine's paths. Tester checklist: `docs/linux-testing.md`.
 
 ### Daemon lifecycle
 

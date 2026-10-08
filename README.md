@@ -27,6 +27,17 @@ PATH=/opt/homebrew/opt/rustup/bin:$PATH pnpm --filter @gentle-dot/desktop dev
 
 The app puts the Dot on the desktop and an item in the menu bar, and `⌥ Space` opens the panel. If the daemon is not running, the app starts it. See [apps/desktop/README.md](apps/desktop/README.md).
 
+## Desktop app (Linux)
+
+Debian and Ubuntu (GNOME) and Omarchy (Hyprland) build the app from source with one script, which asks before using sudo for system packages:
+
+```sh
+scripts/linux/setup-debian.sh   # Debian, Ubuntu
+scripts/linux/setup-arch.sh     # Omarchy, Arch
+```
+
+Wayland differences and the tester checklist: [apps/desktop/README.md](apps/desktop/README.md#linux) and [docs/linux-testing.md](docs/linux-testing.md).
+
 ## Server
 
 `Dockerfile` and `compose.yaml` run the same daemon on a VPS behind HTTPS. See [docs/deploy-vps.md](docs/deploy-vps.md).

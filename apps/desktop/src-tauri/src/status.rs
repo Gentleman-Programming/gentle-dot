@@ -1,8 +1,11 @@
 //! Menu bar tooltip and glyph for each `AgentState` (protocol v1).
 
-/// The menu bar rose (`docs/brand/rose-glyph.svg`), one template image per
-/// state family. The PNGs are 36 px, drawn at 18 pt on Retina menu bars, and
-/// rendered by `apps/desktop/scripts/render-icons.mjs`.
+use crate::platform::Os;
+
+/// The menu bar rose (`docs/brand/rose-glyph.svg`), one image per state family,
+/// rendered by `apps/desktop/scripts/make-icon.mjs`. On macOS they are 36 px template
+/// images, drawn at 18 pt on Retina menu bars. Linux panels can be light or dark and
+/// do not tint icons, so Linux gets 32 px glyphs in a light gray with a dark outline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayGlyph {
     Ready,
@@ -23,6 +26,21 @@ impl TrayGlyph {
             Self::Unavailable => include_bytes!("../icons/tray/unavailable@2x.png"),
         }
     }
+
+    pub fn image(self, os: Os) -> &'static [u8] {
+        match (os, self) {
+            (Os::MacOs, _) => self.png(),
+            (Os::Linux, Self::Ready) => include_bytes!("../icons/tray/linux/ready.png"),
+            (Os::Linux, Self::Working) => include_bytes!("../icons/tray/linux/working.png"),
+            (Os::Linux, Self::NeedsYou) => include_bytes!("../icons/tray/linux/needs-you.png"),
+            (Os::Linux, Self::Unavailable) => include_bytes!("../icons/tray/linux/unavailable.png"),
+        }
+    }
+}
+
+/// Whether the tray tints the glyph itself (macOS template images).
+pub fn is_template(os: Os) -> bool {
+    os == Os::MacOs
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +116,31 @@ mod tests {
                 assert_ne!(a.png(), b.png(), "{a:?} and {b:?}");
             }
         }
+    }
+
+    #[test]
+    fn linux_panels_get_their_own_32_px_glyphs() {
+        let glyphs = [TrayGlyph::Ready, TrayGlyph::Working, TrayGlyph::NeedsYou, TrayGlyph::Unavailable];
+        for glyph in glyphs {
+            let png = glyph.image(Os::Linux);
+            assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "{glyph:?}");
+            let width = u32::from_be_bytes(png[16..20].try_into().unwrap());
+            let height = u32::from_be_bytes(png[20..24].try_into().unwrap());
+            assert_eq!((width, height), (32, 32), "{glyph:?}");
+            assert_ne!(png, glyph.png(), "{glyph:?}");
+            assert_eq!(glyph.image(Os::MacOs), glyph.png(), "{glyph:?}");
+        }
+        for (i, a) in glyphs.iter().enumerate() {
+            for b in &glyphs[i + 1..] {
+                assert_ne!(a.image(Os::Linux), b.image(Os::Linux), "{a:?} and {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_the_macos_menu_bar_tints_template_glyphs() {
+        assert!(is_template(Os::MacOs));
+        assert!(!is_template(Os::Linux));
     }
 
     #[test]
