@@ -35,9 +35,9 @@ Branch: `feat/gentle-dot` · Delivery strategy: `single-pr` (user choice, L7; fo
 
 | ID | Specs | Route | Status | Commit / evidence | Scope |
 |---|---|---|---|---|---|
-| T0 | S8 | inline | done (uncommitted) | readback OK; no commit yet | Design (`docs/design.md`) and this plan |
-| T1 | S3, S6 | inline | pending | — | Scaffold the pnpm workspace (`packages/protocol`, `packages/daemon`, `packages/ui`, `apps/desktop` placeholder), TypeScript strict, Vitest, lint, README |
-| T2 | S3, S5 | inline | pending | — | Agent supervisor: spawn, strict JSONL framing, id correlation, fake agent for tests, restart with backoff, reopen last session |
+| T0 | S8 | inline | done | `5ec596c` readback OK | Design (`docs/design.md`) and this plan |
+| T1 | S3, S6 | inline | done | `605b6c2` typecheck, lint, 2 tests green | Scaffold the pnpm workspace (`packages/protocol`, `packages/daemon`, `packages/ui`, `apps/desktop` placeholder), TypeScript strict, Vitest, lint, README |
+| T2 | S3, S5 | inline | done | `c199fef` RED (missing modules) → GREEN 14 daemon tests, 3 consecutive runs | Agent supervisor: spawn, strict JSONL framing, id correlation, fake agent for tests, restart with backoff, reopen last session |
 | T3 | S2, S6 | inline | pending | — | Gateway: HTTP static + `/health`, WebSocket protocol v1, token + Origin checks, Pi RPC mapping (design §4) |
 | T4 | S4 | inline | pending | — | White-label: verify `--append-system-prompt` passthrough, `identity.md`, event sanitizer, tool-kind mapping, error neutralization |
 | T5 | S2 | inline (writer only if parallel with T7) | pending | — | Web UI: chat, streaming Markdown, activity rows, conversations, composer with Stop/steer, visual tokens |
@@ -57,4 +57,5 @@ Environment notes: Node v24.14.1 and pnpm are present. `cargo` is on PATH but `r
 - **L5 (2026-10-08, evidence):** `gentle-shell --mode rpc --no-session` returned `get_state` success (model reported) and `get_commands` with 82 commands including `gentle:*`, and emitted `extension_ui_request` `setStatus`/`setWidget`/`notify` at startup, so branding reaches RPC clients and S4 needs the sanitizer. Pi RPC docs: `custom()` returns undefined in RPC mode, while `select`/`confirm`/`input`/`editor`/`notify`/`setStatus`/`setWidget`/`setTitle` are forwarded. `extensions/ask-user-choice.ts` already falls back to `ctx.ui.select` + `ctx.ui.input` for RPC hosts. Pi CLI has `--append-system-prompt` and `--session-dir`.
 - **L6 (2026-10-08, decision):** Pi Durable deferred. Recovery relies on persisted Pi sessions plus Engram, per L2; it is reconsidered only for unattended or scheduled work.
 - **L7 (2026-10-08, user):** "Un solo pr, instala lo que necesites y dale nomás" — plan approved, delivery `single-pr` with size exception, installs authorized (Rust stable via rustup).
-- **Next step:** T1.
+- **L8 (2026-10-08, evidence):** Rust stable 1.99.0 installed via rustup (Homebrew); the nix `cargo` precedes it on PATH, so Tauri commands prepend `/opt/homebrew/opt/rustup/bin`. Toolchain versions: TypeScript 7, Vitest 5, Biome 2, pnpm 11.5. T2 risk tier: medium (process supervision covered by integration tests with a fake agent; the fake delays `crash` exit because macOS pipes are asynchronous).
+- **Next step:** T3.
