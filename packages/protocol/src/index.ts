@@ -78,6 +78,8 @@ export interface AuthPrompt {
 	message: string;
 	placeholder?: string;
 	options?: { id: string; label: string; description?: string }[];
+	/** The answer may be left empty. */
+	optional?: boolean;
 }
 
 export type AuthEvent =
@@ -89,8 +91,18 @@ export type AuthEvent =
 /** What a connector may do: only read, or also act after the user approves each action. */
 export type ConnectorMode = "read_only" | "read_write";
 
-/** `off`: not added or turned off; `error`: the last sign-in failed. */
-export type ConnectorStatus = "off" | "needs_signin" | "connected" | "error";
+/** `off`: not added or turned off; `needs_setup`: a value the user types is missing; `error`: the last sign-in failed. */
+export type ConnectorStatus = "off" | "needs_setup" | "needs_signin" | "connected" | "error";
+
+/** In-app steps for a connector the user sets up with an app or bot of their own. */
+export interface ConnectorGuide {
+	steps: string[];
+	links: { label: string; url: string }[];
+	/** The address to register as the app's redirect URL, for a sign-in with the user's own OAuth app. */
+	redirectUrl?: string;
+	/** Something to know before starting, for example a preview program or a sign-in limit. */
+	note?: string;
+}
 
 /** A service the assistant can connect to (an MCP server the daemon manages). */
 export interface ConnectorInfo {
@@ -104,6 +116,46 @@ export interface ConnectorInfo {
 	enabled: boolean;
 	mode: ConnectorMode;
 	status: ConnectorStatus;
+	/** Steps shown before "Connect", for connectors set up with the user's own app or bot. */
+	guide?: ConnectorGuide;
+	/** A server the user added from the assistant's draft or an import; it has no curated read-only list. */
+	custom?: { origin: string; summary: string };
+	/** It has no sign-in of its own (it uses a token, or none). */
+	noSignIn?: true;
+}
+
+/** A connector the assistant drafted with `propose_connector`, waiting for the user's answer. */
+export interface ConnectorDraft {
+	draftId: string;
+	name: string;
+	description: string;
+	transport: "stdio" | "http";
+	command?: string;
+	args?: string[];
+	url?: string;
+	/** Secrets the server needs, by name; the app asks the user for each one. */
+	envNames: string[];
+	needsOAuth: boolean;
+}
+
+/** An MCP server found in another app's configuration; values never leave the daemon. */
+export interface ImportCandidate {
+	id: string;
+	name: string;
+	/** The apps it was found in. */
+	sources: string[];
+	transport: "stdio" | "http" | "sse";
+	/** The command line or address, with values that look secret masked. */
+	summary: string;
+	envNames: string[];
+	headerNames: string[];
+	/** Values the user types after the import (VS Code inputs), by their description. */
+	inputs: string[];
+	importable: boolean;
+	/** Why it cannot be imported. */
+	reason?: string;
+	/** The connector that already has this server. */
+	duplicateOf?: string;
 }
 
 /** Reasoning effort levels the engine accepts. */
@@ -201,10 +253,18 @@ export type ClientMessage =
 	| { type: "profile_save_current"; name: string }
 	| { type: "connectors_list" }
 	| {
-			type: "connector_connect" | "connector_signin" | "connector_disconnect" | "connector_remove";
+			type:
+				| "connector_connect"
+				| "connector_signin"
+				| "connector_setup"
+				| "connector_disconnect"
+				| "connector_remove";
 			connectorId: string;
 	  }
-	| { type: "connector_mode"; connectorId: string; mode: ConnectorMode };
+	| { type: "connector_mode"; connectorId: string; mode: ConnectorMode }
+	| { type: "connector_draft_reply"; draftId: string; approve: boolean }
+	| { type: "connectors_scan" }
+	| { type: "connector_import"; ids: string[] };
 
 export type ServerPayload =
 	| { type: "ready"; agentState: AgentState; conversationId?: string; model?: string; features?: Features }
@@ -253,7 +313,11 @@ export type ServerPayload =
 	  }
 	| { type: "profiles_imported"; imported: { from: string; to: string }[]; missingProviders: string[] }
 	/** Connector sign-ins reuse `auth_event`, `auth_prompt`, and `auth_done`, with flow ids starting `connector-`. */
-	| { type: "connectors"; connectors: ConnectorInfo[]; open?: boolean };
+	| { type: "connectors"; connectors: ConnectorInfo[]; open?: boolean }
+	| { type: "connector_draft"; draft: ConnectorDraft }
+	| { type: "connector_draft_resolved"; draftId: string; approved: boolean }
+	| { type: "connector_imports"; found: ImportCandidate[] }
+	| { type: "connector_imported"; names: string[] };
 
 /** Every daemon message carries a per-connection, monotonic `seq`. */
 export type ServerMessage = ServerPayload & { seq: number };
@@ -263,6 +327,8 @@ const isOptional = (value: unknown, check: (v: unknown) => boolean) => value ===
 const MAX_TEXT = 100_000;
 const CONNECTOR_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const isConnectorId = (value: unknown): value is string => isString(value) && CONNECTOR_ID.test(value);
+const isShortString = (value: unknown): value is string => isString(value) && value.length <= 200;
+const MAX_IMPORTS = 200;
 
 /**
  * Reads the complete queues from the engine's `queue_update` record. A missing
@@ -350,6 +416,7 @@ export function parseClientMessage(raw: string): ClientMessage | undefined {
 			return isValidProfileName(m.name) ? { type: m.type, name: m.name } : undefined;
 		case "connector_connect":
 		case "connector_signin":
+		case "connector_setup":
 		case "connector_disconnect":
 		case "connector_remove":
 			return isConnectorId(m.connectorId) ? { type: m.type, connectorId: m.connectorId } : undefined;
@@ -357,7 +424,16 @@ export function parseClientMessage(raw: string): ClientMessage | undefined {
 			return isConnectorId(m.connectorId) && (m.mode === "read_only" || m.mode === "read_write")
 				? { type: "connector_mode", connectorId: m.connectorId, mode: m.mode }
 				: undefined;
+		case "connector_draft_reply":
+			return isShortString(m.draftId) && typeof m.approve === "boolean"
+				? { type: "connector_draft_reply", draftId: m.draftId, approve: m.approve }
+				: undefined;
+		case "connector_import":
+			return Array.isArray(m.ids) && m.ids.length <= MAX_IMPORTS && m.ids.every(isShortString)
+				? { type: "connector_import", ids: m.ids }
+				: undefined;
 		case "connectors_list":
+		case "connectors_scan":
 		case "profiles_list":
 		case "profile_import":
 		case "abort":

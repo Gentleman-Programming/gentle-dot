@@ -19,6 +19,7 @@ import {
 	pageHistory,
 	resolveConversation,
 } from "./conversations.ts";
+import { DRAFT_STATUS_KEY } from "./extensions/approval-guard.ts";
 import { describeTool, textOf } from "./presentation.ts";
 import {
 	LiveModelSwitch,
@@ -92,6 +93,8 @@ export class DotBridge {
 	private nextMessage = 0;
 	private assistantId: string | undefined;
 	private restartPending = false;
+	private restarting = false;
+	private restartAgain = false;
 	/** The running answer is being stopped on purpose, so its end is not an error. */
 	private stopRequested = false;
 	/** The conversation switch in progress; messages sent meanwhile wait for it. */
@@ -142,6 +145,8 @@ export class DotBridge {
 		});
 		if (this.queued()) this.deliver(client, { type: "queue", ...this.queue });
 		for (const { ask } of this.asks.values()) this.deliver(client, { type: "ask", ask });
+		for (const draft of this.options.connectors?.drafts() ?? [])
+			this.deliver(client, { type: "connector_draft", draft });
 		if (this.interrupted) this.deliver(client, { type: "interrupted" });
 		return () => {
 			this.clients.delete(client);
@@ -328,10 +333,28 @@ export class DotBridge {
 				return;
 			case "connector_connect":
 			case "connector_signin":
+			case "connector_setup":
 			case "connector_disconnect":
 			case "connector_mode":
 			case "connector_remove":
 				await this.connectorCommand(client, message);
+				return;
+			case "connector_draft_reply": {
+				const emit = (payload: ServerPayload) => this.deliver(client, payload);
+				const { draftId, approve } = message;
+				const refused = this.requireConnectors().decideDraft(client, draftId, approve, emit);
+				if (refused) this.deliver(client, { type: "error", ...refused });
+				else this.broadcast({ type: "connector_draft_resolved", draftId, approved: approve });
+				return;
+			}
+			case "connectors_scan":
+				this.deliver(client, { type: "connector_imports", found: this.requireConnectors().scan() });
+				return;
+			case "connector_import":
+				this.deliver(client, {
+					type: "connector_imported",
+					names: this.requireConnectors().importServers(message.ids),
+				});
 				return;
 			case "profile_save":
 			case "profile_rename":
@@ -466,6 +489,9 @@ export class DotBridge {
 			case "connector_signin":
 				refused = connectors.signIn(client, message.connectorId, emit);
 				break;
+			case "connector_setup":
+				refused = connectors.setup(client, message.connectorId, emit);
+				break;
 			case "connector_disconnect":
 				refused = connectors.disconnect(message.connectorId);
 				break;
@@ -477,6 +503,20 @@ export class DotBridge {
 				break;
 		}
 		if (refused) this.deliver(client, { type: "error", ...refused });
+	}
+
+	/**
+	 * A connector the assistant drafted with `propose_connector`. It reaches the daemon on the
+	 * engine's own output, and every window shows it as a card; nothing changes until the user answers.
+	 */
+	private onConnectorDraft(text: unknown): void {
+		const draft = typeof text === "string" ? this.options.connectors?.propose(text) : undefined;
+		if (!draft) {
+			this.log("ignored a malformed connector draft");
+			return;
+		}
+		this.log(`the assistant drafted a connector: ${draft.name}`);
+		this.broadcast({ type: "connector_draft", draft });
 	}
 
 	/** The connector files were changed outside the Connectors screen and put back. */
@@ -601,9 +641,23 @@ export class DotBridge {
 		this.restartAgent();
 	}
 
+	/** Restarts the engine; changes that arrive during a restart get one more, so the last one is read. */
 	private restartAgent(): void {
 		this.restartPending = false;
-		this.supervisor.restart().catch((error: Error) => this.log(`agent restart failed: ${error.message}`));
+		if (this.restarting) {
+			this.restartAgain = true;
+			return;
+		}
+		this.restarting = true;
+		this.supervisor
+			.restart()
+			.catch((error: Error) => this.log(`agent restart failed: ${error.message}`))
+			.finally(() => {
+				this.restarting = false;
+				if (!this.restartAgain) return;
+				this.restartAgain = false;
+				this.restartAgent();
+			});
 	}
 
 	/** A profile applied while the assistant was busy switches the model now. */
@@ -790,6 +844,10 @@ export class DotBridge {
 				event.notifyType === "error" ? "error" : event.notifyType === "warning" ? "warning" : "info";
 			if (shouldShowToast(level))
 				this.broadcast({ type: "toast", level, message: presentText(String(event.message ?? "")) });
+			return;
+		}
+		if (method === "setStatus" && event.statusKey === DRAFT_STATUS_KEY) {
+			this.onConnectorDraft(event.statusText);
 			return;
 		}
 		if (!DIALOG_METHODS.has(method) || !requestId) return;

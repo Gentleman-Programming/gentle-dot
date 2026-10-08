@@ -7,6 +7,7 @@
 //   "ask:select"   asks a select dialog and echoes the answer
 //   "ask:confirm"  asks a confirm dialog and echoes the answer
 //   "ask:approval" asks the approval guard's real confirm for a Notion page, and echoes the answer
+//   "propose:<json>" runs the approval guard's real propose_connector with <json> as its arguments
 //   "hang"         starts a run that only ends on abort (an aborted answer), or on a
 //                  session switch (Pi then ends it with an error: "This operation was aborted")
 //   "fail"         the provider fails: an answer that ends with stopReason "error"
@@ -351,6 +352,15 @@ async function runPrompt(text: string) {
 		if (decision.action !== "ask") throw new Error("the guard did not ask");
 		const answer = await askUi({ method: "confirm", title: decision.title, message: decision.message });
 		assistantText(answer.confirmed ? "Created the page" : "I did not create the page");
+		return endRun();
+	}
+	if (text.startsWith("propose:")) {
+		const { proposeConnector } = await import("../../src/extensions/approval-guard.ts");
+		const ui = {
+			setStatus: (statusKey: string, statusText: string | undefined) =>
+				out({ type: "extension_ui_request", id: randomUUID(), method: "setStatus", statusKey, statusText }),
+		};
+		assistantText(proposeConnector(JSON.parse(text.slice(8)), { hasUI: true, ui }));
 		return endRun();
 	}
 	assistantText(`Echo: ${text}`);

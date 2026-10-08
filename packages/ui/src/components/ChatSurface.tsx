@@ -5,6 +5,7 @@ import { activeTitle, type DotAction, type DotState, isBusy, needsAccount } from
 import { AccountsPanel } from "./AccountsPanel.tsx";
 import { AskCard } from "./AskCard.tsx";
 import { Composer } from "./Composer.tsx";
+import { ConnectorDraftCard } from "./ConnectorDraftCard.tsx";
 import { ConnectorsPanel } from "./ConnectorsPanel.tsx";
 import {
 	AccountsIcon,
@@ -237,6 +238,15 @@ export function ChatSurface({
 				) : null}
 				{state.asks.map((ask) => (
 					<AskCard key={ask.requestId} ask={ask} send={send} />
+				))}
+				{(state.connectors.drafts ?? []).map((draft) => (
+					<ConnectorDraftCard
+						key={draft.draftId}
+						draft={draft}
+						send={send}
+						// Its secrets are asked in the Connectors screen.
+						approved={() => dispatch({ type: "connector_started", connectorId: draft.name })}
+					/>
 				))}
 			</main>
 

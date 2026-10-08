@@ -288,6 +288,8 @@ function fakePi(tools: { name: string; annotations?: Record<string, boolean> }[]
 				if (event === "tool_call") handlers.push(handler);
 			},
 			getAllTools: () => tools,
+			// The guard also registers propose_connector (connector-drafts.test.ts covers it).
+			registerTool: () => {},
 		},
 	};
 }

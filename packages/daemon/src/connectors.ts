@@ -12,16 +12,51 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ConnectorInfo, ConnectorMode, ServerPayload } from "@gentle-dot/protocol";
+import type {
+	ConnectorDraft,
+	ConnectorGuide,
+	ConnectorInfo,
+	ConnectorMode,
+	ImportCandidate,
+	ServerPayload,
+} from "@gentle-dot/protocol";
+import { type ScannedServer, scanClientConfigs } from "./connector-import.ts";
 import { type ConnectorPolicy, POLICY_ENV } from "./extensions/approval-guard.ts";
 
-/** A service in the catalog: an official remote MCP server with OAuth sign-in. */
+/** A value the user types in the app (a token, client credentials); kept only in the assistant's private state. */
+export interface SetupField {
+	key: string;
+	/** What to ask, in plain words. */
+	label: string;
+	secret: boolean;
+	optional?: true;
+}
+
+/** An OAuth client of the user's own (the engine's `oauth` settings). */
+export interface OAuthTemplate {
+	clientId?: string;
+	clientSecret?: string;
+	callbackUrl?: string;
+	callbackPort?: number;
+	scope?: string;
+}
+
+/**
+ * A server entry of the engine's `mcp.json`. `${input:<key>}` stands for the value of a field; the
+ * values the engine resolves (env, headers, the client secret) are otherwise written in its syntax,
+ * so a literal is escaped with {@link literal}.
+ */
+export type ServerTemplate =
+	| { url: string; headers?: Record<string, string>; oauth?: OAuthTemplate }
+	| { command: string; args?: string[]; env?: Record<string, string>; cwd?: string };
+
+/** A service in the catalog: an official remote MCP server, or a community one the user sets up with a guide. */
 export interface CatalogEntry {
 	id: string;
 	name: string;
-	url: string;
 	reads: string;
 	sends: string;
 	/**
@@ -29,14 +64,34 @@ export interface CatalogEntry {
 	 * anything else needs the user's approval, and read-only mode hides it.
 	 */
 	readOnlyTools: readonly string[];
+	server: ServerTemplate;
+	/** Values the user types before connecting. */
+	fields?: readonly SetupField[];
+	/** Signs in through the engine's `mcp login` (OAuth). */
+	oauth: boolean;
+	/** Steps shown before "Connect". */
+	guide?: ConnectorGuide;
 }
 
-/** Official remote servers, checked against each provider's documentation on 2026-10-08. */
+/** Fixed loopback redirects for sign-ins with the user's own OAuth app, so they can be registered once. */
+export const SLACK_REDIRECT = "http://localhost:38417/callback";
+export const GMAIL_REDIRECT = "http://localhost:38418/callback";
+
+const CLIENT_ID: SetupField = { key: "client_id", label: "Client ID", secret: false };
+
+/** Where the value of a field goes in a server entry. */
+export const placeholder = (key: string) => `\${input:${key}}`;
+
+/**
+ * Official remote servers, checked against each provider's documentation on 2026-10-08, and Discord's
+ * community server (Discord has no official one), pinned to an exact version.
+ */
 export const CATALOG: readonly CatalogEntry[] = [
 	{
 		id: "notion",
 		name: "Notion",
-		url: "https://mcp.notion.com/mcp",
+		server: { url: "https://mcp.notion.com/mcp" },
+		oauth: true,
 		reads: "Search and read your pages, databases, and comments.",
 		sends: "Create and edit pages and add comments, after you approve each one.",
 		readOnlyTools: [
@@ -52,7 +107,8 @@ export const CATALOG: readonly CatalogEntry[] = [
 	{
 		id: "linear",
 		name: "Linear",
-		url: "https://mcp.linear.app/mcp",
+		server: { url: "https://mcp.linear.app/mcp" },
+		oauth: true,
 		reads: "Find and read issues, projects, cycles, and comments.",
 		sends: "Create and update issues, projects, and comments, after you approve each one.",
 		readOnlyTools: [
@@ -77,7 +133,8 @@ export const CATALOG: readonly CatalogEntry[] = [
 	{
 		id: "atlassian",
 		name: "Atlassian",
-		url: "https://mcp.atlassian.com/v2/mcp",
+		server: { url: "https://mcp.atlassian.com/v2/mcp" },
+		oauth: true,
 		reads: "Search and read Jira issues and Confluence pages.",
 		sends: "Create and edit Jira issues and Confluence pages, and comment, after you approve each one.",
 		readOnlyTools: [
@@ -98,32 +155,296 @@ export const CATALOG: readonly CatalogEntry[] = [
 			"listConfluenceComments",
 		],
 	},
+	{
+		id: "discord",
+		name: "Discord",
+		// Community server (MIT, github.com/PaSympa/discord-mcp); it declares `readOnlyHint` on its tools.
+		server: {
+			command: "npx",
+			args: ["-y", "@pasympa/discord-mcp@2.2.0"],
+			env: { DISCORD_TOKEN: placeholder("token") },
+		},
+		fields: [
+			{ key: "token", label: "Bot token (from the Bot page of your Discord application)", secret: true },
+		],
+		oauth: false,
+		reads: "Read channels, messages, threads, and members in the servers your bot was invited to.",
+		sends: "Send and react to messages and manage channels as your bot, after you approve each one.",
+		readOnlyTools: [
+			"discord_list_guilds",
+			"discord_get_guild_info",
+			"discord_list_channels",
+			"discord_find_channel_by_name",
+			"discord_read_messages",
+			"discord_search_messages",
+			"discord_search_guild_messages",
+			"discord_get_reactions",
+			"discord_get_message_attachments",
+			"discord_fetch_pinned_messages",
+			"discord_get_forum_channels",
+			"discord_get_forum_post",
+			"discord_list_forum_threads",
+			"discord_get_forum_tags",
+			"discord_list_members",
+			"discord_get_member_info",
+			"discord_search_members",
+			"discord_list_roles",
+			"discord_list_scheduled_events",
+			"discord_get_scheduled_event",
+		],
+		guide: {
+			steps: [
+				"Open the Discord Developer Portal and choose New Application. Give it a name, for example Gentle Dot.",
+				"Open the Bot page and choose Reset Token. Copy the token and keep it for the last step.",
+				"On the same page, under Privileged Gateway Intents, turn on Message Content Intent and Server Members Intent, then save.",
+				"Open OAuth2, then URL Generator. Check the scope bot, then the permissions View Channels, Read Message History, Send Messages, Send Messages in Threads, and Add Reactions.",
+				"Open the generated address, pick your server, and choose Authorize. The bot can only see the servers you invite it to.",
+				"Choose Continue here and paste the bot token. It stays on this computer, in the assistant's private settings.",
+			],
+			links: [{ label: "Discord Developer Portal", url: "https://discord.com/developers/applications" }],
+			note: "This uses a community server, not one made by Discord. Your bot acts in Discord with the permissions you gave it.",
+		},
+	},
+	{
+		id: "slack",
+		name: "Slack",
+		server: {
+			url: "https://mcp.slack.com/mcp",
+			oauth: {
+				clientId: placeholder("client_id"),
+				clientSecret: placeholder("client_secret"),
+				callbackUrl: SLACK_REDIRECT,
+			},
+		},
+		fields: [
+			CLIENT_ID,
+			{
+				key: "client_secret",
+				label: "Client Secret (leave it empty if your app uses PKCE)",
+				secret: true,
+				optional: true,
+			},
+		],
+		oauth: true,
+		reads: "Search messages, channels, files, and people, and read channels and threads.",
+		sends: "Send and schedule messages, add reactions, and create canvases, after you approve each one.",
+		readOnlyTools: [
+			"slack_search_public",
+			"slack_search_public_and_private",
+			"slack_search_channels",
+			"slack_search_users",
+			"slack_read_channel",
+			"slack_read_thread",
+			"slack_read_canvas",
+			"slack_read_user_profile",
+			"slack_list_channel_members",
+			"slack_get_reactions",
+			"slack_read_file",
+		],
+		guide: {
+			steps: [
+				"Open Slack's app page and choose Create New App, then From scratch. Pick your workspace.",
+				"Open OAuth & Permissions. Under Redirect URLs, add the address below and save it.",
+				"On the same page, turn on PKCE (Slack only accepts a redirect to this computer with it).",
+				"Under User Token Scopes, add search:read.public, search:read.private, search:read.users, channels:history, groups:history, im:history, mpim:history, channels:read, groups:read, users:read, canvases:read, reactions:read, and chat:write.",
+				"Open Basic Information and copy the Client ID (and the Client Secret, if you want to use it).",
+				"Choose Continue here, paste them, and approve access in the page that opens.",
+			],
+			links: [
+				{ label: "Slack apps", url: "https://api.slack.com/apps" },
+				{ label: "Slack's MCP server guide", url: "https://docs.slack.dev/ai/slack-mcp-server" },
+			],
+			redirectUrl: SLACK_REDIRECT,
+			note: "Your workspace admin may need to approve the app. With PKCE on, Slack asks you to sign in again every 30 days.",
+		},
+	},
+	{
+		id: "gmail",
+		name: "Gmail",
+		server: {
+			url: "https://gmailmcp.googleapis.com/mcp/v1",
+			oauth: {
+				clientId: placeholder("client_id"),
+				clientSecret: placeholder("client_secret"),
+				callbackUrl: GMAIL_REDIRECT,
+				scope: "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose",
+			},
+		},
+		fields: [CLIENT_ID, { key: "client_secret", label: "Client Secret", secret: true }],
+		oauth: true,
+		reads: "Search and read your email threads, drafts, and labels.",
+		sends: "Create drafts and label messages, after you approve each one. It never sends mail.",
+		readOnlyTools: ["search_threads", "get_thread", "get_message", "list_drafts", "list_labels"],
+		guide: {
+			steps: [
+				"In the Google Cloud console, create a project (or pick one of yours).",
+				"Enable the Gmail API and the Gmail MCP API for that project.",
+				"Open Google Auth Platform, then Branding, and choose Get Started. Name the app, pick your email, choose External (or Internal for a Workspace), and finish.",
+				"Open Audience and add your own address as a test user. Open Data Access and add the scopes gmail.readonly and gmail.compose.",
+				"Open Clients, choose Create Client, then Web application. Add the address below as an Authorized redirect URI, create it, and copy the Client ID and the Client Secret.",
+				"Choose Continue here, paste them, and approve access in the page that opens.",
+			],
+			links: [
+				{ label: "Google Cloud console", url: "https://console.cloud.google.com/" },
+				{
+					label: "Gmail MCP server guide",
+					url: "https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server",
+				},
+			],
+			redirectUrl: GMAIL_REDIRECT,
+			note: "Gmail's server is a Developer Preview: your account must be in the Google Workspace Developer Preview Program. While the app is in testing, Google asks you to sign in again every 7 days.",
+		},
+	},
 ];
 
 const catalogEntry = (id: string) => CATALOG.find((entry) => entry.id === id);
 
+/** A server the user added from the assistant's draft or an import. */
+export interface CustomConnector {
+	name: string;
+	description: string;
+	/** Where it came from, in plain words. */
+	origin: string;
+	server: ServerTemplate;
+	fields: SetupField[];
+	oauth: boolean;
+}
+
+export interface SavedConnector {
+	enabled: boolean;
+	mode: ConnectorMode;
+	/** The values the user typed, by field key; never sent to a window or written to the log. */
+	values?: Record<string, string>;
+	custom?: CustomConnector;
+}
+
 export interface ConnectorsState {
-	connectors: Record<string, { enabled: boolean; mode: ConnectorMode }>;
+	connectors: Record<string, SavedConnector>;
+}
+
+/** What a connector is, from the catalog or from the user's own server. */
+interface ConnectorSpec {
+	name: string;
+	reads: string;
+	sends: string;
+	readOnlyTools: readonly string[];
+	server: ServerTemplate;
+	fields: readonly SetupField[];
+	oauth: boolean;
+	guide?: ConnectorGuide;
+	custom?: CustomConnector;
+}
+
+function specOf(id: string, saved: SavedConnector | undefined): ConnectorSpec | undefined {
+	const entry = catalogEntry(id);
+	if (entry) return { ...entry, fields: entry.fields ?? [] };
+	const custom = saved?.custom;
+	if (!custom) return undefined;
+	return {
+		name: custom.name,
+		reads: custom.description || "Uses the tools of this server.",
+		sends: "Uses every tool of this server, after you approve each action.",
+		readOnlyTools: [],
+		server: custom.server,
+		fields: custom.fields,
+		oauth: custom.oauth,
+		custom,
+	};
+}
+
+/** True when a value the user must type is missing. */
+function missingValues(spec: ConnectorSpec, values: Record<string, string> | undefined): boolean {
+	return spec.fields.some((field) => !field.optional && !values?.[field.key]);
+}
+
+/** `text` as a literal for a value the engine resolves: it would run a leading `!` and expand `$NAME`. */
+export function literal(text: string): string {
+	return text.replace(/\$/g, "$$$$").replace(/!/g, "$$!");
+}
+
+const PLACEHOLDER = /\$\$|\$\{input:([A-Za-z0-9_.-]{1,64})\}/g;
+
+/** The server entry with the user's values in place, or undefined while a required one is missing. */
+export function fillServer(
+	template: ServerTemplate,
+	fields: readonly SetupField[],
+	values: Record<string, string>,
+): ServerTemplate | undefined {
+	if (fields.some((field) => !field.optional && !values[field.key])) return undefined;
+	const keys = new Set(fields.map((field) => field.key));
+	const fill = (text: string, resolved: boolean) =>
+		text.replace(PLACEHOLDER, (match, key: string | undefined) => {
+			if (!key || !keys.has(key)) return match;
+			const value = values[key] ?? "";
+			return resolved ? literal(value) : value;
+		});
+	// An optional value left empty drops its entry instead of leaving an empty one.
+	const dropped = (text: string) => {
+		const key = /^\$\{input:([A-Za-z0-9_.-]{1,64})\}$/.exec(text)?.[1];
+		return key !== undefined && keys.has(key) && !values[key];
+	};
+	const record = (entries: Record<string, string> | undefined) => {
+		if (!entries) return undefined;
+		const out = Object.fromEntries(
+			Object.entries(entries)
+				.filter(([, text]) => !dropped(text))
+				.map(([key, text]) => [key, fill(text, true)]),
+		);
+		return Object.keys(out).length > 0 ? out : undefined;
+	};
+	if ("url" in template) {
+		const server: ServerTemplate = { url: fill(template.url, false) };
+		const headers = record(template.headers);
+		if (headers) server.headers = headers;
+		if (template.oauth) {
+			const oauth: OAuthTemplate = {};
+			for (const key of ["clientId", "clientSecret", "callbackUrl", "scope"] as const) {
+				const text = template.oauth[key];
+				if (text !== undefined && !dropped(text)) oauth[key] = fill(text, key === "clientSecret");
+			}
+			if (template.oauth.callbackPort !== undefined) oauth.callbackPort = template.oauth.callbackPort;
+			server.oauth = oauth;
+		}
+		return server;
+	}
+	const server: ServerTemplate = { command: fill(template.command, false) };
+	if (template.args) server.args = template.args.map((arg) => fill(arg, false));
+	const env = record(template.env);
+	if (env) server.env = env;
+	if (template.cwd !== undefined) server.cwd = fill(template.cwd, false);
+	return server;
+}
+
+/** The catalog's connectors first, then the user's own servers in the order they were added. */
+function ordered(state: ConnectorsState): [string, SavedConnector][] {
+	const entries = Object.entries(state.connectors);
+	return [
+		...CATALOG.flatMap((entry) => entries.filter(([id]) => id === entry.id)),
+		...entries.filter(([id, saved]) => !catalogEntry(id) && saved.custom),
+	];
 }
 
 /**
  * The engine's `mcp.json` for the added connectors. The assistant turns codemode off, so every
  * server is `direct`. Read only hides every tool (`*`) except the curated ones (exact names win
- * over patterns in the engine), so a tool the catalog does not know stays hidden.
+ * over patterns in the engine), so a tool the catalog does not know stays hidden; a server of the
+ * user's own has no curated list, so all of its tools are hidden. A connector that still waits for
+ * a value the user types is left out.
  */
 export function renderMcpJson(state: ConnectorsState): string {
 	const servers: Record<string, unknown> = {};
-	for (const entry of CATALOG) {
-		const saved = state.connectors[entry.id];
-		if (!saved) continue;
-		servers[entry.id] = {
-			url: entry.url,
+	for (const [id, saved] of ordered(state)) {
+		const spec = specOf(id, saved);
+		const server = spec && fillServer(spec.server, spec.fields, saved.values ?? {});
+		if (!spec || !server) continue;
+		servers[id] = {
+			...server,
 			exposure: "direct",
 			...(saved.mode === "read_only"
 				? {
 						toolExposure: {
 							"*": "hidden",
-							...Object.fromEntries(entry.readOnlyTools.map((tool) => [tool, "direct"])),
+							...Object.fromEntries(spec.readOnlyTools.map((tool) => [tool, "direct"])),
 						},
 					}
 				: {}),
@@ -261,9 +582,9 @@ export class ConnectorStore {
 	policy(): ConnectorPolicy {
 		const connectors: NonNullable<ConnectorPolicy["connectors"]> = {};
 		for (const [id, saved] of Object.entries(this.state().connectors)) {
-			const entry = catalogEntry(id);
-			if (entry && saved.enabled)
-				connectors[id] = { name: entry.name, mode: saved.mode, readOnlyTools: [...entry.readOnlyTools] };
+			const spec = specOf(id, saved);
+			if (spec && saved.enabled)
+				connectors[id] = { name: spec.name, mode: saved.mode, readOnlyTools: [...spec.readOnlyTools] };
 		}
 		return {
 			connectors,
@@ -281,17 +602,21 @@ export class ConnectorStore {
 	}
 
 	/**
-	 * True when the engine stored tokens for the connector (key `mcp__<id>|<url>`). Token values
-	 * are dropped while parsing, so they are never kept or passed on.
+	 * True when the engine stored tokens for the connector (key `mcp__<server>|<url>`, `-` as `_`).
+	 * Token values are dropped while parsing, so they are never kept or passed on.
 	 */
 	isSignedIn(id: string): boolean {
-		const entry = catalogEntry(id);
-		if (!entry || !existsSync(this.authFile)) return false;
+		const saved = this.saved.connectors[id];
+		const spec = specOf(id, saved);
+		const server = spec && fillServer(spec.server, spec.fields, saved?.values ?? {});
+		if (!server || !("url" in server) || !URL.canParse(server.url) || !existsSync(this.authFile))
+			return false;
 		try {
 			const states = JSON.parse(readFileSync(this.authFile, "utf8"), (key, value) =>
 				key === "tokens" && typeof value === "object" && value !== null ? {} : value,
 			) as Record<string, { tokens?: unknown } | undefined>;
-			return typeof states[`mcp__${id}|${new URL(entry.url).href}`]?.tokens === "object";
+			const key = `mcp__${id.replace(/-/g, "_")}|${new URL(server.url).href}`;
+			return typeof states[key]?.tokens === "object";
 		} catch {
 			return false;
 		}
@@ -342,21 +667,54 @@ export class ConnectorStore {
 	private load(): ConnectorsState {
 		try {
 			const saved = JSON.parse(readFileSync(this.file, "utf8")) as {
-				connectors?: Record<string, { enabled?: unknown; mode?: unknown }>;
+				connectors?: Record<string, Record<string, unknown> | undefined>;
 			};
 			const connectors: ConnectorsState["connectors"] = {};
 			for (const [id, value] of Object.entries(saved.connectors ?? {})) {
-				if (!catalogEntry(id)) continue;
-				connectors[id] = {
+				const custom = catalogEntry(id) ? undefined : parseCustom(value?.custom);
+				if (!catalogEntry(id) && !custom) continue;
+				const entry: SavedConnector = {
 					enabled: value?.enabled === true,
 					mode: value?.mode === "read_write" ? "read_write" : "read_only",
 				};
+				const values = stringRecord(value?.values);
+				if (values) entry.values = values;
+				if (custom) entry.custom = custom;
+				connectors[id] = entry;
 			}
 			return { connectors };
 		} catch {
 			return { connectors: {} };
 		}
 	}
+}
+
+function stringRecord(value: unknown): Record<string, string> | undefined {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	const entries = Object.entries(value).filter(
+		(entry): entry is [string, string] => typeof entry[1] === "string",
+	);
+	return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+/** A saved server of the user's own, or undefined when anything is malformed. */
+function parseCustom(value: unknown): CustomConnector | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+	const custom = value as Partial<CustomConnector>;
+	if (typeof custom.name !== "string" || typeof custom.origin !== "string") return undefined;
+	const server = custom.server as Record<string, unknown> | undefined;
+	if (typeof server?.url !== "string" && typeof server?.command !== "string") return undefined;
+	const fields = Array.isArray(custom.fields)
+		? custom.fields.filter((f): f is SetupField => typeof f?.key === "string" && typeof f.label === "string")
+		: [];
+	return {
+		name: custom.name,
+		description: typeof custom.description === "string" ? custom.description : "",
+		origin: custom.origin,
+		server: server as ServerTemplate,
+		fields,
+		oauth: custom.oauth === true,
+	};
 }
 
 function lstatOrUndefined(path: string) {
@@ -390,7 +748,13 @@ export const APPROVAL_GUARD = fileURLToPath(new URL("./extensions/approval-guard
 
 /** Why a connector action did not start; `message` is safe to show. */
 export type ConnectorRefusal = {
-	code: "connector_busy" | "unknown_connector" | "connector_not_added";
+	code:
+		| "connector_busy"
+		| "unknown_connector"
+		| "connector_not_added"
+		| "connector_no_setup"
+		| "connector_no_signin"
+		| "draft_not_found";
 	message: string;
 };
 
@@ -398,6 +762,9 @@ const REFUSALS = {
 	busy: { code: "connector_busy", message: "Another sign-in is in progress. Finish or cancel it first." },
 	unknown: { code: "unknown_connector", message: "That connector is not available." },
 	notAdded: { code: "connector_not_added", message: "Connect that service first." },
+	noSetup: { code: "connector_no_setup", message: "That connector has nothing to set up." },
+	noSignin: { code: "connector_no_signin", message: "That connector does not use a sign-in." },
+	noDraft: { code: "draft_not_found", message: "That draft is no longer waiting." },
 } as const satisfies Record<string, ConnectorRefusal>;
 
 type Emit = (payload: ServerPayload) => void;
@@ -416,8 +783,24 @@ interface Flow {
 	output: string;
 }
 
+/** The values a connector needs, asked one at a time in the window that started it. */
+interface Setup {
+	id: string;
+	connectorId: string;
+	owner: object;
+	emit: Emit;
+	fields: readonly SetupField[];
+	values: Record<string, string>;
+	finish: (values: Record<string, string>) => void;
+}
+
 const PASTE_PROMPT =
 	"If the browser shows an error page after you approve, copy the full address from its address bar and paste it here.";
+const DRAFT_ORIGIN = "Drafted by the assistant";
+const MAX_DRAFTS = 5;
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+/** Arguments named like these hold a secret; the value after them is masked in summaries. */
+const SECRET_NAME = /token|key|secret|password|passwd|auth|bearer|credential/i;
 
 export interface ConnectorManagerOptions {
 	store: ConnectorStore;
@@ -425,14 +808,19 @@ export interface ConnectorManagerOptions {
 	/** The engine's environment (its own HOME, XDG folders, and memory settings). */
 	env: NodeJS.ProcessEnv;
 	cwd: string;
+	/** The home folder "Import my MCP servers" scans; default the user's. */
+	importHome?: string;
 	log?: (line: string) => void;
 }
 
 /**
- * Connects, signs in, changes, and removes connectors. Sign-in runs the engine's own
- * `mcp login <server>` as a separate process (one at a time; its loopback callback port is
- * shared), relays the authorization URL, and can finish with an address the user pastes when
- * the browser could not reach this computer. Nothing typed or printed is logged.
+ * Connects, sets up, signs in, changes, and removes connectors. Values the user types (a bot token,
+ * an OAuth client) are asked one at a time with sign-in prompts, kept in the assistant's private
+ * state, and never logged or sent back. Sign-in runs the engine's own `mcp login <server>` as a
+ * separate process (one at a time; its loopback callback port is shared), relays the authorization
+ * URL, and can finish with an address the user pastes when the browser could not reach this
+ * computer. Drafts from the assistant and servers found in other apps are added only when the user
+ * says so, read only, with every tool hidden. Nothing typed or printed is logged.
  */
 export class ConnectorManager {
 	/** `restart`: the engine must restart (when idle) to read the new `mcp.json`. */
@@ -440,7 +828,10 @@ export class ConnectorManager {
 	/** A change to the connector files made outside the Connectors screen was put back. */
 	onBlocked: () => void = () => {};
 	private flow: Flow | undefined;
+	private setupFlow: Setup | undefined;
 	private readonly failed = new Set<string>();
+	private readonly waiting = new Map<string, ConnectorDraft>();
+	private scanned = new Map<string, ScannedServer>();
 	private readonly options: ConnectorManagerOptions;
 
 	constructor(options: ConnectorManagerOptions) {
@@ -459,52 +850,88 @@ export class ConnectorManager {
 
 	list(): ConnectorInfo[] {
 		const { connectors } = this.options.store.state();
-		return CATALOG.map((entry) => {
-			const saved = connectors[entry.id];
-			const status = !saved?.enabled
-				? "off"
-				: this.failed.has(entry.id)
-					? "error"
-					: this.options.store.isSignedIn(entry.id)
-						? "connected"
-						: "needs_signin";
-			return {
-				id: entry.id,
-				name: entry.name,
-				reads: entry.reads,
-				sends: entry.sends,
+		const ids = [
+			...CATALOG.map((entry) => entry.id),
+			...ordered({ connectors })
+				.map(([id]) => id)
+				.filter((id) => !catalogEntry(id)),
+		];
+		return ids.flatMap((id) => {
+			const saved = connectors[id];
+			const spec = specOf(id, saved);
+			if (!spec) return [];
+			const info: ConnectorInfo = {
+				id,
+				name: spec.name,
+				reads: spec.reads,
+				sends: spec.sends,
 				added: saved !== undefined,
 				enabled: saved?.enabled === true,
 				mode: saved?.mode ?? "read_only",
-				status,
+				status: this.status(id, spec, saved),
 			};
+			if (!spec.oauth) info.noSignIn = true;
+			if (spec.guide) info.guide = spec.guide;
+			if (spec.custom) info.custom = { origin: spec.custom.origin, summary: summarize(spec.custom.server) };
+			return [info];
 		});
 	}
 
-	/** Adds or turns on a connector, then signs in when it has no sign-in yet. */
+	/** Adds or turns on a connector: asks for the values it still needs, then signs in when it has no sign-in yet. */
 	connect(owner: object, id: string, emit: Emit): ConnectorRefusal | undefined {
-		if (!catalogEntry(id)) return REFUSALS.unknown;
-		if (this.flow) return REFUSALS.busy;
-		this.options.store.update((state) => {
-			state.connectors[id] = { enabled: true, mode: state.connectors[id]?.mode ?? "read_only" };
+		const saved = this.options.store.state().connectors[id];
+		const spec = specOf(id, saved);
+		if (!spec) return REFUSALS.unknown;
+		if (this.busy()) return REFUSALS.busy;
+		if (missingValues(spec, saved?.values)) {
+			// Nothing is added until every value is there.
+			this.askValues(owner, id, spec.fields, emit, (values, flowId) => {
+				this.save(id, (current) => ({ ...current, enabled: true, values }));
+				this.afterSetup(owner, id, emit, flowId);
+			});
+			return undefined;
+		}
+		this.save(id, (current) => ({ ...current, enabled: true }));
+		this.afterSetup(owner, id, emit, `connector-${randomUUID()}`);
+		return undefined;
+	}
+
+	/** Asks again for the values the user typed (a new token, another OAuth client). */
+	setup(owner: object, id: string, emit: Emit): ConnectorRefusal | undefined {
+		const saved = this.options.store.state().connectors[id];
+		const spec = specOf(id, saved);
+		if (!spec) return REFUSALS.unknown;
+		if (!saved) return REFUSALS.notAdded;
+		if (spec.fields.length === 0) return REFUSALS.noSetup;
+		if (this.busy()) return REFUSALS.busy;
+		this.askValues(owner, id, spec.fields, emit, (values, flowId) => {
+			this.save(id, (current) => ({ ...current, values }));
+			this.afterSetup(owner, id, emit, flowId);
 		});
-		this.onChanged(true);
-		if (!this.options.store.isSignedIn(id)) this.startLogin(owner, id, emit);
-		// Already signed in: the window that asked is told it is done.
-		else emit({ type: "auth_done", flowId: `connector-${randomUUID()}`, providerId: id, ok: true });
 		return undefined;
 	}
 
 	signIn(owner: object, id: string, emit: Emit): ConnectorRefusal | undefined {
-		if (!catalogEntry(id)) return REFUSALS.unknown;
-		if (this.flow) return REFUSALS.busy;
-		if (!this.options.store.state().connectors[id]) return REFUSALS.notAdded;
+		const saved = this.options.store.state().connectors[id];
+		const spec = specOf(id, saved);
+		if (!spec) return REFUSALS.unknown;
+		if (this.busy()) return REFUSALS.busy;
+		if (!saved) return REFUSALS.notAdded;
+		if (!spec.oauth) return REFUSALS.noSignin;
 		this.startLogin(owner, id, emit);
 		return undefined;
 	}
 
-	/** Answers the flow `owner` started: a pasted address, or a cancellation. */
+	/** Answers the flow `owner` started: a typed value, a pasted address, or a cancellation. */
 	reply(owner: object, flowId: string, answer: { value?: string; cancelled?: boolean }): boolean {
+		const setup = this.setupFlow;
+		if (setup && setup.id === flowId) {
+			if (setup.owner !== owner) return false;
+			if (answer.cancelled) this.cancelSetup(setup);
+			else if (answer.value !== undefined) this.takeValue(setup, answer.value);
+			else return false;
+			return true;
+		}
 		const flow = this.flow;
 		if (!flow || flow.id !== flowId || flow.owner !== owner) return false;
 		if (answer.cancelled) {
@@ -522,10 +949,12 @@ export class ConnectorManager {
 
 	/** A window that goes away takes its sign-in with it. */
 	cancelOwnedBy(owner: object): void {
+		if (this.setupFlow?.owner === owner) this.cancelSetup(this.setupFlow);
 		if (this.flow?.owner === owner) this.cancel(this.flow);
 	}
 
 	cancelAll(): void {
+		if (this.setupFlow) this.cancelSetup(this.setupFlow);
 		if (this.flow) this.cancel(this.flow);
 	}
 
@@ -540,15 +969,20 @@ export class ConnectorManager {
 
 	/** Signs out (`mcp logout`, which needs the server still configured), then forgets the connector. */
 	async remove(id: string): Promise<ConnectorRefusal | undefined> {
-		if (!catalogEntry(id)) return REFUSALS.unknown;
-		if (!this.options.store.state().connectors[id]) return REFUSALS.notAdded;
+		const saved = this.options.store.state().connectors[id];
+		const spec = specOf(id, saved);
+		if (!spec) return REFUSALS.unknown;
+		if (!saved) return REFUSALS.notAdded;
 		if (this.flow?.connectorId === id) this.cancel(this.flow);
-		const code = await new Promise<number | null>((done) => {
-			const child = this.run("logout", id);
-			child.on("error", () => done(-1));
-			child.on("close", (exit) => done(exit));
-		});
-		if (code !== 0) this.log(`sign-out of connector ${id} failed (exit ${code})`);
+		if (this.setupFlow?.connectorId === id) this.cancelSetup(this.setupFlow);
+		if (spec.oauth) {
+			const code = await new Promise<number | null>((done) => {
+				const child = this.run("logout", id);
+				child.on("error", () => done(-1));
+				child.on("close", (exit) => done(exit));
+			});
+			if (code !== 0) this.log(`sign-out of connector ${id} failed (exit ${code})`);
+		}
 		this.failed.delete(id);
 		this.options.store.update((state) => {
 			delete state.connectors[id];
@@ -557,12 +991,259 @@ export class ConnectorManager {
 		return undefined;
 	}
 
+	/**
+	 * A draft from `propose_connector` (the engine's status text), checked and kept for the user's
+	 * answer; undefined when it is malformed. Only the newest five wait.
+	 */
+	propose(text: string): ConnectorDraft | undefined {
+		const draft = parseDraft(text);
+		if (!draft) return undefined;
+		this.waiting.set(draft.draftId, draft);
+		for (const id of this.waiting.keys()) if (this.waiting.size > MAX_DRAFTS) this.waiting.delete(id);
+		return draft;
+	}
+
+	drafts(): ConnectorDraft[] {
+		return [...this.waiting.values()];
+	}
+
+	/**
+	 * The user's answer to a draft. Declining forgets it. Approving adds the server, turned on, read
+	 * only, with every tool hidden, then asks for its secrets in the window that approved it and signs
+	 * in when it needs to.
+	 */
+	decideDraft(owner: object, draftId: string, approve: boolean, emit: Emit): ConnectorRefusal | undefined {
+		const draft = this.waiting.get(draftId);
+		if (!draft) return REFUSALS.noDraft;
+		if (approve && this.busy()) return REFUSALS.busy;
+		this.waiting.delete(draftId);
+		if (!approve) return undefined;
+		const id = this.newId(draft.name);
+		const server: ServerTemplate =
+			draft.transport === "http"
+				? { url: draft.url ?? "" }
+				: {
+						command: draft.command ?? "",
+						...(draft.args?.length ? { args: draft.args } : {}),
+						...(draft.envNames.length > 0
+							? { env: Object.fromEntries(draft.envNames.map((name) => [name, placeholder(name)])) }
+							: {}),
+					};
+		const custom: CustomConnector = {
+			name: draft.name,
+			description: draft.description,
+			origin: DRAFT_ORIGIN,
+			server,
+			fields: draft.envNames.map((name) => ({ key: name, label: name, secret: true })),
+			oauth: draft.transport === "http" && draft.needsOAuth,
+		};
+		this.save(id, () => ({ enabled: true, mode: "read_only", custom }));
+		this.log(`added connector ${id} from the assistant's draft`);
+		if (custom.fields.length === 0) this.afterSetup(owner, id, emit, `connector-${randomUUID()}`);
+		else
+			this.askValues(owner, id, custom.fields, emit, (values, flowId) => {
+				this.save(id, (current) => ({ ...current, values }));
+				this.afterSetup(owner, id, emit, flowId);
+			});
+		return undefined;
+	}
+
+	/** Reads the other apps' configurations (only reads them) and lists what it found, without any value. */
+	scan(): ImportCandidate[] {
+		const home = this.options.importHome ?? homedir();
+		const groups = new Map<string, { candidate: ImportCandidate; server: ScannedServer }>();
+		const found = new Map<string, ScannedServer>();
+		for (const server of scanClientConfigs(home)) {
+			const key = server.server ? fingerprint(server.server) : `${server.source}:${server.name}`;
+			const group = groups.get(key);
+			if (group) {
+				if (!group.candidate.sources.includes(server.source)) group.candidate.sources.push(server.source);
+				continue;
+			}
+			const id = `${server.source}:${server.name}`;
+			const candidate = this.describeImport(id, server);
+			groups.set(key, { candidate, server });
+			found.set(id, server);
+		}
+		this.scanned = found;
+		this.log(`found ${found.size} MCP servers in other apps`);
+		return [...groups.values()].map(({ candidate }) => candidate);
+	}
+
+	/** Copies the chosen servers from the last scan, with their values, read only with every tool hidden. */
+	importServers(ids: string[]): string[] {
+		const imported: string[] = [];
+		for (const key of ids) {
+			const found = this.scanned.get(key);
+			if (!found?.server || this.duplicateOf(found.server)) continue;
+			const id = this.newId(found.name);
+			const custom: CustomConnector = {
+				name: found.name,
+				description: "",
+				origin: `Imported from ${found.source}`,
+				server: found.server,
+				fields: found.fields,
+				oauth: found.oauth,
+			};
+			this.options.store.update((state) => {
+				state.connectors[id] = { enabled: true, mode: "read_only", custom };
+			});
+			imported.push(id);
+		}
+		if (imported.length > 0) {
+			this.log(`imported ${imported.length} MCP servers: ${imported.join(", ")}`);
+			this.onChanged(true);
+		}
+		return imported;
+	}
+
+	private describeImport(id: string, server: ScannedServer): ImportCandidate {
+		const template = server.server;
+		const candidate: ImportCandidate = {
+			id,
+			name: server.name,
+			sources: [server.source],
+			transport: server.transport,
+			summary: template ? summarize(template) : "",
+			envNames: template && "command" in template ? Object.keys(template.env ?? {}) : [],
+			headerNames: template && "url" in template ? Object.keys(template.headers ?? {}) : [],
+			inputs: server.fields.map((field) => field.label),
+			importable: template !== undefined,
+		};
+		if (server.reason) candidate.reason = server.reason;
+		const duplicate = template && this.duplicateOf(template);
+		if (duplicate) {
+			candidate.importable = false;
+			candidate.duplicateOf = duplicate;
+		}
+		return candidate;
+	}
+
+	/** The connector with the same server: one the user added, or a catalog entry with a curated list. */
+	private duplicateOf(server: ServerTemplate): string | undefined {
+		const key = fingerprint(server);
+		const { connectors } = this.options.store.state();
+		for (const entry of CATALOG) if (fingerprint(entry.server) === key) return entry.id;
+		for (const [id, saved] of Object.entries(connectors))
+			if (saved.custom && fingerprint(saved.custom.server) === key) return id;
+		return undefined;
+	}
+
+	/** A connector id from a name: lowercase letters, digits, and `-`, not taken yet. */
+	private newId(name: string): string {
+		const base =
+			name
+				.toLowerCase()
+				.replace(/[^a-z0-9]+/g, "-")
+				.replace(/^-+|-+$/g, "")
+				.slice(0, 32)
+				.replace(/-+$/, "") || "server";
+		const taken = (id: string) =>
+			catalogEntry(id) !== undefined || id in this.options.store.state().connectors;
+		if (!taken(base)) return base;
+		for (let n = 2; ; n++) if (!taken(`${base}-${n}`)) return `${base}-${n}`;
+	}
+
+	private status(
+		id: string,
+		spec: ConnectorSpec,
+		saved: SavedConnector | undefined,
+	): ConnectorInfo["status"] {
+		if (!saved?.enabled) return "off";
+		if (missingValues(spec, saved.values)) return "needs_setup";
+		if (this.failed.has(id)) return "error";
+		if (spec.oauth && !this.options.store.isSignedIn(id)) return "needs_signin";
+		return "connected";
+	}
+
+	private busy(): boolean {
+		return this.flow !== undefined || this.setupFlow !== undefined;
+	}
+
+	/** Changes one connector, keeping what is not changed, then has the engine read it again. */
+	private save(id: string, update: (current: SavedConnector) => SavedConnector): void {
+		this.options.store.update((state) => {
+			state.connectors[id] = update(state.connectors[id] ?? { enabled: false, mode: "read_only" });
+		});
+		this.onChanged(true);
+	}
+
+	/** After the values are there: sign in when the connector needs it, otherwise it is done. */
+	private afterSetup(owner: object, id: string, emit: Emit, flowId: string): void {
+		const spec = specOf(id, this.options.store.state().connectors[id]);
+		if (spec?.oauth && !this.options.store.isSignedIn(id)) this.startLogin(owner, id, emit, flowId);
+		// Already signed in, or nothing to sign in to: the window that asked is told it is done.
+		else emit({ type: "auth_done", flowId, providerId: id, ok: true });
+	}
+
+	private askValues(
+		owner: object,
+		connectorId: string,
+		fields: readonly SetupField[],
+		emit: Emit,
+		finish: (values: Record<string, string>, flowId: string) => void,
+	): void {
+		const id = `connector-setup-${randomUUID()}`;
+		this.setupFlow = {
+			id,
+			connectorId,
+			owner,
+			emit,
+			fields,
+			values: {},
+			finish: (values) => finish(values, id),
+		};
+		this.askNext(this.setupFlow);
+	}
+
+	private askNext(setup: Setup, again = false): void {
+		const field = setup.fields[Object.keys(setup.values).length];
+		if (!field) return;
+		setup.emit({
+			type: "auth_prompt",
+			prompt: {
+				flowId: setup.id,
+				kind: field.secret ? "secret" : "text",
+				message: again ? `${field.label} is needed to continue.` : field.label,
+				...(field.optional ? { optional: true } : {}),
+			},
+		});
+	}
+
+	private takeValue(setup: Setup, typed: string): void {
+		const field = setup.fields[Object.keys(setup.values).length];
+		if (!field) return;
+		const value = typed.trim();
+		if (!value && !field.optional) {
+			this.askNext(setup, true);
+			return;
+		}
+		setup.values[field.key] = value;
+		if (Object.keys(setup.values).length < setup.fields.length) {
+			this.askNext(setup);
+			return;
+		}
+		this.setupFlow = undefined;
+		setup.finish(setup.values);
+	}
+
+	private cancelSetup(setup: Setup): void {
+		if (this.setupFlow === setup) this.setupFlow = undefined;
+		setup.emit({
+			type: "auth_done",
+			flowId: setup.id,
+			providerId: setup.connectorId,
+			ok: false,
+			message: "Setup cancelled.",
+		});
+	}
+
 	private change(
 		id: string,
-		update: (saved: ConnectorsState["connectors"][string]) => ConnectorsState["connectors"][string],
+		update: (saved: SavedConnector) => SavedConnector,
 	): ConnectorRefusal | undefined {
-		if (!catalogEntry(id)) return REFUSALS.unknown;
 		const saved = this.options.store.state().connectors[id];
+		if (!specOf(id, saved)) return REFUSALS.unknown;
 		if (!saved) return REFUSALS.notAdded;
 		this.options.store.update((state) => {
 			state.connectors[id] = update(saved);
@@ -580,10 +1261,10 @@ export class ConnectorManager {
 		});
 	}
 
-	private startLogin(owner: object, connectorId: string, emit: Emit): void {
+	private startLogin(owner: object, connectorId: string, emit: Emit, flowId?: string): void {
 		const child = this.run("login", connectorId);
 		const flow: Flow = {
-			id: `connector-${randomUUID()}`,
+			id: flowId ?? `connector-${randomUUID()}`,
 			connectorId,
 			owner,
 			emit,
@@ -613,7 +1294,9 @@ export class ConnectorManager {
 		const redirect = authorization.searchParams.get("redirect_uri");
 		if (redirect && URL.canParse(redirect))
 			flow.redirect = { url: new URL(redirect), state: authorization.searchParams.get("state") };
-		const name = catalogEntry(flow.connectorId)?.name ?? flow.connectorId;
+		const name =
+			specOf(flow.connectorId, this.options.store.state().connectors[flow.connectorId])?.name ??
+			flow.connectorId;
 		flow.emit({
 			type: "auth_event",
 			flowId: flow.id,
@@ -697,6 +1380,86 @@ export class ConnectorManager {
 	private log(line: string): void {
 		this.options.log?.(line);
 	}
+}
+
+/** A draft's fields, checked; undefined when anything is missing or malformed. */
+function parseDraft(text: string): ConnectorDraft | undefined {
+	let value: unknown;
+	try {
+		value = JSON.parse(text);
+	} catch {
+		return undefined;
+	}
+	if (typeof value !== "object" || value === null) return undefined;
+	const raw = value as Record<string, unknown>;
+	const name = typeof raw.name === "string" ? raw.name.trim() : "";
+	const description = raw.description === undefined ? "" : raw.description;
+	const envNames = raw.env_names === undefined ? [] : raw.env_names;
+	if (!name || name.length > 60 || typeof description !== "string" || description.length > 500)
+		return undefined;
+	if (
+		!Array.isArray(envNames) ||
+		envNames.length > 20 ||
+		!envNames.every((n) => typeof n === "string" && ENV_NAME.test(n))
+	)
+		return undefined;
+	const base = {
+		draftId: randomUUID(),
+		name,
+		description: description.trim(),
+		envNames: [...new Set(envNames)],
+	};
+	if (raw.transport === "stdio") {
+		const { command, args = [] } = raw;
+		if (typeof command !== "string" || !command.trim() || command.length > 300) return undefined;
+		if (
+			!Array.isArray(args) ||
+			args.length > 40 ||
+			!args.every((a) => typeof a === "string" && a.length <= 500)
+		)
+			return undefined;
+		return { ...base, transport: "stdio", command, ...(args.length > 0 ? { args } : {}), needsOAuth: false };
+	}
+	if (raw.transport === "http") {
+		const url =
+			typeof raw.url === "string" && raw.url.length <= 2000 && URL.canParse(raw.url)
+				? new URL(raw.url)
+				: undefined;
+		const loopback = url && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+		if (!url || !(url.protocol === "https:" || (url.protocol === "http:" && loopback))) return undefined;
+		return { ...base, transport: "http", url: raw.url as string, needsOAuth: raw.needs_oauth === true };
+	}
+	return undefined;
+}
+
+/** Compares servers by what they run or reach: an npm package's version and a URL's query do not count. */
+function fingerprint(server: ServerTemplate): string {
+	if ("url" in server) {
+		const url = URL.canParse(server.url) ? new URL(server.url) : undefined;
+		return url ? `url ${url.origin}${url.pathname.replace(/\/+$/, "")}` : `url ${server.url}`;
+	}
+	const unversioned = (arg: string) => arg.replace(/^(@?[^@\s/]+(?:\/[^@\s]+)?)@[\w.^~<>=*-]+$/, "$1");
+	return ["cmd", server.command, ...(server.args ?? []).map(unversioned)].join("\u0000");
+}
+
+/** The command line or address, with values that look secret masked (never an env value or header). */
+export function summarize(server: ServerTemplate): string {
+	if ("url" in server) {
+		if (!URL.canParse(server.url)) return server.url.replace(/[?#].*$/, "");
+		const url = new URL(server.url);
+		return `${url.origin}${url.pathname}`;
+	}
+	const words = [server.command, ...(server.args ?? [])];
+	return words
+		.map((word, index) => {
+			const flag = /^(--?[^=]+)=(.*)$/.exec(word);
+			if (flag?.[1] && SECRET_NAME.test(flag[1])) return `${flag[1]}=•••`;
+			const previous = words[index - 1];
+			if (index > 1 && previous?.startsWith("-") && SECRET_NAME.test(previous) && !word.startsWith("-"))
+				return "•••";
+			return /^(ghp_|gho_|github_pat_|sk-|sk_|xox[abp]-|AKIA)/.test(word) ? "•••" : word;
+		})
+		.join(" ");
 }
 
 /** The guard's policy for the engine's environment; the engine cannot change its own environment. */

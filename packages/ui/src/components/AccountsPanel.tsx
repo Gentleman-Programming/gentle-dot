@@ -301,6 +301,11 @@ export function FlowPrompt({ prompt, send }: { prompt: AuthPrompt; send: Send })
 			<button type="submit" className="primary" disabled={!value.trim()}>
 				Continue
 			</button>
+			{prompt.optional ? (
+				<button type="button" onClick={() => answer("")}>
+					Skip
+				</button>
+			) : null}
 		</form>
 	);
 }

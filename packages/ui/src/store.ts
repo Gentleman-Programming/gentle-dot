@@ -5,9 +5,11 @@ import type {
 	AuthEvent,
 	AuthPrompt,
 	AuthProvider,
+	ConnectorDraft,
 	ConnectorInfo,
 	ConversationSummary,
 	Features,
+	ImportCandidate,
 	MessageQueue,
 	ModelOption,
 	Profile,
@@ -46,8 +48,12 @@ export interface ConnectorsState {
 	open: boolean;
 	/** Undefined until the first list arrives. */
 	list?: ConnectorInfo[];
-	/** A connector sign-in; `providerId` is the connector id. */
+	/** A connector sign-in or setup; `providerId` is the connector id (or the draft's name). */
 	flow?: AuthFlowState;
+	/** Connectors the assistant drafted, waiting for the user's answer. */
+	drafts?: ConnectorDraft[];
+	/** The servers the last scan found in other apps, while the list is shown. */
+	imports?: ImportCandidate[];
 }
 
 export type ConnectionStatus = "connecting" | "open" | "closed" | "unauthorized";
@@ -98,6 +104,7 @@ export type DotAction =
 	| { type: "profiles"; open: boolean }
 	| { type: "connectors"; open: boolean }
 	| { type: "connector_started"; connectorId: string }
+	| { type: "connector_imports_closed" }
 	| { type: "auth_started"; providerId: string };
 
 export const initialState: DotState = {
@@ -145,6 +152,10 @@ export function reduce(state: DotState, action: DotAction): DotState {
 				...openConnectors(state, true),
 				connectors: { ...state.connectors, open: true, flow: { providerId: action.connectorId, events: [] } },
 			};
+		case "connector_imports_closed": {
+			const { imports: _imports, ...rest } = state.connectors;
+			return { ...state, connectors: rest };
+		}
 		case "auth_started":
 			return {
 				...state,
@@ -239,6 +250,25 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 			const updated = { ...state, connectors: { ...state.connectors, list: message.connectors } };
 			return message.open ? openConnectors(updated, true) : updated;
 		}
+		case "connector_draft": {
+			const drafts = state.connectors.drafts ?? [];
+			if (drafts.some((d) => d.draftId === message.draft.draftId)) return state;
+			return { ...state, connectors: { ...state.connectors, drafts: [...drafts, message.draft] } };
+		}
+		case "connector_draft_resolved": {
+			const drafts = (state.connectors.drafts ?? []).filter((d) => d.draftId !== message.draftId);
+			return { ...state, connectors: { ...state.connectors, drafts } };
+		}
+		case "connector_imports":
+			return { ...state, connectors: { ...state.connectors, imports: message.found } };
+		case "connector_imported": {
+			const { imports: _imports, ...rest } = state.connectors;
+			const text =
+				message.names.length > 0
+					? `Imported ${message.names.join(", ")}. Their tools stay hidden until you choose Read and send.`
+					: "Nothing was imported.";
+			return addNotice({ ...state, connectors: rest }, "info", text);
+		}
 		case "profiles": {
 			const { type: _type, seq: _seq, open, profiles, active, ...rest } = message;
 			const next = { ...state.profiles, ...rest, list: profiles };
@@ -307,7 +337,16 @@ function openConnectors(state: DotState, open: boolean): DotState {
 	const flow = state.connectors.flow;
 	const keep = open && flow !== undefined && flow.done === undefined;
 	const others = open ? openProfiles({ ...state, auth: { ...state.auth, open: false } }, false) : state;
-	return { ...others, connectors: { ...state.connectors, open, flow: keep ? flow : undefined } };
+	const { imports, ...connectors } = state.connectors;
+	return {
+		...others,
+		connectors: {
+			...connectors,
+			...(open && imports ? { imports } : {}),
+			open,
+			flow: keep ? flow : undefined,
+		},
+	};
 }
 
 function closeConnectors(state: DotState, when: boolean): DotState {

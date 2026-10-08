@@ -43,6 +43,8 @@ export interface DaemonOptions {
 	authRuntime?: () => Promise<AuthRuntime>;
 	/** The engine's command line for connector sign-in; default `GENTLE_DOT_MCP_CLI` (JSON array) or the bundled one. */
 	connectorCli?: McpCli;
+	/** The home folder "Import my MCP servers" reads other apps' configs from; default `GENTLE_DOT_IMPORT_HOME` or the user's. */
+	importHome?: string;
 	/** Origins allowed to open the WebSocket, besides the daemon's own and the desktop app's. */
 	allowedOrigins?: string[];
 	backoffMs?: number[];
@@ -170,6 +172,9 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		cli: options.connectorCli ?? mcpCliFromEnv(process.env) ?? bundledMcpCli(),
 		env: { ...agentEnv },
 		cwd: options.workspace,
+		...((options.importHome ?? process.env.GENTLE_DOT_IMPORT_HOME)
+			? { importHome: options.importHome ?? process.env.GENTLE_DOT_IMPORT_HOME }
+			: {}),
 		log,
 	});
 	const historyPage = options.historyPage ?? Number(process.env.GENTLE_DOT_HISTORY_PAGE);

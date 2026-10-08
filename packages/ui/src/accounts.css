@@ -120,3 +120,128 @@ button.back {
 	background: rgba(180, 231, 199, 0.1);
 	color: var(--green);
 }
+
+.chip.connector-needs_setup {
+	color: var(--yellow);
+	border-color: rgba(224, 194, 122, 0.45);
+}
+
+.connector-actions,
+.connector-links {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin: 12px 0;
+}
+
+.connector-guide,
+.connector-imports {
+	margin-top: 12px;
+	padding: 14px 16px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-md);
+	background: var(--surface);
+}
+
+.connector-guide h3,
+.connector-imports h3 {
+	margin: 0 0 8px;
+	font-size: 15px;
+	font-weight: 700;
+}
+
+.connector-guide ol {
+	margin: 0 0 12px;
+	padding-left: 20px;
+	font-size: 13px;
+	line-height: 19px;
+}
+
+.connector-redirect {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin-bottom: 8px;
+	font-size: 12px;
+	color: var(--muted);
+}
+
+.connector-redirect code,
+.connector-imports code,
+.connector-origin code,
+.connector-draft-details code {
+	font: 12px / 17px var(--font-mono);
+	color: var(--text);
+	overflow-wrap: anywhere;
+	user-select: all;
+}
+
+.connector-imports ul {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.connector-step + .connector-step {
+	margin-top: 6px;
+}
+
+.connector-found {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	padding: 10px 0;
+	border-top: 1px solid var(--line);
+}
+
+.connector-import {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 13px;
+}
+
+.connector-import input {
+	accent-color: var(--accent);
+}
+
+.connector-import .muted {
+	font-size: 12px;
+}
+
+.connector-names {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 4px;
+	margin: 0;
+	font-size: 12px;
+}
+
+.connector-origin {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	margin: 0 0 4px;
+	font-size: 12px;
+	color: var(--muted);
+}
+
+.connector-draft-details {
+	display: grid;
+	grid-template-columns: max-content 1fr;
+	gap: 6px 12px;
+	margin: 8px 0;
+	font-size: 12px;
+}
+
+.connector-draft-details dt {
+	color: var(--muted);
+}
+
+.connector-draft-details dd {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	margin: 0;
+}

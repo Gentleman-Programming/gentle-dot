@@ -9,3 +9,5 @@ export const E2E_COMMANDS_FILE = join(E2E_DATA_DIR, "agent-commands.jsonl");
 /** A second daemon with the conversations list on (it is off by default), for the tests of that feature. */
 export const E2E_CONVERSATIONS_PORT = 4392;
 export const E2E_CONVERSATIONS_DATA_DIR = join(tmpdir(), "gentle-dot-e2e-conversations");
+/** A stand-in home with other apps' MCP configs, scanned by "Import my MCP servers" (never the real one). */
+export const E2E_IMPORT_HOME = join(tmpdir(), "gentle-dot-e2e-import-home");

@@ -2,7 +2,7 @@
 // A stand-in for the engine's `mcp login <server>` and `mcp logout <server>` commands.
 // login prints the authorization URL like the engine does, then waits on a loopback
 // callback (`/callback?code=…&state=fake-state`); on that request it stores a sign-in
-// in `<PI_CODING_AGENT_DIR>/mcp-auth.json` under `mcp__<server>|<url>` and exits 0.
+// in `<PI_CODING_AGENT_DIR>/mcp-auth.json` under `mcp__<server>|<url>` (`-` as `_`, like the engine) and exits 0.
 // logout removes that key. Environment:
 //   FAKE_MCP_CLI_LOG   append {argv, env} as JSONL for every run
 //   FAKE_MCP_CLI_MODE  "fail": exit 1 after printing the URL; "auto": finish without a callback
@@ -15,7 +15,7 @@ import { join } from "node:path";
 const [command, name] = process.argv.slice(2).filter((arg) => arg !== "mcp");
 const agentDir = process.env.PI_CODING_AGENT_DIR ?? ".";
 const authFile = join(agentDir, "mcp-auth.json");
-const key = `mcp__${name}|${process.env.FAKE_MCP_CLI_URL ?? "https://mcp.notion.com/mcp"}`;
+const key = `mcp__${name?.replace(/-/g, "_")}|${process.env.FAKE_MCP_CLI_URL ?? "https://mcp.notion.com/mcp"}`;
 
 if (process.env.FAKE_MCP_CLI_LOG) {
 	appendFileSync(

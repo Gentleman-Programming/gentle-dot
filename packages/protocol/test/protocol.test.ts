@@ -223,4 +223,31 @@ describe("connector messages", () => {
 		).toBeUndefined();
 		expect(parseClientMessage('{"type":"connector_mode","connectorId":"notion"}')).toBeUndefined();
 	});
+
+	it("accepts setup, draft answers, scans, and imports", () => {
+		expect(parseClientMessage('{"type":"connector_setup","connectorId":"discord"}')).toEqual({
+			type: "connector_setup",
+			connectorId: "discord",
+		});
+		expect(parseClientMessage('{"type":"connector_draft_reply","draftId":"d1","approve":true}')).toEqual({
+			type: "connector_draft_reply",
+			draftId: "d1",
+			approve: true,
+		});
+		expect(parseClientMessage('{"type":"connectors_scan"}')).toEqual({ type: "connectors_scan" });
+		expect(parseClientMessage('{"type":"connector_import","ids":["cursor:github"]}')).toEqual({
+			type: "connector_import",
+			ids: ["cursor:github"],
+		});
+		for (const bad of [
+			'{"type":"connector_draft_reply","draftId":"d1"}',
+			'{"type":"connector_draft_reply","draftId":3,"approve":false}',
+			'{"type":"connector_import","ids":"cursor:github"}',
+			'{"type":"connector_import","ids":[3]}',
+			JSON.stringify({ type: "connector_import", ids: Array.from({ length: 201 }, (_, i) => `a:${i}`) }),
+			'{"type":"connector_setup","connectorId":"../x"}',
+		]) {
+			expect(parseClientMessage(bad), bad.slice(0, 80)).toBeUndefined();
+		}
+	});
 });

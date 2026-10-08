@@ -1,7 +1,14 @@
-import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { expect, type Page, test } from "@playwright/test";
-import { E2E_COMMANDS_FILE, E2E_CONVERSATIONS_PORT, E2E_DATA_DIR, E2E_TOKEN } from "./token.ts";
+import {
+	E2E_COMMANDS_FILE,
+	E2E_CONVERSATIONS_PORT,
+	E2E_DATA_DIR,
+	E2E_IMPORT_HOME,
+	E2E_TOKEN,
+} from "./token.ts";
 
 const readJson = (path: string) =>
 	existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as unknown) : undefined;
@@ -271,6 +278,112 @@ test("connects Notion from the Connectors screen, switches its mode, and removes
 	await say(page, "/connectors");
 	await expect(screen).toBeVisible();
 	await expect(page.locator(".message-user")).toHaveCount(sent);
+});
+
+/** Every file below `dir` with its hash, to show a scan never changes them. */
+function hashes(dir: string): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const name of readdirSync(dir)) {
+		const path = join(dir, name);
+		if (statSync(path).isDirectory()) Object.assign(out, hashes(path));
+		else out[path] = createHash("sha256").update(readFileSync(path)).digest("hex");
+	}
+	return out;
+}
+
+test("sets up Discord from its guide, imports a found server, and adds the assistant's draft", async ({
+	page,
+}) => {
+	const shots = "/tmp/gentle-dot-t18b";
+	const before = hashes(E2E_IMPORT_HOME);
+	const mcpServers = () =>
+		(
+			JSON.parse(readFileSync(join(E2E_DATA_DIR, "agent", "mcp.json"), "utf8")) as {
+				mcpServers: Record<string, Record<string, unknown>>;
+			}
+		).mcpServers;
+	await open(page);
+	await page.getByRole("button", { name: "Connectors" }).click();
+	const screen = page.getByRole("region", { name: "Connectors" });
+
+	// Guides: Slack and Gmail show the redirect address to register; Discord asks for the bot token.
+	for (const name of ["Slack", "Gmail"]) {
+		await screen.getByRole("button", { name: `Connect ${name}` }).click();
+		const guide = screen.getByRole("region", { name: `Set up ${name}` });
+		await expect(guide).toContainText("http://localhost:3841");
+		await page.screenshot({ path: `${shots}/guide-${name.toLowerCase()}.png` });
+		await guide.getByRole("button", { name: "Back" }).click();
+	}
+	await screen.getByRole("button", { name: "Connect Discord" }).click();
+	const guide = screen.getByRole("region", { name: "Set up Discord" });
+	await expect(guide).toContainText("Message Content Intent");
+	await page.screenshot({ path: `${shots}/guide-discord.png` });
+	await guide.getByRole("button", { name: "Continue" }).click();
+	await expect(screen).toContainText("Setting up Discord");
+	await screen.getByLabel(/bot token/i).fill("dummy-discord-token");
+	await screen.getByRole("button", { name: "Continue" }).click();
+	await expect(screen.getByRole("status")).toHaveText("Connected to Discord.");
+	await screen.getByRole("button", { name: "Back to connectors" }).click();
+	expect(mcpServers().discord).toMatchObject({ command: "npx", args: ["-y", "@pasympa/discord-mcp@2.2.0"] });
+	await expect(page.locator("body")).not.toContainText("dummy-discord-token");
+
+	// Import: names only, with the source app; the old SSE server cannot be imported.
+	await screen.getByRole("button", { name: "Import my MCP servers" }).click();
+	const found = screen.getByRole("region", { name: "Found these servers" });
+	await expect(found.getByRole("checkbox", { name: "github" })).toBeVisible();
+	await expect(found).toContainText("From Cursor");
+	await expect(found).toContainText("GITHUB_PERSONAL_ACCESS_TOKEN");
+	await expect(found.getByRole("checkbox", { name: "oldsse" })).toBeDisabled();
+	await expect(page.locator("body")).not.toContainText("ghp_e2e_secret_value");
+	await page.screenshot({ path: `${shots}/import-list.png` });
+	await found.getByRole("checkbox", { name: "github" }).check();
+	await found.getByRole("checkbox", { name: "search" }).check();
+	await found.getByRole("button", { name: "Import 2 servers" }).click();
+	const github = screen.getByRole("listitem", { name: "github" });
+	await expect(github).toContainText("Imported from Cursor");
+	await expect(github).toContainText("tools stay hidden");
+	await expect(screen.getByRole("listitem", { name: "search" })).toContainText("Needs setup");
+	expect(mcpServers().github).toMatchObject({ toolExposure: { "*": "hidden" } });
+	expect(hashes(E2E_IMPORT_HOME)).toEqual(before);
+
+	// Add another: the request goes to the chat; the assistant's draft comes back as a card.
+	await screen.getByRole("button", { name: "Add another connector" }).click();
+	await screen.getByLabel("What do you want to connect?").fill("Weather");
+	await page.screenshot({ path: `${shots}/add-another.png` });
+	await screen.getByRole("button", { name: "Ask the assistant" }).click();
+	await expect(page.locator(".message-user").last()).toContainText("Weather");
+	const draft = {
+		name: "Weather",
+		description: "Look up forecasts.",
+		transport: "stdio",
+		command: "npx",
+		args: ["-y", "weather-mcp@1.0.0"],
+		env_names: ["WEATHER_API_KEY"],
+	};
+	await say(page, `propose:${JSON.stringify(draft)}`);
+	const card = page.getByRole("region", { name: "Add Weather?" });
+	await expect(card).toContainText("npx -y weather-mcp@1.0.0");
+	await expect(card).toContainText("WEATHER_API_KEY");
+	await card.scrollIntoViewIfNeeded();
+	await card.screenshot({ path: `${shots}/draft-card.png` });
+	await page.screenshot({ path: `${shots}/draft-card-panel.png` });
+	await card.getByRole("button", { name: "Add Weather" }).click();
+	await expect(screen).toContainText("Setting up Weather");
+	await screen.getByLabel(/WEATHER_API_KEY/).fill("weather-secret-value");
+	await screen.getByRole("button", { name: "Continue" }).click();
+	await expect(screen.getByRole("status")).toHaveText("Connected to Weather.");
+	expect(mcpServers().weather).toMatchObject({ command: "npx", toolExposure: { "*": "hidden" } });
+	await expect(page.locator("body")).not.toContainText("weather-secret-value");
+	await screen.getByRole("button", { name: "Back to connectors" }).click();
+	for (const name of ["github", "Weather"]) {
+		const row = screen.getByRole("listitem", { name });
+		await row.scrollIntoViewIfNeeded();
+		await row.screenshot({ path: `${shots}/connector-row-${name.toLowerCase()}.png` });
+	}
+	for (const name of ["Discord", "github", "search", "Weather"]) {
+		await screen.getByRole("button", { name: `Remove ${name}` }).click();
+		await expect(screen.getByRole("button", { name: `Remove ${name}` })).toHaveCount(0);
+	}
 });
 
 test("shows a connector action as an approval card with a preview", async ({ page }) => {

@@ -89,10 +89,13 @@ describe("connectors over the protocol", () => {
 			["notion", "off"],
 			["linear", "off"],
 			["atlassian", "off"],
+			["discord", "off"],
+			["slack", "off"],
+			["gmail", "off"],
 		]);
 		expect(list.open).toBeUndefined();
 		send({ type: "send", text: "/connectors" });
-		expect((await find("connectors", (m) => m.open === true)).connectors).toHaveLength(3);
+		expect((await find("connectors", (m) => m.open === true)).connectors).toHaveLength(6);
 		expect(messages.some((m) => m.type === "user_message")).toBe(false);
 	});
 
@@ -133,7 +136,7 @@ describe("connectors over the protocol", () => {
 		const prompt = await find("auth_prompt");
 		send({ type: "auth_reply", flowId: prompt.prompt.flowId, cancelled: true });
 		expect(await find("auth_done")).toMatchObject({ ok: false, message: "Sign-in cancelled." });
-		send({ type: "connector_signin", connectorId: "gmail" });
+		send({ type: "connector_signin", connectorId: "nope" });
 		expect(await find("error", (m) => m.code === "unknown_connector")).toBeTruthy();
 	});
 

@@ -43,10 +43,15 @@ async function engineMcp() {
 
 describe("connectors catalog", () => {
 	it("lists Notion, Linear, and Atlassian with their official remote servers", () => {
-		expect(CATALOG.map(({ id, name, url }) => ({ id, name, url }))).toEqual([
-			{ id: "notion", name: "Notion", url: "https://mcp.notion.com/mcp" },
-			{ id: "linear", name: "Linear", url: "https://mcp.linear.app/mcp" },
-			{ id: "atlassian", name: "Atlassian", url: "https://mcp.atlassian.com/v2/mcp" },
+		expect(CATALOG.slice(0, 3).map(({ id, name, server, oauth }) => ({ id, name, server, oauth }))).toEqual([
+			{ id: "notion", name: "Notion", server: { url: "https://mcp.notion.com/mcp" }, oauth: true },
+			{ id: "linear", name: "Linear", server: { url: "https://mcp.linear.app/mcp" }, oauth: true },
+			{
+				id: "atlassian",
+				name: "Atlassian",
+				server: { url: "https://mcp.atlassian.com/v2/mcp" },
+				oauth: true,
+			},
 		]);
 		for (const entry of CATALOG) {
 			expect(entry.readOnlyTools.length).toBeGreaterThan(3);
@@ -381,6 +386,9 @@ describe("connector sign-in", () => {
 			{ id: "notion", added: false, enabled: false, mode: "read_only", status: "off" },
 			{ id: "linear", added: false, enabled: false, mode: "read_only", status: "off" },
 			{ id: "atlassian", added: false, enabled: false, mode: "read_only", status: "off" },
+			{ id: "discord", added: false, enabled: false, mode: "read_only", status: "off" },
+			{ id: "slack", added: false, enabled: false, mode: "read_only", status: "off" },
+			{ id: "gmail", added: false, enabled: false, mode: "read_only", status: "off" },
 		]);
 		expect(manager.list()[0]).toMatchObject({
 			name: "Notion",

@@ -21,6 +21,10 @@
  * best effort, NOT a security boundary: the assistant runs as the user with a shell, so a command
  * can still build a name the check does not see. The daemon keeps the connector state in memory
  * and puts changed files back (docs/design.md, Connectors), and stage 2 (S25) moves tokens out of reach.
+ * The assistant may draft a new connector with `propose_connector`: the draft goes to the daemon as a
+ * status update on the engine's own output (`ctx.ui.setStatus`), which only the daemon reads, and the
+ * model hears only that the user will review it. The daemon shows the draft as a card and adds it
+ * only after the user approves; secrets are typed in the app, never in the chat.
  * This file has no dependencies besides Node, so the engine loads it as is.
  */
 import { realpathSync, statSync } from "node:fs";
@@ -28,6 +32,55 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export const POLICY_ENV = "GENTLE_DOT_CONNECTOR_POLICY";
+/** The status key of a connector draft; the daemon reads it, nothing shows it. */
+export const DRAFT_STATUS_KEY = "gentle-dot:connector-draft";
+/** A draft longer than this is not sent. */
+const MAX_DRAFT = 20_000;
+
+/** `propose_connector`: a plain JSON schema (the engine accepts one), with secrets by name only. */
+export const PROPOSE_TOOL = {
+	name: "propose_connector",
+	label: "Propose a connector",
+	description:
+		"Draft a new connector (an MCP server) for the user to review in the app. Give the server's name, what it does, and either its command (stdio) or its URL (http). List the secrets it needs by environment variable name only; the app asks the user for their values. The user decides; nothing is added until they approve.",
+	promptGuidelines: [
+		"When the user wants to connect another app or service, find its MCP server (prefer the official one, with a pinned version) and call propose_connector. Never edit connector files, never run `mcp add`, and never ask for tokens or keys in the chat.",
+	],
+	parameters: {
+		type: "object",
+		properties: {
+			name: { type: "string", description: "Short name, for example GitHub." },
+			description: { type: "string", description: "What it lets the assistant do, in plain words." },
+			transport: { type: "string", enum: ["stdio", "http"] },
+			command: { type: "string", description: "For stdio: the program, for example npx." },
+			args: { type: "array", items: { type: "string" }, description: "For stdio: its arguments." },
+			url: { type: "string", description: "For http: the server's https URL." },
+			env_names: {
+				type: "array",
+				items: { type: "string" },
+				description: "Environment variable names of the secrets it needs (no values).",
+			},
+			needs_oauth: { type: "boolean", description: "For http: the server signs in with OAuth." },
+		},
+		required: ["name", "transport"],
+		additionalProperties: false,
+	},
+} as const;
+
+const REVIEW = "The user will review this connector in the app. Do not ask for its secrets in the chat.";
+const NO_REVIEW = "No one can review a connector right now. Ask the user to open the app.";
+
+/** Sends a draft to the daemon; the text is all the model gets back. */
+export function proposeConnector(
+	params: unknown,
+	ctx: { hasUI: boolean; ui: { setStatus(key: string, text: string | undefined): void } },
+): string {
+	if (!ctx.hasUI) return NO_REVIEW;
+	const text = JSON.stringify(params ?? {});
+	if (text.length > MAX_DRAFT) return "That draft is too long. Keep it to the server's command or URL.";
+	ctx.ui.setStatus(DRAFT_STATUS_KEY, text);
+	return REVIEW;
+}
 
 export type ConnectorMode = "read_only" | "read_write";
 
@@ -282,6 +335,15 @@ export default function approvalGuard(pi: ExtensionAPI): void {
 		? ["mcp.json", "mcp-auth.json", "auth.json", "models.json"].map((name) => resolve(agentDir, name))
 		: [];
 	const policy: ConnectorPolicy = parsed ?? { protectedPaths: fallback };
+
+	pi.registerTool({
+		...PROPOSE_TOOL,
+		promptGuidelines: [...PROPOSE_TOOL.promptGuidelines],
+		parameters: PROPOSE_TOOL.parameters as never,
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			return { content: [{ type: "text", text: proposeConnector(params, ctx) }], details: {} };
+		},
+	});
 
 	pi.on("tool_call", async (event, ctx) => {
 		const annotations = event.toolName.startsWith("mcp__")
