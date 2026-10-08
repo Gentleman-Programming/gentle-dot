@@ -58,16 +58,20 @@ Runtime overrides:
 | Launch at login | Turns the login item on or off (macOS LaunchAgent). This menu item is the source of truth; `launchAtLogin` in `config.json` is not read. |
 | Quit | Stops the daemon the app started (SIGTERM), then quits. A daemon started elsewhere keeps running. |
 
-The menu bar title shows a short marker for the agent state that the UI reports through `set_dot_state`, and the tooltip names it.
+The menu bar icon changes with the agent state that the UI reports through `set_dot_state` (ready, working, needs you, unavailable), and the tooltip names it.
 
 ## Icons
 
-`scripts/make-icon.mjs` draws the violet circle used for the app icons, with no dependencies:
+All icons come from the rose (`docs/brand/`). `scripts/make-icon.mjs` renders them with Playwright's Chromium:
+
+- `src-tauri/icons/tray/<glyph>.png` and `<glyph>@2x.png` (18 and 36 px): the menu bar glyph `rose-glyph.svg` for `ready`, `working` (dashed outer petals), `needs-you` (badge dot), and `unavailable` (dimmed). They are template images, so macOS uses only their alpha and tints them for the menu bar. The app embeds the 36 px files, which macOS draws at 18 pt.
+- `src-tauri/icons/source.png` (1024 px): the neon rose `rose-source.png` on a black macOS squircle with a faint pink rim.
+- `packages/ui/public/favicon.svg` and `favicon.png`: the glyph in neon pink for the browser tab.
 
 ```sh
-node scripts/make-icon.mjs src-tauri/icons/source.png 1024 '#7C5CFF'
-node scripts/make-icon.mjs src-tauri/icons/tray.png 32 '#000000'
-pnpm --filter @gentle-dot/desktop tauri icon src-tauri/icons/source.png
+node scripts/make-icon.mjs
+pnpm --filter @gentle-dot/desktop tauri icon src-tauri/icons/source.png -o /tmp/gentle-dot-icons
+cp /tmp/gentle-dot-icons/{32x32,64x64,128x128,128x128@2x}.png /tmp/gentle-dot-icons/icon.{icns,png} src-tauri/icons/
 ```
 
-The tray icon is a template image, so macOS uses only its alpha and tints it to match the menu bar.
+`tauri icon` also writes Android, iOS, and Windows icons, which this macOS app does not use, so they go to a scratch directory and only the files `tauri.conf.json` lists (plus `64x64.png`) are copied.

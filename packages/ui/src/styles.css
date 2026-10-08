@@ -104,99 +104,234 @@ button.icon {
 	outline-offset: 2px;
 }
 
-/* ---------- Dot ---------- */
+/* ---------- Dot: the rose (docs/brand/rose-design.html) ---------- */
 
 .dot {
+	--neon: #ff2d7a;
+	--neon-soft: rgba(255, 45, 122, 0.35);
+	--core: #ffd6e8;
 	position: relative;
-	width: 56px;
-	height: 56px;
+	display: block;
+	width: 64px;
+	height: 84px;
 	padding: 0;
 	border: none;
-	border-radius: 50%;
-	background: radial-gradient(circle at 35% 30%, #a48bff, var(--accent) 55%, #4b2fd1);
-	box-shadow: 0 0 0 0 var(--accent-soft);
+	border-radius: 14px;
+	background: none;
 	user-select: none;
 	-webkit-user-select: none;
 }
 
 .dot:hover:not(:disabled) {
-	background: radial-gradient(circle at 35% 30%, #b39dff, var(--accent) 55%, #4b2fd1);
+	background: none;
 }
 
-.dot-core {
+.dot:focus-visible {
+	outline-offset: -2px;
+}
+
+/* No circle and no box: the strokes are the rose, and they carry the glow. */
+.rose {
+	position: relative;
+	display: block;
+	width: 100%;
+	height: 100%;
+}
+
+.rose svg {
 	position: absolute;
-	inset: 18px;
-	border-radius: 50%;
-	background: rgba(255, 255, 255, 0.85);
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	overflow: visible;
 }
 
-.dot-orbit {
-	position: absolute;
-	inset: 6px;
-	border-radius: 50%;
+.rose path {
+	fill: none;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	vector-effect: non-scaling-stroke;
 }
 
-.dot-idle {
-	animation: breathe 3.2s var(--ease) infinite;
+.rose-base {
+	opacity: 0.8;
+	filter: drop-shadow(0 0 1px var(--neon)) drop-shadow(0 0 4px var(--neon-soft));
 }
 
-.dot-thinking .dot-orbit::after {
-	content: "";
-	position: absolute;
-	top: -2px;
-	left: 50%;
-	width: 6px;
-	height: 6px;
-	margin-left: -3px;
-	border-radius: 50%;
-	background: #fff;
+.rose-base path {
+	stroke: var(--neon);
+	stroke-width: 1.1;
 }
 
-.dot-thinking .dot-orbit {
-	animation: orbit 1.2s linear infinite;
+/* The light layer: one dash per stroke that travels from start to end. */
+.rose-light {
+	opacity: 0;
+	filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 3px var(--neon));
 }
 
-.dot-working {
-	animation: pulse 1s var(--ease) infinite;
+.rose-light path {
+	stroke: var(--core);
+	stroke-width: 1.6;
+	stroke-dasharray: 0 1;
 }
 
-.dot-needs_you {
-	box-shadow: 0 0 0 3px var(--amber);
+.rose-sparkles {
+	filter: drop-shadow(0 0 2px var(--neon));
 }
 
-.dot-restarting,
-.dot-starting {
-	filter: grayscale(1);
-	opacity: 0.7;
+.rose-sparkles circle {
+	fill: var(--core);
+	opacity: 0.8;
 }
 
-.dot-error {
-	box-shadow: 0 0 0 3px var(--danger);
+.rose-idle .rose-base {
+	animation: rose-breathe 3.6s ease-in-out infinite;
+}
+
+.rose-idle .rose-sparkles circle {
+	animation: rose-twinkle 2.8s ease-in-out infinite;
+	animation-delay: calc(var(--i) * -0.37s);
+}
+
+.rose-thinking .rose-base {
+	opacity: 0.65;
+}
+
+.rose-thinking .rose-light {
+	opacity: 1;
+}
+
+.rose-thinking .rose-light path {
+	stroke-dasharray: 0.16 1.2;
+	animation: rose-run calc(var(--d) * 1.6) linear infinite;
+	animation-delay: calc(var(--i) * -0.53s);
+}
+
+.rose-thinking .rose-sparkles {
+	opacity: 0.35;
+}
+
+.rose-working .rose-base {
+	opacity: 0.9;
+}
+
+.rose-working .rose-light {
+	opacity: 1;
+}
+
+.rose-working .rose-light path {
+	stroke-dasharray: 0.22 0.5;
+	animation: rose-run calc(var(--d) * 0.55) linear infinite;
+	animation-delay: calc(var(--i) * -0.29s);
+}
+
+.rose-working .rose-sparkles circle {
+	animation: rose-twinkle 0.9s ease-in-out infinite;
+	animation-delay: calc(var(--i) * -0.13s);
+}
+
+.rose-needs .rose-base {
+	opacity: 1;
+	animation: rose-call 1.4s ease-in-out infinite;
+}
+
+.rose-needs .rose-sparkles circle {
+	animation: rose-twinkle 1.4s ease-in-out infinite;
+}
+
+.rose-restarting {
+	filter: grayscale(1) brightness(0.8);
+}
+
+.rose-restarting .rose-base {
+	opacity: 0.4;
+}
+
+.rose-restarting .rose-light {
+	opacity: 0.8;
+}
+
+.rose-restarting .rose-light path {
+	stroke-dasharray: 0.1 2;
+	animation: rose-run calc(var(--d) * 2.4) linear infinite;
+	animation-delay: calc(var(--i) * -0.71s);
+}
+
+.rose-restarting .rose-sparkles,
+.rose-offline .rose-sparkles {
+	display: none;
+}
+
+.rose-offline {
+	filter: grayscale(0.85) brightness(0.6);
+}
+
+.rose-offline .rose-base {
+	opacity: 0.55;
+	filter: none;
 }
 
 .dot-badge {
 	position: absolute;
-	top: -2px;
-	right: -2px;
-	width: 18px;
-	height: 18px;
+	top: 2px;
+	right: 2px;
+	width: 16px;
+	height: 16px;
 	border-radius: 50%;
 	background: var(--amber);
-	color: #1a1200;
-	font-size: 12px;
-	font-weight: 700;
-	line-height: 18px;
+	color: #241600;
+	font-size: 11px;
+	font-weight: 800;
+	line-height: 16px;
+	text-align: center;
+	box-shadow: 0 0 6px rgba(245, 165, 36, 0.7);
 }
 
-@keyframes breathe {
-	50% {
-		box-shadow: 0 0 0 6px var(--accent-soft);
+/* Reduce motion: no traveling light (frozen dashes would look broken); the glow stays, stronger when busy.
+   Glow radii stay small because the window is only a few pixels larger than the rose. */
+@media (prefers-reduced-motion: reduce) {
+	.rose-light {
+		display: none;
+	}
+
+	.rose-working .rose-base,
+	.rose-needs .rose-base {
+		filter: drop-shadow(0 0 1.5px var(--neon)) drop-shadow(0 0 4px var(--neon));
 	}
 }
 
-@keyframes orbit {
+@keyframes rose-run {
+	from {
+		stroke-dashoffset: 1.2;
+	}
 	to {
-		transform: rotate(360deg);
+		stroke-dashoffset: -0.2;
+	}
+}
+
+@keyframes rose-breathe {
+	0%,
+	100% {
+		filter: drop-shadow(0 0 1px var(--neon)) drop-shadow(0 0 2px var(--neon-soft));
+	}
+	50% {
+		filter: drop-shadow(0 0 1.5px var(--neon)) drop-shadow(0 0 4px var(--neon));
+	}
+}
+
+@keyframes rose-call {
+	0%,
+	100% {
+		filter: drop-shadow(0 0 1px var(--neon)) drop-shadow(0 0 4px var(--neon-soft));
+	}
+	50% {
+		filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 3px var(--neon)) drop-shadow(0 0 5px var(--neon-soft));
+	}
+}
+
+@keyframes rose-twinkle {
+	50% {
+		opacity: 0.15;
 	}
 }
 

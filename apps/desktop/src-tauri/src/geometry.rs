@@ -83,6 +83,22 @@ pub fn default_dot_position(monitor: Rect, size: (i32, i32), margin: i32) -> (i3
     (monitor.right() - size.0 - margin, monitor.y + (monitor.height - size.1) / 2)
 }
 
+/// Where the Dot starts: the saved position re-snapped to the current monitors
+/// (they may have changed since it was saved), or the right edge of the
+/// primary work area. `size` is the Dot's real window size.
+pub fn initial_dot_position(
+    saved: Option<(i32, i32)>,
+    size: (i32, i32),
+    monitors: &[Rect],
+    primary: Option<Rect>,
+    margin: i32,
+) -> Option<(i32, i32)> {
+    match saved {
+        Some((x, y)) if !monitors.is_empty() => Some(snap_to_edge(Rect::new(x, y, size.0, size.1), monitors, margin)),
+        _ => primary.map(|work| default_dot_position(work, size, margin)),
+    }
+}
+
 /// Places the panel beside the Dot on the side with more room, vertically
 /// centered on the Dot, and clamped inside the monitor.
 pub fn place_panel(dot: Rect, panel: (i32, i32), monitor: Rect, gap: i32, margin: i32) -> (i32, i32) {
@@ -151,6 +167,33 @@ mod tests {
     fn default_position_is_right_edge_vertically_centered() {
         assert_eq!(default_dot_position(SCREEN, (56, 56), 12), (1852, 512));
         assert_eq!(default_dot_position(Rect::new(1920, -200, 2560, 1440), (112, 112), 24), (4344, 464));
+    }
+
+    /// The rose window is taller than wide: 64 × 84 pt, here at 2× scale.
+    fn rose(x: i32, y: i32) -> Rect {
+        Rect::new(x, y, 128, 168)
+    }
+
+    #[test]
+    fn snaps_a_tall_window_by_its_real_size() {
+        assert_eq!(snap_to_edge(rose(1700, 500), &[SCREEN], 24), (1768, 500));
+        assert_eq!(snap_to_edge(rose(900, 900), &[SCREEN], 24), (900, 888));
+        assert_eq!(snap_to_edge(rose(1850, 1000), &[SCREEN], 24), (1768, 888));
+    }
+
+    #[test]
+    fn initial_position_restores_the_saved_spot_with_the_real_size() {
+        // Saved near the bottom-right corner: the full 168 px height stays on screen.
+        assert_eq!(initial_dot_position(Some((1768, 1000)), (128, 168), &[SCREEN], Some(SCREEN), 24), Some((1768, 888)));
+        assert_eq!(initial_dot_position(Some((24, 300)), (128, 168), &[SCREEN], Some(SCREEN), 24), Some((24, 300)));
+    }
+
+    #[test]
+    fn initial_position_defaults_to_the_primary_right_edge() {
+        assert_eq!(initial_dot_position(None, (128, 168), &[SCREEN], Some(SCREEN), 24), Some((1768, 456)));
+        // Without monitor information the saved spot cannot be checked, so use the primary monitor.
+        assert_eq!(initial_dot_position(Some((5, 5)), (128, 168), &[], Some(SCREEN), 24), Some((1768, 456)));
+        assert_eq!(initial_dot_position(None, (128, 168), &[], None, 24), None);
     }
 
     #[test]

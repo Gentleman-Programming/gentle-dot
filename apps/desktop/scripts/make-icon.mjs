@@ -1,63 +1,100 @@
 #!/usr/bin/env node
-// Writes a filled, anti-aliased circle on a transparent background as an RGBA PNG.
-// Usage: node scripts/make-icon.mjs <out.png> [size=1024] [hex=#7C5CFF]
-import { writeFileSync } from "node:fs";
-import { crc32, deflateSync } from "node:zlib";
+// Renders the rose icons with Playwright's Chromium (design sheet: docs/brand/rose-design.html):
+//   src-tauri/icons/tray/<glyph>.png, <glyph>@2x.png  menu bar template images, 18 and 36 px
+//   src-tauri/icons/source.png                         1024 px app icon master (neon rose, black squircle)
+//   packages/ui/public/favicon.svg, favicon.png        the menu bar glyph in neon pink (the traced
+//                                                       strokes are illegible at tab size), and a 64 px PNG
+// Usage: node scripts/make-icon.mjs, then regenerate the bundle icons from source.png (see README).
+import { readFileSync, writeFileSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { chromium } from "@playwright/test";
 
-const [out, sizeArg = "1024", hex = "#7C5CFF"] = process.argv.slice(2);
-if (!out) {
-	console.error("usage: make-icon.mjs <out.png> [size] [hex]");
-	process.exit(1);
-}
-const size = Number(sizeArg);
-const [r, g, b] = [1, 3, 5].map((i) => Number.parseInt(hex.slice(i, i + 2), 16));
+const path = (relative) => fileURLToPath(new URL(relative, import.meta.url));
+const brand = (file) => path(`../../../docs/brand/${file}`);
 
-// Each scanline starts with filter byte 0 (None), followed by RGBA pixels.
-const raw = Buffer.alloc(size * (size * 4 + 1));
-const center = size / 2;
-const radius = size / 2 - Math.max(1, size / 64);
-const samples = 4;
-for (let y = 0; y < size; y++) {
-	const row = y * (size * 4 + 1);
-	for (let x = 0; x < size; x++) {
-		// Supersample each pixel so the edge is smooth at small sizes.
-		let covered = 0;
-		for (let sy = 0; sy < samples; sy++) {
-			for (let sx = 0; sx < samples; sx++) {
-				const dx = x + (sx + 0.5) / samples - center;
-				const dy = y + (sy + 0.5) / samples - center;
-				if (dx * dx + dy * dy <= radius * radius) covered++;
-			}
-		}
-		const offset = row + 1 + x * 4;
-		raw[offset] = r;
-		raw[offset + 1] = g;
-		raw[offset + 2] = b;
-		raw[offset + 3] = Math.round((covered / (samples * samples)) * 255);
-	}
-}
-
-function chunk(type, data) {
-	const length = Buffer.alloc(4);
-	length.writeUInt32BE(data.length);
-	const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
-	const crc = Buffer.alloc(4);
-	crc.writeUInt32BE(crc32(body));
-	return Buffer.concat([length, body, crc]);
-}
-
-const header = Buffer.alloc(13);
-header.writeUInt32BE(size, 0);
-header.writeUInt32BE(size, 4);
-header[8] = 8; // bit depth
-header[9] = 6; // color type: RGBA
-writeFileSync(
-	out,
-	Buffer.concat([
-		Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-		chunk("IHDR", header),
-		chunk("IDAT", deflateSync(raw)),
-		chunk("IEND", Buffer.alloc(0)),
-	]),
+// ---------- Menu bar ----------
+// Template images: macOS reads only the alpha channel and tints them for the menu bar.
+const glyphPaths = [...readFileSync(brand("rose-glyph.svg"), "utf8").matchAll(/<path d="([^"]+)"\/>/g)].map(
+	(m) => m[1],
 );
-console.log(`wrote ${out} (${size}x${size}, ${hex})`);
+const OUTER_PETALS = 2; // the first two paths of rose-glyph.svg
+const BADGE = { cx: 15.2, cy: 3, r: 2.6, gap: 1.3 };
+
+function glyph({ dashed = false, badge = false, opacity = 1 }) {
+	const strokes = glyphPaths
+		.map((d, i) => `<path d="${d}"${dashed && i < OUTER_PETALS ? ' stroke-dasharray="1.3 1.4"' : ""}/>`)
+		.join("");
+	const knockout = badge
+		? `<mask id="m"><rect width="18" height="18" fill="#fff"/><circle cx="${BADGE.cx}" cy="${BADGE.cy}" r="${BADGE.r + BADGE.gap}"/></mask>`
+		: "";
+	const dot = badge
+		? `<circle cx="${BADGE.cx}" cy="${BADGE.cy}" r="${BADGE.r}" fill="#000" stroke="none"/>`
+		: "";
+	return `${knockout}<g opacity="${opacity}" fill="none" stroke="#000" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"${badge ? ' mask="url(#m)"' : ""}>${strokes}</g>${dot}`;
+}
+
+const glyphs = {
+	ready: glyph({}),
+	working: glyph({ dashed: true }),
+	"needs-you": glyph({ badge: true }),
+	unavailable: glyph({ opacity: 0.4 }),
+};
+
+const favicon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18"><title>Gentle Dot</title>${glyph({}).replaceAll("#000", "#ff2d7a")}</svg>\n`;
+
+// ---------- App icon ----------
+// macOS icon grid: an 824 px squircle centered in 1024, leaving room for its shadow.
+function squircle(center, radius, exponent = 5, steps = 240) {
+	const points = [];
+	for (let i = 0; i < steps; i++) {
+		const t = (i / steps) * 2 * Math.PI;
+		const [c, s] = [Math.cos(t), Math.sin(t)];
+		const x = center + radius * Math.sign(c) * Math.abs(c) ** (2 / exponent);
+		const y = center + radius * Math.sign(s) * Math.abs(s) ** (2 / exponent);
+		points.push(`${x.toFixed(2)} ${y.toFixed(2)}`);
+	}
+	return `M${points.join("L")}Z`;
+}
+
+const rose = readFileSync(brand("rose-source.png")).toString("base64");
+const shape = squircle(512, 412);
+const art = 758; // the rose fills 92% of the squircle, as on the sheet
+const appIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<defs>
+	<radialGradient id="bg" cx="50%" cy="40%" r="62%"><stop offset="0" stop-color="#1a0a12"/><stop offset="0.75" stop-color="#050506"/></radialGradient>
+	<clipPath id="clip"><path d="${shape}"/></clipPath>
+	<filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000" flood-opacity="0.5"/></filter>
+</defs>
+<path d="${shape}" fill="url(#bg)" filter="url(#shadow)"/>
+<g clip-path="url(#clip)">
+	<image href="data:image/png;base64,${rose}" x="${512 - art / 2}" y="${512 - art / 2}" width="${art}" height="${art}" style="mix-blend-mode: screen"/>
+	<path d="${shape}" transform="translate(0 4)" fill="none" stroke="rgba(255,255,255,0.10)" stroke-width="4"/>
+	<path d="${shape}" fill="none" stroke="rgba(255,45,122,0.22)" stroke-width="8"/>
+</g>
+</svg>`;
+
+// ---------- Render ----------
+const browser = await chromium.launch();
+const page = await browser.newPage({ deviceScaleFactor: 1 });
+
+async function render(svg, size, out) {
+	await page.setContent(`<body style="margin:0;background:transparent">${svg}</body>`);
+	await page.locator("svg").evaluate((el, s) => {
+		el.setAttribute("width", s);
+		el.setAttribute("height", s);
+	}, size);
+	await page.locator("svg").screenshot({ path: out, omitBackground: true });
+	console.log(`wrote ${out} (${size}px)`);
+}
+
+await mkdir(path("../src-tauri/icons/tray"), { recursive: true });
+for (const [name, body] of Object.entries(glyphs)) {
+	const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 18">${body}</svg>`;
+	await render(svg, 18, path(`../src-tauri/icons/tray/${name}.png`));
+	await render(svg, 36, path(`../src-tauri/icons/tray/${name}@2x.png`));
+}
+await render(appIcon, 1024, path("../src-tauri/icons/source.png"));
+writeFileSync(path("../../../packages/ui/public/favicon.svg"), favicon);
+await render(favicon, 64, path("../../../packages/ui/public/favicon.png"));
+await browser.close();

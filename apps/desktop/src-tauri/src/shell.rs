@@ -5,7 +5,7 @@ use crate::config::{self, ConnectionInfo, DesktopConfig, DEFAULT_SHORTCUT};
 use crate::daemon::{Daemon, RestartOutcome};
 use crate::geometry::{self, Rect};
 use crate::position::{self, DotPosition};
-use crate::status::tray_status;
+use crate::status::{tray_status, TrayGlyph};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
@@ -25,7 +25,8 @@ use tauri_plugin_opener::OpenerExt;
 const DOT: &str = "dot";
 const PANEL: &str = "panel";
 const TRAY: &str = "main";
-const DOT_SIZE: f64 = 56.0;
+/// The rose window, in logical pixels: the rose's aspect (860 × 1130 crop).
+const DOT_SIZE: (f64, f64) = (64.0, 84.0);
 const PANEL_SIZE: (f64, f64) = (420.0, 640.0);
 const EDGE_MARGIN: f64 = 12.0;
 const PANEL_GAP: f64 = 8.0;
@@ -87,7 +88,8 @@ fn set_dot_state(app: AppHandle, state: String) -> CommandResult {
     let status = tray_status(&state).ok_or_else(|| format!("unknown state `{state}`"))?;
     let tray = app.tray_by_id(TRAY).ok_or("tray icon is missing")?;
     tray.set_tooltip(Some(&status.tooltip)).map_err(err)?;
-    tray.set_title((!status.title.is_empty()).then_some(status.title)).map_err(err)
+    tray.set_icon(Some(Image::from_bytes(status.glyph.png()).map_err(err)?)).map_err(err)?;
+    tray.set_icon_as_template(true).map_err(err)
 }
 
 fn rect_of(window: &WebviewWindow) -> CommandResult<Rect> {
@@ -176,7 +178,7 @@ fn spawn_snapper(app: AppHandle) -> mpsc::Sender<()> {
 fn build_windows(app: &AppHandle, config: &DesktopConfig) -> tauri::Result<()> {
     let dot = WebviewWindowBuilder::new(app, DOT, WebviewUrl::App("index.html?surface=dot".into()))
         .title("Gentle Dot")
-        .inner_size(DOT_SIZE, DOT_SIZE)
+        .inner_size(DOT_SIZE.0, DOT_SIZE.1)
         .transparent(true)
         .decorations(false)
         .always_on_top(true)
@@ -202,17 +204,15 @@ fn build_windows(app: &AppHandle, config: &DesktopConfig) -> tauri::Result<()> {
     // Restore the saved position (re-snapped in case the monitors changed), or
     // default to the right edge of the primary monitor, vertically centered.
     let monitors = monitor_rects(&dot).unwrap_or_default();
-    let size = scaled(&dot, DOT_SIZE);
-    let margin = scaled(&dot, EDGE_MARGIN);
-    let saved = position::load(&config.data_dir.join("desktop.json"));
-    let target = match (saved, monitors.is_empty()) {
-        (Some(p), false) => Some(geometry::snap_to_edge(Rect::new(p.x, p.y, size, size), &monitors, margin)),
-        _ => app.primary_monitor()?.map(|m| {
-            let area = m.work_area();
-            let work = Rect::new(area.position.x, area.position.y, area.size.width as i32, area.size.height as i32);
-            geometry::default_dot_position(work, (size, size), margin)
-        }),
-    };
+    // The real window size, so a tall rose snapped to the bottom edge stays fully on screen.
+    let fallback = (scaled(&dot, DOT_SIZE.0), scaled(&dot, DOT_SIZE.1));
+    let size = rect_of(&dot).map(|r| (r.width, r.height)).unwrap_or(fallback);
+    let primary = app.primary_monitor()?.map(|m| {
+        let area = m.work_area();
+        Rect::new(area.position.x, area.position.y, area.size.width as i32, area.size.height as i32)
+    });
+    let saved = position::load(&config.data_dir.join("desktop.json")).map(|p| (p.x, p.y));
+    let target = geometry::initial_dot_position(saved, size, &monitors, primary, scaled(&dot, EDGE_MARGIN));
     if let Some((x, y)) = target {
         dot.set_position(PhysicalPosition::new(x, y))?;
     }
@@ -239,7 +239,7 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig) -> tauri::Result<TrayIcon
         ],
     )?;
     TrayIconBuilder::with_id(TRAY)
-        .icon(Image::from_bytes(include_bytes!("../icons/tray.png"))?)
+        .icon(Image::from_bytes(TrayGlyph::Unavailable.png())?)
         .icon_as_template(true)
         .tooltip("Gentle Dot")
         .menu(&menu)

@@ -1,5 +1,6 @@
 import type { AgentState } from "@gentle-dot/protocol";
 import { useRef } from "react";
+import { Rose, type RoseMood } from "../rose/Rose.tsx";
 
 const LABELS: Record<AgentState, string> = {
 	starting: "starting",
@@ -11,6 +12,16 @@ const LABELS: Record<AgentState, string> = {
 	error: "unavailable",
 };
 
+const MOODS: Record<AgentState, RoseMood> = {
+	starting: "restarting",
+	idle: "idle",
+	thinking: "thinking",
+	working: "working",
+	needs_you: "needs",
+	restarting: "restarting",
+	error: "offline",
+};
+
 const DRAG_THRESHOLD_PX = 3;
 
 interface DotSurfaceProps {
@@ -20,7 +31,7 @@ interface DotSurfaceProps {
 	startDrag: () => void;
 }
 
-/** The collapsed, always-on-top orb. A click opens the panel; a drag moves the window. */
+/** The collapsed, always-on-top rose. A click opens the panel; a drag moves the window. */
 export function DotSurface({ agentState, connected, toggle, startDrag }: DotSurfaceProps) {
 	const press = useRef<{ x: number; y: number; dragging: boolean } | undefined>(undefined);
 	const state = connected ? agentState : "restarting";
@@ -54,8 +65,7 @@ export function DotSurface({ agentState, connected, toggle, startDrag }: DotSurf
 				}
 			}}
 		>
-			<span className="dot-core" aria-hidden="true" />
-			<span className="dot-orbit" aria-hidden="true" />
+			<Rose mood={MOODS[state]} />
 			{state === "needs_you" ? (
 				<span className="dot-badge" aria-hidden="true">
 					!
