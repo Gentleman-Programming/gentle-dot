@@ -11,6 +11,7 @@ async function main(): Promise<void> {
 		host: config.host,
 		dataDir: config.dataDir,
 		workspace: config.workspace,
+		...(config.preferredFolder ? { preferredFolder: config.preferredFolder } : {}),
 		uiDir: config.uiDir,
 		agentCommand: config.agentCommand,
 		agentArgs: config.agentArgs,

@@ -8,7 +8,10 @@ export interface DotConfig {
 	port: number;
 	host: string;
 	dataDir: string;
+	/** The engine's own working folder, `<dataDir>/workspace`. */
 	workspace: string;
+	/** The folder the user chose to work in, when it is not the engine's own workspace. */
+	preferredFolder: string | undefined;
 	uiDir: string;
 	agentCommand: string;
 	agentArgs: string[];
@@ -81,19 +84,20 @@ function agentConfig(env: NodeJS.ProcessEnv, dataDir: string) {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): DotConfig {
 	const dataDir = resolve(expandHome(env.GENTLE_DOT_DATA_DIR ?? "~/.gentle-dot"));
 	const file = readFileConfig(dataDir);
+	// The engine always works in its own workspace, which names its memory project; a
+	// folder the user chose is passed to the engine as the place to work in.
+	const workspace = join(dataDir, "workspace");
+	const chosen =
+		env.GENTLE_DOT_WORKSPACE ?? (typeof file.workspace === "string" ? file.workspace : undefined);
+	const preferredFolder = chosen ? resolve(expandHome(chosen)) : undefined;
 	return {
 		port: env.GENTLE_DOT_PORT
 			? parsePort(env.GENTLE_DOT_PORT, "GENTLE_DOT_PORT")
 			: parsePort(file.port ?? 4317, "config.json"),
 		host: env.GENTLE_DOT_HOST ?? "127.0.0.1",
 		dataDir,
-		// The engine reads project settings from its workspace, so it is never the home folder by default.
-		workspace: resolve(
-			expandHome(
-				env.GENTLE_DOT_WORKSPACE ??
-					(typeof file.workspace === "string" ? file.workspace : join(dataDir, "workspace")),
-			),
-		),
+		workspace,
+		preferredFolder: preferredFolder === workspace ? undefined : preferredFolder,
 		uiDir: resolve(env.GENTLE_DOT_UI_DIR ?? DEFAULT_UI_DIR),
 		...agentConfig(env, dataDir),
 		allowedOrigins: parseList(env.GENTLE_DOT_ALLOWED_ORIGINS, "GENTLE_DOT_ALLOWED_ORIGINS"),

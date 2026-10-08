@@ -459,7 +459,7 @@ describe("own instance", () => {
 		expect(env.GENTLE_PI_CONFIG_HOME).toBe(join(dataDir, "gentle-ai"));
 	});
 
-	it("gives the agent its own HOME, XDG folders, and memory server, keeping PATH and the user's git identity", async () => {
+	it("gives the agent its own HOME and XDG folders, keeping PATH, the user's git identity, and the user's Engram", async () => {
 		const scratch = tempDir();
 		const realHome = join(scratch, "user");
 		mkdirSync(realHome);
@@ -500,8 +500,9 @@ describe("own instance", () => {
 			XDG_STATE_HOME: join(home, ".local", "state"),
 			GIT_CONFIG_GLOBAL: join(realHome, ".gitconfig"),
 			PATH: process.env.PATH,
-			// Engram ties a memory server to the HOME that started it, so the assistant runs its own.
-			ENGRAM_PORT: "7438",
+			// The user's global Engram: its data dir, so the memory plugin accepts the user's server.
+			ENGRAM_DATA_DIR: join(realHome, ".engram"),
+			ENGRAM_URL: "http://127.0.0.1:7437",
 		});
 		expect(statSync(home).mode & 0o777).toBe(0o700);
 		expect(existsSync(join(dataDir, "workspace"))).toBe(true);

@@ -19,6 +19,7 @@
 //   FAKE_AGENT_ARGS_FILE  write argv as JSON to this file
 //   FAKE_AGENT_BRANDING   emit branded startup UI records
 //   FAKE_AGENT_ENV_FILE   write selected environment variables as JSON to this file
+//   FAKE_AGENT_CWD_FILE   write the working directory to this file
 //   FAKE_AGENT_COMMANDS_FILE  append every model command (set_model, set_thinking_level) as JSONL
 //   FAKE_AGENT_NO_MODEL   refuse every prompt, like an engine with no signed-in account
 //   FAKE_AGENT_DROP_QUEUE settle without taking or reporting queued messages
@@ -52,6 +53,7 @@ let thinkingLevel = "medium";
 
 const argv = process.argv.slice(2);
 if (process.env.FAKE_AGENT_ARGS_FILE) writeFileSync(process.env.FAKE_AGENT_ARGS_FILE, JSON.stringify(argv));
+if (process.env.FAKE_AGENT_CWD_FILE) writeFileSync(process.env.FAKE_AGENT_CWD_FILE, process.cwd());
 if (process.env.FAKE_AGENT_ENV_FILE) {
 	writeFileSync(
 		process.env.FAKE_AGENT_ENV_FILE,
@@ -70,6 +72,7 @@ if (process.env.FAKE_AGENT_ENV_FILE) {
 					"GENTLE_SHELL_CONFIG",
 					"ENGRAM_PORT",
 					"ENGRAM_URL",
+					"ENGRAM_DATA_DIR",
 				].map((key) => [key, process.env[key]]),
 			),
 		),

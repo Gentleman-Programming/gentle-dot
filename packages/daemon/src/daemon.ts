@@ -7,7 +7,7 @@ import { type ClientMessage, CloseCode, PROTOCOL_VERSION, parseClientMessage } f
 import { type WebSocket, WebSocketServer } from "ws";
 import { AuthManager, type AuthRuntime, createModelAuthRuntime, resolveAgentHome } from "./auth.ts";
 import { type BridgeClient, DotBridge } from "./bridge.ts";
-import { ensurePrivateDir, isolatedAgentEnv } from "./isolation.ts";
+import { ensureMemoryProject, ensurePrivateDir, isolatedAgentEnv } from "./isolation.ts";
 import { defaultImportPath, ProfileStore } from "./profiles.ts";
 import { AgentSupervisor } from "./supervisor.ts";
 import { identityArgs } from "./white-label.ts";
@@ -16,7 +16,10 @@ export interface DaemonOptions {
 	port: number;
 	host: string;
 	dataDir: string;
+	/** The engine's working folder, owned by the assistant; it names the memory project. */
 	workspace: string;
+	/** A folder the user prefers to work in; the engine is told about it but keeps its own workspace. */
+	preferredFolder?: string;
 	/** Directory with the built web UI (`index.html`). */
 	uiDir: string;
 	agentCommand: string;
@@ -86,6 +89,13 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	const log = options.log ?? (() => {});
 	const token = ensureToken(options.dataDir);
 	mkdirSync(options.workspace, { recursive: true, mode: 0o700 });
+	ensureMemoryProject(options.workspace);
+	const folderArgs = options.preferredFolder
+		? [
+				"--append-system-prompt",
+				`The user's preferred working folder is ${options.preferredFolder}. Use absolute paths there unless told otherwise.`,
+			]
+		: [];
 	let agentEnv = { ...(options.agentEnv ?? process.env) };
 	const homeArgs: string[] = [];
 	if (options.agentHome) {
@@ -97,7 +107,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	const supervisor = new AgentSupervisor({
 		command: options.agentCommand,
 		args: [...(options.agentArgs ?? []), ...homeArgs],
-		extraArgs: [...identityArgs(options.dataDir), ...(options.agentExtraArgs ?? [])],
+		extraArgs: [...identityArgs(options.dataDir), ...folderArgs, ...(options.agentExtraArgs ?? [])],
 		cwd: options.workspace,
 		dataDir: options.dataDir,
 		env: agentEnv,

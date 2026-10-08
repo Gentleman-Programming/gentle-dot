@@ -17,6 +17,7 @@ describe("loadConfig", () => {
 			// Never the user's home: the engine reads project settings from its workspace.
 			workspace: join(dataDir, "workspace"),
 		});
+		expect(config.preferredFolder).toBeUndefined();
 		expect(config.agentArgs).toHaveLength(1);
 		expect(config.agentArgs[0]).toMatch(/node_modules\/gentle-pi\/bin\/gentle-shell\.mjs$/);
 		expect(existsSync(config.agentArgs[0] ?? "")).toBe(true);
@@ -45,9 +46,24 @@ describe("loadConfig", () => {
 
 	it("reads config.json and lets environment variables win", () => {
 		const dataDir = tempDir();
-		writeFileSync(join(dataDir, "config.json"), JSON.stringify({ port: 5000, workspace: dataDir }));
-		expect(loadConfig({ GENTLE_DOT_DATA_DIR: dataDir })).toMatchObject({ port: 5000, workspace: dataDir });
+		writeFileSync(join(dataDir, "config.json"), JSON.stringify({ port: 5000, workspace: "/projects" }));
+		expect(loadConfig({ GENTLE_DOT_DATA_DIR: dataDir })).toMatchObject({
+			port: 5000,
+			preferredFolder: "/projects",
+		});
 		expect(loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_PORT: "6000" }).port).toBe(6000);
+	});
+
+	it("keeps the engine in its own workspace and treats a custom one as the user's preferred folder", () => {
+		const dataDir = tempDir();
+		const config = loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_WORKSPACE: "/work/repo" });
+		// The workspace holds the memory project setting, so the engine always works there.
+		expect(config).toMatchObject({ workspace: join(dataDir, "workspace"), preferredFolder: "/work/repo" });
+		const same = loadConfig({
+			GENTLE_DOT_DATA_DIR: dataDir,
+			GENTLE_DOT_WORKSPACE: join(dataDir, "workspace"),
+		});
+		expect(same.preferredFolder).toBeUndefined();
 	});
 
 	it("rejects an invalid port and a malformed argument list", () => {
