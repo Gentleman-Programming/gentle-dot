@@ -1,0 +1,26 @@
+{
+	"name": "gentle-dot",
+	"private": true,
+	"type": "module",
+	"engines": {
+		"node": ">=24"
+	},
+	"packageManager": "pnpm@11.5.0",
+	"scripts": {
+		"dev": "pnpm --filter @gentle-dot/ui build && node packages/daemon/src/cli.ts",
+		"build": "pnpm --filter @gentle-dot/ui build",
+		"start": "node packages/daemon/src/cli.ts",
+		"test": "vitest run",
+		"e2e": "playwright test",
+		"typecheck": "tsc -b",
+		"lint": "biome check .",
+		"format": "biome format --write ."
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.15",
+		"@playwright/test": "^1.63.0",
+		"@types/node": "^26.6.4",
+		"typescript": "^7.0.2",
+		"vitest": "^5.0.3"
+	}
+}

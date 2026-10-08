@@ -1,0 +1,16 @@
+{
+	"name": "@gentle-dot/daemon",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"bin": {
+		"gentle-dot": "./src/cli.ts"
+	},
+	"dependencies": {
+		"@gentle-dot/protocol": "workspace:*",
+		"ws": "^8.22.0"
+	},
+	"devDependencies": {
+		"@types/ws": "^8.18.2"
+	}
+}

@@ -1,0 +1,14 @@
+{
+	"files": [],
+	"references": [
+		{
+			"path": "packages/protocol"
+		},
+		{
+			"path": "packages/daemon"
+		},
+		{
+			"path": "packages/ui"
+		}
+	]
+}

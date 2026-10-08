@@ -1,0 +1,23 @@
+{
+	"$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+	"files": {
+		"includes": [
+			"**",
+			"!**/node_modules",
+			"!**/dist",
+			"!apps/desktop/src-tauri/target",
+			"!apps/desktop/src-tauri/gen",
+			"!odd",
+			"!docs"
+		]
+	},
+	"formatter": {
+		"indentStyle": "tab",
+		"lineWidth": 110
+	},
+	"linter": {
+		"rules": {
+			"preset": "recommended"
+		}
+	}
+}
