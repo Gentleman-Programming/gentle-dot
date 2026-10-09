@@ -73,12 +73,15 @@ pub fn compositor_places_windows(env: impl Fn(&str) -> Option<String>) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchRequest {
     Toggle,
+    ToggleRose,
     Show,
 }
 
 /// Reads the arguments of a launch, `args[0]` being the program.
 pub fn launch_request(args: &[String]) -> LaunchRequest {
-    if args.iter().skip(1).any(|arg| arg == "--toggle") {
+    if args.iter().skip(1).any(|arg| arg == "--toggle-rose") {
+        LaunchRequest::ToggleRose
+    } else if args.iter().skip(1).any(|arg| arg == "--toggle") {
         LaunchRequest::Toggle
     } else {
         LaunchRequest::Show
@@ -166,6 +169,7 @@ mod tests {
     #[test]
     fn toggle_argument_toggles_the_panel() {
         let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(launch_request(&args(&["gentle-dot", "--toggle-rose"])), LaunchRequest::ToggleRose);
         assert_eq!(launch_request(&args(&["gentle-dot", "--toggle"])), LaunchRequest::Toggle);
         assert_eq!(launch_request(&args(&["/opt/gentle-dot", "--verbose", "--toggle"])), LaunchRequest::Toggle);
         assert_eq!(launch_request(&args(&["gentle-dot"])), LaunchRequest::Show);
