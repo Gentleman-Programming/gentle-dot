@@ -43,6 +43,8 @@ interface ChatSurfaceProps {
 	openUrl?: (url: string) => void;
 	/** Computer control, in the desktop panel only. */
 	computer?: ComputerControls;
+	/** The desktop panel offers the voice engine and its optional local model (S30.5). */
+	voiceModel?: boolean;
 	/** Hiding the rose and full screen (S26), in the desktop panel only; the web page already fills the browser. */
 	panelWindow?: PanelWindowControls;
 	/** Sends files to the daemon (S31); without it the composer has no attachments. */
@@ -74,6 +76,7 @@ export function ChatSurface({
 	dispatch = () => {},
 	openUrl = openExternal,
 	computer,
+	voiceModel,
 	panelWindow,
 	upload,
 }: ChatSurfaceProps) {
@@ -265,6 +268,7 @@ export function ChatSurface({
 						dispatch={dispatch}
 						openUrl={openUrl}
 						{...(computer?.available ? { computer } : {})}
+						{...(voiceModel ? { voiceModel } : {})}
 					/>
 				</main>
 			) : null}

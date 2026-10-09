@@ -5,6 +5,7 @@ import "../accounts.css";
 import { FlowEvent, FlowPrompt } from "./AccountsPanel.tsx";
 import { type ComputerControls, ComputerEntry } from "./Computer.tsx";
 import type { Send } from "./types.ts";
+import { VoiceModelEntry } from "./VoiceModel.tsx";
 
 interface ConnectorsPanelProps {
 	connectors: ConnectorsState;
@@ -13,6 +14,8 @@ interface ConnectorsPanelProps {
 	openUrl: (url: string) => void;
 	/** Computer control, in the desktop app on macOS only. */
 	computer?: ComputerControls;
+	/** The desktop app's voice engine and optional local model (S30.5). */
+	voiceModel?: boolean;
 }
 
 const STATUS_LABELS: Record<ConnectorStatus, string> = {
@@ -28,7 +31,14 @@ export const addConnectorRequest = (what: string) =>
 	`Please help me add a connector for ${what}. Find its MCP server and draft it for me to review.`;
 
 /** The apps the assistant can use, each signed in from here and set to read only or read and send. */
-export function ConnectorsPanel({ connectors, send, dispatch, openUrl, computer }: ConnectorsPanelProps) {
+export function ConnectorsPanel({
+	connectors,
+	send,
+	dispatch,
+	openUrl,
+	computer,
+	voiceModel,
+}: ConnectorsPanelProps) {
 	const [guideFor, setGuideFor] = useState<string>();
 	const [adding, setAdding] = useState(false);
 	const flow = connectors.flow;
@@ -138,6 +148,7 @@ export function ConnectorsPanel({ connectors, send, dispatch, openUrl, computer 
 								{...withInfo(connectors.list?.find((c) => c.builtin && c.id === "computer"))}
 							/>
 						) : null}
+						{voiceModel ? <VoiceModelEntry /> : null}
 						{/* Built-in entries are the desktop app's; the web page never shows them. */}
 						{(connectors.list ?? [])
 							.filter((c) => !c.builtin)

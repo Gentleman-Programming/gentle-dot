@@ -71,3 +71,36 @@ export function startRefusal(error: unknown): string {
 	if (error instanceof Error && error.message) return error.message;
 	return "Could not start listening.";
 }
+
+/**
+ * The optional local voice model (S30.5): `voice_model_status|download|cancel|remove` and the
+ * `voice://model` event. Nothing downloads unless the user asks.
+ */
+export interface VoiceModelStatus {
+	installed: boolean;
+	bytes?: number;
+	downloading: boolean;
+	received?: number;
+	total?: number;
+	engine: "parakeet" | "apple" | "none";
+}
+
+export interface VoiceModelEvent {
+	state: "downloading" | "verifying" | "installed" | "failed" | "removed";
+	received?: number;
+	total?: number;
+	message?: string;
+}
+
+export const voiceModelStatus = () => invoke<VoiceModelStatus>("voice_model_status");
+export const downloadVoiceModel = () => invoke<void>("voice_model_download");
+export const cancelVoiceModel = () => invoke<void>("voice_model_cancel");
+export const removeVoiceModel = () => invoke<void>("voice_model_remove");
+
+/** Listens to the model's download and install progress. */
+export async function onVoiceModel(handler: (event: VoiceModelEvent) => void): Promise<() => void> {
+	const { listen } = await import("@tauri-apps/api/event");
+	return listen<VoiceModelEvent>("voice://model", (event) => {
+		if (event.payload && typeof event.payload.state === "string") handler(event.payload);
+	});
+}

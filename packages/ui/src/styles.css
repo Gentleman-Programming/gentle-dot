@@ -1796,3 +1796,20 @@ html[data-surface="glow"] body {
 .chat-fullscreen .model-picker {
 	margin-inline: max(12px, calc((100% - var(--reading-width)) / 2));
 }
+
+/* The local voice model's download (S30.5). */
+.voice-model-progress {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-top: 6px;
+}
+
+.voice-model-progress progress {
+	flex: 1;
+	accent-color: var(--accent);
+}
+
+.voice-model-error {
+	color: var(--red, #ff6b8a);
+}

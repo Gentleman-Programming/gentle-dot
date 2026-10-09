@@ -172,6 +172,7 @@ function Assistant({ surface }: { surface: Surface }) {
 			focusKey={focusKey}
 			{...(surface === "panel" ? { onHide: hidePanel } : {})}
 			{...(computer ? { computer } : {})}
+			{...(desktop && surface === "panel" ? { voiceModel: true } : {})}
 			{...(desktop && surface === "panel" ? { panelWindow: panel.controls } : {})}
 			{...(upload ? { upload } : {})}
 		/>
