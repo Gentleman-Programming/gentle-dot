@@ -157,9 +157,9 @@ Branch: `feat/gentle-dot` · Delivery strategy: `single-pr` (user choice, L7; fo
 | T28e | S29.2 | inline; user consented (L84) | done | `5ec1d25`; two signed builds both `certificate leaf = H"4611e0a8…"`, verify ok | Self-signed identity; compare the designated requirement across two builds |
 | T28f | S29.3, S29.4 | delegated writer, parallel with T28d | done | see L87 | Linux .deb (arm64, amd64) and Arch PKGBUILD in containers; clean install smoke |
 | T28g | S29.4 | inline | done | see L87 | docs/install.md; Hyprland snippets point at /usr/bin/gentle-dot |
-| T29 | S30 | explore (delegated, read-only) → spec → implement | in progress | map done (L88) |
+| T29 | S30 | explore (delegated, read-only) → spec → implement | in progress | map done (L88) | Voice conversation: mic button, transcription, spoken replies |
 | T29a | S30.1 | delegated writer, parallel with T29b (surface `apps/desktop/src-tauri/**`) | in progress | — | Native macOS speech recognition commands and events |
-| T29b | S30.2–S30.4 | delegated writer, parallel with T29a (surface `packages/**`) | in progress | — | Daemon OpenAI-key transcription/TTS, mic button, spoken replies | Voice conversation: mic button, transcription, spoken replies |
+| T29b | S30.2–S30.4 | delegated writer, parallel with T29a (surface `packages/**`) | in progress | — | Daemon OpenAI-key transcription/TTS, mic button, spoken replies |
 | T22 | S18 (hardening, L47 B1/B2) | delegated writer | done (accepted with documented gaps, L52) | `8651bba`; parent re-ran 328 tests + typecheck | Option A: authoritative in-memory connector state with revert, credential reads blocked, path-independent bash checks, full approval preview, redirect manual, private Engram stop, onboarding overlap fix |
 | T23 | S25 | explore → spec → implement (stage 2) | pending | — | Daemon-side MCP proxy with Keychain tokens |
 | T9 | S1–S6, S9–S12 | delegated verifier (high risk: process supervision, auth) | done | L24 + L31 | Full verification: unit, integration, Playwright, `@real-agent`, `tauri build` + launch, manual macOS checklist with observed results |
