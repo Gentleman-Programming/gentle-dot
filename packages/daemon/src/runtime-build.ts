@@ -88,10 +88,10 @@ export async function buildRuntime(outDir: string): Promise<void> {
 	chmodSync(join(daemon, "cli.mjs"), 0o755);
 	// The bundle finds these through `import.meta.url`, as the sources do in `src/`.
 	copyFileSync(join(PACKAGE, "src", "identity.md"), join(daemon, "identity.md"));
-	copyFileSync(
-		join(PACKAGE, "src", "extensions", "approval-guard.ts"),
-		join(daemon, "extensions", "approval-guard.ts"),
-	);
+	// The engine loads the guard with -e, and the guard imports its siblings.
+	for (const name of ["approval-guard.ts", "screenshot-context.ts"]) {
+		copyFileSync(join(PACKAGE, "src", "extensions", name), join(daemon, "extensions", name));
+	}
 	const manifest = { name: "gentle-dot-runtime", private: true, type: "module", dependencies };
 	writeFileSync(join(daemon, "package.json"), `${JSON.stringify(manifest, null, "\t")}\n`);
 	writeFileSync(join(outDir, "bin", "pi"), piWrapper(engineEntry()), { mode: 0o755 });

@@ -42,6 +42,7 @@ describe("build:runtime", () => {
 			"bin/pi",
 			"daemon/cli.mjs",
 			"daemon/extensions/approval-guard.ts",
+			"daemon/extensions/screenshot-context.ts",
 			"daemon/identity.md",
 			"daemon/package.json",
 		]);

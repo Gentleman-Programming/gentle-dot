@@ -426,3 +426,32 @@ describe("approval guard extension", () => {
 		expect(result).toEqual({ block: true, reason: expect.stringContaining("Connectors screen") });
 	});
 });
+
+describe("screenshots in the model's context (S24.10)", () => {
+	it("hooks the context event so each model call carries only the last screenshot", async () => {
+		const context: ((event: { messages: unknown[] }) => unknown)[] = [];
+		const pi = {
+			on(event: string, handler: (event: { messages: unknown[] }) => unknown) {
+				if (event === "context") context.push(handler);
+			},
+			getAllTools: () => [],
+			registerTool: () => {},
+		};
+		approvalGuard(pi as never);
+		const shot = (data: string) => ({
+			role: "toolResult",
+			toolCallId: data,
+			toolName: "mcp__computer__screenshot",
+			content: [{ type: "image", data, mimeType: "image/jpeg" }],
+			isError: false,
+		});
+		const [hook] = context;
+		expect(context).toHaveLength(1);
+		if (!hook) return;
+		const result = (await hook({ messages: [shot("OLD"), shot("NEW")] })) as {
+			messages: { content: { type: string }[] }[];
+		};
+		const types = result.messages.map((message) => message.content.map((block) => block.type));
+		expect(types).toEqual([["text"], ["image"]]);
+	});
+});
