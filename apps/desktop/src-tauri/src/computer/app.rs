@@ -48,6 +48,14 @@ enum Overlay {
     Mark(super::glow::Mark),
 }
 
+impl Computer {
+    /// The helper's address and key for this launch, registered with the daemon over the app's
+    /// channel (S24.7, L61); `None` off macOS or when the helper did not start.
+    pub fn endpoint(&self) -> Option<Endpoint> {
+        self.endpoint.clone()
+    }
+}
+
 /// Creates the session and, on macOS, starts the MCP helper, the timeout watcher, and the
 /// glow overlay. Runs in the app's setup, on the main thread.
 pub fn start(app: &AppHandle) -> Computer {
@@ -290,7 +298,7 @@ pub fn computer_status(computer: State<'_, Computer>) -> StateEvent {
     computer.control.status(SystemClock.now_ms())
 }
 
-/// Dialogs shown by the app itself (NSAlert through the dialog plugin), never the webview.
+/// Dialogs shown by the app itself (an `NSAlert`, see `alert`), never the webview.
 #[cfg(target_os = "macos")]
 struct NativeDialogs {
     app: AppHandle,
@@ -340,12 +348,10 @@ for up to 1 hour. Stop and ⌥⇧Esc still work."
 
     #[test]
     fn every_computer_dialog_defaults_to_its_refusing_button() {
-        use tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom;
         for choice in [GRANT_CHOICE, CONFIRM_CHOICE, YOLO_CHOICE] {
-            match choice.buttons() {
-                OkCancelCustom(first, second) => assert_eq!((first.as_str(), second.as_str()), (choice.refuse, choice.allow)),
-                other => panic!("unexpected buttons: {other:?}"),
-            }
+            assert_eq!(choice.alert_buttons(), [choice.refuse, choice.allow]);
+            assert!(!choice.allows_response(Some(crate::alert::REFUSE_RESPONSE)));
+            assert!(!choice.allows_response(None));
         }
     }
 

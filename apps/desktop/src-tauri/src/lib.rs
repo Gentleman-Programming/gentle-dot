@@ -1,4 +1,5 @@
 pub mod alert;
+pub mod app_channel;
 pub mod approvals;
 pub mod computer;
 pub mod config;

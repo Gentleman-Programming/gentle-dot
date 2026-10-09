@@ -305,6 +305,32 @@ export function approvalCard(
 	};
 }
 
+/**
+ * The same approval for the desktop app's native dialog (S25.3): the action in words and every
+ * argument as its own field, key fields first. The app sanitizes and shortens what it shows.
+ */
+export function approvalRequest(
+	name: string,
+	server: string,
+	tool: string,
+	input: Record<string, unknown>,
+): { connector: string; action: string; preview: { name: string; value: unknown }[] } {
+	return {
+		connector: name,
+		action: describeAction(tool, server),
+		preview: rankedKeys(input).map((key) => ({ name: key, value: input[key] })),
+	};
+}
+
+/** The argument names, key fields first. */
+function rankedKeys(input: Record<string, unknown>): string[] {
+	const rank = (key: string) => {
+		const index = KEY_FIELDS.findIndex((pattern) => pattern.test(key));
+		return index < 0 ? KEY_FIELDS.length : index;
+	};
+	return Object.keys(input).sort((a, b) => rank(a) - rank(b));
+}
+
 /** `notion_create_pages` (or `notion-create-pages`) of `notion` -> "create pages". */
 function describeAction(tool: string, server: string): string {
 	let action = tool;
@@ -316,12 +342,7 @@ function describeAction(tool: string, server: string): string {
 
 /** Every argument, key fields first, so the user approves what they saw; very long ones say what was cut. */
 function preview(input: Record<string, unknown>): string {
-	const rank = (key: string) => {
-		const index = KEY_FIELDS.findIndex((pattern) => pattern.test(key));
-		return index < 0 ? KEY_FIELDS.length : index;
-	};
-	const text = Object.keys(input)
-		.sort((a, b) => rank(a) - rank(b))
+	const text = rankedKeys(input)
 		.map((key) => `${key}: ${show(input[key])}`)
 		.join("\n");
 	if (text.length <= PREVIEW_LIMIT) return text;

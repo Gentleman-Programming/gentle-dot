@@ -38,6 +38,11 @@ interface ChatSurfaceProps {
 	variant: "web" | "panel";
 	state: DotState;
 	send: Send;
+	/**
+	 * Connector changes (S25.2), through the desktop app on behalf of this window. Only the desktop
+	 * panel has it; elsewhere connector controls are disabled with the reason.
+	 */
+	appSend?: Send;
 	dismiss: (id: number) => void;
 	onHide?: () => void;
 	focusKey?: number;
@@ -74,6 +79,7 @@ export function ChatSurface({
 	variant,
 	state,
 	send,
+	appSend,
 	dismiss,
 	onHide,
 	focusKey,
@@ -296,6 +302,7 @@ export function ChatSurface({
 					<ConnectorsPanel
 						connectors={state.connectors}
 						send={send}
+						{...(appSend ? { appSend } : {})}
 						dispatch={dispatch}
 						openUrl={openUrl}
 						{...(computer?.available ? { computer } : {})}
@@ -350,6 +357,7 @@ export function ChatSurface({
 						key={draft.draftId}
 						draft={draft}
 						send={send}
+						{...(appSend ? { appSend } : {})}
 						// Its secrets are asked in the Connectors screen.
 						approved={() => dispatch({ type: "connector_started", connectorId: draft.name })}
 					/>

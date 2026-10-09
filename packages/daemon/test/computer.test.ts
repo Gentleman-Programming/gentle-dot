@@ -5,6 +5,7 @@ import type { ConnectorInfo, ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
@@ -37,6 +38,8 @@ async function setup(options: Setup = {}) {
 		writeFileSync(join(importHome, path), JSON.stringify(content));
 	}
 	const fake = fakeAuthRuntime();
+	// The desktop app registers the helper and makes the connector changes (S25.2).
+	const app = fakeApp([], "allow");
 	const d = await startDaemon({
 		port: 0,
 		host: "127.0.0.1",
@@ -55,6 +58,7 @@ async function setup(options: Setup = {}) {
 		authRuntime: async () => fake.runtime,
 		connectorCli: { command: process.execPath, args: [FAKE_CLI] },
 		importHome,
+		appChannel: app.daemonEnd,
 		log: (line) => logs.push(line),
 	});
 	daemons.push(d);
@@ -75,19 +79,25 @@ async function setup(options: Setup = {}) {
 		servers,
 		agentEnv,
 		policy,
-		...(await connect(d)),
-		connect: () => connect(d),
+		app,
+		...(await connect(d, app)),
+		connect: () => connect(d, app),
 	};
 }
 
-async function connect(d: DotDaemon) {
+async function connect(d: DotDaemon, app: ReturnType<typeof fakeApp>) {
 	const ws = new WebSocket(`ws://127.0.0.1:${d.port}/ws`);
 	const messages: ServerMessage[] = [];
 	ws.on("message", (data) => messages.push(JSON.parse(String(data)) as ServerMessage));
 	await new Promise((resolve) => ws.on("open", resolve));
 	ws.send(JSON.stringify({ type: "hello", token: d.token, protocol: 1 }));
-	await waitFor(() => messages.some((m) => m.type === "ready"));
-	const send = (m: object) => ws.send(JSON.stringify(m));
+	const ready = await waitFor(() => messages.find((m) => m.type === "ready"));
+	const clientId = ready.type === "ready" ? (ready.clientId ?? "") : "";
+	const send = sendLikeThePanel(
+		app,
+		() => clientId,
+		(m) => ws.send(JSON.stringify(m)),
+	);
 	function find<T extends ServerMessage["type"]>(
 		type: T,
 		where: (m: Extract<ServerMessage, { type: T }>) => boolean = () => true,
@@ -199,16 +209,19 @@ describe("computer control registration (S24.7)", () => {
 		}
 	});
 
-	it("removes it on computer_unregister, which only the window that registered it can send", async () => {
+	it("removes it on computer_unregister, which only the app can send (L61)", async () => {
 		const { d, servers, send, list, connect: other } = await setup();
 		const second = await other();
 		send({ type: "computer_register", url: HELPER, token: KEY });
 		await waitFor(() => servers().computer);
 		const pid = d.supervisor.pid;
 
-		second.send({ type: "computer_unregister" });
+		// A window with the access key (the agent could be one) cannot remove or repoint it.
+		second.ws.send(JSON.stringify({ type: "computer_unregister" }));
+		second.ws.send(JSON.stringify({ type: "computer_register", url: "http://127.0.0.1:9/mcp", token: KEY }));
+		await second.find("error", (m) => m.code === "app_required");
 		await settle();
-		expect(servers().computer).toBeDefined();
+		expect(servers().computer).toMatchObject({ url: HELPER });
 
 		send({ type: "computer_unregister" });
 		await waitFor(() => !servers().computer);
@@ -216,18 +229,17 @@ describe("computer control registration (S24.7)", () => {
 		await waitFor(() => d.supervisor.pid !== pid && d.supervisor.state === "ready");
 	});
 
-	it("removes it when the window that registered it disconnects, not when another one does", async () => {
-		const { servers, send, ws, connect: other } = await setup();
+	it("stays while windows come and go, and goes away when the app does", async () => {
+		const { servers, send, ws, app, connect: other } = await setup();
 		const second = await other();
-		const third = await other();
 		send({ type: "computer_register", url: HELPER, token: KEY });
 		await waitFor(() => servers().computer);
 
-		third.ws.close();
+		ws.close();
 		await settle();
 		expect(servers().computer).toBeDefined();
 
-		ws.close();
+		app.close();
 		await waitFor(() => !servers().computer);
 		await second.find("connectors", (m) => computerOf(m.connectors) === undefined);
 		expect(computerOf(await second.list())).toBeUndefined();

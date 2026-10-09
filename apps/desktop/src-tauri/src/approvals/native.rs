@@ -1,5 +1,5 @@
-//! The real approval dialog: an alert shown by the app (NSAlert through the dialog plugin on
-//! macOS, as computer control does, S24.3), "Decline" as the default button.
+//! The real approval dialog: an alert shown by the app (an `NSAlert` on macOS, as computer control
+//! does, S24.3), "Decline" as the default button.
 
 use super::{ApprovalDialog, Prompt, APPROVAL_CHOICE};
 use tauri::AppHandle;
@@ -20,7 +20,8 @@ impl Prompt for NativePrompt {
     }
 
     /// macOS: aborts the modal alert on screen. `-[NSApplication abortModal]` is the one modal
-    /// call meant for other threads; the aborted alert reads as Decline. The approvals gate
+    /// call meant for other threads; the aborted alert answers `NSModalResponseAbort`, which
+    /// `alert` reads as Decline. The approvals gate
     /// guarantees no other approval dialog is up, but a computer-control dialog stacked on top
     /// would be aborted instead, which also refuses (fail closed). Elsewhere the stale dialog
     /// stays until the user answers, and that answer is ignored.

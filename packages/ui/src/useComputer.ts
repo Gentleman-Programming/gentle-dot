@@ -1,4 +1,3 @@
-import type { ClientMessage } from "@gentle-dot/protocol";
 import { useEffect, useState } from "react";
 import { type ComputerState, computerEndpoint, computerStatus, onComputerState } from "./computer.ts";
 
@@ -22,14 +21,10 @@ export function useComputerState(enabled: boolean): ComputerState {
 }
 
 /**
- * Registers the app's helper with the daemon on every connection (S24.7); the daemon drops it when
- * this window disconnects. True when the app has a helper. The key is passed on, never kept.
+ * Whether the app has a computer-control helper (S24.7). The app itself registers it with the daemon
+ * it launched, over its private channel (L61); the window never sends its key.
  */
-export function useComputerRegistration(
-	enabled: boolean,
-	connected: boolean,
-	send: (message: ClientMessage) => void,
-): boolean {
+export function useComputerAvailable(enabled: boolean, connected: boolean): boolean {
 	const [available, setAvailable] = useState(false);
 	useEffect(() => {
 		if (!enabled || !connected) return;
@@ -38,7 +33,6 @@ export function useComputerRegistration(
 			(endpoint) => {
 				if (!live) return;
 				setAvailable(endpoint !== null);
-				if (endpoint) send({ type: "computer_register", url: endpoint.url, token: endpoint.token });
 			},
 			() => {
 				if (live) setAvailable(false);
@@ -47,6 +41,6 @@ export function useComputerRegistration(
 		return () => {
 			live = false;
 		};
-	}, [enabled, connected, send]);
+	}, [enabled, connected]);
 	return available;
 }

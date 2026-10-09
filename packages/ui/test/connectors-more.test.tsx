@@ -1,10 +1,11 @@
-import type {
-	ClientMessage,
-	ConnectorDraft,
-	ConnectorInfo,
-	ImportCandidate,
-	ServerMessage,
-	ServerPayload,
+import {
+	APP_REQUIRED,
+	type ClientMessage,
+	type ConnectorDraft,
+	type ConnectorInfo,
+	type ImportCandidate,
+	type ServerMessage,
+	type ServerPayload,
 } from "@gentle-dot/protocol";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -143,14 +144,37 @@ const ready = apply(
 
 function Harness({ initial, send }: { initial: DotState; send: (m: ClientMessage) => void }) {
 	const [state, dispatch] = useReducer(reduce, initial);
-	return <ChatSurface variant="panel" state={state} send={send} dismiss={vi.fn()} dispatch={dispatch} />;
+	return (
+		<ChatSurface
+			variant="panel"
+			state={state}
+			send={send}
+			appSend={send}
+			dismiss={vi.fn()}
+			dispatch={dispatch}
+		/>
+	);
+}
+
+/** The web page: no app, so no `appSend`. */
+function WebHarness({ initial, send }: { initial: DotState; send: (m: ClientMessage) => void }) {
+	const [state, dispatch] = useReducer(reduce, initial);
+	return <ChatSurface variant="web" state={state} send={send} dismiss={vi.fn()} dispatch={dispatch} />;
 }
 
 function panel(state: DotState) {
 	const send = vi.fn();
 	const dispatch = vi.fn();
 	const openUrl = vi.fn();
-	render(<ConnectorsPanel connectors={state.connectors} send={send} dispatch={dispatch} openUrl={openUrl} />);
+	render(
+		<ConnectorsPanel
+			connectors={state.connectors}
+			send={send}
+			appSend={send}
+			dispatch={dispatch}
+			openUrl={openUrl}
+		/>,
+	);
 	return { send, dispatch, openUrl };
 }
 
@@ -339,5 +363,36 @@ describe("importing MCP servers", () => {
 		s = apply(s, { type: "connector_imports", found }, { type: "connector_imported", names: ["stripe"] });
 		expect(s.connectors.imports).toBeUndefined();
 		expect(s.notices.at(-1)?.message).toMatch(/Imported stripe/);
+	});
+});
+
+describe("drafts and imports outside the desktop app (S25.2)", () => {
+	it("a draft can be declined on the web page but only added in the app", async () => {
+		const send = vi.fn();
+		render(<WebHarness initial={apply(ready, { type: "connector_draft", draft })} send={send} />);
+		const card = within(screen.getByRole("region", { name: "Add GitHub?" }));
+		expect(card.getByRole("button", { name: "Add GitHub" })).toBeDisabled();
+		expect(card.getByText(APP_REQUIRED)).toBeInTheDocument();
+		await userEvent.setup().click(card.getByRole("button", { name: "Decline" }));
+		expect(send.mock.calls.map(([m]) => m)).toEqual([
+			{ type: "connector_draft_reply", draftId: "d1", approve: false },
+		]);
+	});
+
+	it("the web page lists what it found but cannot import it", async () => {
+		const send = vi.fn();
+		render(
+			<WebHarness
+				initial={apply(reduce(ready, { type: "connectors", open: true }), {
+					type: "connector_imports",
+					found,
+				})}
+				send={send}
+			/>,
+		);
+		const list = within(screen.getByRole("region", { name: "Found these servers" }));
+		await userEvent.setup().click(list.getByRole("checkbox", { name: "stripe" }));
+		expect(list.getByRole("button", { name: /Import/ })).toBeDisabled();
+		expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "connector_import" }));
 	});
 });

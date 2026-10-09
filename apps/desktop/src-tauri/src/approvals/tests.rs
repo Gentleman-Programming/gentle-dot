@@ -7,7 +7,7 @@ fn field(name: &str, value: serde_json::Value) -> PreviewField {
 }
 
 fn request(preview: Vec<PreviewField>) -> ApprovalRequest {
-    ApprovalRequest { connector: "Slack".into(), action: "send message".into(), preview }
+    ApprovalRequest { connector: "Slack".into(), action: "send message".into(), preview, ..Default::default() }
 }
 
 fn approvals(prompt: &Arc<FakePrompt>, timeout: Duration) -> Approvals {
@@ -90,6 +90,7 @@ fn names_are_one_line_and_short() {
         connector: format!("Evil\nAllow everything {}", "z".repeat(100)),
         action: "send\u{202e}".into(),
         preview: vec![field("a\nb", json!("v"))],
+        ..Default::default()
     };
     let dialog = ApprovalDialog::new(&req, LONG);
     assert!(!dialog.title.contains('\n'), "{}", dialog.title);
@@ -101,10 +102,7 @@ fn names_are_one_line_and_short() {
 #[test]
 fn the_approval_buttons_default_to_decline() {
     assert_eq!(APPROVAL_CHOICE, Choice { allow: "Allow", refuse: "Decline" });
-    match APPROVAL_CHOICE.buttons() {
-        tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(first, _) => assert_eq!(first, "Decline"),
-        other => panic!("unexpected buttons: {other:?}"),
-    }
+    assert_eq!(APPROVAL_CHOICE.alert_buttons()[0], "Decline");
 }
 
 #[test]
@@ -200,4 +198,41 @@ fn requests_read_the_daemon_json() {
     }))
     .unwrap();
     assert_eq!(request.preview[1], field("parent", json!({"page_id": "1"})));
+}
+
+#[test]
+fn a_change_the_user_started_has_its_own_title_and_sentence() {
+    let request: ApprovalRequest = serde_json::from_value(json!({
+        "connector": "Notion",
+        "action": "read and send",
+        "title": "Let Notion read and send?",
+        "summary": "The assistant will be able to send, post, and change things in Notion.",
+        "preview": [{"name": "Sends", "value": "Pages and comments."}]
+    }))
+    .unwrap();
+    let dialog = ApprovalDialog::new(&request, Duration::from_secs(120));
+    assert_eq!(dialog.title, "Let Notion read and send?");
+    assert_eq!(
+        dialog.message,
+        "The assistant will be able to send, post, and change things in Notion.\n\n\
+Sends: Pages and comments.\n\n\
+If you do not answer within 2 minutes, it is declined."
+    );
+}
+
+#[test]
+fn a_given_title_and_sentence_are_made_safe_too() {
+    let request = ApprovalRequest {
+        connector: "Notion".into(),
+        action: "connect".into(),
+        title: Some(format!("Connect\nNotion\u{202e}? {}", "t".repeat(200))),
+        summary: Some(format!("It reads\u{200b} Notion. {}", "s".repeat(2000))),
+        preview: vec![],
+    };
+    let dialog = ApprovalDialog::new(&request, LONG);
+    assert!(!dialog.title.contains('\n'), "{}", dialog.title);
+    assert!(dialog.title.starts_with("Connect Notion\\u{202e}? ttt"), "{}", dialog.title);
+    assert!(dialog.title.chars().count() < 160, "{}", dialog.title);
+    assert!(dialog.message.starts_with("It reads\\u{200b} Notion. sss"), "{}", dialog.message);
+    assert!(dialog.message.contains("more characters)"), "{}", dialog.message);
 }

@@ -47,6 +47,12 @@
 			"permissions": ["allow-shortcut-get", "allow-shortcut-set"]
 		},
 		{
+			"identifier": "connectors",
+			"description": "Connector changes from the panel (S25.2): sent to the daemon over the app's private channel on behalf of the panel's window; the Dot and the web page cannot make them.",
+			"windows": ["panel"],
+			"permissions": ["allow-connector-command"]
+		},
+		{
 			"identifier": "glow",
 			"description": "What the computer-control glow overlay (S28) may call: listening to the glow and session events, nothing else.",
 			"windows": ["glow"],

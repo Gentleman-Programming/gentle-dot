@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import type { ConnectorInfo } from "@gentle-dot/protocol";
+import { APP_REQUIRED, type ConnectorInfo } from "@gentle-dot/protocol";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -119,19 +119,20 @@ afterEach(() => {
 	window.sessionStorage.clear();
 });
 
-describe("registering the helper (S24.7)", () => {
-	it("the desktop panel asks the app for the endpoint once connected and registers it with the daemon", async () => {
+describe("registering the helper (S24.7, L61)", () => {
+	it("the desktop panel only asks the app whether it has a helper; the app registers it over its channel", async () => {
 		h.state = { ...h.state, connection: "connecting" };
 		const view = await renderApp("?surface=panel");
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		expect(invoked("computer_endpoint")).toHaveLength(0);
 
-		h.state = { ...h.state, connection: "open" };
+		h.state = { ...connectorsOpen([notion, computerEntry()]), connection: "open" };
 		const { App } = await import("../src/App.tsx");
 		view.rerender(<App />);
-		await waitFor(() => expect(registrations()).toHaveLength(1));
-		expect(registrations()[0]?.[0]).toEqual({ type: "computer_register", url: HELPER, token: KEY });
-		expect(invoked("computer_endpoint")).toHaveLength(1);
+		await waitFor(() => expect(invoked("computer_endpoint")).toHaveLength(1));
+		await screen.findByRole("listitem", { name: "Computer" });
+		expect(registrations()).toHaveLength(0);
+		expect(JSON.stringify(h.send.mock.calls)).not.toContain(KEY);
 	});
 
 	it("registers nothing when the app has no helper", async () => {
@@ -337,5 +338,30 @@ describe("yolo mode (S24.9)", () => {
 		);
 		expect(rule(".computer-yolo-chip")).toMatch(/var\(--yellow/);
 		expect(rule('.switch[aria-checked="true"]')).toMatch(/var\(--accent/);
+	});
+});
+
+describe("connector changes go through the app (S25.2)", () => {
+	it("the panel sends them with its window's id to the app, never over the WebSocket", async () => {
+		h.state = { ...connectorsOpen([notion]), clientId: "window-1" };
+		await renderApp("?surface=panel");
+		const entry = within(await screen.findByRole("listitem", { name: "Notion" }));
+		await userEvent.setup().click(entry.getByRole("button", { name: "Disconnect Notion" }));
+		await waitFor(() => expect(invoked("connector_command")).toHaveLength(1));
+		expect(invoked("connector_command")[0]?.[1]).toEqual({
+			clientId: "window-1",
+			message: { type: "connector_disconnect", connectorId: "notion" },
+		});
+		expect(h.send.mock.calls.some(([m]) => m.type === "connector_disconnect")).toBe(false);
+	});
+
+	it("the web page shows them disabled with the reason", async () => {
+		h.tauri = false;
+		h.state = { ...connectorsOpen([notion]), clientId: "window-1" };
+		await renderApp("?#token=web-key");
+		const entry = within(await screen.findByRole("listitem", { name: "Notion" }));
+		expect(entry.getByRole("button", { name: "Disconnect Notion" })).toBeDisabled();
+		expect(screen.getByText(APP_REQUIRED)).toBeInTheDocument();
+		expect(h.invoke).not.toHaveBeenCalled();
 	});
 });

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::File;
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
@@ -120,13 +120,15 @@ impl Drop for FileActions {
 }
 
 /// Runs `program` with `args` and the app's environment plus `envs`, stdin from `/dev/null`,
-/// and stdout and stderr appended to `log`. A program without a `/` is looked up in the
-/// child's `PATH`. No other descriptor of the app reaches the child.
+/// stdout and stderr appended to `log`, and `channel` (the daemon's end of the app channel,
+/// numbered above 3) on fd 3. A program without a `/` is looked up in the child's `PATH`. No other
+/// descriptor of the app reaches the child.
 pub fn spawn_disclaimed(
     program: &str,
     args: &[String],
     envs: &[(String, String)],
     log: &File,
+    channel: Option<BorrowedFd<'_>>,
 ) -> io::Result<DisclaimedChild> {
     let mut env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
     env.extend(envs.iter().map(|(k, v)| (OsString::from(k), OsString::from(v))));
@@ -174,6 +176,10 @@ pub fn spawn_disclaimed(
         check(libc::posix_spawn_file_actions_addopen(&mut actions.0, 0, dev_null.as_ptr(), libc::O_RDONLY, 0))?;
         check(libc::posix_spawn_file_actions_adddup2(&mut actions.0, log.as_raw_fd(), 1))?;
         check(libc::posix_spawn_file_actions_adddup2(&mut actions.0, log.as_raw_fd(), 2))?;
+        if let Some(channel) = channel {
+            // Named here, so POSIX_SPAWN_CLOEXEC_DEFAULT keeps it open in the child, and only it.
+            check(libc::posix_spawn_file_actions_adddup2(&mut actions.0, channel.as_raw_fd(), crate::daemon::APP_FD))?;
+        }
 
         let mut pid: libc::pid_t = 0;
         check(libc::posix_spawn(
@@ -212,13 +218,13 @@ mod tests {
     }
 
     fn sh(script: &str, envs: &[(String, String)], log: &File) -> DisclaimedChild {
-        spawn_disclaimed("/bin/sh", &["-c".into(), script.into()], envs, log).unwrap()
+        spawn_disclaimed("/bin/sh", &["-c".into(), script.into()], envs, log, None).unwrap()
     }
 
     #[test]
     fn the_child_answers_for_itself() {
         let (_, log) = scratch_log("disclaim");
-        let mut child = spawn_disclaimed("/bin/sleep", &["30".into()], &[], &log).unwrap();
+        let mut child = spawn_disclaimed("/bin/sleep", &["30".into()], &[], &log, None).unwrap();
         thread::sleep(Duration::from_millis(100));
         let pid = child.id() as libc::pid_t;
         // SAFETY: a read-only query about a live child.
@@ -241,7 +247,7 @@ mod tests {
     fn a_bare_program_name_is_found_in_the_child_path() {
         let (path, log) = scratch_log("path");
         let envs = [("PATH".to_string(), "/usr/bin:/bin".to_string())];
-        let mut child = spawn_disclaimed("echo", &["found".into()], &envs, &log).unwrap();
+        let mut child = spawn_disclaimed("echo", &["found".into()], &envs, &log, None).unwrap();
         assert!(child.wait().unwrap().success());
         assert_eq!(std::fs::read_to_string(path).unwrap(), "found\n");
     }
@@ -269,7 +275,7 @@ mod tests {
     #[test]
     fn stop_child_terminates_then_kills_after_the_grace() {
         let (_, log) = scratch_log("stop");
-        let mut child = spawn_disclaimed("/bin/sleep", &["30".into()], &[], &log).unwrap();
+        let mut child = spawn_disclaimed("/bin/sleep", &["30".into()], &[], &log, None).unwrap();
         stop_child(&mut child, Duration::from_secs(5));
         assert_eq!(child.try_wait().unwrap().and_then(|s| s.signal()), Some(libc::SIGTERM));
         let mut stubborn = sh("trap '' TERM; sleep 30", &[], &log);
@@ -281,6 +287,6 @@ mod tests {
     #[test]
     fn a_missing_program_is_an_error() {
         let (_, log) = scratch_log("missing");
-        assert!(spawn_disclaimed("/nonexistent/gentle-dot-node", &[], &[], &log).is_err());
+        assert!(spawn_disclaimed("/nonexistent/gentle-dot-node", &[], &[], &log, None).is_err());
     }
 }

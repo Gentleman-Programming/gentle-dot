@@ -8,7 +8,7 @@
 //! for it in tests.
 
 #[cfg(test)]
-mod fake;
+pub(crate) mod fake;
 pub mod native;
 
 use crate::alert::Choice;
@@ -30,6 +30,9 @@ pub const PREVIEW_BUDGET: usize = 4000;
 pub const MIN_VALUE_LIMIT: usize = 80;
 /// The most characters of a connector, action, or field name.
 pub const NAME_LIMIT: usize = 60;
+/// The most characters of a title or sentence the daemon gives for a change the user started.
+pub const TITLE_LIMIT: usize = 120;
+pub const SUMMARY_LIMIT: usize = 600;
 
 /// One argument of the action, in the order the daemon chose (key fields first).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -39,13 +42,20 @@ pub struct PreviewField {
 }
 
 /// What the daemon asks the user to approve.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct ApprovalRequest {
     /// The connector's display name ("Notion").
     pub connector: String,
     /// What it will do ("create pages").
     pub action: String,
     pub preview: Vec<PreviewField>,
+    /// For a change the user started in the panel (S25.3: "Let Notion read and send?"), instead of
+    /// "Allow <connector> to <action>?".
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Instead of "The assistant wants to <action> in <connector>.".
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,10 +88,18 @@ impl ApprovalDialog {
             })
             .collect();
         let details = if fields.is_empty() { "(no details)".to_owned() } else { fields.join("\n") };
+        let title = match &request.title {
+            Some(title) => clip(&sanitize(title, true), TITLE_LIMIT, 1),
+            None => format!("Allow {connector} to {action}?"),
+        };
+        let sentence = match &request.summary {
+            Some(summary) => clip(&sanitize(summary, true), SUMMARY_LIMIT, 1),
+            None => format!("The assistant wants to {action} in {connector}."),
+        };
         ApprovalDialog {
-            title: format!("Allow {connector} to {action}?"),
+            title,
             message: format!(
-                "The assistant wants to {action} in {connector}.\n\n{details}\n\n\
+                "{sentence}\n\n{details}\n\n\
 If you do not answer within {}, it is declined.",
                 spell(timeout)
             ),

@@ -15,6 +15,7 @@ import approvalGuard, {
 	PROPOSE_TOOL,
 	proposeConnector,
 } from "../src/extensions/approval-guard.ts";
+import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
@@ -326,20 +327,30 @@ afterEach(async () => {
 	await Promise.all(daemons.splice(0).map((d) => d.close()));
 });
 
-async function connect(d: DotDaemon) {
+async function connect(d: DotDaemon, app: ReturnType<typeof fakeApp>) {
 	const ws = new WebSocket(`ws://127.0.0.1:${d.port}/ws`);
 	const messages: ServerMessage[] = [];
 	ws.on("message", (data) => messages.push(JSON.parse(String(data)) as ServerMessage));
 	await new Promise((resolve) => ws.on("open", resolve));
 	ws.send(JSON.stringify({ type: "hello", token: d.token, protocol: 1 }));
-	await waitFor(() => messages.some((m) => m.type === "ready"));
-	return { ws, messages, send: (m: object) => ws.send(JSON.stringify(m)) };
+	const ready = await waitFor(() => messages.find((m) => m.type === "ready"));
+	const clientId = ready.type === "ready" ? (ready.clientId ?? "") : "";
+	return {
+		ws,
+		messages,
+		send: sendLikeThePanel(
+			app,
+			() => clientId,
+			(m) => ws.send(JSON.stringify(m)),
+		),
+	};
 }
 
 describe("connector drafts through the daemon", () => {
 	it("shows the engine's draft as a card in every window; only the user's answer adds it", async () => {
 		const dataDir = tempDir();
 		const fake = fakeAuthRuntime();
+		const app = fakeApp([], "allow");
 		const d = await startDaemon({
 			port: 0,
 			host: "127.0.0.1",
@@ -353,9 +364,10 @@ describe("connector drafts through the daemon", () => {
 			authRuntime: async () => fake.runtime,
 			connectorCli: { command: process.execPath, args: [FAKE_CLI] },
 			importHome: tempDir(),
+			appChannel: app.daemonEnd,
 		});
 		daemons.push(d);
-		const first = await connect(d);
+		const first = await connect(d, app);
 		first.send({ type: "send", text: `propose:${JSON.stringify({ ...stdioDraft, env_names: [] })}` });
 		const card = await waitFor(() =>
 			first.messages.find(
@@ -364,7 +376,7 @@ describe("connector drafts through the daemon", () => {
 		);
 		expect(card.draft).toMatchObject({ name: "GitHub", command: "npx", envNames: [] });
 		// A window that opens later sees the waiting card too.
-		const second = await connect(d);
+		const second = await connect(d, app);
 		await waitFor(() => second.messages.some((m) => m.type === "connector_draft"));
 		const mcpFile = join(dataDir, "agent", "mcp.json");
 		const before = existsSync(mcpFile) ? readFileSync(mcpFile, "utf8") : undefined;

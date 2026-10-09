@@ -262,11 +262,57 @@ describe("the daemon's sign-in home", () => {
 		expect(statSync(s.authFile).mode & 0o777).toBe(0o600);
 		expect(s.isSignedIn("notion")).toBe(true);
 		expect(s.isSignedIn("linear")).toBe(false);
-		// Not again: a file that shows up in the engine's home later is not taken over.
+		// A file that shows up in the engine's home later never replaces a sign-in the daemon holds,
+		// and it does not stay there.
 		writeFileSync(old, JSON.stringify({ [NOTION_KEY]: { tokens: { access_token: "planted" } } }));
 		const next = make();
 		expect(readFileSync(next.authFile, "utf8")).toBe(stored);
+		expect(existsSync(old)).toBe(false);
 		expect(readdirSync(join(dataDir, "connector-signin")).filter((f) => f.includes(".tmp"))).toEqual([]);
+	});
+
+	it("finishes a move that stopped halfway: an empty sign-in home, the old file still there (A2)", () => {
+		const { make, agentHome, dataDir } = setup();
+		const old = join(agentHome, "mcp-auth.json");
+		const stored = JSON.stringify({ [NOTION_KEY]: { tokens: { access_token: SECRETS.oauthAccess } } });
+		writeFileSync(old, stored);
+		mkdirSync(join(dataDir, "connector-signin"), { mode: 0o700 });
+		const s = make();
+		expect(existsSync(old)).toBe(false);
+		expect(readFileSync(s.authFile, "utf8")).toBe(stored);
+		expect(s.isSignedIn("notion")).toBe(true);
+	});
+
+	it("moves the sign-ins the daemon does not hold yet when both files exist, keeping its own (A2)", () => {
+		const { make, agentHome, dataDir } = setup();
+		const old = join(agentHome, "mcp-auth.json");
+		const linearKey = NOTION_KEY.replace("notion", "linear").replace("mcp.notion.com", "mcp.linear.app");
+		writeFileSync(
+			old,
+			JSON.stringify({
+				[NOTION_KEY]: { tokens: { access_token: "older-notion" } },
+				[linearKey]: { tokens: { access_token: SECRETS.oauthAccess } },
+			}),
+		);
+		mkdirSync(join(dataDir, "connector-signin"), { mode: 0o700 });
+		const current = { [NOTION_KEY]: { tokens: { access_token: "current-notion" } } };
+		writeFileSync(join(dataDir, "connector-signin", "mcp-auth.json"), JSON.stringify(current));
+		const s = make();
+		expect(existsSync(old)).toBe(false);
+		const moved = JSON.parse(readFileSync(s.authFile, "utf8"));
+		expect(moved[NOTION_KEY].tokens.access_token).toBe("current-notion");
+		expect(moved[linearKey].tokens.access_token).toBe(SECRETS.oauthAccess);
+		expect(statSync(s.authFile).mode & 0o777).toBe(0o600);
+	});
+
+	it("leaves the old file where it is when it cannot be read as sign-ins (A2)", () => {
+		const { make, agentHome, dataDir } = setup();
+		const old = join(agentHome, "mcp-auth.json");
+		mkdirSync(join(dataDir, "connector-signin"), { mode: 0o700 });
+		writeFileSync(join(dataDir, "connector-signin", "mcp-auth.json"), "{}");
+		writeFileSync(old, "not json");
+		make();
+		expect(readFileSync(old, "utf8")).toBe("not json");
 	});
 
 	it("protects the sign-in home and its files from the file tools and shell commands like the other credential files", () => {

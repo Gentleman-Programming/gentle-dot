@@ -1,26 +1,28 @@
-import type { ConnectorDraft } from "@gentle-dot/protocol";
+import { APP_REQUIRED, type ConnectorDraft } from "@gentle-dot/protocol";
 import { useEffect, useRef } from "react";
 import type { Send } from "./types.ts";
 
 /**
  * A connector the assistant drafted. Every detail is shown; only "Add" adds it, read only with all
- * of its tools hidden, and its secrets are then asked in the Connectors screen.
+ * of its tools hidden, and its secrets are then asked in the Connectors screen. Adding goes through
+ * the desktop app (`appSend`, S25.2), which confirms it natively; any window may decline.
  */
 export function ConnectorDraftCard({
 	draft,
 	send,
+	appSend,
 	approved,
 }: {
 	draft: ConnectorDraft;
 	send: Send;
+	appSend?: Send;
 	approved: () => void;
 }) {
 	const card = useRef<HTMLElement>(null);
 	useEffect(() => {
 		card.current?.scrollIntoView?.({ block: "nearest" });
 	}, []);
-	const answer = (approve: boolean) =>
-		send({ type: "connector_draft_reply", draftId: draft.draftId, approve });
+	const decline = () => send({ type: "connector_draft_reply", draftId: draft.draftId, approve: false });
 	const runs = draft.transport === "http" ? draft.url : [draft.command, ...(draft.args ?? [])].join(" ");
 
 	return (
@@ -53,18 +55,20 @@ export function ConnectorDraftCard({
 			<p className="connector-note">
 				You type each secret in the app, never in the chat. It starts read only, with all of its tools hidden.
 			</p>
+			{appSend ? null : <p className="connector-note">{APP_REQUIRED}</p>}
 			<div className="ask-options">
 				<button
 					type="button"
 					className="primary"
+					disabled={!appSend}
 					onClick={() => {
-						answer(true);
+						appSend?.({ type: "connector_draft_reply", draftId: draft.draftId, approve: true });
 						approved();
 					}}
 				>
 					Add {draft.name}
 				</button>
-				<button type="button" onClick={() => answer(false)}>
+				<button type="button" onClick={decline}>
 					Decline
 				</button>
 			</div>

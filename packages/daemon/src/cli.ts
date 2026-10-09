@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { inheritedAppSocket } from "./app-channel.ts";
 import { loadConfig } from "./config.ts";
 import { APPROVAL_GUARD, bundledMcpCli } from "./connectors.ts";
 import { startDaemon, startupMessage } from "./daemon.ts";
@@ -33,6 +34,9 @@ function selfCheck(): void {
 
 async function main(): Promise<void> {
 	const config = loadConfig();
+	// The desktop app that launched the daemon hands over its private channel on fd 3 (S25.1); it is
+	// opened before anything is spawned, and refused if children would inherit it.
+	const appChannel = inheritedAppSocket({ log });
 	const daemon = await startDaemon({
 		port: config.port,
 		host: config.host,
@@ -44,6 +48,7 @@ async function main(): Promise<void> {
 		agentArgs: config.agentArgs,
 		...(config.agentHome ? { agentHome: config.agentHome } : {}),
 		allowedOrigins: config.allowedOrigins,
+		...(appChannel ? { appChannel } : {}),
 		log,
 	});
 	process.stdout.write(`${startupMessage(daemon.url, config.dataDir, process.stdout.isTTY === true)}\n`);

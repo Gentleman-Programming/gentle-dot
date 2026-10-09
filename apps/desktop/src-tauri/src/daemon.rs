@@ -1,12 +1,17 @@
-//! Attaches to a running daemon or spawns one, and stops what it spawned.
+//! Attaches to a running daemon or spawns one, and stops what it spawned. A daemon it spawns gets
+//! its end of the app's private channel on fd 3 (S25.1, `app_channel`); one it attached to gets none.
 
+pub use crate::app_channel::APP_FD;
+use crate::app_channel::{AppChannel, Handler};
 use crate::health::check_health;
 use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -104,25 +109,59 @@ impl ChildProcess for Child {
     }
 }
 
-/// Starts the daemon with stdin from `/dev/null` and its output in `log`. On macOS the app
-/// disclaims responsibility for it, so it never inherits the app's TCC grants (S24.1).
+/// A connected pair of Unix sockets: the app's end, and the daemon's, numbered above [`APP_FD`] so
+/// placing it on fd 3 in the child never collides with it. Both are close-on-exec here.
+pub fn channel_pair() -> io::Result<(UnixStream, OwnedFd)> {
+    let (app, daemon) = UnixStream::pair()?;
+    let daemon = OwnedFd::from(daemon);
+    use std::os::fd::AsRawFd;
+    if daemon.as_raw_fd() > APP_FD {
+        return Ok((app, daemon));
+    }
+    // SAFETY: duplicating a descriptor we own; the copy is owned by the returned OwnedFd.
+    let copy = unsafe { libc::fcntl(daemon.as_raw_fd(), libc::F_DUPFD_CLOEXEC, APP_FD + 1) };
+    if copy == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `copy` is a fresh descriptor nobody else owns.
+    Ok((app, unsafe { OwnedFd::from_raw_fd(copy) }))
+}
+
+/// Starts the daemon with stdin from `/dev/null`, its output in `log`, and `channel` (from
+/// [`channel_pair`]) on fd 3. On macOS the app disclaims responsibility for it, so it never
+/// inherits the app's TCC grants (S24.1).
 #[cfg(target_os = "macos")]
-fn spawn_daemon(spec: &LaunchSpec, log: File) -> io::Result<Box<dyn ChildProcess>> {
-    let child = crate::disclaimed::spawn_disclaimed(&spec.program, &spec.args, &spec.envs, &log)?;
+fn spawn_daemon(spec: &LaunchSpec, log: File, channel: Option<BorrowedFd<'_>>) -> io::Result<Box<dyn ChildProcess>> {
+    let child = crate::disclaimed::spawn_disclaimed(&spec.program, &spec.args, &spec.envs, &log, channel)?;
     Ok(Box::new(child))
 }
 
 #[cfg(not(target_os = "macos"))]
-fn spawn_daemon(spec: &LaunchSpec, log: File) -> io::Result<Box<dyn ChildProcess>> {
+fn spawn_daemon(spec: &LaunchSpec, log: File, channel: Option<BorrowedFd<'_>>) -> io::Result<Box<dyn ChildProcess>> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
-    let child = Command::new(&spec.program)
+    let mut command = Command::new(&spec.program);
+    command
         .args(&spec.args)
         .envs(spec.envs.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
-        .stderr(log)
-        .spawn()?;
-    Ok(Box::new(child))
+        .stderr(log);
+    if let Some(fd) = channel.map(|fd| fd.as_raw_fd()) {
+        // SAFETY: runs in the child between fork and exec and only calls dup2, which is
+        // async-signal-safe. `fd` is above APP_FD (channel_pair), so dup2 makes a new fd 3
+        // without close-on-exec, while the original closes at exec.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::dup2(fd, APP_FD) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    Ok(Box::new(command.spawn()?))
 }
 
 /// Sends SIGTERM, waits up to `grace` for a clean exit, then kills.
@@ -161,11 +200,37 @@ pub struct Daemon {
     data_dir: PathBuf,
     runtime_dir: Option<PathBuf>,
     child: Mutex<Option<Box<dyn ChildProcess>>>,
+    /// The private channel to the daemon this app spawned; attached daemons have none.
+    channel: Mutex<Option<Arc<AppChannel>>>,
+    /// Serves the daemon's requests; without it no channel is made.
+    handler: Option<Arc<dyn Handler>>,
+    /// Replaces [`launch_spec`] (tests).
+    launch: Option<LaunchSpec>,
 }
 
 impl Daemon {
     pub fn new(port: u16, data_dir: PathBuf, runtime_dir: Option<PathBuf>) -> Self {
-        Self { port, data_dir, runtime_dir, child: Mutex::new(None) }
+        Self { port, data_dir, runtime_dir, child: Mutex::new(None), channel: Mutex::new(None), handler: None, launch: None }
+    }
+
+    /// Every daemon this app spawns gets a channel served by `handler`.
+    pub fn with_channel(mut self, handler: Arc<dyn Handler>) -> Self {
+        self.handler = Some(handler);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_launch(mut self, spec: LaunchSpec) -> Self {
+        self.launch = Some(spec);
+        self
+    }
+
+    /// The channel to the daemon, only while one this app spawned runs and the channel is open.
+    pub fn channel(&self) -> Option<Arc<AppChannel>> {
+        if !self.owns_running() {
+            return None;
+        }
+        self.channel.lock().unwrap().clone().filter(|channel| channel.is_open())
     }
 
     pub fn is_healthy(&self) -> bool {
@@ -206,10 +271,30 @@ impl Daemon {
                 return Ok(());
             }
         }
-        let spec = launch_spec(|key| std::env::var(key).ok(), cfg!(debug_assertions), self.runtime_dir.as_deref());
+        let spec = self.launch.clone().unwrap_or_else(|| {
+            launch_spec(|key| std::env::var(key).ok(), cfg!(debug_assertions), self.runtime_dir.as_deref())
+        });
         let log = open_private_log(&self.data_dir).map_err(|e| format!("cannot open daemon.log: {e}"))?;
-        let child = spawn_daemon(&spec, log).map_err(|e| format!("cannot start {}: {e}", spec.program))?;
+        let pair = match &self.handler {
+            Some(_) => Some(channel_pair().map_err(|e| format!("cannot open the assistant's channel: {e}"))?),
+            None => None,
+        };
+        let channel_end = pair.as_ref().map(|(_, daemon_end)| {
+            use std::os::fd::AsFd;
+            daemon_end.as_fd()
+        });
+        let child = spawn_daemon(&spec, log, channel_end).map_err(|e| format!("cannot start {}: {e}", spec.program))?;
         *slot = Some(child);
+        // The daemon's end now lives only in the daemon.
+        if let (Some((app_end, _)), Some(handler)) = (pair, &self.handler) {
+            match AppChannel::start(app_end, handler.clone()) {
+                Ok(channel) => {
+                    handler.opened(&channel);
+                    *self.channel.lock().unwrap() = Some(channel);
+                }
+                Err(error) => eprintln!("gentle-dot: cannot read the assistant's channel: {error}"),
+            }
+        }
         Ok(())
     }
 
@@ -219,10 +304,14 @@ impl Daemon {
         slot.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None)))
     }
 
-    /// Stops the daemon only if this app spawned it.
+    /// Stops the daemon only if this app spawned it, and closes its channel.
     pub fn stop(&self) {
-        if let Some(mut child) = self.child.lock().unwrap().take() {
+        let child = self.child.lock().unwrap().take();
+        if let Some(mut child) = child {
             stop_child(child.as_mut(), STOP_GRACE);
+        }
+        if let Some(channel) = self.channel.lock().unwrap().take() {
+            channel.close();
         }
     }
 
@@ -242,6 +331,10 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_channel::{AppChannel, Handler};
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::fd::{AsFd, AsRawFd};
+    use std::os::unix::net::UnixStream;
     use std::process::Command;
 
     fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
@@ -383,6 +476,105 @@ mod tests {
         assert_eq!(mode_of(&dir), 0o700);
         assert_eq!(mode_of(&dir.join("daemon.log")), 0o600);
         assert_eq!(fs::read_to_string(dir.join("daemon.log")).unwrap(), "old line\nnew line\n");
+    }
+
+    fn sh_spec(script: &str) -> LaunchSpec {
+        LaunchSpec { program: "/bin/sh".into(), args: vec!["-c".into(), script.into()], envs: vec![] }
+    }
+
+    fn read_line(stream: &UnixStream) -> String {
+        // macOS refuses socket options (EINVAL) once the other end has closed; reading still works.
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        line
+    }
+
+    #[test]
+    fn the_daemon_gets_its_end_of_the_channel_on_fd_3() {
+        let dir = scratch_dir("channel-fd");
+        let (app, daemon_end) = channel_pair().unwrap();
+        let script = "if [ -S /dev/fd/3 ]; then kind=socket; else kind=other; fi; \
+IFS= read -r line <&3; printf '%s %s\\n' \"$kind\" \"$line\" >&3";
+        let mut child = spawn_daemon(&sh_spec(script), open_private_log(&dir).unwrap(), Some(daemon_end.as_fd())).unwrap();
+        drop(daemon_end);
+        (&app).write_all(b"ping\n").unwrap();
+        assert_eq!(read_line(&app), "socket ping\n");
+        assert!(child.wait().unwrap().success());
+        // Once the daemon is gone, nothing else holds the other end.
+        assert_eq!(read_line(&app), "");
+    }
+
+    #[test]
+    fn the_channel_end_is_never_one_the_daemon_could_clobber() {
+        let (_app, daemon_end) = channel_pair().unwrap();
+        assert!(daemon_end.as_raw_fd() > APP_FD, "{}", daemon_end.as_raw_fd());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn without_a_channel_fd_3_is_closed_in_the_daemon() {
+        let dir = scratch_dir("channel-none");
+        let script = "if [ -e /dev/fd/3 ]; then echo open; else echo none; fi";
+        let mut child = spawn_daemon(&sh_spec(script), open_private_log(&dir).unwrap(), None).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(fs::read_to_string(dir.join("daemon.log")).unwrap(), "none\n");
+    }
+
+    #[derive(Default)]
+    struct Opened(Mutex<usize>);
+
+    impl Handler for Opened {
+        fn approve(&self, _: &crate::approvals::ApprovalRequest) -> bool {
+            false
+        }
+
+        fn opened(&self, _: &Arc<AppChannel>) {
+            *self.0.lock().unwrap() += 1;
+        }
+    }
+
+    /// A daemon stand-in that answers every request on fd 3 with `{"echo": <id>}`.
+    const ECHO: &str = r#"while IFS= read -r line <&3; do
+id=$(printf '%s' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+printf '{"kind":"response","id":%s,"result":{"echo":%s}}\n' "$id" "$id" >&3
+done"#;
+
+    #[test]
+    fn a_daemon_this_app_spawned_gets_a_channel_until_it_stops() {
+        let handler = Arc::new(Opened::default());
+        let daemon = Daemon::new(1, scratch_dir("channel-own"), None)
+            .with_channel(handler.clone())
+            .with_launch(sh_spec(ECHO));
+        assert!(daemon.channel().is_none());
+        daemon.spawn().unwrap();
+        let channel = daemon.channel().expect("a channel to the spawned daemon");
+        assert_eq!(*handler.0.lock().unwrap(), 1);
+        let answer = channel.request("ping", serde_json::json!({}), Duration::from_secs(5)).unwrap();
+        assert_eq!(answer, serde_json::json!({"echo": 1}));
+        daemon.stop();
+        assert!(daemon.channel().is_none());
+        assert!(!channel.is_open());
+    }
+
+    #[test]
+    fn a_daemon_the_app_only_attached_to_gets_no_channel() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut buf = [0u8; 512];
+                let _ = std::io::Read::read(&mut stream, &mut buf);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+            }
+        });
+        let handler = Arc::new(Opened::default());
+        let daemon = Daemon::new(port, scratch_dir("channel-attached"), None)
+            .with_channel(handler.clone())
+            .with_launch(sh_spec(ECHO));
+        daemon.ensure_running(Duration::from_secs(5)).unwrap();
+        assert!(daemon.channel().is_none());
+        assert_eq!(*handler.0.lock().unwrap(), 0);
     }
 
     #[test]

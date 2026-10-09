@@ -877,17 +877,30 @@ export class ConnectorStore {
 	}
 
 	/**
-	 * Before the proxy, the engine kept the sign-ins in its home. They move once, the first time the
-	 * sign-in home is made: the copy is read back before the old file is removed. A file that shows up
-	 * in the engine's home later is never taken over.
+	 * Before the proxy, the engine kept the sign-ins in its home. Whenever that file is there it is
+	 * moved: verbatim when the daemon holds no sign-ins yet, otherwise only the sign-ins the daemon
+	 * does not hold (its own always win, so a file planted later never replaces one). The result is
+	 * read back before the old file is removed, so a move that stopped halfway finishes next time.
 	 */
 	private moveLegacySignIns(): void {
-		if (existsSync(this.signinHome)) return;
 		ensurePrivateDir(this.signinHome);
 		const text = readOrUndefined(this.legacyAuthFile);
 		if (text === undefined) return;
-		writePrivate(this.authFile, text);
-		if (readOrUndefined(this.authFile) !== text) {
+		const legacy = signInStates(text);
+		const currentText = readOrUndefined(this.authFile);
+		const current = currentText === undefined ? {} : signInStates(currentText);
+		if (!legacy || !current) {
+			this.options.log?.("could not read the connector sign-ins to move; they stay where they were");
+			return;
+		}
+		const missing = Object.keys(legacy).filter((key) => !(key in current));
+		if (currentText === undefined) writePrivate(this.authFile, text);
+		else if (missing.length > 0) {
+			const merged = { ...Object.fromEntries(missing.map((key) => [key, legacy[key]])), ...current };
+			writePrivate(this.authFile, `${JSON.stringify(merged, null, 2)}\n`);
+		}
+		const moved = signInStates(readOrUndefined(this.authFile) ?? "");
+		if (!moved || Object.keys(legacy).some((key) => !(key in moved))) {
 			this.options.log?.("could not move the connector sign-ins; they stay where they were");
 			return;
 		}
@@ -1011,6 +1024,18 @@ function parseCustom(value: unknown): CustomConnector | undefined {
 /** A sign-in's key in `mcp-auth.json`, like the engine's (`mcp__<server>|<url>`, `-` as `_`). */
 function authKey(id: string, url: string): string {
 	return `mcp__${id.replace(/-/g, "_")}|${new URL(url).href}`;
+}
+
+/** The sign-ins of an `mcp-auth.json` by key; undefined when it is not a JSON object. */
+function signInStates(text: string): Record<string, unknown> | undefined {
+	try {
+		const value = JSON.parse(text) as unknown;
+		return typeof value === "object" && value !== null && !Array.isArray(value)
+			? (value as Record<string, unknown>)
+			: undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function readOrUndefined(path: string): string | undefined {
@@ -1423,6 +1448,15 @@ export class ConnectorManager {
 		this.scanned = found;
 		this.log(`found ${found.size} MCP servers in other apps`);
 		return [...groups.values()].map(({ candidate }) => candidate);
+	}
+
+	/** The scanned servers `importServers(ids)` would add, by name and what they run; nothing changes. */
+	importChoices(ids: string[]): { name: string; summary: string }[] {
+		return ids.flatMap((key) => {
+			const found = this.scanned.get(key);
+			if (!found?.server || this.duplicateOf(found.server)) return [];
+			return [{ name: found.name, summary: summarize(found.server) }];
+		});
 	}
 
 	/** Copies the chosen servers from the last scan, with their values, read only with every tool hidden. */

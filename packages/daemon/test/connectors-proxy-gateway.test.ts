@@ -1,16 +1,18 @@
 // The MCP proxy inside the daemon, end to end with the fake agent (S25.4): the engine's mcp.json
-// leads to the daemon, a read-only call runs without a card, a sending action asks once on the
-// ask-card path, and a declined one never reaches the server.
+// leads to the daemon, a read-only call runs without asking, and a sending action is asked once in
+// the desktop app's native dialog (S25.3); windows only see that it waits there. Declined, not
+// answered, or the app gone: it never reaches the server.
 import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { McpClient, McpError, StreamableHttpTransport, type Tool } from "@earendil-works/pi-mcp";
-import type { ServerMessage } from "@gentle-dot/protocol";
+import { McpClient, type McpError, StreamableHttpTransport, type Tool } from "@earendil-works/pi-mcp";
+import { APP_REQUIRED, type ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
@@ -77,6 +79,7 @@ async function setup() {
 	const agentHome = join(dataDir, "agent");
 	const notion = await fakeNotion();
 	const fake = fakeAuthRuntime();
+	const app = fakeApp([], "allow");
 	const d = await startDaemon({
 		port: 0,
 		host: "127.0.0.1",
@@ -98,6 +101,9 @@ async function setup() {
 				...(credentials.authProvider ? { authProvider: credentials.authProvider } : {}),
 				openGetStream: false,
 			}),
+		appChannel: app.daemonEnd,
+		// The app declines on its own after 120 s; a short wait here stands in for that.
+		approvalWaitMs: 1000,
 	});
 	daemons.push(d);
 	const ws = new WebSocket(`ws://127.0.0.1:${d.port}/ws`);
@@ -106,8 +112,14 @@ async function setup() {
 	await new Promise((resolve) => ws.on("open", resolve));
 	closers.push(async () => ws.close());
 	ws.send(JSON.stringify({ type: "hello", token: d.token, protocol: 1 }));
-	await waitFor(() => messages.some((m) => m.type === "ready"));
-	const send = (m: object) => ws.send(JSON.stringify(m));
+	const ready = await waitFor(() => messages.find((m) => m.type === "ready"));
+	const clientId = ready.type === "ready" ? (ready.clientId ?? "") : "";
+	const send = sendLikeThePanel(
+		app,
+		() => clientId,
+		(m) => ws.send(JSON.stringify(m)),
+	);
+	const raw = (m: object) => ws.send(JSON.stringify(m));
 	const mcpText = () => readFileSync(join(agentHome, "mcp.json"), "utf8");
 	/** Connects to a server of the engine's mcp.json exactly as the engine would: its URL and headers. */
 	const engineClient = async (id: string) => {
@@ -122,12 +134,12 @@ async function setup() {
 			ws.once("close", () => done());
 			ws.close();
 		});
-	return { d, dataDir, agentHome, notion, messages, send, mcpText, engineClient, closeWindow };
+	return { d, dataDir, agentHome, notion, app, messages, send, raw, mcpText, engineClient, closeWindow };
 }
 
 describe("connectors through the daemon's proxy (regression, S25.4)", () => {
-	it("connects, then a read-only call reaches the server with the stored sign-in and no card", async () => {
-		const { d, notion, send, messages, mcpText, engineClient } = await setup();
+	it("connects, then a read-only call reaches the server with the stored sign-in without asking", async () => {
+		const { d, notion, app, send, messages, mcpText, engineClient } = await setup();
 		const pid = d.supervisor.pid;
 		send({ type: "connector_connect", connectorId: "notion" });
 		await waitFor(() => messages.find((m) => m.type === "auth_done" && m.ok));
@@ -145,11 +157,13 @@ describe("connectors through the daemon's proxy (regression, S25.4)", () => {
 		});
 		expect(notion.calls()).toEqual(["notion-search"]);
 		for (const request of notion.seen) expect(request.authorization).toBe(`Bearer ${SIGNED_IN_TOKEN}`);
-		expect(messages.some((m) => m.type === "ask")).toBe(false);
+		// Only connecting it was confirmed.
+		expect(app.asked.map((a) => a.title)).toEqual(["Connect Notion?"]);
+		expect(messages.filter((m) => m.type === "ask")).toHaveLength(1);
 	});
 
-	it("asks once before a sending action in read and send, forwards nothing when declined, and runs it when allowed", async () => {
-		const { d, notion, send, messages, mcpText, engineClient } = await setup();
+	it("asks the app once before a sending action: declined or unanswered sends nothing, allowed runs it, and windows cannot answer", async () => {
+		const { d, notion, app, send, raw, messages, mcpText, engineClient } = await setup();
 		send({ type: "connector_connect", connectorId: "notion" });
 		await waitFor(() => messages.find((m) => m.type === "auth_done" && m.ok));
 		const pid = d.supervisor.pid;
@@ -158,34 +172,54 @@ describe("connectors through the daemon's proxy (regression, S25.4)", () => {
 		const oldKey = JSON.parse(mcpText()).mcpServers.notion.headers.Authorization;
 		const client = await engineClient("notion");
 		expect((await client.listTools()).map((t) => t.name)).toEqual(["notion-search", "notion-create-pages"]);
-		const args = { parent: "Team space", title: "Plan", content: "x".repeat(9000) };
+		const args = { content: "x".repeat(9000), title: "Plan", parent: "Team space" };
+		const refusal = (call: Promise<unknown>) =>
+			call.then(
+				() => undefined,
+				(e: unknown) => e as McpError,
+			);
+		const asked = app.asked.length;
 
-		const declined = client.callTool("notion-create-pages", args);
-		const ask = await waitFor(() => messages.find((m) => m.type === "ask"));
-		if (ask.type !== "ask") throw new Error("not an ask");
-		expect(ask.ask).toMatchObject({ method: "confirm", title: "Allow Notion to create pages?" });
-		expect(ask.ask.message).toContain("parent: Team space");
-		expect(ask.ask.message).toContain("title: Plan");
-		await waitFor(() => d.bridge.agentState === "needs_you");
-		send({ type: "ui_response", requestId: ask.ask.requestId, confirmed: false });
-		const error = await declined.then(
-			() => undefined,
-			(e: unknown) => e,
+		// No answer: windows see that it waits in the app, and answering there does nothing.
+		app.answer("hang");
+		const unanswered = refusal(client.callTool("notion-create-pages", args));
+		const ask = await waitFor(() =>
+			messages.find((m) => m.type === "ask" && m.ask.title === "Allow Notion to create pages?"),
 		);
-		expect(error).toBeInstanceOf(McpError);
-		expect((error as McpError).message).toMatch(/did not allow/);
+		if (ask.type !== "ask") throw new Error("not an ask");
+		expect(ask.ask).toEqual({
+			requestId: expect.any(String),
+			method: "app",
+			title: "Allow Notion to create pages?",
+			message: "Waiting for your answer in the Gentle Dot app.",
+		});
+		await waitFor(() => d.bridge.agentState === "needs_you");
+		raw({ type: "ui_response", requestId: ask.ask.requestId, confirmed: true });
+		await waitFor(() => messages.find((m) => m.type === "error" && m.code === "app_required"));
+		expect((await unanswered)?.message).toMatch(/did not allow/);
 		expect(notion.calls()).toEqual([]);
 		await waitFor(() => messages.find((m) => m.type === "ask_resolved" && m.requestId === ask.ask.requestId));
+		// The app showed the full preview, key fields first (in the order the agent gave them).
+		expect(app.asked[asked]).toEqual({
+			connector: "Notion",
+			action: "create pages",
+			preview: [
+				{ name: "title", value: "Plan" },
+				{ name: "parent", value: "Team space" },
+				{ name: "content", value: args.content },
+			],
+		});
 
-		const allowed = client.callTool("notion-create-pages", args);
-		const second = await waitFor(() =>
-			messages.find((m) => m.type === "ask" && m.ask.requestId !== ask.ask.requestId),
-		);
-		if (second.type !== "ask") throw new Error("not an ask");
-		send({ type: "ui_response", requestId: second.ask.requestId, confirmed: true });
-		expect(await allowed).toMatchObject({ content: [{ text: "notion ran notion-create-pages" }] });
+		app.answer("decline");
+		expect((await refusal(client.callTool("notion-create-pages", args)))?.message).toMatch(/did not allow/);
+		expect(notion.calls()).toEqual([]);
+
+		app.answer("allow");
+		expect(await client.callTool("notion-create-pages", args)).toMatchObject({
+			content: [{ text: "notion ran notion-create-pages" }],
+		});
 		expect(notion.calls()).toEqual(["notion-create-pages"]);
-		expect(messages.filter((m) => m.type === "ask")).toHaveLength(2);
+		expect(app.asked).toHaveLength(asked + 3);
 
 		// The next engine launch gets a new key; the old one no longer works.
 		const restarted = d.supervisor.pid;
@@ -201,21 +235,34 @@ describe("connectors through the daemon's proxy (regression, S25.4)", () => {
 		expect(stale.status).toBe(401);
 	});
 
-	it("refuses a sending action when no window can answer", async () => {
-		const { d, notion, send, messages, engineClient, closeWindow } = await setup();
+	it("refuses a sending action when the app quits while asking, and when there is no app", async () => {
+		const { d, notion, app, send, raw, messages, engineClient } = await setup();
 		send({ type: "connector_connect", connectorId: "notion" });
 		await waitFor(() => messages.find((m) => m.type === "auth_done" && m.ok));
 		const pid = d.supervisor.pid;
 		send({ type: "connector_mode", connectorId: "notion", mode: "read_write" });
 		await waitFor(() => d.supervisor.pid !== pid && d.supervisor.state === "ready");
 		const client = await engineClient("notion");
-		await closeWindow();
-		await new Promise((resolve) => setTimeout(resolve, 100));
-		const error = await client.callTool("notion-create-pages", { title: "x" }).then(
-			() => undefined,
-			(e: unknown) => e,
+		const failure = (call: Promise<unknown>) =>
+			call.then(
+				() => undefined,
+				(e: unknown) => e as McpError,
+			);
+
+		app.answer("hang");
+		const pending = failure(client.callTool("notion-create-pages", { title: "x" }));
+		await waitFor(() =>
+			messages.find((m) => m.type === "ask" && m.ask.title === "Allow Notion to create pages?"),
 		);
-		expect((error as McpError).message).toMatch(/approval/);
+		app.close();
+		expect((await pending)?.message).toMatch(/did not allow/);
+
+		expect((await failure(client.callTool("notion-create-pages", { title: "y" })))?.message).toMatch(
+			/approval/,
+		);
 		expect(notion.calls()).toEqual([]);
+		// And a window cannot turn it back on or change it without the app.
+		raw({ type: "connector_mode", connectorId: "notion", mode: "read_only" });
+		await waitFor(() => messages.find((m) => m.type === "error" && m.message === APP_REQUIRED));
 	});
 });

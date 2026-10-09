@@ -26,6 +26,7 @@ const COMMANDS: &[&str] = &[
     "voice_model_remove",
     "shortcut_get",
     "shortcut_set",
+    "connector_command",
 ];
 
 fn find_in_path(program: &str, path: &str) -> Option<PathBuf> {
