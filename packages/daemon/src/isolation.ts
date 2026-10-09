@@ -62,6 +62,10 @@ export function ensureMemoryProject(workspace: string): void {
  * engine's home, on port 7438 (`GENTLE_DOT_ENGRAM_PORT` overrides it).
  * Subagents are off (`GENTLE_PI_AGENTS=0`) until S25.
  *
+ * Without a `TMPDIR` (the installed app's launch on Linux), the engine gets a
+ * private one under its home: it caches compiled extensions in the temporary
+ * folder, and a shared `/tmp` would let another local user plant that cache.
+ *
  * An installed app (`GENTLE_DOT_RUNTIME`) also names the Engram binary
  * (`ENGRAM_BIN`, see `resolveEngramBin`), since its PATH has no user folders.
  */
@@ -78,6 +82,10 @@ export function isolatedAgentEnv(base: NodeJS.ProcessEnv, dataDir: string): Node
 		XDG_STATE_HOME: join(home, ".local", "state"),
 	};
 	for (const key of INHERITED_HOMES) delete env[key];
+	if (!base.TMPDIR) {
+		env.TMPDIR = join(home, ".cache", "tmp");
+		ensurePrivateDir(env.TMPDIR);
+	}
 	const bin = bundledBinDir(base);
 	if (bin) {
 		const rest = (base.PATH ?? "").split(delimiter).filter((part) => part && part !== bin);

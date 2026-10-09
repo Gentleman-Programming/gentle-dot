@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
@@ -82,6 +90,21 @@ describe("isolatedAgentEnv subagents", () => {
 		expect(isolatedAgentEnv({ HOME: tempDir() }, tempDir()).GENTLE_PI_AGENTS).toBe("0");
 		expect(isolatedAgentEnv({ HOME: tempDir(), GENTLE_PI_AGENTS: "1" }, tempDir()).GENTLE_PI_AGENTS).toBe(
 			"0",
+		);
+	});
+});
+
+describe("isolatedAgentEnv temporary folder", () => {
+	it("gives the engine a private TMPDIR when none is set, so its caches never land in a shared /tmp", () => {
+		const dataDir = tempDir();
+		const env = isolatedAgentEnv({ HOME: tempDir() }, dataDir);
+		expect(env.TMPDIR).toBe(join(dataDir, "home", ".cache", "tmp"));
+		expect(statSync(env.TMPDIR ?? "").mode & 0o777).toBe(0o700);
+	});
+
+	it("keeps the user's own TMPDIR", () => {
+		expect(isolatedAgentEnv({ HOME: tempDir(), TMPDIR: "/var/tmp/me" }, tempDir()).TMPDIR).toBe(
+			"/var/tmp/me",
 		);
 	});
 });
