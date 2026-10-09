@@ -415,6 +415,12 @@ const SECRET_ID = /^[A-Za-z0-9._:@/-]{1,200}$/;
 /** The reference to the secret item `id`. */
 export const secretRef = (id: string) => `${REF}${id}`;
 const refId = (text: string) => (text.startsWith(REF) ? text.slice(REF.length) : undefined);
+/**
+ * Whether `text` is the reference to the secret of exactly this slot. Ids follow from the
+ * connector and the field, so a reference to any other item (one planted in `connectors.json`
+ * while the daemon was down, pointing at another connector's secret) is never read (A1, L117).
+ */
+const ownRef = (text: string, slotId: string) => refId(text) === slotId;
 
 /** A part of a secret id: as it is when the app accepts it, otherwise a hash of it. */
 const idPart = (text: string) =>
@@ -422,6 +428,9 @@ const idPart = (text: string) =>
 /** Where a connector's secrets live in the app's store: `connector/<id>/…`. */
 export const secretPrefix = (connectorId: string) => `connector/${idPart(connectorId)}/`;
 const signInId = (connectorId: string) => `${secretPrefix(connectorId)}signin`;
+/** The connector's own sign-in reference, or undefined when it has none or refers elsewhere (A1). */
+const signInRef = (connectorId: string, saved: SavedConnector) =>
+	saved.signIn && refId(saved.signIn) === signInId(connectorId) ? signInId(connectorId) : undefined;
 
 /** A value of a server of the user's own that is a secret: anything but an empty one or one with a field in it. */
 const FIELD_START = placeholder("").slice(0, -1);
@@ -464,12 +473,11 @@ function mapSecrets(
 /** Every secret item a connector refers to, its sign-in included. */
 function refsOf(id: string, saved: SavedConnector): string[] {
 	const ids: string[] = [];
-	mapSecrets(id, saved, (_secretId, text) => {
-		const ref = refId(text);
-		if (ref) ids.push(ref);
+	mapSecrets(id, saved, (secretId, text) => {
+		if (ownRef(text, secretId)) ids.push(secretId);
 		return text;
 	});
-	const signIn = saved.signIn && refId(saved.signIn);
+	const signIn = signInRef(id, saved);
 	if (signIn) ids.push(signIn);
 	return ids;
 }
@@ -996,7 +1004,7 @@ export class ConnectorStore {
 	/** True when the connector has a stored sign-in with tokens. No token value is kept or passed on. */
 	isSignedIn(id: string): boolean {
 		const saved = this.saved.connectors[id];
-		const ref = saved?.signIn && refId(saved.signIn);
+		const ref = saved && signInRef(id, saved);
 		if (!ref) return false;
 		const text = this.cache.get(ref);
 		// Stored only once it had tokens; until it is read again it counts as signed in.
@@ -1068,9 +1076,14 @@ export class ConnectorStore {
 	private open(id: string, saved: SavedConnector): { open: SavedConnector; locked?: string } {
 		let missing = false;
 		let waiting = false;
-		const open = mapSecrets(id, saved, (_secretId, text) => {
+		const open = mapSecrets(id, saved, (secretId, text) => {
 			const ref = refId(text);
 			if (ref === undefined) return text;
+			if (!ownRef(text, secretId)) {
+				// Another item's reference in this slot: never resolved, and the connector stays locked.
+				missing = true;
+				return text;
+			}
 			const secret = this.cache.get(ref);
 			if (secret !== undefined) return secret;
 			if (this.pending.has(ref)) waiting = true;
@@ -1078,7 +1091,8 @@ export class ConnectorStore {
 			// Kept as the reference, so the connector still counts as set up.
 			return text;
 		});
-		const signIn = saved.signIn && refId(saved.signIn);
+		const signIn = signInRef(id, saved);
+		if (saved.signIn && !signIn) missing = true;
 		if (signIn && !this.cache.has(signIn) && !this.options.secrets?.available) missing = true;
 		// A reference anywhere else (a changed file) never reaches a server.
 		if (!missing && JSON.stringify(open.custom ?? {}).includes(JSON.stringify(REF).slice(1, -1)))
@@ -1094,8 +1108,9 @@ export class ConnectorStore {
 
 	/** One connector's sign-in, from memory. */
 	private signInState(id: string): McpOAuthState | undefined {
-		const ref = this.saved.connectors[id]?.signIn;
-		const text = ref && refId(ref) && this.cache.get(refId(ref) ?? "");
+		const saved = this.saved.connectors[id];
+		const ref = saved && signInRef(id, saved);
+		const text = ref && this.cache.get(ref);
 		if (!text) return undefined;
 		try {
 			return JSON.parse(text) as McpOAuthState;
