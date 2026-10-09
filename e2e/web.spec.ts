@@ -1,14 +1,7 @@
-import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, type Page, test } from "@playwright/test";
-import {
-	E2E_COMMANDS_FILE,
-	E2E_CONVERSATIONS_PORT,
-	E2E_DATA_DIR,
-	E2E_IMPORT_HOME,
-	E2E_TOKEN,
-} from "./token.ts";
+import { E2E_COMMANDS_FILE, E2E_CONVERSATIONS_PORT, E2E_DATA_DIR, E2E_TOKEN } from "./token.ts";
 
 const readJson = (path: string) =>
 	existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as unknown) : undefined;
@@ -222,168 +215,20 @@ test("opens accounts with /login, offers subscriptions without Claude, and conne
 	await expect(page.getByRole("textbox", { name: "Message" })).toBeVisible();
 });
 
-test("connects Notion from the Connectors screen, switches its mode, and removes it", async ({ page }) => {
-	// The sign-in page would open in a new tab; keep its address instead.
-	await page.addInitScript(() => {
-		const opened: string[] = [];
-		(window as unknown as { opened: string[] }).opened = opened;
-		window.open = (url?: string | URL) => {
-			opened.push(String(url));
-			return null;
-		};
-	});
+// Connecting, setting up, importing, and approving drafts are the desktop app's (S25.2): the
+// daemon's own tests drive those flows through a stand-in for the app's private channel. In the
+// browser the list stays readable and every control says where to go instead.
+test("the browser lists connectors but leaves every change to the desktop app", async ({ page }) => {
 	await open(page);
 	await page.getByRole("button", { name: "Connectors" }).click();
 	const screen = page.getByRole("region", { name: "Connectors" });
 	for (const name of ["Notion", "Linear", "Atlassian"]) {
 		await expect(screen.getByRole("listitem", { name })).toBeVisible();
 	}
+	await expect(screen).toContainText("Open the Gentle Dot app to change connectors.");
 	const notion = screen.getByRole("listitem", { name: "Notion" });
-	await expect(notion).toContainText("It cannot send or change anything.");
-	await notion.getByRole("button", { name: "Connect Notion" }).click();
-
-	await expect(screen).toContainText("Signing in to Notion");
-	await screen.getByRole("button", { name: "Open the sign-in page" }).click();
-	const link = await page.evaluate(() => (window as unknown as { opened: string[] }).opened[0] ?? "");
-	expect(link).toMatch(/^https:\/\/auth\.example\.com\/authorize\?/);
-	await page.screenshot({ path: "/tmp/gentle-dot-t18a/connectors-signin.png" });
-	// The browser could not reach this computer: paste the address it ended on.
-	const redirect = new URL(new URL(link).searchParams.get("redirect_uri") ?? "");
-	redirect.search = "?code=e2e-code&state=fake-state";
-	await screen.getByLabel(/paste it here/).fill(redirect.href);
-	await screen.getByRole("button", { name: "Continue" }).click();
-	await expect(screen.getByRole("status")).toHaveText("Connected to Notion.");
-	await screen.getByRole("button", { name: "Back to connectors" }).click();
-
-	await expect(notion.getByText("Connected", { exact: true })).toBeVisible();
-	await expect(notion.getByRole("radio", { name: "Read only" })).toBeChecked();
-	// The choice is the daemon's: the radio follows the list it sends back.
-	await notion.getByRole("radio", { name: "Read and send" }).click();
-	await expect(notion.getByRole("radio", { name: "Read and send" })).toBeChecked();
-	await expect(notion).toContainText("after you approve each one");
-	await page.screenshot({ path: "/tmp/gentle-dot-t18a/connectors-screen.png" });
-	const mcp = JSON.parse(readFileSync(join(E2E_DATA_DIR, "agent", "mcp.json"), "utf8"));
-	expect(mcp).toEqual({ mcpServers: { notion: { url: "https://mcp.notion.com/mcp", exposure: "direct" } } });
-
-	await notion.getByRole("button", { name: "Remove Notion" }).click();
-	await expect(notion.getByRole("button", { name: "Connect Notion" })).toBeVisible();
-	await expect(notion.getByText("Connected", { exact: true })).toHaveCount(0);
-	expect(JSON.parse(readFileSync(join(E2E_DATA_DIR, "agent", "mcp.json"), "utf8"))).toEqual({
-		mcpServers: {},
-	});
-	await screen.getByRole("button", { name: "Close connectors" }).click();
-
-	// Typing /connectors opens the screen; it never reaches the assistant.
-	const sent = await page.locator(".message-user").count();
-	await say(page, "/connectors");
-	await expect(screen).toBeVisible();
-	await expect(page.locator(".message-user")).toHaveCount(sent);
-});
-
-/** Every file below `dir` with its hash, to show a scan never changes them. */
-function hashes(dir: string): Record<string, string> {
-	const out: Record<string, string> = {};
-	for (const name of readdirSync(dir)) {
-		const path = join(dir, name);
-		if (statSync(path).isDirectory()) Object.assign(out, hashes(path));
-		else out[path] = createHash("sha256").update(readFileSync(path)).digest("hex");
-	}
-	return out;
-}
-
-test("sets up Discord from its guide, imports a found server, and adds the assistant's draft", async ({
-	page,
-}) => {
-	const shots = "/tmp/gentle-dot-t18b";
-	const before = hashes(E2E_IMPORT_HOME);
-	const mcpServers = () =>
-		(
-			JSON.parse(readFileSync(join(E2E_DATA_DIR, "agent", "mcp.json"), "utf8")) as {
-				mcpServers: Record<string, Record<string, unknown>>;
-			}
-		).mcpServers;
-	await open(page);
-	await page.getByRole("button", { name: "Connectors" }).click();
-	const screen = page.getByRole("region", { name: "Connectors" });
-
-	// Guides: Slack and Gmail show the redirect address to register; Discord asks for the bot token.
-	for (const name of ["Slack", "Gmail"]) {
-		await screen.getByRole("button", { name: `Connect ${name}` }).click();
-		const guide = screen.getByRole("region", { name: `Set up ${name}` });
-		await expect(guide).toContainText("http://localhost:3841");
-		await page.screenshot({ path: `${shots}/guide-${name.toLowerCase()}.png` });
-		await guide.getByRole("button", { name: "Back" }).click();
-	}
-	await screen.getByRole("button", { name: "Connect Discord" }).click();
-	const guide = screen.getByRole("region", { name: "Set up Discord" });
-	await expect(guide).toContainText("Message Content Intent");
-	await page.screenshot({ path: `${shots}/guide-discord.png` });
-	await guide.getByRole("button", { name: "Continue" }).click();
-	await expect(screen).toContainText("Setting up Discord");
-	await screen.getByLabel(/bot token/i).fill("dummy-discord-token");
-	await screen.getByRole("button", { name: "Continue" }).click();
-	await expect(screen.getByRole("status")).toHaveText("Connected to Discord.");
-	await screen.getByRole("button", { name: "Back to connectors" }).click();
-	expect(mcpServers().discord).toMatchObject({ command: "npx", args: ["-y", "@pasympa/discord-mcp@2.2.0"] });
-	await expect(page.locator("body")).not.toContainText("dummy-discord-token");
-
-	// Import: names only, with the source app; the old SSE server cannot be imported.
-	await screen.getByRole("button", { name: "Import my MCP servers" }).click();
-	const found = screen.getByRole("region", { name: "Found these servers" });
-	await expect(found.getByRole("checkbox", { name: "github" })).toBeVisible();
-	await expect(found).toContainText("From Cursor");
-	await expect(found).toContainText("GITHUB_PERSONAL_ACCESS_TOKEN");
-	await expect(found.getByRole("checkbox", { name: "oldsse" })).toBeDisabled();
-	await expect(page.locator("body")).not.toContainText("ghp_e2e_secret_value");
-	await page.screenshot({ path: `${shots}/import-list.png` });
-	await found.getByRole("checkbox", { name: "github" }).check();
-	await found.getByRole("checkbox", { name: "search" }).check();
-	await found.getByRole("button", { name: "Import 2 servers" }).click();
-	const github = screen.getByRole("listitem", { name: "github" });
-	await expect(github).toContainText("Imported from Cursor");
-	await expect(github).toContainText("tools stay hidden");
-	await expect(screen.getByRole("listitem", { name: "search" })).toContainText("Needs setup");
-	expect(mcpServers().github).toMatchObject({ toolExposure: { "*": "hidden" } });
-	expect(hashes(E2E_IMPORT_HOME)).toEqual(before);
-
-	// Add another: the request goes to the chat; the assistant's draft comes back as a card.
-	await screen.getByRole("button", { name: "Add another connector" }).click();
-	await screen.getByLabel("What do you want to connect?").fill("Weather");
-	await page.screenshot({ path: `${shots}/add-another.png` });
-	await screen.getByRole("button", { name: "Ask the assistant" }).click();
-	await expect(page.locator(".message-user").last()).toContainText("Weather");
-	const draft = {
-		name: "Weather",
-		description: "Look up forecasts.",
-		transport: "stdio",
-		command: "npx",
-		args: ["-y", "weather-mcp@1.0.0"],
-		env_names: ["WEATHER_API_KEY"],
-	};
-	await say(page, `propose:${JSON.stringify(draft)}`);
-	const card = page.getByRole("region", { name: "Add Weather?" });
-	await expect(card).toContainText("npx -y weather-mcp@1.0.0");
-	await expect(card).toContainText("WEATHER_API_KEY");
-	await card.scrollIntoViewIfNeeded();
-	await card.screenshot({ path: `${shots}/draft-card.png` });
-	await page.screenshot({ path: `${shots}/draft-card-panel.png` });
-	await card.getByRole("button", { name: "Add Weather" }).click();
-	await expect(screen).toContainText("Setting up Weather");
-	await screen.getByLabel(/WEATHER_API_KEY/).fill("weather-secret-value");
-	await screen.getByRole("button", { name: "Continue" }).click();
-	await expect(screen.getByRole("status")).toHaveText("Connected to Weather.");
-	expect(mcpServers().weather).toMatchObject({ command: "npx", toolExposure: { "*": "hidden" } });
-	await expect(page.locator("body")).not.toContainText("weather-secret-value");
-	await screen.getByRole("button", { name: "Back to connectors" }).click();
-	for (const name of ["github", "Weather"]) {
-		const row = screen.getByRole("listitem", { name });
-		await row.scrollIntoViewIfNeeded();
-		await row.screenshot({ path: `${shots}/connector-row-${name.toLowerCase()}.png` });
-	}
-	for (const name of ["Discord", "github", "search", "Weather"]) {
-		await screen.getByRole("button", { name: `Remove ${name}` }).click();
-		await expect(screen.getByRole("button", { name: `Remove ${name}` })).toHaveCount(0);
-	}
+	await expect(notion.getByRole("button", { name: "Connect Notion" })).toBeDisabled();
+	await expect(screen.getByRole("button", { name: "Connect Slack" })).toBeDisabled();
 });
 
 test("shows a connector action as an approval card with a preview", async ({ page }) => {

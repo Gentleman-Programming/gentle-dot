@@ -38,11 +38,6 @@ process.env.FAKE_AGENT_COMMANDS_FILE = conversations
 	? join(dataDir, "agent-commands.jsonl")
 	: E2E_COMMANDS_FILE;
 process.env.GENTLE_DOT_DATA_DIR = dataDir;
-// Connector sign-in runs a stand-in for the engine's `mcp login`, which waits for the pasted address.
-process.env.GENTLE_DOT_MCP_CLI = JSON.stringify([
-	process.execPath,
-	fileURLToPath(new URL("../packages/daemon/test/fixtures/fake-mcp-cli.ts", import.meta.url)),
-]);
 process.env.GENTLE_DOT_AGENT_BIN = process.execPath;
 process.env.GENTLE_DOT_AGENT_ARGS = JSON.stringify([
 	fileURLToPath(new URL("../packages/daemon/test/fixtures/fake-agent.ts", import.meta.url)),

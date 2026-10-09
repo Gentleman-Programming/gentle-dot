@@ -1,15 +1,17 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: `${input:<key>}` and `${NAME}` are the placeholders connectors use.
 // The connector files with the MCP proxy (S25.4): the engine's mcp.json lists only the daemon's
-// proxy addresses, the real servers and their secrets stay in the daemon's own sign-in home, and the
-// approval guard lets proxied tools through (the proxy asks) while it keeps protecting the files.
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+// proxy addresses, the real servers stay in the daemon's memory and their secrets in the app's
+// secure store (S25.5), and the approval guard lets proxied tools through (the proxy asks) while it
+// keeps protecting the files, the old sign-in files included.
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { ConnectorStore, type CustomConnector, renderMcpJson } from "../src/connectors.ts";
 import { decide, parsePolicy } from "../src/extensions/approval-guard.ts";
-import { tempDir, waitFor } from "./helpers.ts";
+import { MemorySecretSource } from "../src/secret-source.ts";
+import { tempDir } from "./helpers.ts";
 
 const NOTION_KEY = "mcp__notion|https://mcp.notion.com/mcp";
 const KEY = "proxy-key-for-this-launch-0123456789abcdef";
@@ -46,18 +48,20 @@ function setup(options: { env?: NodeJS.ProcessEnv } = {}) {
 	const workspace = join(dataDir, "workspace");
 	mkdirSync(agentHome);
 	mkdirSync(workspace);
+	const secrets = new MemorySecretSource();
 	const make = () => {
 		const s = new ConnectorStore({
 			dataDir,
 			agentHome,
 			workspace,
+			secrets,
 			guardPath: "/app/guard.ts",
 			...(options.env ? { env: options.env } : {}),
 		});
 		stores.push(s);
 		return s;
 	};
-	return { dataDir, agentHome, workspace, make };
+	return { dataDir, agentHome, workspace, make, secrets };
 }
 
 const httpCustom: CustomConnector = {
@@ -109,12 +113,14 @@ describe("the engine's mcp.json with the proxy", () => {
 		const s = make();
 		s.setProxy(PROXY);
 		fill(s);
-		writeFileSync(
-			s.authFile,
-			JSON.stringify({
-				[NOTION_KEY]: { tokens: { access_token: SECRETS.oauthAccess, refresh_token: SECRETS.oauthRefresh } },
-			}),
-		);
+		await s.saveSignIn("notion", {
+			serverUrl: "https://mcp.notion.com/mcp",
+			tokens: {
+				access_token: SECRETS.oauthAccess,
+				token_type: "Bearer",
+				refresh_token: SECRETS.oauthRefresh,
+			},
+		});
 		const text = readFileSync(join(agentHome, "mcp.json"), "utf8");
 		const servers = JSON.parse(text).mcpServers as Record<string, Record<string, unknown>>;
 		expect(Object.keys(servers)).toEqual(["notion", "linear", "discord", "slack", "tracker", "files"]);
@@ -141,13 +147,12 @@ describe("the engine's mcp.json with the proxy", () => {
 			expect(text).not.toContain(upstream);
 		for (const name of ["DISCORD_TOKEN", "FILES_TOKEN", "env", "oauth", "toolExposure", "command"])
 			expect(text).not.toContain(name);
-		// The real servers are only in the daemon's own sign-in home, for the sign-in command.
-		expect(s.signinHome).toBe(join(dataDir, "connector-signin"));
-		const signin = JSON.parse(readFileSync(s.signinMcpFile, "utf8")).mcpServers;
-		expect(signin.notion.url).toBe("https://mcp.notion.com/mcp");
-		expect(signin.slack.oauth.clientId).toBe("slack-client-id");
-		expect(statSync(s.signinHome).mode & 0o777).toBe(0o700);
-		expect(statSync(s.signinMcpFile).mode & 0o777).toBe(0o600);
+		// The real servers are only in the daemon's memory, and their secrets only in the app's store.
+		expect(existsSync(s.signinHome)).toBe(false);
+		const record = readFileSync(join(dataDir, "connectors.json"), "utf8");
+		for (const secret of Object.values(SECRETS)) expect(record).not.toContain(secret);
+		expect(JSON.parse(record).connectors.slack.values.client_id).toBe("slack-client-id");
+		expect(statSync(join(dataDir, "connectors.json")).mode & 0o777).toBe(0o600);
 	});
 
 	it("leaves the connectors out until the proxy listens, keeps the computer helper as it is, and changes the key per launch", () => {
@@ -241,80 +246,19 @@ describe("the proxy's view of a connector and its credentials", () => {
 		expect((await s.credentials("team")).headers).toEqual({ "X-Team": "team-7", "X-Price": "$5" });
 		const notion = await s.credentials("notion");
 		expect(await notion.authProvider?.token()).toBeUndefined();
-		writeFileSync(
-			s.authFile,
-			JSON.stringify({ [NOTION_KEY]: { tokens: { access_token: SECRETS.oauthAccess } } }),
-		);
+		// A planted sign-in file is never read; only a sign-in the daemon stored is used.
+		mkdirSync(s.signinHome, { recursive: true });
+		writeFileSync(s.authFile, JSON.stringify({ [NOTION_KEY]: { tokens: { access_token: "planted" } } }));
+		expect(await notion.authProvider?.token()).toBeUndefined();
+		await s.saveSignIn("notion", {
+			serverUrl: "https://mcp.notion.com/mcp",
+			tokens: { access_token: SECRETS.oauthAccess, token_type: "Bearer" },
+		});
 		expect(await notion.authProvider?.token()).toBe(SECRETS.oauthAccess);
 	});
 });
 
-describe("the daemon's sign-in home", () => {
-	it("moves the engine's old mcp-auth.json there once, after checking the copy", () => {
-		const { make, agentHome, dataDir } = setup();
-		const old = join(agentHome, "mcp-auth.json");
-		const stored = JSON.stringify({ [NOTION_KEY]: { tokens: { access_token: SECRETS.oauthAccess } } });
-		writeFileSync(old, stored);
-		const s = make();
-		expect(existsSync(old)).toBe(false);
-		expect(readFileSync(s.authFile, "utf8")).toBe(stored);
-		expect(s.authFile).toBe(join(dataDir, "connector-signin", "mcp-auth.json"));
-		expect(statSync(s.authFile).mode & 0o777).toBe(0o600);
-		expect(s.isSignedIn("notion")).toBe(true);
-		expect(s.isSignedIn("linear")).toBe(false);
-		// A file that shows up in the engine's home later never replaces a sign-in the daemon holds,
-		// and it does not stay there.
-		writeFileSync(old, JSON.stringify({ [NOTION_KEY]: { tokens: { access_token: "planted" } } }));
-		const next = make();
-		expect(readFileSync(next.authFile, "utf8")).toBe(stored);
-		expect(existsSync(old)).toBe(false);
-		expect(readdirSync(join(dataDir, "connector-signin")).filter((f) => f.includes(".tmp"))).toEqual([]);
-	});
-
-	it("finishes a move that stopped halfway: an empty sign-in home, the old file still there (A2)", () => {
-		const { make, agentHome, dataDir } = setup();
-		const old = join(agentHome, "mcp-auth.json");
-		const stored = JSON.stringify({ [NOTION_KEY]: { tokens: { access_token: SECRETS.oauthAccess } } });
-		writeFileSync(old, stored);
-		mkdirSync(join(dataDir, "connector-signin"), { mode: 0o700 });
-		const s = make();
-		expect(existsSync(old)).toBe(false);
-		expect(readFileSync(s.authFile, "utf8")).toBe(stored);
-		expect(s.isSignedIn("notion")).toBe(true);
-	});
-
-	it("moves the sign-ins the daemon does not hold yet when both files exist, keeping its own (A2)", () => {
-		const { make, agentHome, dataDir } = setup();
-		const old = join(agentHome, "mcp-auth.json");
-		const linearKey = NOTION_KEY.replace("notion", "linear").replace("mcp.notion.com", "mcp.linear.app");
-		writeFileSync(
-			old,
-			JSON.stringify({
-				[NOTION_KEY]: { tokens: { access_token: "older-notion" } },
-				[linearKey]: { tokens: { access_token: SECRETS.oauthAccess } },
-			}),
-		);
-		mkdirSync(join(dataDir, "connector-signin"), { mode: 0o700 });
-		const current = { [NOTION_KEY]: { tokens: { access_token: "current-notion" } } };
-		writeFileSync(join(dataDir, "connector-signin", "mcp-auth.json"), JSON.stringify(current));
-		const s = make();
-		expect(existsSync(old)).toBe(false);
-		const moved = JSON.parse(readFileSync(s.authFile, "utf8"));
-		expect(moved[NOTION_KEY].tokens.access_token).toBe("current-notion");
-		expect(moved[linearKey].tokens.access_token).toBe(SECRETS.oauthAccess);
-		expect(statSync(s.authFile).mode & 0o777).toBe(0o600);
-	});
-
-	it("leaves the old file where it is when it cannot be read as sign-ins (A2)", () => {
-		const { make, agentHome, dataDir } = setup();
-		const old = join(agentHome, "mcp-auth.json");
-		mkdirSync(join(dataDir, "connector-signin"), { mode: 0o700 });
-		writeFileSync(join(dataDir, "connector-signin", "mcp-auth.json"), "{}");
-		writeFileSync(old, "not json");
-		make();
-		expect(readFileSync(old, "utf8")).toBe("not json");
-	});
-
+describe("the old sign-in files", () => {
 	it("protects the sign-in home and its files from the file tools and shell commands like the other credential files", () => {
 		const { make, agentHome, dataDir } = setup();
 		const s = make();
@@ -330,6 +274,7 @@ describe("the daemon's sign-in home", () => {
 				join(signin, "mcp-auth.json"),
 			]),
 		);
+		mkdirSync(signin, { recursive: true });
 		writeFileSync(s.authFile, "{}");
 		const cwd = join(dataDir, "workspace");
 		for (const call of [
@@ -344,37 +289,21 @@ describe("the daemon's sign-in home", () => {
 			expect(decide({ ...call, cwd }, policy).action).toBe("block");
 	});
 
-	it("puts back the sign-in files when they change outside a sign-in, and keeps what a sign-in wrote", async () => {
-		const { make } = setup();
+	it("are never written again: the daemon keeps no sign-in home while it runs", async () => {
+		const { make, secrets } = setup();
 		const s = make();
-		fill(s);
-		const signinMcp = readFileSync(s.signinMcpFile, "utf8");
-		writeFileSync(
-			s.signinMcpFile,
-			JSON.stringify({ mcpServers: { notion: { url: "https://evil.example/mcp" } } }),
-		);
-		expect(s.enforce()).toBe(true);
-		expect(readFileSync(s.signinMcpFile, "utf8")).toBe(signinMcp);
-		// Planted sign-in state is removed while no sign-in runs.
-		writeFileSync(s.authFile, JSON.stringify({ [NOTION_KEY]: { tokens: { access_token: "planted" } } }));
-		expect(s.enforce()).toBe(true);
-		expect(existsSync(s.authFile)).toBe(false);
-		// A sign-in writes it, and what it wrote is kept.
-		const done = s.signingIn();
-		const signedIn = JSON.stringify({ [NOTION_KEY]: { tokens: { access_token: SECRETS.oauthAccess } } });
-		writeFileSync(s.authFile, signedIn);
-		expect(s.enforce()).toBe(false);
-		done();
-		expect(s.enforce()).toBe(false);
-		writeFileSync(s.authFile, "{}");
-		expect(s.enforce()).toBe(true);
-		expect(readFileSync(s.authFile, "utf8")).toBe(signedIn);
-		// And the watcher does the same while the daemon runs.
 		s.watch();
-		rmSync(s.signinMcpFile);
-		await waitFor(() => existsSync(s.signinMcpFile) && readFileSync(s.signinMcpFile, "utf8") === signinMcp);
-		writeFileSync(s.authFile, "{}");
-		await waitFor(() => readFileSync(s.authFile, "utf8") === signedIn);
+		fill(s);
+		await s.settled();
+		await s.saveSignIn("notion", {
+			serverUrl: "https://mcp.notion.com/mcp",
+			tokens: { access_token: SECRETS.oauthAccess, token_type: "Bearer" },
+		});
+		expect(s.enforce()).toBe(false);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(existsSync(s.signinHome)).toBe(false);
+		expect(secrets.values.get("connector/discord/value/token")).toBe(SECRETS.discordToken);
+		expect(secrets.values.get("connector/files/value/FILES_TOKEN")).toBe(SECRETS.envToken);
 	});
 });
 

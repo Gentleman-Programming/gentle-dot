@@ -1,15 +1,14 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { ConnectorInfo, ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
+import { oauthOptions } from "./fake-oauth.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
-const FAKE_CLI = fileURLToPath(new URL("./fixtures/fake-mcp-cli.ts", import.meta.url));
 const HELPER = "http://127.0.0.1:51234/mcp";
 const KEY = "s3cr3t-Computer-Key-0123456789abcdef";
 
@@ -19,7 +18,7 @@ afterEach(async () => {
 });
 
 interface Setup {
-	cliMode?: "auto";
+	browser?: "auto";
 	/** Written to `<data>/connectors.json` before the daemon starts. */
 	saved?: object;
 	/** Files below the home folder the import scan reads, by relative path. */
@@ -53,10 +52,9 @@ async function setup(options: Setup = {}) {
 		agentEnv: {
 			...process.env,
 			FAKE_AGENT_ENV_FILE: envFile,
-			...(options.cliMode ? { FAKE_MCP_CLI_MODE: options.cliMode } : {}),
 		},
 		authRuntime: async () => fake.runtime,
-		connectorCli: { command: process.execPath, args: [FAKE_CLI] },
+		connectorOAuth: oauthOptions(options.browser === "auto"),
 		importHome,
 		appChannel: app.daemonEnd,
 		log: (line) => logs.push(line),
@@ -339,7 +337,7 @@ describe("computer control registration (S24.7)", () => {
 
 describe("connectors next to the computer (regression)", () => {
 	it("connects, changes, and removes a connector while the helper is registered, and puts back a tampered mcp.json", async () => {
-		const { d, mcpFile, servers, send, find, list, policy } = await setup({ cliMode: "auto" });
+		const { d, mcpFile, servers, send, find, list, policy } = await setup({ browser: "auto" });
 		send({ type: "computer_register", url: HELPER, token: KEY });
 		await waitFor(() => servers().computer);
 

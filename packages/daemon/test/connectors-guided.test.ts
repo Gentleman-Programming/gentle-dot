@@ -3,13 +3,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import type { ServerPayload } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
-import { CATALOG, ConnectorManager, ConnectorStore, renderSigninMcpJson } from "../src/connectors.ts";
+import { CATALOG, ConnectorManager, ConnectorStore, renderMcpJson } from "../src/connectors.ts";
+import { MemorySecretSource } from "../src/secret-source.ts";
+import { fakeOAuth } from "./fake-oauth.ts";
 import { tempDir, waitFor } from "./helpers.ts";
 
-const FAKE_CLI = fileURLToPath(new URL("./fixtures/fake-mcp-cli.ts", import.meta.url));
 const TOKEN = "discord-bot-token-$ecret!value";
 const CLIENT_SECRET = "slack-client-secret-value";
 
@@ -124,50 +125,48 @@ describe("guided catalog entries", () => {
 	});
 });
 
-describe("guided mcp.json rendering (the sign-in home)", () => {
-	it("puts typed values in as literals the engine does not run or expand, and hides unknown tools", async () => {
-		const [{ validateMcpServerConfig, getMcpToolExposure }, { resolveConfigValue }] = await engine();
-		const rendered = JSON.parse(
-			renderSigninMcpJson({
-				connectors: {
-					discord: { enabled: true, mode: "read_only", values: { token: TOKEN } },
-					slack: { enabled: true, mode: "read_write", values: { client_id: "123.456", client_secret: "" } },
-					gmail: {
-						enabled: false,
-						mode: "read_only",
-						values: { client_id: "g-id.apps.googleusercontent.com", client_secret: "!echo pwned" },
-					},
-				},
-			}),
-		) as { mcpServers: Record<string, Record<string, unknown>> };
-		const { discord, slack, gmail } = rendered.mcpServers;
-		for (const [name, config] of Object.entries(rendered.mcpServers))
-			expect(typeof validateMcpServerConfig(name, config), name).toBe("object");
-		expect(discord).toMatchObject({
+describe("guided values reach the real server as they were typed", () => {
+	it("never runs or expands a typed value, and leaves an empty optional one out", async () => {
+		const [, { resolveConfigValue }] = await engine();
+		const store = new ConnectorStore({
+			dataDir: tempDir(),
+			agentHome: join(tempDir(), "agent"),
+			secrets: new MemorySecretSource(),
+		});
+		store.update((state) => {
+			state.connectors.discord = { enabled: true, mode: "read_only", values: { token: TOKEN } };
+			state.connectors.slack = {
+				enabled: true,
+				mode: "read_write",
+				values: { client_id: "123.456", client_secret: "" },
+			};
+			state.connectors.gmail = {
+				enabled: false,
+				mode: "read_only",
+				values: { client_id: "g-id.apps.googleusercontent.com", client_secret: "!echo pwned" },
+			};
+		});
+		expect(store.proxyView("discord")?.server).toEqual({
 			command: "npx",
 			args: ["-y", "@pasympa/discord-mcp@2.2.0"],
-			exposure: "direct",
 		});
-		const token = (discord?.env as Record<string, string> | undefined)?.DISCORD_TOKEN ?? "";
-		expect(token).not.toBe(TOKEN);
-		expect(resolveConfigValue(token)).toBe(TOKEN);
-		expect(getMcpToolExposure(discord, "discord_read_messages")).toBe("direct");
-		expect(getMcpToolExposure(discord, "discord_send_message")).toBe("hidden");
-		// An optional value left empty is left out; the client id is used as is.
-		expect(slack?.oauth).toEqual({ clientId: "123.456", callbackUrl: "http://localhost:38417/callback" });
-		expect(slack?.toolExposure).toBeUndefined();
-		const oauth = gmail?.oauth as Record<string, string>;
-		expect(oauth.clientId).toBe("g-id.apps.googleusercontent.com");
-		expect(oauth.clientSecret?.startsWith("!")).toBe(false);
-		expect(resolveConfigValue(oauth.clientSecret ?? "")).toBe("!echo pwned");
-		expect(gmail?.enabled).toBe(false);
+		expect((await store.credentials("discord")).env).toEqual({ DISCORD_TOKEN: TOKEN });
+		expect((await store.signInTarget("slack")).settings).toEqual({
+			clientId: "123.456",
+			callbackUrl: "http://localhost:38417/callback",
+		});
+		const gmail = (await store.signInTarget("gmail")).settings;
+		expect(gmail.clientId).toBe("g-id.apps.googleusercontent.com");
+		expect(gmail.clientSecret).toBe("!echo pwned");
+		// The engine would have run it; the engine never sees it now.
+		expect(resolveConfigValue("!echo pwned")).toBe("pwned");
+		store.close();
 	});
 
 	it("leaves out a guided connector whose required values are missing", () => {
-		const rendered = JSON.parse(
-			renderSigninMcpJson({ connectors: { discord: { enabled: true, mode: "read_only" } } }),
-		) as { mcpServers: Record<string, unknown> };
-		expect(rendered.mcpServers).toEqual({});
+		const state = { connectors: { discord: { enabled: true, mode: "read_only" as const } } };
+		const proxy = { url: "http://127.0.0.1:4999/mcp", key: "k".repeat(32) };
+		expect(JSON.parse(renderMcpJson(state, undefined, proxy)).mcpServers).toEqual({});
 	});
 });
 
@@ -176,17 +175,16 @@ afterEach(() => {
 	for (const manager of managers.splice(0)) manager.cancelAll();
 });
 
-function setup(cliEnv: Record<string, string> = {}) {
+function setup() {
 	const dataDir = tempDir();
 	const agentHome = join(dataDir, "agent");
-	const cliLog = join(dataDir, "cli.jsonl");
 	const logs: string[] = [];
-	const store = new ConnectorStore({ dataDir, agentHome });
+	const secrets = new MemorySecretSource();
+	const oauth = fakeOAuth();
+	const store = new ConnectorStore({ dataDir, agentHome, secrets });
 	const manager = new ConnectorManager({
 		store,
-		cli: { command: process.execPath, args: [FAKE_CLI] },
-		env: { ...process.env, HOME: join(dataDir, "home"), FAKE_MCP_CLI_LOG: cliLog, ...cliEnv },
-		cwd: dataDir,
+		oauth: { fetch: oauth.fetch, openBrowser: (url) => void oauth.browse(url).catch(() => {}) },
 		log: (line) => logs.push(line),
 	});
 	managers.push(manager);
@@ -194,19 +192,12 @@ function setup(cliEnv: Record<string, string> = {}) {
 	const sent: ServerPayload[] = [];
 	const emit = (payload: ServerPayload) => sent.push(payload);
 	const prompts = () => sent.flatMap((m) => (m.type === "auth_prompt" ? [m.prompt] : []));
-	const cliRuns = () =>
-		existsSync(cliLog)
-			? readFileSync(cliLog, "utf8")
-					.trim()
-					.split("\n")
-					.map((line) => JSON.parse(line) as { argv: string[] })
-			: [];
-	return { dataDir, agentHome, store, manager, owner, sent, emit, prompts, logs, cliRuns };
+	return { dataDir, agentHome, store, manager, owner, sent, emit, prompts, logs, secrets, oauth };
 }
 
 describe("guided connector setup", () => {
 	it("asks for the Discord bot token as a secret, then adds it read only; the value is never shown or logged", async () => {
-		const { manager, store, owner, emit, sent, prompts, logs, dataDir, agentHome, cliRuns } = setup();
+		const { manager, store, owner, emit, sent, prompts, logs, dataDir, agentHome, secrets, oauth } = setup();
 		expect(manager.connect(owner, "discord", emit)).toBeUndefined();
 		const prompt = await waitFor(() => prompts()[0]);
 		expect(prompt).toMatchObject({ kind: "secret", flowId: expect.stringMatching(/^connector-setup-/) });
@@ -216,27 +207,24 @@ describe("guided connector setup", () => {
 		expect(manager.reply(owner, prompt.flowId, { value: TOKEN })).toBe(true);
 		const done = await waitFor(() => sent.find((m) => m.type === "auth_done"));
 		expect(done).toMatchObject({ flowId: prompt.flowId, providerId: "discord", ok: true });
-		expect(store.state().connectors.discord).toEqual({
-			enabled: true,
-			mode: "read_only",
-			values: { token: TOKEN },
-		});
+		expect(store.state().connectors.discord).toMatchObject({ enabled: true, mode: "read_only" });
+		expect(secrets.values.get("connector/discord/value/token")).toBe(TOKEN);
 		expect(manager.list().find((c) => c.id === "discord")).toMatchObject({
 			added: true,
 			enabled: true,
 			status: "connected",
 			guide: expect.objectContaining({ steps: expect.any(Array) }),
 		});
-		// A server with a token signs in with nothing else; `mcp login` never runs.
-		expect(cliRuns()).toEqual([]);
+		// A server with a token signs in with nothing else.
+		expect(oauth.tokenRequests).toEqual([]);
 		expect(JSON.stringify(manager.list())).not.toContain(TOKEN);
 		expect(JSON.stringify(sent)).not.toContain(TOKEN);
 		expect(logs.join("\n")).not.toContain(TOKEN);
-		// The real server is only in the daemon's sign-in home; the proxy hands the token to the server it runs.
-		expect(readFileSync(store.signinMcpFile, "utf8")).toContain("DISCORD_TOKEN");
+		// The token is only in the app's store; the proxy hands it to the server it runs.
 		expect(readFileSync(join(agentHome, "mcp.json"), "utf8")).not.toContain("DISCORD_TOKEN");
 		expect((await store.credentials("discord")).env).toEqual({ DISCORD_TOKEN: TOKEN });
 		expect(readFileSync(join(dataDir, "connectors.json"), "utf8")).toContain("discord");
+		expect(readFileSync(join(dataDir, "connectors.json"), "utf8")).not.toContain(TOKEN);
 		expect(store.policy().connectors?.discord?.readOnlyTools).toContain("discord_read_messages");
 	});
 
@@ -251,11 +239,8 @@ describe("guided connector setup", () => {
 		expect(manager.connect(owner, "slack", emit)).toBeUndefined();
 	});
 
-	it("asks for Slack's client id and an optional secret, writes them to mcp.json, then signs in on the same flow", async () => {
-		const { manager, store, owner, emit, sent, prompts, cliRuns, logs } = setup({
-			FAKE_MCP_CLI_MODE: "auto",
-			FAKE_MCP_CLI_URL: "https://mcp.slack.com/mcp",
-		});
+	it("asks for Slack's client id and an optional secret, keeps the secret in the app's store, then signs in with them on the same flow", async () => {
+		const { manager, store, owner, emit, sent, prompts, logs, secrets, oauth, dataDir } = setup();
 		manager.connect(owner, "slack", emit);
 		const first = await waitFor(() => prompts()[0]);
 		expect(first).toMatchObject({ kind: "text" });
@@ -266,17 +251,24 @@ describe("guided connector setup", () => {
 		expect(manager.reply(owner, second.flowId, { value: CLIENT_SECRET })).toBe(true);
 		const done = await waitFor(() => sent.find((m) => m.type === "auth_done"));
 		expect(done).toMatchObject({ flowId: first.flowId, providerId: "slack", ok: true });
-		expect(cliRuns().map((r) => r.argv)).toEqual([["mcp", "login", "slack"]]);
-		const slack = JSON.parse(readFileSync(store.signinMcpFile, "utf8")).mcpServers.slack;
-		expect(slack.oauth).toMatchObject({
-			clientId: "123.456",
-			callbackUrl: "http://localhost:38417/callback",
-		});
+		// The user's own client, on its fixed redirect; nothing is registered.
+		const link = sent.find((m) => m.type === "auth_event");
+		const url = new URL(link?.type === "auth_event" && link.event.kind === "auth_url" ? link.event.url : "");
+		expect(url.searchParams.get("client_id")).toBe("123.456");
+		expect(url.searchParams.get("redirect_uri")).toBe("http://localhost:38417/callback");
+		expect(oauth.registered).toEqual([]);
+		expect(oauth.tokenRequests).toEqual([
+			{ grant: "authorization_code", clientId: "123.456", clientSecret: CLIENT_SECRET },
+		]);
 		expect(manager.list().find((c) => c.id === "slack")?.status).toBe("connected");
-		expect(store.state().connectors.slack?.values).toEqual({
+		expect(secrets.values.get("connector/slack/value/client_secret")).toBe(CLIENT_SECRET);
+		expect(
+			JSON.parse(readFileSync(join(dataDir, "connectors.json"), "utf8")).connectors.slack.values,
+		).toEqual({
 			client_id: "123.456",
-			client_secret: CLIENT_SECRET,
+			client_secret: { secretRef: "connector/slack/value/client_secret" },
 		});
+		expect(store.state().connectors.slack?.signIn).toBeDefined();
 		expect(JSON.stringify(sent)).not.toContain(CLIENT_SECRET);
 		expect(logs.join("\n")).not.toContain(CLIENT_SECRET);
 	});
@@ -292,7 +284,7 @@ describe("guided connector setup", () => {
 	});
 
 	it("changes the stored values from Set up, and refuses connectors that need none", async () => {
-		const { manager, store, owner, emit, sent, prompts } = setup();
+		const { manager, store, owner, emit, sent, prompts, secrets } = setup();
 		store.update((state) => {
 			state.connectors.discord = { enabled: true, mode: "read_write", values: { token: "old" } };
 		});
@@ -300,11 +292,9 @@ describe("guided connector setup", () => {
 		const prompt = await waitFor(() => prompts()[0]);
 		manager.reply(owner, prompt.flowId, { value: "new-token" });
 		await waitFor(() => sent.find((m) => m.type === "auth_done"));
-		expect(store.state().connectors.discord).toEqual({
-			enabled: true,
-			mode: "read_write",
-			values: { token: "new-token" },
-		});
+		expect(store.state().connectors.discord).toMatchObject({ enabled: true, mode: "read_write" });
+		expect(secrets.values.get("connector/discord/value/token")).toBe("new-token");
+		expect((await store.credentials("discord")).env).toEqual({ DISCORD_TOKEN: "new-token" });
 		expect(manager.setup(owner, "notion", emit)).toMatchObject({ code: "connector_not_added" });
 		expect(manager.setup(owner, "nope", emit)).toMatchObject({ code: "unknown_connector" });
 	});

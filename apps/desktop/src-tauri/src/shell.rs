@@ -12,6 +12,7 @@ use crate::daemon::{self, Daemon, RestartOutcome};
 use crate::geometry::{self, Rect};
 use crate::platform::{self, LaunchRequest, Os, DOT_TITLE, PANEL_TITLE};
 use crate::position::{self, DotPosition};
+use crate::secure_store::{self, SecretStore};
 use crate::shortcut;
 use crate::status::{is_template, tray_status, TrayGlyph};
 use crate::voice::app as voice;
@@ -121,16 +122,22 @@ fn read_connection_info(config: &DesktopConfig) -> CommandResult<ConnectionInfo>
     Ok(config::connection_info(config.port, token.trim()))
 }
 
-/// Serves the daemon's requests on the app channel: native approvals (S25.3), and registering the
-/// computer helper with a daemon this app just spawned (S24.7, L61).
+/// Serves the daemon's requests on the app channel: native approvals (S25.3), connector secrets
+/// from the secure store (S25.5), and registering the computer helper with a daemon this app just
+/// spawned (S24.7, L61).
 struct ChannelService {
     approvals: Approvals,
     computer: Option<Endpoint>,
+    secrets: Box<dyn SecretStore>,
 }
 
 impl app_channel::Handler for ChannelService {
     fn approve(&self, request: &ApprovalRequest) -> bool {
         self.approvals.confirm(request) == Decision::Approved
+    }
+
+    fn secrets(&self) -> Option<&dyn SecretStore> {
+        Some(self.secrets.as_ref())
     }
 
     fn opened(&self, channel: &Arc<AppChannel>) {
@@ -775,6 +782,7 @@ pub fn run() {
             let service = ChannelService {
                 approvals: Approvals::new(Arc::new(NativePrompt::new(handle.clone())), APPROVAL_TIMEOUT),
                 computer: computer.endpoint(),
+                secrets: secure_store::connector_store(),
             };
             app.manage(computer);
             let runtime_dir = daemon::runtime_dir(|key| std::env::var(key).ok(), app.path().resource_dir().ok());

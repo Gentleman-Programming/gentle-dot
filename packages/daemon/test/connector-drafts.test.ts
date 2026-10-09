@@ -2,7 +2,6 @@
 // S19: the assistant drafts a connector with `propose_connector`; only the user's approval adds it.
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { ServerMessage, ServerPayload } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
@@ -15,11 +14,12 @@ import approvalGuard, {
 	PROPOSE_TOOL,
 	proposeConnector,
 } from "../src/extensions/approval-guard.ts";
+import { MemorySecretSource } from "../src/secret-source.ts";
 import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
+import { oauthOptions } from "./fake-oauth.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
-const FAKE_CLI = fileURLToPath(new URL("./fixtures/fake-mcp-cli.ts", import.meta.url));
 const SECRET = "gh-token-$top!secret";
 
 /** Drafts that would put a typed secret into the command line or an address the model chose. */
@@ -146,16 +146,15 @@ afterEach(() => {
 	for (const manager of managers.splice(0)) manager.cancelAll();
 });
 
-function setup(cliEnv: Record<string, string> = {}) {
+function setup() {
 	const dataDir = tempDir();
 	const agentHome = join(dataDir, "agent");
 	const logs: string[] = [];
-	const store = new ConnectorStore({ dataDir, agentHome });
+	const secrets = new MemorySecretSource();
+	const store = new ConnectorStore({ dataDir, agentHome, secrets });
 	const manager = new ConnectorManager({
 		store,
-		cli: { command: process.execPath, args: [FAKE_CLI] },
-		env: { ...process.env, HOME: join(dataDir, "home"), ...cliEnv },
-		cwd: dataDir,
+		oauth: oauthOptions(true),
 		log: (line) => logs.push(line),
 	});
 	managers.push(manager);
@@ -165,7 +164,7 @@ function setup(cliEnv: Record<string, string> = {}) {
 	const sent: ServerPayload[] = [];
 	const emit = (payload: ServerPayload) => sent.push(payload);
 	const prompts = () => sent.flatMap((m) => (m.type === "auth_prompt" ? [m.prompt] : []));
-	return { dataDir, agentHome, store, manager, changes, owner, sent, emit, prompts, logs };
+	return { dataDir, agentHome, store, manager, changes, owner, sent, emit, prompts, logs, secrets };
 }
 
 describe("connector drafts", () => {
@@ -235,7 +234,7 @@ describe("connector drafts", () => {
 	});
 
 	it("on approval asks for each secret in the app, then adds the server read only with every tool hidden", async () => {
-		const { manager, store, owner, emit, sent, prompts, logs, changes } = setup();
+		const { manager, store, owner, emit, sent, prompts, logs, changes, secrets, dataDir } = setup();
 		const draft = manager.propose(JSON.stringify(stdioDraft));
 		expect(manager.decideDraft(owner, draft?.draftId ?? "", true, emit)).toBeUndefined();
 		const prompt = await waitFor(() => prompts()[0]);
@@ -246,19 +245,16 @@ describe("connector drafts", () => {
 		expect(done).toMatchObject({ providerId: "github", ok: true });
 		expect(changes).toContain(true);
 		const saved = store.state().connectors.github;
-		expect(saved).toMatchObject({
-			enabled: true,
+		expect(saved).toMatchObject({ enabled: true, mode: "read_only" });
+		expect(secrets.values.get("connector/github/value/GITHUB_PERSONAL_ACCESS_TOKEN")).toBe(SECRET);
+		expect(readFileSync(join(dataDir, "connectors.json"), "utf8")).not.toContain(SECRET);
+		// Read only with no curated list: the proxy shows none of its tools.
+		expect(store.proxyView("github")).toMatchObject({
 			mode: "read_only",
-			values: { GITHUB_PERSONAL_ACCESS_TOKEN: SECRET },
+			readOnlyTools: [],
+			server: { command: "npx", args: ["-y", "@modelcontextprotocol/server-github@2025.4.8"] },
 		});
-		const server = JSON.parse(readFileSync(store.signinMcpFile, "utf8")).mcpServers.github;
-		expect(server).toMatchObject({
-			command: "npx",
-			args: ["-y", "@modelcontextprotocol/server-github@2025.4.8"],
-			exposure: "direct",
-			toolExposure: { "*": "hidden" },
-		});
-		expect(server.env.GITHUB_PERSONAL_ACCESS_TOKEN).not.toBe(SECRET);
+		expect((await store.credentials("github")).env).toEqual({ GITHUB_PERSONAL_ACCESS_TOKEN: SECRET });
 		expect(store.policy().connectors?.github).toEqual({
 			name: "GitHub",
 			mode: "read_only",
@@ -281,17 +277,11 @@ describe("connector drafts", () => {
 		expect(logs.join("\n")).not.toContain(SECRET);
 		// Read and send shows every tool, and each call asks (no curated list).
 		manager.setMode("github", "read_write");
-		expect(
-			JSON.parse(readFileSync(store.signinMcpFile, "utf8")).mcpServers.github.toolExposure,
-		).toBeUndefined();
 		expect(store.proxyView("github")).toMatchObject({ mode: "read_write", readOnlyTools: [] });
 	});
 
 	it("gives a draft with a taken name its own id, and signs in when it needs OAuth", async () => {
-		const { manager, store, owner, emit, sent } = setup({
-			FAKE_MCP_CLI_MODE: "auto",
-			FAKE_MCP_CLI_URL: "https://mcp.notion.com/mcp",
-		});
+		const { manager, store, owner, emit, sent } = setup();
 		store.update((state) => {
 			state.connectors.notion = { enabled: true, mode: "read_only" };
 		});
@@ -362,7 +352,7 @@ describe("connector drafts through the daemon", () => {
 			backoffMs: [50],
 			agentHome: join(dataDir, "agent"),
 			authRuntime: async () => fake.runtime,
-			connectorCli: { command: process.execPath, args: [FAKE_CLI] },
+			connectorOAuth: oauthOptions(),
 			importHome: tempDir(),
 			appChannel: app.daemonEnd,
 		});
@@ -393,11 +383,12 @@ describe("connector drafts through the daemon", () => {
 					m.type === "connectors" && m.connectors.some((c) => c.id === "github" && c.custom !== undefined),
 			),
 		);
+		// Added read only: with no curated list, the proxy shows none of its tools.
 		expect(
-			JSON.parse(readFileSync(join(dataDir, "connector-signin", "mcp.json"), "utf8")).mcpServers.github
-				.toolExposure,
-		).toEqual({
-			"*": "hidden",
+			JSON.parse(readFileSync(join(dataDir, "connectors.json"), "utf8")).connectors.github,
+		).toMatchObject({
+			enabled: true,
+			mode: "read_only",
 		});
 		// The engine reaches it only through the proxy.
 		expect(

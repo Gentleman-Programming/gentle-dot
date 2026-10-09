@@ -1,12 +1,13 @@
-import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
 	existsSync,
 	type FSWatcher,
 	lstatSync,
 	mkdirSync,
+	readdirSync,
 	readFileSync,
 	renameSync,
+	rmdirSync,
 	unlinkSync,
 	watch,
 	writeFileSync,
@@ -27,10 +28,11 @@ import type {
 import { MAX_CONNECTOR_DRAFTS } from "@gentle-dot/protocol";
 import { resolveRecord, resolveValue, storedSignIn } from "./connector-credentials.ts";
 import { type ScannedServer, scanClientConfigs, valueNotes } from "./connector-import.ts";
+import { type OAuthSettings, type SignIn, SignInCancelledError, startSignIn } from "./connector-oauth.ts";
 import { type ConnectorPolicy, draftSecretProblem, POLICY_ENV } from "./extensions/approval-guard.ts";
-import { ensurePrivateDir } from "./isolation.ts";
 import type { ProxiedConnector, UpstreamCredentials } from "./mcp-proxy.ts";
 import { runtimeDir, runtimeModules } from "./runtime.ts";
+import { NO_APP, type SecretSource, SecretsUnavailableError } from "./secret-source.ts";
 
 /** A value the user types in the app (a token, client credentials); kept only in the assistant's private state. */
 export interface SetupField {
@@ -73,7 +75,7 @@ export interface CatalogEntry {
 	server: ServerTemplate;
 	/** Values the user types before connecting. */
 	fields?: readonly SetupField[];
-	/** Signs in through the engine's `mcp login` (OAuth). */
+	/** Signs in with OAuth (run by the daemon). */
 	oauth: boolean;
 	/** Steps shown before "Connect". */
 	guide?: ConnectorGuide;
@@ -347,9 +349,14 @@ export interface CustomConnector {
 export interface SavedConnector {
 	enabled: boolean;
 	mode: ConnectorMode;
-	/** The values the user typed, by field key; never sent to a window or written to the log. */
+	/**
+	 * The values the user typed, by field key; never sent to a window or written to the log. A secret
+	 * one is only a reference to its item in the app's secure store ({@link secretRef}).
+	 */
 	values?: Record<string, string>;
 	custom?: CustomConnector;
+	/** The OAuth sign-in: a reference to its item in the app's secure store. */
+	signIn?: string;
 }
 
 export interface ConnectorsState {
@@ -397,6 +404,83 @@ export function literal(text: string): string {
 }
 
 const PLACEHOLDER = /\$\$|\$\{input:([A-Za-z0-9_.-]{1,64})\}/g;
+
+/**
+ * A secret in the daemon's memory is only a reference to its item in the app's secure store (S25.5):
+ * this prefix and the item's id. No typed or imported text can start with NUL. Files get
+ * `{"secretRef": "<id>"}` in its place, and the value itself is fetched from the app when needed.
+ */
+const REF = "\u0000secret-ref:";
+const SECRET_ID = /^[A-Za-z0-9._:@/-]{1,200}$/;
+/** The reference to the secret item `id`. */
+export const secretRef = (id: string) => `${REF}${id}`;
+const refId = (text: string) => (text.startsWith(REF) ? text.slice(REF.length) : undefined);
+/**
+ * Whether `text` is the reference to the secret of exactly this slot. Ids follow from the
+ * connector and the field, so a reference to any other item (one planted in `connectors.json`
+ * while the daemon was down, pointing at another connector's secret) is never read (A1, L117).
+ */
+const ownRef = (text: string, slotId: string) => refId(text) === slotId;
+
+/** A part of a secret id: as it is when the app accepts it, otherwise a hash of it. */
+const idPart = (text: string) =>
+	/^[A-Za-z0-9._-]{1,64}$/.test(text) ? text : createHash("sha256").update(text).digest("hex").slice(0, 32);
+/** Where a connector's secrets live in the app's store: `connector/<id>/…`. */
+export const secretPrefix = (connectorId: string) => `connector/${idPart(connectorId)}/`;
+const signInId = (connectorId: string) => `${secretPrefix(connectorId)}signin`;
+/** The connector's own sign-in reference, or undefined when it has none or refers elsewhere (A1). */
+const signInRef = (connectorId: string, saved: SavedConnector) =>
+	saved.signIn && refId(saved.signIn) === signInId(connectorId) ? signInId(connectorId) : undefined;
+
+/** A value of a server of the user's own that is a secret: anything but an empty one or one with a field in it. */
+const FIELD_START = placeholder("").slice(0, -1);
+const secretText = (text: string) => text !== "" && !text.includes(FIELD_START);
+
+/**
+ * The connector with each secret it holds passed through `map(id, text)`: the values of secret
+ * fields, and for a server of the user's own its environment values, headers, and OAuth client
+ * secret (imported or drafted servers keep them in their entry). The sign-in is not included.
+ */
+function mapSecrets(
+	id: string,
+	saved: SavedConnector,
+	map: (secretId: string, text: string) => string,
+): SavedConnector {
+	const spec = specOf(id, saved);
+	const out = structuredClone(saved);
+	const prefix = secretPrefix(id);
+	if (out.values && spec)
+		for (const field of spec.fields) {
+			const text = out.values[field.key];
+			if (field.secret && text) out.values[field.key] = map(`${prefix}value/${idPart(field.key)}`, text);
+		}
+	const server = out.custom?.server;
+	const record = (entries: Record<string, string> | undefined, kind: string) => {
+		for (const [name, text] of Object.entries(entries ?? {}))
+			if (entries && typeof text === "string" && secretText(text))
+				entries[name] = map(`${prefix}${kind}/${idPart(name)}`, text);
+	};
+	if (server && "command" in server) record(server.env, "env");
+	else if (server) {
+		record(server.headers, "header");
+		const secret = server.oauth?.clientSecret;
+		if (server.oauth && secret && secretText(secret))
+			server.oauth.clientSecret = map(`${prefix}client-secret`, secret);
+	}
+	return out;
+}
+
+/** Every secret item a connector refers to, its sign-in included. */
+function refsOf(id: string, saved: SavedConnector): string[] {
+	const ids: string[] = [];
+	mapSecrets(id, saved, (secretId, text) => {
+		if (ownRef(text, secretId)) ids.push(secretId);
+		return text;
+	});
+	const signIn = signInRef(id, saved);
+	if (signIn) ids.push(signIn);
+	return ids;
+}
 
 /** The server entry with the user's values in place, or undefined while a required one is missing. */
 export function fillServer(
@@ -500,34 +584,6 @@ export function renderMcpJson(
 	return `${JSON.stringify({ mcpServers: servers }, null, 2)}\n`;
 }
 
-/**
- * The real servers, in the engine's format, for the daemon's own sign-in home: only the engine's
- * `mcp login` and `mcp logout` commands read it, never the engine that talks to the model. Read only
- * still hides every tool (`*`) except the curated ones, as the engine would have.
- */
-export function renderSigninMcpJson(state: ConnectorsState): string {
-	const servers: Record<string, unknown> = {};
-	for (const [id, saved] of ordered(state)) {
-		const filled = filledServer(id, saved);
-		if (!filled) continue;
-		const { spec, server } = filled;
-		servers[id] = {
-			...server,
-			exposure: "direct",
-			...(saved.mode === "read_only"
-				? {
-						toolExposure: {
-							"*": "hidden",
-							...Object.fromEntries(spec.readOnlyTools.map((tool) => [tool, "direct"])),
-						},
-					}
-				: {}),
-			...(saved.enabled ? {} : { enabled: false }),
-		};
-	}
-	return `${JSON.stringify({ mcpServers: servers }, null, 2)}\n`;
-}
-
 function writePrivate(path: string, text: string): void {
 	const temp = `${path}.${process.pid}.tmp`;
 	writeFileSync(temp, text, { mode: 0o600 });
@@ -538,6 +594,11 @@ export interface ConnectorStoreOptions {
 	dataDir: string;
 	/** The engine's home, which holds its `mcp.json` (and held `mcp-auth.json` before the proxy). */
 	agentHome: string;
+	/**
+	 * Where the connectors' secrets live: the desktop app's secure store over its channel (S25.5).
+	 * Without one, connectors that need a secret fail closed with {@link NO_APP}.
+	 */
+	secrets?: SecretSource;
 	/** The environment the values of imported servers may read (`$NAME`); default the daemon's. */
 	env?: NodeJS.ProcessEnv;
 	/** The engine's working folder; a project `.pi/mcp.json` there would add servers. */
@@ -547,29 +608,36 @@ export interface ConnectorStoreOptions {
 	log?: (line: string) => void;
 }
 
+/** What a remote connector's OAuth sign-in needs: its server, the user's own client, and the stored sign-in. */
+export interface SignInTarget {
+	serverUrl: string;
+	settings: OAuthSettings;
+	stored?: McpOAuthState;
+}
+
 /**
  * The connectors the user approved. The daemon reads `<data>/connectors.json` once, when it
  * starts, and from then on the state lives in memory and changes only through the Connectors
- * screen. The files (`connectors.json`, the engine's `mcp.json`, and the sign-in home's `mcp.json`)
- * are written from memory; a change made by anything else (the assistant has a shell) is put back,
- * and a project `.pi/mcp.json` in the workspace is removed. The sign-ins (`mcp-auth.json`) change
- * only during a sign-in or a token refresh; other changes are put back too. Checked on every file
- * event, before every engine start, and after every run. A change made while the daemon is not
- * running is loaded at its next start (S25.6).
+ * screen. The files (`connectors.json` and the engine's `mcp.json`) are written from memory; a change
+ * made by anything else (the assistant has a shell) is put back, and a project `.pi/mcp.json` in the
+ * workspace is removed. Checked on every file event, before every engine start, and after every
+ * run. A change made while the daemon is not running is loaded at its next start (S25.6).
  *
- * The engine's `mcp.json` lists only the daemon's proxy (S25.4). The real servers and the sign-ins
- * are in the daemon's own sign-in home (`<data>/connector-signin`), which only the engine's
- * `mcp login`/`mcp logout` commands are pointed at.
+ * Secrets (S25.5) are never in a file: `connectors.json` holds `{"secretRef": "<id>"}` in their
+ * place, the values live in the desktop app's secure store, and the daemon keeps the ones it read
+ * in memory until the app's channel closes. The engine's `mcp.json` lists only the daemon's proxy
+ * (S25.4). Secrets that files held before (`connectors.json`, the old sign-in home, and the
+ * engine's `mcp-auth.json`) move into the app's store once, with {@link ConnectorStore.migrate}.
  */
 export class ConnectorStore {
 	readonly file: string;
 	readonly mcpFile: string;
-	/** The daemon's own folder for the sign-in command: the real servers and the sign-ins. */
+	/** Where the daemon kept the real servers and the sign-ins before T23d; removed once migrated. */
 	readonly signinHome: string;
 	readonly signinMcpFile: string;
-	/** The sign-ins (pi-mcp's OAuth state by `mcp__<server>|<url>`), in the sign-in home. */
+	/** The sign-ins of the old sign-in home (pi-mcp's OAuth state by `mcp__<server>|<url>`). */
 	readonly authFile: string;
-	/** Where the engine kept the sign-ins before the proxy; moved once into the sign-in home. */
+	/** Where the engine kept the sign-ins before the proxy. */
 	readonly legacyAuthFile: string;
 	/** Called after a change made outside the Connectors screen was put back. */
 	onReverted: () => void = () => {};
@@ -580,10 +648,17 @@ export class ConnectorStore {
 	private computer: ComputerEndpoint | undefined;
 	/** The daemon's proxy for the running engine; only in memory and `mcp.json`. */
 	private proxy: ProxyEndpoint | undefined;
-	/** The sign-ins as the last sign-in or refresh left them (undefined: no file). */
-	private authText: string | undefined;
-	/** Sign-in commands running now; they write the sign-ins themselves. */
-	private signins = 0;
+	/** Secrets read from or stored in the app's store, by id; only in memory. */
+	private readonly cache = new Map<string, string>();
+	/** Secrets `connectors.json` still holds as text, by the id they move to; kept in the file until then. */
+	private readonly pending = new Map<string, string>();
+	/** True once the sign-in files were moved (`version: 2`); files that appear later are not imported. */
+	private migrated: boolean;
+	private migrating: Promise<void> | undefined;
+	/** Stores still running (a secret sealed by {@link update}). */
+	private readonly writes = new Set<Promise<unknown>>();
+	/** Sign-in files that appeared after the move and were reported. */
+	private readonly reported = new Set<string>();
 	private watchers: FSWatcher[] = [];
 	private readonly options: ConnectorStoreOptions;
 
@@ -595,10 +670,11 @@ export class ConnectorStore {
 		this.signinMcpFile = join(this.signinHome, "mcp.json");
 		this.authFile = join(this.signinHome, "mcp-auth.json");
 		this.legacyAuthFile = join(options.agentHome, "mcp-auth.json");
-		this.moveLegacySignIns();
-		this.authText = readOrUndefined(this.authFile);
-		const { state, renamed } = this.load();
+		const { state, renamed, version } = this.load();
 		this.saved = state;
+		// A new install has nothing to move.
+		this.migrated =
+			version >= 2 || (version === 0 && ![this.authFile, this.legacyAuthFile].some((f) => existsSync(f)));
 		if (renamed) writePrivate(this.file, this.recordText());
 	}
 
@@ -610,16 +686,84 @@ export class ConnectorStore {
 		return structuredClone(this.saved);
 	}
 
-	/** Changes the state, then writes the files (each atomically, mode 0600). */
+	/**
+	 * Changes the state, then writes the files (each atomically, mode 0600). A secret the change put
+	 * in as text is stored in the app's store and replaced by its reference first; without the app it
+	 * is dropped (the connector then needs it again).
+	 */
 	update(change: (state: ConnectorsState) => void): void {
 		const state = this.state();
 		change(state);
+		for (const [id, saved] of Object.entries(state.connectors))
+			state.connectors[id] = mapSecrets(id, saved, (secretId, text) =>
+				refId(text) !== undefined ? text : this.seal(secretId, text),
+			);
 		this.saved = state;
 		mkdirSync(this.options.agentHome, { recursive: true, mode: 0o700 });
-		ensurePrivateDir(this.signinHome);
 		writePrivate(this.file, this.recordText());
 		writePrivate(this.mcpFile, this.engineMcpText());
-		writePrivate(this.signinMcpFile, renderSigninMcpJson(state));
+		this.onUpdated();
+	}
+
+	/** Waits for the secrets {@link update} is still storing. */
+	async settled(): Promise<void> {
+		while (this.writes.size > 0) await Promise.allSettled([...this.writes]);
+	}
+
+	/**
+	 * Stores the values the user typed for a connector: the secret ones in the app's store (only
+	 * their references in memory and `connectors.json`), the others as they are. A secret left empty
+	 * removes its item. Rejects without the app, and then nothing changes.
+	 */
+	async keepValues(id: string, values: Record<string, string>): Promise<void> {
+		const current = this.saved.connectors[id] ?? { enabled: false, mode: "read_only" };
+		const spec = specOf(id, current);
+		if (!spec) throw new Error(`The connector ${id} is not available.`);
+		const prefix = secretPrefix(id);
+		const kept: Record<string, string> = {};
+		for (const [key, value] of Object.entries(values)) {
+			const field = spec.fields.find((f) => f.key === key);
+			const secretId = `${prefix}value/${idPart(key)}`;
+			if (!field?.secret) kept[key] = value;
+			else if (value) {
+				await this.keep(secretId, value);
+				kept[key] = secretRef(secretId);
+			} else {
+				kept[key] = "";
+				await this.secrets().delete(secretId);
+				this.cache.delete(secretId);
+			}
+		}
+		this.update((state) => {
+			state.connectors[id] = { ...(state.connectors[id] ?? current), values: kept };
+		});
+	}
+
+	/** Forgets a connector's secrets in the app's store (when it is removed); the state is not changed. */
+	async forget(id: string): Promise<void> {
+		const prefix = secretPrefix(id);
+		for (const key of [...this.cache.keys(), ...this.pending.keys()])
+			if (key.startsWith(prefix)) {
+				this.cache.delete(key);
+				this.pending.delete(key);
+			}
+		const source = this.options.secrets;
+		if (!source?.available) {
+			this.log(`the secrets of connector ${id} stay in the app's secure store: the app is not connected`);
+			return;
+		}
+		try {
+			for (const secretId of await source.list())
+				if (secretId.startsWith(prefix)) await source.delete(secretId);
+		} catch (error) {
+			this.log(`could not remove the secrets of connector ${id}: ${(error as Error).message}`);
+		}
+	}
+
+	/** Forgets every secret read so far (the app's channel closed); the next use asks the app again. */
+	lock(): void {
+		if (this.cache.size === 0) return;
+		this.cache.clear();
 		this.onUpdated();
 	}
 
@@ -642,11 +786,21 @@ export class ConnectorStore {
 		return true;
 	}
 
-	/** A connector as the proxy sees it, from the state in memory; undefined when it cannot run. */
+	/** Reads a connector's secrets from the app before the proxy uses it; failures leave it locked. */
+	async prepare(id: string): Promise<void> {
+		await this.unlock(id).catch(() => {});
+	}
+
+	/**
+	 * A connector as the proxy sees it, from the state in memory; undefined when it cannot run. When
+	 * a secret it needs is not in memory (no app, or its item is gone), `unavailable` says why.
+	 */
 	proxyView(id: string): ProxiedConnector | undefined {
 		const saved = this.saved.connectors[id];
-		const filled = saved && filledServer(id, saved);
-		if (!saved || !filled) return undefined;
+		if (!saved) return undefined;
+		const { open, locked } = this.open(id, saved);
+		const filled = filledServer(id, open);
+		if (!filled) return undefined;
 		const { spec, server } = filled;
 		return {
 			id,
@@ -663,19 +817,21 @@ export class ConnectorStore {
 							...(server.cwd !== undefined ? { cwd: server.cwd } : {}),
 						},
 			// The server with its values: a new token or address makes a new connection.
-			revision: createHash("sha256").update(JSON.stringify(server)).digest("hex"),
+			revision: createHash("sha256")
+				.update(JSON.stringify(server))
+				.update(locked ?? "")
+				.digest("hex"),
+			...(locked ? { unavailable: locked } : {}),
 		};
 	}
 
 	/**
 	 * What the proxy adds to the real server: the values the user typed (headers, a stdio server's
 	 * environment) as they were typed, and for a remote server without its own Authorization header,
-	 * the stored sign-in, refreshed when it expires.
+	 * the stored sign-in, refreshed when it expires (the new tokens go to the app's store).
 	 */
 	async credentials(id: string): Promise<UpstreamCredentials> {
-		const filled = filledServer(id, this.saved.connectors[id]);
-		if (!filled) throw new Error(`The connector ${id} is not set up.`);
-		const { spec, server } = filled;
+		const { spec, server } = await this.unlocked(id);
 		const env = this.options.env ?? process.env;
 		if ("command" in server) {
 			const resolved = resolveRecord(server.env, env, spec.name);
@@ -686,40 +842,63 @@ export class ConnectorStore {
 			(h) => h.toLowerCase() === "authorization",
 		);
 		if (ownAuthorization) return headers ? { headers } : {};
-		const key = authKey(id, server.url);
-		const { oauth } = server;
 		const authProvider = storedSignIn(
 			server.url,
-			{ load: () => this.signIn(key), save: (state) => this.saveSignIn(key, state) },
-			() => ({
-				...(oauth?.clientId ? { clientId: oauth.clientId } : {}),
-				...(oauth?.clientSecret
-					? { clientSecret: resolveValue(oauth.clientSecret, env, `${spec.name} client secret`) }
-					: {}),
-				...(oauth?.callbackUrl ? { redirectUrl: oauth.callbackUrl } : {}),
-			}),
+			{ load: () => this.signInState(id), save: (state) => this.saveSignIn(id, state) },
+			() => {
+				const { clientId, clientSecret, callbackUrl } = oauthSettings(spec.name, server, env);
+				return {
+					...(clientId ? { clientId } : {}),
+					...(clientSecret ? { clientSecret } : {}),
+					...(callbackUrl ? { redirectUrl: callbackUrl } : {}),
+				};
+			},
 		);
 		return { ...(headers ? { headers } : {}), authProvider };
 	}
 
-	/**
-	 * While the engine's sign-in command runs, it writes the sign-ins itself; call the returned
-	 * function when it ended, so what it wrote is kept.
-	 */
-	signingIn(): () => void {
-		this.signins++;
-		let done = false;
-		return () => {
-			if (done) return;
-			done = true;
-			this.signins--;
-			this.authText = readOrUndefined(this.authFile);
+	/** What a sign-in to a remote connector needs; rejects when its secrets cannot be read. */
+	async signInTarget(id: string): Promise<SignInTarget> {
+		const { spec, server } = await this.unlocked(id);
+		if (!("url" in server)) throw new Error(`${spec.name} does not use a sign-in.`);
+		const stored = this.signInState(id);
+		return {
+			serverUrl: server.url,
+			settings: oauthSettings(spec.name, server, this.options.env ?? process.env),
+			...(stored ? { stored } : {}),
 		};
+	}
+
+	/** Stores a sign-in (new, or refreshed) in the app's store and refers to it from the state. */
+	async saveSignIn(id: string, state: McpOAuthState): Promise<void> {
+		const secretId = signInId(id);
+		await this.keep(secretId, JSON.stringify(state));
+		if (this.saved.connectors[id] && this.saved.connectors[id].signIn !== secretRef(secretId))
+			this.update((current) => {
+				const saved = current.connectors[id];
+				if (saved) saved.signIn = secretRef(secretId);
+			});
 	}
 
 	/** The helper's address while it is registered (never its key). */
 	computerUrl(): string | undefined {
 		return this.computer?.url;
+	}
+
+	/**
+	 * Moves the secrets files still hold into the app's store, once the app is there (S25.5): text
+	 * secrets in `connectors.json`, then the sign-ins of the old sign-in home and of the engine's old
+	 * `mcp-auth.json` (the daemon's own win). Each one is stored, read back, and compared before the
+	 * file loses it; when one fails, the files stay as they were and the next start tries again. A
+	 * file that is empty or cannot be read is skipped and does not stop the rest. Afterwards
+	 * `connectors.json` says so (`version: 2`), and sign-in files that appear later are reported once
+	 * and left alone, never imported. Nothing secret is logged.
+	 */
+	migrate(): Promise<void> {
+		this.migrating ??= this.runMigration().finally(() => {
+			this.migrating = undefined;
+		});
+		return this.migrating;
 	}
 
 	/**
@@ -734,25 +913,15 @@ export class ConnectorStore {
 		for (const [file, text, empty] of [
 			[this.file, this.recordText(), noConnectors],
 			[this.mcpFile, this.engineMcpText(), noConnectors && !this.computer],
-			[this.signinMcpFile, renderSigninMcpJson(this.saved), noConnectors],
 		] as const) {
 			const current = readOrUndefined(file);
 			if (current === text || (current === undefined && empty)) continue;
 			mkdirSync(this.options.agentHome, { recursive: true, mode: 0o700 });
-			ensurePrivateDir(this.signinHome);
 			writePrivate(file, text);
 			changed.push(file);
 		}
-		// The sign-ins change only through a sign-in or a refresh.
-		if (this.signins === 0 && readOrUndefined(this.authFile) !== this.authText) {
-			if (this.authText === undefined) unlinkSync(this.authFile);
-			else {
-				ensurePrivateDir(this.signinHome);
-				writePrivate(this.authFile, this.authText);
-			}
-			changed.push(this.authFile);
-		}
 		if (this.removeProjectConfig()) changed.push("the workspace's .pi/mcp.json");
+		this.reportPlanted();
 		if (changed.length === 0 || !report) return changed.length > 0;
 		this.options.log?.(
 			`connector files were changed outside the Connectors screen; put back ${changed.join(", ")}`,
@@ -779,8 +948,7 @@ export class ConnectorStore {
 				this.watchProjectConfig();
 			}, 20);
 		};
-		ensurePrivateDir(this.signinHome);
-		const folders = [this.options.dataDir, this.options.agentHome, this.signinHome, this.options.workspace];
+		const folders = [this.options.dataDir, this.options.agentHome, this.options.workspace];
 		for (const folder of folders) {
 			if (!folder) continue;
 			mkdirSync(folder, { recursive: true, mode: 0o700 });
@@ -802,6 +970,7 @@ export class ConnectorStore {
 	/**
 	 * What the approval guard enforces: the turned-on connectors, which of them the proxy fronts (it
 	 * filters and asks, so the guard lets their tools through), and the files only the daemon writes.
+	 * The old sign-in files stay protected in case they appear again.
 	 */
 	policy(): ConnectorPolicy {
 		const connectors: NonNullable<ConnectorPolicy["connectors"]> = {};
@@ -832,84 +1001,254 @@ export class ConnectorStore {
 		};
 	}
 
-	/**
-	 * True when the sign-in command stored tokens for the connector (key `mcp__<server>|<url>`, `-`
-	 * as `_`). Token values are dropped while parsing, so they are never kept or passed on.
-	 */
+	/** True when the connector has a stored sign-in with tokens. No token value is kept or passed on. */
 	isSignedIn(id: string): boolean {
-		const server = filledServer(id, this.saved.connectors[id])?.server;
-		if (!server || !("url" in server) || !URL.canParse(server.url) || !existsSync(this.authFile))
-			return false;
-		try {
-			const states = JSON.parse(readFileSync(this.authFile, "utf8"), (key, value) =>
-				key === "tokens" && typeof value === "object" && value !== null ? {} : value,
-			) as Record<string, { tokens?: unknown } | undefined>;
-			return typeof states[authKey(id, server.url)]?.tokens === "object";
-		} catch {
-			return false;
+		const saved = this.saved.connectors[id];
+		const ref = saved && signInRef(id, saved);
+		if (!ref) return false;
+		const text = this.cache.get(ref);
+		// Stored only once it had tokens; until it is read again it counts as signed in.
+		if (text === undefined) return true;
+		return typeof this.signInState(id)?.tokens?.access_token === "string";
+	}
+
+	private secrets(): SecretSource {
+		const source = this.options.secrets;
+		if (!source?.available) throw new SecretsUnavailableError();
+		return source;
+	}
+
+	/** Stores a secret in the app's store and keeps it in memory. */
+	private async keep(id: string, secret: string): Promise<void> {
+		await this.secrets().put(id, secret);
+		this.cache.set(id, secret);
+	}
+
+	/** A secret {@link update} got as text: stored in the app's store in the background, or dropped without one. */
+	private seal(id: string, text: string): string {
+		const source = this.options.secrets;
+		if (!source?.available) {
+			this.log("a connector secret was not kept: the app's secure store is not connected");
+			return secretRef(id);
+		}
+		this.cache.set(id, text);
+		const write = source
+			.put(id, text)
+			.catch((error: Error) => {
+				if (this.cache.get(id) === text) this.cache.delete(id);
+				this.log(`a connector secret could not be stored: ${error.message}`);
+			})
+			.finally(() => this.writes.delete(write));
+		this.writes.add(write);
+		return secretRef(id);
+	}
+
+	/** Reads every secret the connector refers to that is not in memory yet; rejects without the app. */
+	private async unlock(id: string): Promise<void> {
+		await this.migrating;
+		const saved = this.saved.connectors[id];
+		if (!saved) return;
+		const missing = refsOf(id, saved).filter((ref) => !this.cache.has(ref) && !this.pending.has(ref));
+		if (missing.length === 0) return;
+		const source = this.secrets();
+		for (const ref of missing) {
+			const secret = await source.get(ref);
+			if (secret !== undefined) this.cache.set(ref, secret);
 		}
 	}
 
-	/** One server's stored sign-in, for the proxy. */
-	private signIn(key: string): McpOAuthState | undefined {
+	/** The connector's server with its secrets in place; rejects with why when one is missing. */
+	private async unlocked(id: string) {
+		await this.unlock(id);
+		const saved = this.saved.connectors[id];
+		if (!saved) throw new Error(`The connector ${id} is not set up.`);
+		const { open, locked } = this.open(id, saved);
+		if (locked) throw new SecretsUnavailableError(locked);
+		const filled = filledServer(id, open);
+		if (!filled) throw new Error(`The connector ${id} is not set up.`);
+		return filled;
+	}
+
+	/**
+	 * The connector with the secrets in memory in place of their references, and why it cannot run
+	 * when one is not there: no app (or a secret still waiting in a file), or an item that is gone.
+	 */
+	private open(id: string, saved: SavedConnector): { open: SavedConnector; locked?: string } {
+		let missing = false;
+		let waiting = false;
+		const open = mapSecrets(id, saved, (secretId, text) => {
+			const ref = refId(text);
+			if (ref === undefined) return text;
+			if (!ownRef(text, secretId)) {
+				// Another item's reference in this slot: never resolved, and the connector stays locked.
+				missing = true;
+				return text;
+			}
+			const secret = this.cache.get(ref);
+			if (secret !== undefined) return secret;
+			if (this.pending.has(ref)) waiting = true;
+			missing = true;
+			// Kept as the reference, so the connector still counts as set up.
+			return text;
+		});
+		const signIn = signInRef(id, saved);
+		if (saved.signIn && !signIn) missing = true;
+		if (signIn && !this.cache.has(signIn) && !this.options.secrets?.available) missing = true;
+		// A reference anywhere else (a changed file) never reaches a server.
+		if (!missing && JSON.stringify(open.custom ?? {}).includes(JSON.stringify(REF).slice(1, -1)))
+			missing = true;
+		if (!missing) return { open };
+		const name = specOf(id, saved)?.name ?? id;
+		const locked =
+			waiting || !this.options.secrets?.available
+				? NO_APP
+				: `A secret ${name} needs is missing from the app's secure store. Ask the user to set up ${name} again in Connectors.`;
+		return { open, locked };
+	}
+
+	/** One connector's sign-in, from memory. */
+	private signInState(id: string): McpOAuthState | undefined {
+		const saved = this.saved.connectors[id];
+		const ref = saved && signInRef(id, saved);
+		const text = ref && this.cache.get(ref);
+		if (!text) return undefined;
 		try {
-			const states = JSON.parse(readFileSync(this.authFile, "utf8")) as Record<
-				string,
-				McpOAuthState | undefined
-			>;
-			return states[key];
+			return JSON.parse(text) as McpOAuthState;
 		} catch {
 			return undefined;
 		}
 	}
 
-	/** Keeps a refreshed sign-in; the file is then what it should be. */
-	private saveSignIn(key: string, state: McpOAuthState): void {
-		let states: Record<string, unknown> = {};
-		try {
-			states = JSON.parse(readFileSync(this.authFile, "utf8")) as Record<string, unknown>;
-		} catch {}
-		states[key] = state;
-		const text = `${JSON.stringify(states, null, 2)}\n`;
-		ensurePrivateDir(this.signinHome);
-		writePrivate(this.authFile, text);
-		this.authText = text;
+	private async runMigration(): Promise<void> {
+		const source = this.options.secrets;
+		if (!source?.available) return;
+		// Secrets `connectors.json` still holds as text: all of them, or none.
+		if (this.pending.size > 0) {
+			try {
+				for (const [id, secret] of this.pending) await this.verifiedPut(source, id, secret);
+			} catch (error) {
+				this.log(
+					`could not move the connector secrets into the app's secure store (${(error as Error).message}); the files stay as they were`,
+				);
+				return;
+			}
+			const moved = this.pending.size;
+			for (const [id, secret] of this.pending) this.cache.set(id, secret);
+			this.pending.clear();
+			writePrivate(this.file, this.recordText());
+			this.log(`moved ${moved} connector secrets from connectors.json into the app's secure store`);
+		}
+		if (!this.migrated) {
+			let moved = 0;
+			let dropped = 0;
+			// The daemon's own sign-ins first: they win over the engine's older ones.
+			for (const file of [this.authFile, this.legacyAuthFile]) {
+				const states = this.readSignIns(file);
+				if (!states) continue;
+				const refs: Record<string, string> = {};
+				try {
+					for (const [key, state] of Object.entries(states)) {
+						const id = this.connectorForKey(key);
+						if (!id) {
+							dropped++;
+							continue;
+						}
+						if (this.saved.connectors[id]?.signIn || refs[id]) continue;
+						const secretId = signInId(id);
+						const text = JSON.stringify(state);
+						await this.verifiedPut(source, secretId, text);
+						this.cache.set(secretId, text);
+						refs[id] = secretRef(secretId);
+						moved++;
+					}
+				} catch (error) {
+					this.log(
+						`could not move the connector sign-ins into the app's secure store (${(error as Error).message}); they stay where they were`,
+					);
+					this.applySignIns(refs);
+					return;
+				}
+				this.applySignIns(refs);
+				unlinkSync(file);
+			}
+			if (existsSync(this.signinMcpFile)) unlinkSync(this.signinMcpFile);
+			try {
+				if (readdirSync(this.signinHome).length === 0) rmdirSync(this.signinHome);
+			} catch {}
+			this.migrated = true;
+			mkdirSync(this.options.dataDir, { recursive: true, mode: 0o700 });
+			writePrivate(this.file, this.recordText());
+			if (moved > 0) this.log(`moved ${moved} connector sign-ins into the app's secure store`);
+			if (dropped > 0)
+				this.log(
+					`dropped ${dropped} sign-in${dropped === 1 ? "" : "s"} for a connector that is no longer added`,
+				);
+		}
+		this.reportPlanted();
 	}
 
-	/**
-	 * Before the proxy, the engine kept the sign-ins in its home. Whenever that file is there it is
-	 * moved: verbatim when the daemon holds no sign-ins yet, otherwise only the sign-ins the daemon
-	 * does not hold (its own always win, so a file planted later never replaces one). The result is
-	 * read back before the old file is removed, so a move that stopped halfway finishes next time.
-	 */
-	private moveLegacySignIns(): void {
-		ensurePrivateDir(this.signinHome);
-		const text = readOrUndefined(this.legacyAuthFile);
-		if (text === undefined) return;
-		const legacy = signInStates(text);
-		const currentText = readOrUndefined(this.authFile);
-		const current = currentText === undefined ? {} : signInStates(currentText);
-		if (!legacy || !current) {
-			this.options.log?.("could not read the connector sign-ins to move; they stay where they were");
-			return;
+	/** Stores a secret and reads it back; throws when it is not the same. */
+	private async verifiedPut(source: SecretSource, id: string, secret: string): Promise<void> {
+		await source.put(id, secret);
+		if ((await source.get(id)) !== secret) throw new Error("a secret did not read back the same");
+	}
+
+	/** The sign-ins of an old file, by key; undefined when there is none, it is empty, or it cannot be read. */
+	private readSignIns(file: string): Record<string, unknown> | undefined {
+		let text: string;
+		try {
+			text = readFileSync(file, "utf8");
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+				this.log(`could not read ${file}; it was left as it is`);
+			return undefined;
 		}
-		const missing = Object.keys(legacy).filter((key) => !(key in current));
-		if (currentText === undefined) writePrivate(this.authFile, text);
-		else if (missing.length > 0) {
-			const merged = { ...Object.fromEntries(missing.map((key) => [key, legacy[key]])), ...current };
-			writePrivate(this.authFile, `${JSON.stringify(merged, null, 2)}\n`);
+		if (text.trim() === "") {
+			unlinkSync(file);
+			return undefined;
 		}
-		const moved = signInStates(readOrUndefined(this.authFile) ?? "");
-		if (!moved || Object.keys(legacy).some((key) => !(key in moved))) {
-			this.options.log?.("could not move the connector sign-ins; they stay where they were");
-			return;
+		const states = signInStates(text);
+		if (!states) this.log(`${file} is not a list of sign-ins; it was left as it is`);
+		return states;
+	}
+
+	/** The added connector whose remote server an old sign-in key names (`mcp__<server>|<url>`). */
+	private connectorForKey(key: string): string | undefined {
+		for (const [id, saved] of Object.entries(this.saved.connectors)) {
+			const server = filledServer(id, saved)?.server;
+			if (server && "url" in server && URL.canParse(server.url) && authKey(id, server.url) === key) return id;
 		}
-		unlinkSync(this.legacyAuthFile);
-		this.options.log?.("moved the connector sign-ins to the daemon's sign-in folder");
+		return undefined;
+	}
+
+	private applySignIns(refs: Record<string, string>): void {
+		if (Object.keys(refs).length === 0) return;
+		this.update((state) => {
+			for (const [id, ref] of Object.entries(refs)) {
+				const saved = state.connectors[id];
+				if (saved) saved.signIn = ref;
+			}
+		});
+	}
+
+	/** After the move, an old sign-in file that appears again is reported once and never read. */
+	private reportPlanted(): void {
+		if (!this.migrated) return;
+		for (const file of [this.authFile, this.legacyAuthFile]) {
+			if (this.reported.has(file) || !existsSync(file)) continue;
+			this.reported.add(file);
+			this.log(
+				`found ${file} after the connector sign-ins moved to the app's secure store; it was not imported and was left as it is`,
+			);
+		}
 	}
 
 	private engineMcpText(): string {
 		return renderMcpJson(this.saved, this.computer, this.proxy);
+	}
+
+	private log(line: string): void {
+		this.options.log?.(line);
 	}
 
 	private check: () => void = () => {};
@@ -950,47 +1289,87 @@ export class ConnectorStore {
 		return true;
 	}
 
+	/** `connectors.json`: each secret as `{"secretRef": "<id>"}`, or as the text it still was until it moves. */
 	private recordText(): string {
-		return `${JSON.stringify({ version: 1, connectors: this.saved.connectors }, null, 2)}\n`;
+		const record = { version: this.migrated ? 2 : 1, connectors: this.saved.connectors };
+		return `${JSON.stringify(
+			record,
+			(_key, value: unknown) => {
+				const ref = typeof value === "string" ? refId(value) : undefined;
+				return ref === undefined ? value : (this.pending.get(ref) ?? { secretRef: ref });
+			},
+			2,
+		)}\n`;
 	}
 
-	/** The saved state; a connector saved as `computer` (the built-in helper's name) gets `computer-2`. */
-	private load(): { state: ConnectorsState; renamed: boolean } {
+	/**
+	 * The saved state; a connector saved as `computer` (the built-in helper's name) gets `computer-2`.
+	 * A secret saved as text (before T23d) waits in memory for {@link migrate} and is not used.
+	 */
+	private load(): { state: ConnectorsState; renamed: boolean; version: number } {
+		let saved: { version?: unknown; connectors?: Record<string, Record<string, unknown> | undefined> };
 		try {
-			const saved = JSON.parse(readFileSync(this.file, "utf8")) as {
-				connectors?: Record<string, Record<string, unknown> | undefined>;
-			};
-			const connectors: ConnectorsState["connectors"] = {};
-			const entries = Object.entries(saved.connectors ?? {});
-			const ordered = [
-				...entries.filter(([id]) => id !== COMPUTER_ID),
-				...entries.filter(([id]) => id === COMPUTER_ID),
-			];
-			let renamed = false;
-			for (const [savedId, value] of ordered) {
-				let id = savedId;
-				if (id === COMPUTER_ID) {
-					let n = 2;
-					while (`${COMPUTER_ID}-${n}` in connectors || catalogEntry(`${COMPUTER_ID}-${n}`)) n++;
-					id = `${COMPUTER_ID}-${n}`;
-				}
-				const custom = catalogEntry(id) ? undefined : parseCustom(value?.custom);
-				if (!catalogEntry(id) && !custom) continue;
-				renamed ||= id !== savedId;
-				const entry: SavedConnector = {
-					enabled: value?.enabled === true,
-					mode: value?.mode === "read_write" ? "read_write" : "read_only",
-				};
-				const values = stringRecord(value?.values);
-				if (values) entry.values = values;
-				if (custom) entry.custom = custom;
-				connectors[id] = entry;
-			}
-			return { state: { connectors }, renamed };
+			saved = JSON.parse(readFileSync(this.file, "utf8"), (_key, value: unknown) => {
+				const ref = (value as { secretRef?: unknown } | null)?.secretRef;
+				return typeof value === "object" && typeof ref === "string" && SECRET_ID.test(ref)
+					? secretRef(ref)
+					: value;
+			});
 		} catch {
-			return { state: { connectors: {} }, renamed: false };
+			return { state: { connectors: {} }, renamed: false, version: existsSync(this.file) ? 1 : 0 };
 		}
+		const connectors: ConnectorsState["connectors"] = {};
+		const entries = Object.entries(saved.connectors ?? {});
+		const ordered = [
+			...entries.filter(([id]) => id !== COMPUTER_ID),
+			...entries.filter(([id]) => id === COMPUTER_ID),
+		];
+		let renamed = false;
+		for (const [savedId, value] of ordered) {
+			let id = savedId;
+			if (id === COMPUTER_ID) {
+				let n = 2;
+				while (`${COMPUTER_ID}-${n}` in connectors || catalogEntry(`${COMPUTER_ID}-${n}`)) n++;
+				id = `${COMPUTER_ID}-${n}`;
+			}
+			const custom = catalogEntry(id) ? undefined : parseCustom(value?.custom);
+			if (!catalogEntry(id) && !custom) continue;
+			renamed ||= id !== savedId;
+			const entry: SavedConnector = {
+				enabled: value?.enabled === true,
+				mode: value?.mode === "read_write" ? "read_write" : "read_only",
+			};
+			const values = stringRecord(value?.values);
+			if (values) entry.values = values;
+			if (custom) entry.custom = custom;
+			if (typeof value?.signIn === "string" && refId(value.signIn)) entry.signIn = value.signIn;
+			connectors[id] = mapSecrets(id, entry, (secretId, text) => {
+				if (refId(text) !== undefined) return text;
+				this.pending.set(secretId, text);
+				return secretRef(secretId);
+			});
+		}
+		const version = typeof saved.version === "number" ? saved.version : 1;
+		return { state: { connectors }, renamed, version };
 	}
+}
+
+/** The user's own OAuth client of a remote server, its secret resolved like the engine resolved it. */
+function oauthSettings(
+	name: string,
+	server: Extract<ServerTemplate, { url: string }>,
+	env: NodeJS.ProcessEnv,
+): OAuthSettings {
+	const { oauth } = server;
+	return {
+		...(oauth?.clientId ? { clientId: oauth.clientId } : {}),
+		...(oauth?.clientSecret
+			? { clientSecret: resolveValue(oauth.clientSecret, env, `${name} client secret`) }
+			: {}),
+		...(oauth?.callbackUrl ? { callbackUrl: oauth.callbackUrl } : {}),
+		...(oauth?.callbackPort !== undefined ? { callbackPort: oauth.callbackPort } : {}),
+		...(oauth?.scope ? { scope: oauth.scope } : {}),
+	};
 }
 
 function stringRecord(value: unknown): Record<string, string> | undefined {
@@ -1116,13 +1495,9 @@ interface Flow {
 	connectorId: string;
 	owner: object;
 	emit: Emit;
-	child: ChildProcess;
-	/** From the authorization URL: where the browser returns, and the sign-in's `state`. */
-	redirect?: { url: URL; state: string | null };
+	/** The OAuth flow, once the connector's settings were read. */
+	signIn?: SignIn;
 	cancelled: boolean;
-	/** What the command printed so far: stdout until the link appears, the tail of stderr for the log. */
-	printed: string | undefined;
-	output: string;
 }
 
 /** The values a connector needs, asked one at a time in the window that started it. */
@@ -1141,12 +1516,17 @@ const PASTE_PROMPT =
 const DRAFT_ORIGIN = "Drafted by the assistant";
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 
+/** How sign-ins reach the provider and the user's browser; tests replace both. */
+export interface ConnectorOAuthOptions {
+	/** The fetch for discovery, client registration, and tokens; default the global one. */
+	fetch?: typeof fetch;
+	/** Called with each page to approve access on, besides sending it to the window (tests act as the browser). */
+	openBrowser?: (url: string) => void;
+}
+
 export interface ConnectorManagerOptions {
 	store: ConnectorStore;
-	cli: McpCli;
-	/** The engine's environment (its own HOME, XDG folders, and memory settings). */
-	env: NodeJS.ProcessEnv;
-	cwd: string;
+	oauth?: ConnectorOAuthOptions;
 	/** The home folder "Import my MCP servers" scans; default the user's. */
 	importHome?: string;
 	log?: (line: string) => void;
@@ -1154,12 +1534,13 @@ export interface ConnectorManagerOptions {
 
 /**
  * Connects, sets up, signs in, changes, and removes connectors. Values the user types (a bot token,
- * an OAuth client) are asked one at a time with sign-in prompts, kept in the assistant's private
- * state, and never logged or sent back. Sign-in runs the engine's own `mcp login <server>` as a
- * separate process (one at a time; its loopback callback port is shared), relays the authorization
- * URL, and can finish with an address the user pastes when the browser could not reach this
- * computer. Drafts from the assistant and servers found in other apps are added only when the user
- * says so, read only, with every tool hidden. Nothing typed or printed is logged.
+ * an OAuth client) are asked one at a time with sign-in prompts; the secret ones go to the desktop
+ * app's secure store (S25.5) and are never logged, sent back, or written to a file. Sign-in runs in
+ * the daemon with pi-mcp's OAuth (one at a time; a fixed loopback callback port may be shared),
+ * relays the authorization URL to the window that started it, and can finish with an address the
+ * user pastes when the browser could not reach this computer; the tokens go to the app's store.
+ * Drafts from the assistant and servers found in other apps are added only when the user says so,
+ * read only, with every tool hidden. Nothing typed or printed is logged.
  */
 export class ConnectorManager {
 	/** `restart`: the engine must restart (when idle) to read the new `mcp.json`. */
@@ -1260,10 +1641,16 @@ export class ConnectorManager {
 		if (this.busy()) return REFUSALS.busy;
 		if (missingValues(spec, saved?.values)) {
 			// Nothing is added until every value is there.
-			this.askValues(owner, id, spec.fields, emit, (values, flowId) => {
-				this.save(id, (current) => ({ ...current, enabled: true, values }));
-				this.afterSetup(owner, id, emit, flowId);
-			});
+			this.askValues(owner, id, spec.fields, emit, (values, flowId) =>
+				this.keepValues(
+					id,
+					values,
+					emit,
+					flowId,
+					(current) => ({ ...current, enabled: true }),
+					() => this.afterSetup(owner, id, emit, flowId),
+				),
+			);
 			return undefined;
 		}
 		this.save(id, (current) => ({ ...current, enabled: true }));
@@ -1279,10 +1666,16 @@ export class ConnectorManager {
 		if (!saved) return REFUSALS.notAdded;
 		if (spec.fields.length === 0) return REFUSALS.noSetup;
 		if (this.busy()) return REFUSALS.busy;
-		this.askValues(owner, id, spec.fields, emit, (values, flowId) => {
-			this.save(id, (current) => ({ ...current, values }));
-			this.afterSetup(owner, id, emit, flowId);
-		});
+		this.askValues(owner, id, spec.fields, emit, (values, flowId) =>
+			this.keepValues(
+				id,
+				values,
+				emit,
+				flowId,
+				(current) => current,
+				() => this.afterSetup(owner, id, emit, flowId),
+			),
+		);
 		return undefined;
 	}
 
@@ -1314,7 +1707,7 @@ export class ConnectorManager {
 			return true;
 		}
 		if (answer.value === undefined) return false;
-		void this.finishWithPastedAddress(flow, answer.value);
+		this.finishWithPastedAddress(flow, answer.value);
 		return true;
 	}
 
@@ -1342,7 +1735,7 @@ export class ConnectorManager {
 		return this.change(id, (saved) => ({ ...saved, mode }));
 	}
 
-	/** Signs out (`mcp logout`, which needs the server still configured), then forgets the connector. */
+	/** Forgets the connector and its secrets (its sign-in, tokens, and typed values) in the app's store. */
 	async remove(id: string): Promise<ConnectorRefusal | undefined> {
 		const saved = this.options.store.state().connectors[id];
 		const spec = specOf(id, saved);
@@ -1350,14 +1743,7 @@ export class ConnectorManager {
 		if (!saved) return REFUSALS.notAdded;
 		if (this.flow?.connectorId === id) this.cancel(this.flow);
 		if (this.setupFlow?.connectorId === id) this.cancelSetup(this.setupFlow);
-		if (spec.oauth) {
-			const code = await new Promise<number | null>((done) => {
-				const child = this.run("logout", id);
-				child.on("error", () => done(-1));
-				child.on("close", (exit) => done(exit));
-			});
-			if (code !== 0) this.log(`sign-out of connector ${id} failed (exit ${code})`);
-		}
+		await this.options.store.forget(id);
 		this.failed.delete(id);
 		this.options.store.update((state) => {
 			delete state.connectors[id];
@@ -1417,10 +1803,16 @@ export class ConnectorManager {
 		this.log(`added connector ${id} from the assistant's draft`);
 		if (custom.fields.length === 0) this.afterSetup(owner, id, emit, `connector-${randomUUID()}`);
 		else
-			this.askValues(owner, id, custom.fields, emit, (values, flowId) => {
-				this.save(id, (current) => ({ ...current, values }));
-				this.afterSetup(owner, id, emit, flowId);
-			});
+			this.askValues(owner, id, custom.fields, emit, (values, flowId) =>
+				this.keepValues(
+					id,
+					values,
+					emit,
+					flowId,
+					(current) => current,
+					() => this.afterSetup(owner, id, emit, flowId),
+				),
+			);
 		return undefined;
 	}
 
@@ -1475,10 +1867,14 @@ export class ConnectorManager {
 	}
 
 	/**
-	 * Copies the chosen servers, with their values, read only with every tool hidden: from `from`
-	 * (a confirmed plan) when given, else from the last scan.
+	 * Copies the chosen servers, read only with every tool hidden: from `from` (a confirmed plan) when
+	 * given, else from the last scan. Their header and environment values go to the app's secure
+	 * store, with only references in the files.
 	 */
-	importServers(ids: string[], from: ReadonlyMap<string, ScannedServer> = this.scanned): string[] {
+	async importServers(
+		ids: string[],
+		from: ReadonlyMap<string, ScannedServer> = this.scanned,
+	): Promise<string[]> {
 		const imported: string[] = [];
 		for (const key of ids) {
 			const found = from.get(key);
@@ -1497,6 +1893,7 @@ export class ConnectorManager {
 			});
 			imported.push(id);
 		}
+		await this.options.store.settled();
 		if (imported.length > 0) {
 			this.log(`imported ${imported.length} MCP servers: ${imported.join(", ")}`);
 			this.onChanged(true);
@@ -1575,6 +1972,37 @@ export class ConnectorManager {
 			state.connectors[id] = update(state.connectors[id] ?? { enabled: false, mode: "read_only" });
 		});
 		this.onChanged(true);
+	}
+
+	/**
+	 * Stores the typed values (the secret ones in the app's store), then changes the connector with
+	 * `update` and continues; without the app the window is told why and nothing changes.
+	 */
+	private keepValues(
+		id: string,
+		values: Record<string, string>,
+		emit: Emit,
+		flowId: string,
+		update: (current: SavedConnector) => SavedConnector,
+		then: () => void,
+	): void {
+		this.options.store.keepValues(id, values).then(
+			() => {
+				this.save(id, update);
+				then();
+			},
+			(error: Error) => {
+				this.log(`could not keep the values of connector ${id}: ${error.message}`);
+				emit({
+					type: "auth_done",
+					flowId,
+					providerId: id,
+					ok: false,
+					message:
+						error instanceof SecretsUnavailableError ? error.message : "Could not save it. Please try again.",
+				});
+			},
+		);
 	}
 
 	/** After the values are there: sign in when the connector needs it, otherwise it is done. */
@@ -1661,53 +2089,60 @@ export class ConnectorManager {
 		return undefined;
 	}
 
-	/** The engine's sign-in command, pointed at the daemon's sign-in home (the real servers), never the engine's. */
-	private run(subcommand: "login" | "logout", id: string): ChildProcess {
-		const { cli, env, cwd, store } = this.options;
-		const done = store.signingIn();
-		const child = spawn(cli.command, [...cli.args, "mcp", subcommand, id], {
-			cwd,
-			env: { ...env, PI_CODING_AGENT_DIR: store.signinHome },
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-		child.on("error", done);
-		child.on("close", done);
-		return child;
-	}
-
 	private startLogin(owner: object, connectorId: string, emit: Emit, flowId?: string): void {
-		const child = this.run("login", connectorId);
 		const flow: Flow = {
 			id: flowId ?? `connector-${randomUUID()}`,
 			connectorId,
 			owner,
 			emit,
-			child,
 			cancelled: false,
-			printed: "",
-			output: "",
 		};
 		this.flow = flow;
 		this.failed.delete(connectorId);
-		child.stdout?.on("data", (chunk: Buffer) => this.onOutput(flow, chunk.toString("utf8")));
-		child.stderr?.on("data", (chunk: Buffer) => {
-			flow.output = `${flow.output}${chunk.toString("utf8")}`.slice(-2000);
-		});
-		child.on("error", (error) => this.log(`connector sign-in could not start: ${error.message}`));
-		child.on("close", (code) => this.onExit(flow, code));
+		void this.runLogin(flow);
 	}
 
-	private onOutput(flow: Flow, text: string): void {
-		if (flow.printed === undefined) return;
-		flow.printed = `${flow.printed}${text}`.slice(-8000);
-		// The link ends with its line; a chunk may stop in the middle of it.
-		const url = flow.printed.match(/https?:\/\/\S+(?=\s)/)?.[0];
-		if (!url || !URL.canParse(url)) return;
-		flow.printed = undefined;
-		const authorization = new URL(url);
-		const redirect = authorization.searchParams.get("redirect_uri");
-		if (redirect && URL.canParse(redirect))
-			flow.redirect = { url: new URL(redirect), state: authorization.searchParams.get("state") };
+	/** The sign-in, run here with pi-mcp's OAuth; the result goes to the app's secure store only. */
+	private async runLogin(flow: Flow): Promise<void> {
+		const { store, oauth } = this.options;
+		const done = { type: "auth_done", flowId: flow.id, providerId: flow.connectorId } as const;
+		try {
+			const target = await store.signInTarget(flow.connectorId);
+			if (flow.cancelled) throw new SignInCancelledError();
+			flow.signIn = startSignIn({
+				...target,
+				...(oauth?.fetch ? { fetch: oauth.fetch } : {}),
+				onAuthorizationUrl: (url) => this.onAuthorizationUrl(flow, url),
+			});
+			const state = await flow.signIn.done;
+			await store.saveSignIn(flow.connectorId, state);
+			this.log(`signed in to connector ${flow.connectorId}`);
+			flow.emit({ ...done, ok: true });
+		} catch (error) {
+			if (flow.cancelled || error instanceof SignInCancelledError)
+				flow.emit({ ...done, ok: false, message: "Sign-in cancelled." });
+			else {
+				this.failed.add(flow.connectorId);
+				const detail = ((error as Error)?.message ?? String(error)).replace(/https?:\/\/\S+/g, "[address]");
+				this.log(`sign-in to connector ${flow.connectorId} failed: ${detail.slice(0, 200)}`);
+				flow.emit({
+					...done,
+					ok: false,
+					message:
+						error instanceof SecretsUnavailableError
+							? error.message
+							: "Sign-in did not finish. Please try again.",
+				});
+			}
+		} finally {
+			if (this.flow === flow) this.flow = undefined;
+			this.onChanged(false);
+		}
+	}
+
+	/** The page to approve access on goes to the window that started the sign-in. */
+	private onAuthorizationUrl(flow: Flow, url: URL): void {
+		if (flow.cancelled) return;
 		const name =
 			specOf(flow.connectorId, this.options.store.state().connectors[flow.connectorId])?.name ??
 			flow.connectorId;
@@ -1716,10 +2151,11 @@ export class ConnectorManager {
 			flowId: flow.id,
 			event: {
 				kind: "auth_url",
-				url,
+				url: url.href,
 				instructions: `Open the ${name} page and approve access. You can come back here when it says you are done.`,
 			},
 		});
+		this.options.oauth?.openBrowser?.(url.href);
 		this.askForAddress(flow);
 	}
 
@@ -1736,59 +2172,16 @@ export class ConnectorManager {
 
 	/**
 	 * The browser could not reach this computer's sign-in page (for example, the assistant runs
-	 * elsewhere): the pasted address is that page's address, so open it here. Only the exact
-	 * loopback address of this sign-in, with its `state`, is accepted.
+	 * elsewhere): the pasted address is that page's address. Only this sign-in's loopback address,
+	 * with its `state`, is accepted; nothing is fetched.
 	 */
-	private async finishWithPastedAddress(flow: Flow, pasted: string): Promise<void> {
-		const expected = flow.redirect;
-		const url = URL.canParse(pasted.trim()) ? new URL(pasted.trim()) : undefined;
-		const loopback = url && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
-		if (
-			!expected ||
-			!url ||
-			!loopback ||
-			url.protocol !== "http:" ||
-			url.origin !== expected.url.origin ||
-			url.pathname !== expected.url.pathname ||
-			url.searchParams.get("state") !== expected.state
-		) {
-			this.askForAddress(flow, true);
-			return;
-		}
-		if (url.hostname === "localhost") url.hostname = "127.0.0.1";
-		try {
-			// Only this loopback address; where it redirects is not followed.
-			await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(10_000) });
-		} catch {
-			if (this.flow === flow) this.askForAddress(flow, true);
-		}
+	private finishWithPastedAddress(flow: Flow, pasted: string): void {
+		if (!flow.signIn?.paste(pasted)) this.askForAddress(flow, true);
 	}
 
 	private cancel(flow: Flow): void {
 		flow.cancelled = true;
-		flow.child.kill("SIGTERM");
-	}
-
-	private onExit(flow: Flow, code: number | null): void {
-		if (this.flow === flow) this.flow = undefined;
-		const done = { type: "auth_done", flowId: flow.id, providerId: flow.connectorId } as const;
-		if (code === 0 && !flow.cancelled) {
-			this.log(`signed in to connector ${flow.connectorId}`);
-			flow.emit({ ...done, ok: true });
-		} else if (flow.cancelled) {
-			flow.emit({ ...done, ok: false, message: "Sign-in cancelled." });
-		} else {
-			this.failed.add(flow.connectorId);
-			const detail =
-				flow.output
-					.trim()
-					.split("\n")
-					.pop()
-					?.replace(/https?:\/\/\S+/g, "[address]") ?? "";
-			this.log(`sign-in to connector ${flow.connectorId} failed (exit ${code}): ${detail.slice(0, 200)}`);
-			flow.emit({ ...done, ok: false, message: "Sign-in did not finish. Please try again." });
-		}
-		this.onChanged(false);
+		flow.signIn?.cancel();
 	}
 
 	private log(line: string): void {

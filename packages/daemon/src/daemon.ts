@@ -18,10 +18,9 @@ import { AuthManager, type AuthRuntime, createModelAuthRuntime, resolveAgentHome
 import { type BridgeClient, DotBridge } from "./bridge.ts";
 import {
 	APPROVAL_GUARD,
-	bundledMcpCli,
 	ConnectorManager,
+	type ConnectorOAuthOptions,
 	ConnectorStore,
-	type McpCli,
 	policyEnv,
 } from "./connectors.ts";
 import { approvalRequest } from "./extensions/approval-guard.ts";
@@ -29,6 +28,7 @@ import { ensureMemoryProject, ensurePrivateDir, isolatedAgentEnv, privateMemory 
 import { MCP_PREFIX, McpProxy, type ProxiedConnector, type UpstreamCredentials } from "./mcp-proxy.ts";
 import { defaultImportPath, ProfileStore } from "./profiles.ts";
 import { type RotationLimits, rotationLimits } from "./rotation.ts";
+import { AppSecretSource } from "./secret-source.ts";
 import { AgentSupervisor } from "./supervisor.ts";
 import { UploadStore } from "./uploads.ts";
 import { VoiceService } from "./voice.ts";
@@ -56,8 +56,8 @@ export interface DaemonOptions {
 	authRuntime?: () => Promise<AuthRuntime>;
 	/** The fetch for voice requests to OpenAI; tests pass a fake one. */
 	voiceFetch?: typeof fetch;
-	/** The engine's command line for connector sign-in; default `GENTLE_DOT_MCP_CLI` (JSON array) or the bundled one. */
-	connectorCli?: McpCli;
+	/** How connector sign-ins reach the provider and the browser; tests pass stand-ins. */
+	connectorOAuth?: ConnectorOAuthOptions;
 	/** The home folder "Import my MCP servers" reads other apps' configs from; default `GENTLE_DOT_IMPORT_HOME` or the user's. */
 	importHome?: string;
 	/** The connection the MCP proxy makes to a connector's real server; tests pass a stand-in. */
@@ -151,19 +151,28 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		agentEnv.GENTLE_PI_CONFIG_HOME = join(options.dataDir, "gentle-ai");
 	}
 	const agentHome = options.agentHome ?? resolveAgentHome(process.env, options.dataDir);
+	const app = options.appChannel
+		? new AppChannel(options.appChannel, {
+				log,
+				...(options.approvalWaitMs ? { approvalWaitMs: options.approvalWaitMs } : {}),
+			})
+		: undefined;
 	// The approved connectors are read once, here; the engine cannot change them (docs/design.md).
+	// Their secrets come from the app's secure store over its channel, and only into memory (S25.5).
 	const connectorStore = new ConnectorStore({
 		dataDir: options.dataDir,
 		agentHome,
 		workspace: options.workspace,
 		guardPath: APPROVAL_GUARD,
 		env: agentEnv,
+		secrets: new AppSecretSource(app),
 		log,
 	});
 	// The engine reaches every connector through the proxy (S25.4); its key changes with every launch.
 	let port = options.port;
 	const proxy = new McpProxy({
 		connector: (id) => connectorStore.proxyView(id),
+		prepare: (id) => connectorStore.prepare(id),
 		credentials: (id) => connectorStore.credentials(id),
 		// In the desktop app's native dialog, outside the agent's reach (S25.3).
 		approve: (preview, signal) =>
@@ -215,9 +224,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	});
 	const connectors = new ConnectorManager({
 		store: connectorStore,
-		cli: options.connectorCli ?? mcpCliFromEnv(process.env) ?? bundledMcpCli(),
-		env: { ...agentEnv },
-		cwd: options.workspace,
+		...(options.connectorOAuth ? { oauth: options.connectorOAuth } : {}),
 		...((options.importHome ?? process.env.GENTLE_DOT_IMPORT_HOME)
 			? { importHome: options.importHome ?? process.env.GENTLE_DOT_IMPORT_HOME }
 			: {}),
@@ -233,12 +240,6 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		...(options.uploadLimits ? { limits: options.uploadLimits } : {}),
 	});
 	const historyPage = options.historyPage ?? Number(process.env.GENTLE_DOT_HISTORY_PAGE);
-	const app = options.appChannel
-		? new AppChannel(options.appChannel, {
-				log,
-				...(options.approvalWaitMs ? { approvalWaitMs: options.approvalWaitMs } : {}),
-			})
-		: undefined;
 	const bridge = new DotBridge(supervisor, {
 		dataDir: options.dataDir,
 		log,
@@ -259,8 +260,17 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		app.onClose(() => {
 			log("the desktop app's channel closed");
 			connectors.unregisterComputer(app);
+			// Secrets read from the app are forgotten; connectors that need one fail closed until it is back.
+			connectorStore.lock();
 		});
-	} else log("no desktop app channel: connector changes and approvals are refused");
+		// Secrets that files still hold move into the app's store, once.
+		void connectorStore
+			.migrate()
+			.catch((error: Error) => log(`connector secrets were not moved: ${error.message}`));
+	} else
+		log(
+			"no desktop app channel: connector changes and approvals are refused, and connectors that need a secret fail closed",
+		);
 
 	// The files as the daemon writes them (an older version kept a hash), then watched.
 	connectorStore.enforce(false);
@@ -343,12 +353,6 @@ async function appRequest(
 		default:
 			throw new Error(`Unknown request: ${method}`);
 	}
-}
-
-function mcpCliFromEnv(env: NodeJS.ProcessEnv): McpCli | undefined {
-	if (!env.GENTLE_DOT_MCP_CLI) return undefined;
-	const [command, ...args] = JSON.parse(env.GENTLE_DOT_MCP_CLI) as string[];
-	return command ? { command, args } : undefined;
 }
 
 function allowedOrigins(port: number, options: DaemonOptions): Set<string> {

@@ -122,7 +122,8 @@ describe("the in-chat model picker (S32)", () => {
 		});
 		await client.find("profiles", (m) => m.profiles.length === 1);
 		client.send({ type: "models_list" });
-		const list = await client.find("models");
+		// The engine also sends the list when it becomes ready (L101); wait for one made after the save.
+		const list = await client.find("models", (m) => m.profiles.some((p) => p.name === "quick"));
 		expect(list.current).toEqual({
 			provider: "fake",
 			id: "fake-model",

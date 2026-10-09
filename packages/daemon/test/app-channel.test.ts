@@ -3,16 +3,15 @@
 // register the computer helper; the app can, and confirms natively what widens access.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { APP_REQUIRED, type ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import { fakeApp } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
+import { oauthOptions } from "./fake-oauth.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
-const FAKE_CLI = fileURLToPath(new URL("./fixtures/fake-mcp-cli.ts", import.meta.url));
 const HELPER = "http://127.0.0.1:51234/mcp";
 const KEY = "s3cr3t-Computer-Key-0123456789abcdef";
 
@@ -66,9 +65,8 @@ async function setup(options: { channel?: boolean } = {}) {
 		agentArgs: [FAKE_AGENT],
 		agentHome,
 		backoffMs: [50],
-		agentEnv: { ...process.env, FAKE_MCP_CLI_MODE: "auto" },
 		authRuntime: async () => fake.runtime,
-		connectorCli: { command: process.execPath, args: [FAKE_CLI] },
+		connectorOAuth: oauthOptions(true),
 		importHome,
 		...(options.channel === false ? {} : { appChannel: app.daemonEnd }),
 	});

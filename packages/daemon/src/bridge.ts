@@ -481,7 +481,7 @@ export class DotBridge {
 					return;
 				this.deliver(client, {
 					type: "connector_imported",
-					names: connectors.importServers(message.ids, plan.servers),
+					names: await connectors.importServers(message.ids, plan.servers),
 				});
 				return;
 			}
