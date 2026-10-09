@@ -935,7 +935,12 @@ export class DotBridge {
 					this.stopRequested = false;
 					this.clearRun();
 					this.clearQueue();
-				} else this.settleModelSwitch();
+				} else {
+					this.settleModelSwitch();
+					// The engine knows its model only once it is ready; windows that connected
+					// earlier (for example while it restarted) would show none until they asked.
+					this.broadcastModels();
+				}
 				break;
 			case "interrupted":
 				this.interrupted = true;

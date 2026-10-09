@@ -103,6 +103,15 @@ async function connect(d: DotDaemon) {
 }
 
 describe("the in-chat model picker (S32)", () => {
+	it("tells connected windows the current model when the engine (re)starts, without being asked", async () => {
+		const { d } = await setup();
+		const client = await connect(d);
+		await d.supervisor.restart();
+		const pushed = await client.find("models", (m) => m.current !== undefined);
+		expect(pushed.current?.provider).toBe("fake");
+		expect(client.messages.some((m) => (m as { type: string }).type === "models_list")).toBe(false);
+	});
+
 	it("lists the current model and thinking, the models by account, and profiles as quick picks, without secrets", async () => {
 		const { d } = await setup();
 		const client = await connect(d);
