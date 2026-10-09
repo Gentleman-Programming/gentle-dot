@@ -1,5 +1,12 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { HIDDEN_NAMES, isBlockedInput, presentText, shouldShowToast } from "../src/white-label.ts";
+import {
+	HIDDEN_NAMES,
+	IDENTITY_SOURCE,
+	isBlockedInput,
+	presentText,
+	shouldShowToast,
+} from "../src/white-label.ts";
 
 describe("presentText", () => {
 	it.each([
@@ -50,5 +57,18 @@ describe("isBlockedInput", () => {
 		expect(isBlockedInput("  /gentle:status now")).toBe(true);
 		expect(isBlockedInput("What does /gentle mean?")).toBe(false);
 		expect(isBlockedInput("hello")).toBe(false);
+	});
+});
+
+describe("memory scope in the identity (S23, L85)", () => {
+	const identity = readFileSync(IDENTITY_SOURCE, "utf8");
+
+	it("saves only to the gentle-dot project", () => {
+		expect(identity).toMatch(/save[^.\n]*`gentle-dot`/i);
+	});
+
+	it("searches the user's whole memory, not only gentle-dot", () => {
+		expect(identity).toMatch(/all_projects: true/);
+		expect(identity).not.toMatch(/save or search memories, always use that project/);
 	});
 });
