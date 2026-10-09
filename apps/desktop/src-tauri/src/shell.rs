@@ -366,6 +366,8 @@ fn build_windows(
         .always_on_top(true)
         .resizable(false)
         .skip_taskbar(true)
+        // Lets the chat receive HTML5 drops of attachments (S31); Tauri's own handler would take them.
+        .disable_drag_drop_handler()
         .visible(false);
     #[cfg(target_os = "macos")]
     let panel = panel
