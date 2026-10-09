@@ -36,6 +36,7 @@
 //   FAKE_AGENT_IGNORE_ABORT  answer abort but keep running (a session switch still ends the run)
 //   FAKE_AGENT_START_DELAY_MS  answer the first get_state only after this delay
 //   FAKE_AGENT_DROP_CUSTOM  load session files without their custom messages (a format drift)
+//   FAKE_AGENT_PROMPTS_FILE  append every prompt command (message, images, streamingBehavior) as JSONL
 // get_available_models lists MODELS; set_model and set_thinking_level change what
 // get_state reports, so tests can read the last values back. A model's `input` says whether it
 // accepts images, like the engine's models.
@@ -44,7 +45,12 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { join } from "node:path";
 
 type Rec = Record<string, unknown>;
-type Message = { role: "user" | "assistant" | "custom"; content: string; customType?: string };
+type Message = {
+	role: "user" | "assistant" | "custom";
+	content: string;
+	customType?: string;
+	images?: Rec[];
+};
 
 const MODELS: Rec[] = [
 	{
@@ -175,7 +181,13 @@ function appendEntry(entry: Rec): void {
 
 function remember(message: Message): void {
 	messages.push(message);
-	const content = message.role === "assistant" ? [{ type: "text", text: message.content }] : message.content;
+	// Like Pi, a user message with images keeps them as content blocks after the text.
+	const content =
+		message.role === "assistant"
+			? [{ type: "text", text: message.content }]
+			: message.images
+				? [{ type: "text", text: message.content }, ...message.images]
+				: message.content;
 	appendEntry({ type: "message", message: { role: message.role, content } });
 }
 
@@ -212,10 +224,11 @@ function enqueue(text: string, behavior: unknown): void {
 	emitQueue();
 }
 
-function userMessage(text: string): void {
-	remember({ role: "user", content: text });
-	out({ type: "message_start", message: { role: "user", content: text } });
-	out({ type: "message_end", message: { role: "user", content: text } });
+function userMessage(text: string, images?: Rec[]): void {
+	remember(images ? { role: "user", content: text, images } : { role: "user", content: text });
+	const content = images ? [{ type: "text", text }, ...images] : text;
+	out({ type: "message_start", message: { role: "user", content } });
+	out({ type: "message_end", message: { role: "user", content } });
 }
 
 function endRun(): void {
@@ -243,22 +256,22 @@ function endedAnswer(stopReason: "aborted" | "error", errorMessage: string): voi
 	out({ type: "message_end", message });
 }
 
-async function run(text: string) {
+async function run(text: string, images?: Rec[]) {
 	busy = true;
 	let ended: () => void = () => {};
 	runEnded = new Promise((resolve) => {
 		ended = resolve;
 	});
 	try {
-		await runPrompt(text);
+		await runPrompt(text, images);
 	} finally {
 		ended();
 	}
 }
 
-async function runPrompt(text: string) {
+async function runPrompt(text: string, images?: Rec[]) {
 	out({ type: "agent_start" });
-	userMessage(text);
+	userMessage(text, images);
 	if (text === "crash") {
 		// Give the pipe time to flush; macOS pipes are asynchronous.
 		setTimeout(() => process.exit(1), 50);
@@ -404,6 +417,10 @@ function handle(rec: Rec) {
 		case "get_commands":
 			return respond(id, "get_commands", { commands: [{ name: "gentle:status" }, { name: "history" }] });
 		case "prompt": {
+			if (process.env.FAKE_AGENT_PROMPTS_FILE) {
+				const { id: _id, ...command } = rec;
+				appendFileSync(process.env.FAKE_AGENT_PROMPTS_FILE, `${JSON.stringify(command)}\n`);
+			}
 			if (busy && !rec.streamingBehavior) return respond(id, "prompt", undefined, "Agent is streaming");
 			if (busy) {
 				enqueue(String(rec.message), rec.streamingBehavior);
@@ -413,7 +430,8 @@ function handle(rec: Rec) {
 			const burst = String(rec.message).startsWith("burst");
 			if (burst) batch = [];
 			respond(id, "prompt", { disposition: "started" });
-			void run(burst ? String(rec.message).replace(/^burst:/, "") : String(rec.message));
+			const images = Array.isArray(rec.images) && rec.images.length > 0 ? (rec.images as Rec[]) : undefined;
+			void run(burst ? String(rec.message).replace(/^burst:/, "") : String(rec.message), images);
 			if (batch) {
 				process.stdout.write(batch.join(""));
 				batch = undefined;

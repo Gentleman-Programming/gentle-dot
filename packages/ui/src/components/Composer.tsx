@@ -1,6 +1,8 @@
-import { type KeyboardEvent, useEffect, useRef, useState } from "react";
+import { type ClipboardEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
+import { formatSize } from "../uploads.ts";
+import type { AttachmentControls, PendingFile } from "../useAttachments.ts";
 import type { VoiceControls } from "../useVoice.ts";
-import { MicIcon, SendIcon } from "./icons.tsx";
+import { MicIcon, PaperclipIcon, SendIcon } from "./icons.tsx";
 import { newRequestId, type Send } from "./types.ts";
 
 interface ComposerProps {
@@ -13,9 +15,19 @@ interface ComposerProps {
 	onStartTyping?: () => void;
 	/** Talking to the assistant (S30.4); without it there is no mic. */
 	voice?: VoiceControls;
+	/** Files for the message (S31.1); without it there is no attach button. */
+	attachments?: AttachmentControls;
 }
 
-export function Composer({ busy, disabled, send, focusKey, onStartTyping, voice }: ComposerProps) {
+export function Composer({
+	busy,
+	disabled,
+	send,
+	focusKey,
+	onStartTyping,
+	voice,
+	attachments,
+}: ComposerProps) {
 	const [text, setText] = useState("");
 	const box = useRef<HTMLTextAreaElement>(null);
 	const recording = voice?.phase === "recording";
@@ -25,18 +37,35 @@ export function Composer({ busy, disabled, send, focusKey, onStartTyping, voice 
 		if (focusKey !== undefined) box.current?.focus();
 	}, [focusKey]);
 
-	function submit() {
+	const files = attachments?.files ?? [];
+	const uploading = attachments?.uploading === true;
+	const blocked = files.some((f) => f.refused);
+
+	async function submit() {
 		const value = text.trim();
-		if (!value || disabled) return;
-		send({ type: "send", text: value, requestId: newRequestId() });
+		if ((!value && files.length === 0) || disabled || uploading || blocked) return;
+		// Files upload on send; a failed one keeps the message so sending again retries it.
+		const refs = files.length > 0 ? await attachments?.upload() : undefined;
+		if (files.length > 0 && !refs) return;
+		send({ type: "send", text: value, requestId: newRequestId(), ...(refs ? { attachments: refs } : {}) });
+		attachments?.clear();
 		voice?.typed();
 		setText("");
+	}
+
+	/** A pasted image becomes an attachment; pasted text stays text. */
+	function onPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+		if (!attachments) return;
+		const images = Array.from(event.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/"));
+		if (images.length === 0) return;
+		event.preventDefault();
+		attachments.add(images);
 	}
 
 	function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
 		if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
 			event.preventDefault();
-			submit();
+			void submit();
 		}
 	}
 
@@ -47,13 +76,42 @@ export function Composer({ busy, disabled, send, focusKey, onStartTyping, voice 
 					{voiceStatus}
 				</p>
 			) : null}
+			{attachments && files.length > 0 ? (
+				<ul className="attachment-chips" aria-label="Files to send">
+					{files.map((file) => (
+						<FileChip
+							key={file.id}
+							file={file}
+							locked={uploading}
+							remove={() => attachments.remove(file.id)}
+						/>
+					))}
+				</ul>
+			) : null}
 			<form
 				className="composer"
 				onSubmit={(event) => {
 					event.preventDefault();
-					submit();
+					void submit();
 				}}
 			>
+				{attachments && !recording ? (
+					<label className="composer-attach" title="Attach files">
+						<PaperclipIcon />
+						<input
+							type="file"
+							multiple
+							aria-label="Attach files"
+							className="visually-hidden"
+							disabled={disabled || uploading}
+							onChange={(event) => {
+								attachments.add(Array.from(event.target.files ?? []));
+								// The same file can be picked again after removing it.
+								event.target.value = "";
+							}}
+						/>
+					</label>
+				) : null}
 				{recording ? (
 					<div className="voice-recording">
 						<span className="voice-time" role="timer" aria-label="Recording time">
@@ -90,6 +148,7 @@ export function Composer({ busy, disabled, send, focusKey, onStartTyping, voice 
 							setText(event.target.value);
 						}}
 						onKeyDown={onKeyDown}
+						onPaste={onPaste}
 					/>
 				)}
 				{busy || voice?.speaking ? (
@@ -120,7 +179,7 @@ export function Composer({ busy, disabled, send, focusKey, onStartTyping, voice 
 					<button
 						type="submit"
 						className="composer-send"
-						disabled={disabled || text.trim() === ""}
+						disabled={disabled || uploading || blocked || (text.trim() === "" && files.length === 0)}
 						aria-label="Send"
 						title="Send"
 					>
@@ -129,6 +188,37 @@ export function Composer({ busy, disabled, send, focusKey, onStartTyping, voice 
 				)}
 			</form>
 		</>
+	);
+}
+
+/** One attached file: name, size, upload progress, and why it cannot be sent. */
+function FileChip({ file, locked, remove }: { file: PendingFile; locked: boolean; remove: () => void }) {
+	const name = file.file.name;
+	const problem = file.refused ?? file.error;
+	return (
+		<li className={`attachment-chip${problem ? " attachment-chip-error" : ""}`}>
+			<span className="chip-name" title={name}>
+				{name}
+			</span>
+			<span className="chip-size">{formatSize(file.file.size)}</span>
+			{file.progress !== undefined ? (
+				<progress className="chip-progress" aria-label={`Uploading ${name}`} max={1} value={file.progress} />
+			) : null}
+			{problem ? (
+				<span className="chip-error" role="alert">
+					{problem}
+				</span>
+			) : null}
+			<button
+				type="button"
+				className="chip-remove"
+				aria-label={`Remove ${name}`}
+				disabled={locked}
+				onClick={remove}
+			>
+				×
+			</button>
+		</li>
 	);
 }
 

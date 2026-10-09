@@ -31,6 +31,7 @@ import {
 } from "./profiles.ts";
 import { DEFAULT_ROTATION, type RotationLimits, SessionRotator } from "./rotation.ts";
 import type { AgentRecord, AgentSupervisor, SupervisorEvent } from "./supervisor.ts";
+import { composePrompt, type StoredFile, splitAttachments, type UploadStore } from "./uploads.ts";
 import type { VoiceService } from "./voice.ts";
 import { isBlockedInput, presentText, shouldShowToast } from "./white-label.ts";
 
@@ -46,6 +47,8 @@ export interface BridgeOptions {
 	connectors?: ConnectorManager;
 	/** Speech to text and text to speech with an OpenAI API key (S30.2). */
 	voice?: VoiceService;
+	/** Files the user uploaded for their messages (S31). */
+	uploads?: UploadStore;
 	/** How long switching conversations waits for a running answer to stop. Default 10 s. */
 	stopTimeoutMs?: number;
 	/** Optional parts of the app; by default one continuous chat. */
@@ -209,32 +212,23 @@ export class DotBridge {
 					return;
 				}
 				if (message.requestId && this.alreadySeen(message.requestId)) return;
-				if (/^\s*\/login\s*$/i.test(message.text)) {
-					await this.sendProviders(client, true);
-					return;
-				}
-				if (/^\s*\/profiles\s*$/i.test(message.text)) {
-					await this.sendProfiles(client, true);
-					return;
-				}
-				if (/^\s*\/connectors\s*$/i.test(message.text)) {
-					this.deliver(client, {
-						type: "connectors",
-						connectors: this.requireConnectors().list(),
-						open: true,
-					});
-					return;
-				}
+				const files = message.attachments ? this.attachedFiles(client, message.attachments) : [];
+				if (!files) return;
+				// Slash commands are typed alone; a message with files always goes to the assistant.
+				if (files.length === 0 && (await this.openScreen(client, message.text))) return;
 				await this.switching;
 				this.interrupted = false;
 				const busy = this.supervisor.busy;
+				const prompt =
+					files.length > 0
+						? composePrompt(message.text, files, { images: this.supervisor.modelImages })
+						: { message: message.text };
 				this.sending += 1;
 				try {
 					await this.supervisor.request(
-						busy
-							? { type: "prompt", message: message.text, streamingBehavior: "steer" }
-							: { type: "prompt", message: message.text },
+						busy ? { type: "prompt", ...prompt, streamingBehavior: "steer" } : { type: "prompt", ...prompt },
 					);
+					if (message.attachments) this.options.uploads?.consume(message.attachments);
 				} finally {
 					this.sending -= 1;
 					// The run may have settled before the answer to this prompt was handled.
@@ -426,6 +420,38 @@ export class DotBridge {
 				});
 				return;
 		}
+	}
+
+	/** `/login`, `/profiles`, and `/connectors` open their screen instead of reaching the assistant. */
+	private async openScreen(client: BridgeClient, text: string): Promise<boolean> {
+		if (/^\s*\/login\s*$/i.test(text)) {
+			await this.sendProviders(client, true);
+			return true;
+		}
+		if (/^\s*\/profiles\s*$/i.test(text)) {
+			await this.sendProfiles(client, true);
+			return true;
+		}
+		if (/^\s*\/connectors\s*$/i.test(text)) {
+			this.deliver(client, { type: "connectors", connectors: this.requireConnectors().list(), open: true });
+			return true;
+		}
+		return false;
+	}
+
+	/** The uploaded files a message sends; undefined (and an error for the window) when one is not available. */
+	private attachedFiles(
+		client: BridgeClient,
+		refs: NonNullable<Extract<ClientMessage, { type: "send" }>["attachments"]>,
+	): StoredFile[] | undefined {
+		const found = this.options.uploads?.resolve(refs) ?? {
+			ok: false as const,
+			code: "attachment_not_found",
+			message: "Files cannot be sent here.",
+		};
+		if (found.ok) return found.files;
+		this.deliver(client, { type: "error", code: found.code, message: found.message });
+		return undefined;
 	}
 
 	/** With the conversations list off there is one chat; starting or opening another is refused. */
@@ -831,7 +857,8 @@ export class DotBridge {
 	private onQueueUpdate(event: AgentRecord): void {
 		const queue = parseQueue(event);
 		if (!queue) return;
-		this.queue = { steering: queue.steering.map(presentText), followUp: queue.followUp.map(presentText) };
+		const shown = (text: string) => presentText(queuedText(text));
+		this.queue = { steering: queue.steering.map(shown), followUp: queue.followUp.map(shown) };
 		this.broadcast({ type: "queue", ...this.queue });
 	}
 
@@ -848,7 +875,13 @@ export class DotBridge {
 	private onMessageStart(event: AgentRecord): void {
 		const message = event.message as { role?: string } | undefined;
 		if (message?.role === "user") {
-			this.broadcast({ type: "user_message", messageId: `u${++this.nextMessage}`, text: textOf(message) });
+			const { text, attachments } = splitAttachments(textOf(message));
+			this.broadcast({
+				type: "user_message",
+				messageId: `u${++this.nextMessage}`,
+				text,
+				...(attachments.length > 0 ? { attachments } : {}),
+			});
 		}
 		if (message?.role === "assistant") this.assistantId = `m${++this.nextMessage}`;
 	}
@@ -984,4 +1017,12 @@ export class DotBridge {
 	private log(line: string): void {
 		this.options.log?.(line);
 	}
+}
+
+/** A queued message as the user wrote it; files show by name. */
+function queuedText(message: string): string {
+	const { text, attachments } = splitAttachments(message);
+	if (attachments.length === 0) return text;
+	const names = `📎 ${attachments.map((a) => a.name).join(", ")}`;
+	return text ? `${text}\n${names}` : names;
 }

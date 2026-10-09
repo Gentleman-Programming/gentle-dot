@@ -1543,3 +1543,120 @@ html[data-surface="glow"] body {
 		clip-path: inset(0 0 0 0);
 	}
 }
+
+/* ---------- Attachments (S31) ---------- */
+
+.visually-hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	margin: -1px;
+	padding: 0;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+	border: 0;
+}
+
+.composer-attach {
+	position: relative;
+	display: grid;
+	place-items: center;
+	flex: none;
+	width: 32px;
+	height: 32px;
+	margin-left: -8px;
+	border-radius: 50%;
+	color: var(--muted);
+	cursor: pointer;
+}
+
+.composer-attach:hover,
+.composer-attach:focus-within {
+	color: var(--text);
+	background: var(--surface-2);
+}
+
+.attachment-chips,
+.message-attachments {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.attachment-chips {
+	margin: 0 12px 8px;
+}
+
+.message-attachments {
+	justify-content: flex-end;
+	max-width: 85%;
+	margin-top: 6px;
+}
+
+.attachment-chip {
+	display: inline-flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 6px;
+	max-width: 100%;
+	padding: 4px 6px 4px 10px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-pill);
+	background: var(--surface-2);
+	font-size: 12px;
+	line-height: 18px;
+}
+
+.message-attachments .attachment-chip {
+	padding-right: 10px;
+	border-color: var(--accent-line);
+}
+
+.attachment-chip-error {
+	border-color: var(--red);
+	border-radius: var(--radius-md);
+}
+
+.chip-name {
+	max-width: 180px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.chip-size {
+	color: var(--muted);
+	font-variant-numeric: tabular-nums;
+}
+
+.chip-progress {
+	width: 56px;
+	height: 4px;
+	accent-color: var(--accent);
+}
+
+.chip-error {
+	flex-basis: 100%;
+	color: var(--red);
+}
+
+.chip-remove {
+	padding: 0 6px;
+	border: none;
+	background: none;
+	color: var(--muted);
+	line-height: 18px;
+}
+
+.chip-remove:hover:not(:disabled) {
+	color: var(--text);
+}
+
+.chat-dropping {
+	outline: 2px dashed var(--accent-line);
+	outline-offset: -6px;
+}

@@ -11,6 +11,7 @@ import {
 import { join, relative, resolve, sep } from "node:path";
 import type { Activity, ConversationSummary, HistoryMessage } from "@gentle-dot/protocol";
 import { describeTool, textOf } from "./presentation.ts";
+import { splitAttachments } from "./uploads.ts";
 import { presentText } from "./white-label.ts";
 
 const TITLE_SCAN_BYTES = 256 * 1024;
@@ -74,7 +75,10 @@ function titleOf(path: string): string {
 		}
 		if (record.type === "session_info") name = typeof record.name === "string" ? record.name : undefined;
 		const message = (record.message ?? record) as { role?: unknown };
-		if (firstUser === undefined && message.role === "user") firstUser = textOf(message);
+		if (firstUser === undefined && message.role === "user") {
+			const { text, attachments } = splitAttachments(textOf(message));
+			firstUser = text || attachments.map((a) => a.name).join(", ");
+		}
 	}
 	const title = (name ?? firstUser ?? "").replace(/\s+/g, " ").trim();
 	if (!title) return "New conversation";
@@ -173,7 +177,14 @@ export function historyFromMessages(messages: unknown[]): HistoryMessage[] {
 	for (const raw of messages) {
 		const m = raw as AgentMessage;
 		if (m.role === "user") {
-			history.push({ id: `h${++index}`, role: "user", text: textOf(m), activities: [] });
+			const { text, attachments } = splitAttachments(textOf(m));
+			history.push({
+				id: `h${++index}`,
+				role: "user",
+				text,
+				activities: [],
+				...(attachments.length > 0 ? { attachments } : {}),
+			});
 			continue;
 		}
 		if (m.role !== "assistant") continue;

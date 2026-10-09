@@ -3,7 +3,13 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { extname, join, resolve, sep } from "node:path";
-import { type ClientMessage, CloseCode, PROTOCOL_VERSION, parseClientMessage } from "@gentle-dot/protocol";
+import {
+	type AttachmentLimits,
+	type ClientMessage,
+	CloseCode,
+	PROTOCOL_VERSION,
+	parseClientMessage,
+} from "@gentle-dot/protocol";
 import { type WebSocket, WebSocketServer } from "ws";
 import { AuthManager, type AuthRuntime, createModelAuthRuntime, resolveAgentHome } from "./auth.ts";
 import { type BridgeClient, DotBridge } from "./bridge.ts";
@@ -19,6 +25,7 @@ import { ensureMemoryProject, ensurePrivateDir, isolatedAgentEnv, privateMemory 
 import { defaultImportPath, ProfileStore } from "./profiles.ts";
 import { type RotationLimits, rotationLimits } from "./rotation.ts";
 import { AgentSupervisor } from "./supervisor.ts";
+import { UploadStore } from "./uploads.ts";
 import { VoiceService } from "./voice.ts";
 import { identityArgs } from "./white-label.ts";
 
@@ -57,6 +64,8 @@ export interface DaemonOptions {
 	rotation?: RotationLimits;
 	/** Messages per history page; default `GENTLE_DOT_HISTORY_PAGE` or 100. */
 	historyPage?: number;
+	/** Upload limits; default 25 MB per file, 10 files and 50 MB per message (S31.3). */
+	uploadLimits?: AttachmentLimits;
 	log?: (line: string) => void;
 }
 
@@ -185,6 +194,10 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		...(options.voiceFetch ? { fetch: options.voiceFetch } : {}),
 		log,
 	});
+	const uploads = new UploadStore({
+		workspace: options.workspace,
+		...(options.uploadLimits ? { limits: options.uploadLimits } : {}),
+	});
 	const historyPage = options.historyPage ?? Number(process.env.GENTLE_DOT_HISTORY_PAGE);
 	const bridge = new DotBridge(supervisor, {
 		dataDir: options.dataDir,
@@ -193,6 +206,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		profiles,
 		connectors,
 		voice,
+		uploads,
 		features: { conversations: options.conversations ?? process.env.GENTLE_DOT_CONVERSATIONS === "1" },
 		rotation: options.rotation ?? rotationLimits(process.env),
 		...(Number.isInteger(historyPage) && historyPage > 0 ? { historyPage } : {}),
@@ -202,7 +216,13 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	connectorStore.enforce(false);
 	connectorStore.watch();
 
-	const server = createServer((req, res) => handleHttp(req, res, options.uiDir, bridge));
+	const server = createServer((req, res) => {
+		if (new URL(req.url ?? "/", "http://localhost").pathname === "/upload") {
+			void handleUpload(req, res, token, allowedOrigins(port, options), uploads);
+			return;
+		}
+		handleHttp(req, res, options.uiDir, bridge);
+	});
 	const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 	let port = options.port;
 
@@ -302,6 +322,74 @@ function sameToken(given: string, expected: string): boolean {
 	const a = Buffer.from(given);
 	const b = Buffer.from(expected);
 	return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * `POST /upload` (S31.2): one file per request, the raw bytes as the body, its name in
+ * `X-File-Name` (URI-encoded), and `X-Upload-Id` to add it to the message folder of an earlier
+ * file. The same access key and Origin rules as the WebSocket: the key only in
+ * `Authorization: Bearer`, never in the address.
+ */
+async function handleUpload(
+	req: IncomingMessage,
+	res: ServerResponse,
+	token: string,
+	origins: Set<string>,
+	uploads: UploadStore,
+): Promise<void> {
+	res.setHeader("X-Content-Type-Options", "nosniff");
+	res.setHeader("Cache-Control", "no-store");
+	const refuse = (status: number, code: string, message: string) => {
+		// The rest of the body is discarded, never stored.
+		res.setHeader("Connection", "close");
+		reply(res, status, { code, message });
+		req.resume();
+	};
+	const origin = req.headers.origin;
+	if (origin !== undefined && !origins.has(origin))
+		return refuse(403, "forbidden", "This page may not upload.");
+	if (origin !== undefined) {
+		res.setHeader("Access-Control-Allow-Origin", origin);
+		res.setHeader("Vary", "Origin");
+	}
+	if (req.method === "OPTIONS") {
+		res.writeHead(204, {
+			"Access-Control-Allow-Methods": "POST",
+			"Access-Control-Allow-Headers": "Authorization, Content-Type, X-File-Name, X-Upload-Id",
+			"Access-Control-Max-Age": "600",
+		});
+		res.end();
+		return;
+	}
+	if (req.method !== "POST") return refuse(405, "method_not_allowed", "Upload files with POST.");
+	const bearer = /^Bearer (\S+)$/.exec(req.headers.authorization ?? "")?.[1];
+	if (!bearer || !sameToken(bearer, token))
+		return refuse(401, "unauthorized", "The access key is not valid.");
+	let name: string;
+	try {
+		name = decodeURIComponent(String(req.headers["x-file-name"] ?? ""));
+	} catch {
+		name = "";
+	}
+	if (name.trim() === "") return refuse(400, "bad_request", "The file has no name.");
+	const uploadId = req.headers["x-upload-id"];
+	if (uploadId !== undefined && (typeof uploadId !== "string" || !/^[A-Za-z0-9_-]{8,64}$/.test(uploadId))) {
+		return refuse(400, "bad_request", "That upload is not valid.");
+	}
+	const declared = Number(req.headers["content-length"]);
+	const outcome = await uploads.receive(req, {
+		name,
+		...(uploadId ? { uploadId } : {}),
+		...(Number.isFinite(declared) && req.headers["content-length"] !== undefined ? { length: declared } : {}),
+	});
+	if (!outcome.ok) return refuse(outcome.status, outcome.code, outcome.message);
+	reply(res, 200, outcome.file);
+}
+
+function reply(res: ServerResponse, status: number, body: object): void {
+	if (res.headersSent || res.destroyed) return;
+	res.writeHead(status, { "Content-Type": "application/json" });
+	res.end(JSON.stringify(body));
 }
 
 function handleHttp(req: IncomingMessage, res: ServerResponse, uiDir: string, bridge: DotBridge): void {

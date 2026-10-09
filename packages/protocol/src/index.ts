@@ -29,11 +29,43 @@ export interface Ask {
 	timeoutMs?: number;
 }
 
+/** A file the user sent with a message, as its chip shows it (S31). */
+export interface AttachmentInfo {
+	name: string;
+	size: number;
+	mime: string;
+}
+
+/** A file uploaded with `POST /upload`, waiting to be sent with a message. */
+export interface AttachmentRef {
+	/** The message folder the daemon gave the first file; later files of the message reuse it. */
+	uploadId: string;
+	/** The name the daemon stored the file under. */
+	name: string;
+}
+
+/** The daemon's answer to `POST /upload`. */
+export interface UploadedFile extends AttachmentRef, AttachmentInfo {
+	/** Where the file is, relative to the assistant's workspace: `uploads/<uploadId>/<name>`. */
+	path: string;
+}
+
+/** Limits the daemon enforces on uploads (S31.3); the app checks them first to explain a refusal. */
+export const ATTACHMENT_LIMITS = {
+	fileBytes: 25 * 1024 * 1024,
+	messageBytes: 50 * 1024 * 1024,
+	files: 10,
+} as const;
+
+export type AttachmentLimits = { fileBytes: number; messageBytes: number; files: number };
+
 export interface HistoryMessage {
 	id: string;
 	role: "user" | "assistant";
 	text: string;
 	activities: Activity[];
+	/** Files the user sent with the message. */
+	attachments?: AttachmentInfo[];
 	/** From an earlier session of the same chat, before the daemon last rotated it. */
 	earlier?: true;
 }
@@ -257,7 +289,8 @@ export function parseProfileRoles(value: unknown): ProfileRoles | undefined {
 
 export type ClientMessage =
 	| { type: "hello"; token: string; protocol: number }
-	| { type: "send"; text: string; requestId?: string }
+	/** `text` may be empty when files are attached. */
+	| { type: "send"; text: string; requestId?: string; attachments?: AttachmentRef[] }
 	| { type: "steer"; text: string }
 	| { type: "abort" }
 	| { type: "ui_response"; requestId: string; value?: string; confirmed?: boolean; cancelled?: boolean }
@@ -310,7 +343,7 @@ export type ServerPayload =
 			voice?: VoiceCapability;
 	  }
 	| { type: "agent_state"; state: AgentState }
-	| { type: "user_message"; messageId: string; text: string }
+	| { type: "user_message"; messageId: string; text: string; attachments?: AttachmentInfo[] }
 	| { type: "message_delta"; messageId: string; delta: string }
 	| {
 			type: "message_done";
@@ -404,6 +437,23 @@ export function parseQueue(value: unknown): MessageQueue | undefined {
 	return { steering: texts(steering), followUp: texts(followUp) };
 }
 
+const UPLOAD_ID = /^[A-Za-z0-9_-]{8,64}$/;
+const MAX_NAME = 255;
+
+/** 1-10 uploaded files: an upload id and a stored name, never a path. */
+function parseAttachments(value: unknown): AttachmentRef[] | undefined {
+	if (!Array.isArray(value) || value.length === 0 || value.length > ATTACHMENT_LIMITS.files) return undefined;
+	const refs: AttachmentRef[] = [];
+	for (const item of value) {
+		if (typeof item !== "object" || item === null) return undefined;
+		const { uploadId, name } = item as Record<string, unknown>;
+		if (!isString(uploadId) || !UPLOAD_ID.test(uploadId)) return undefined;
+		if (!isString(name) || name === "" || name.length > MAX_NAME || /[/\\\0]/.test(name)) return undefined;
+		refs.push({ uploadId, name });
+	}
+	return refs;
+}
+
 /** Validates one raw client frame; returns undefined when it is not a known, well-formed message. */
 export function parseClientMessage(raw: string): ClientMessage | undefined {
 	let value: unknown;
@@ -419,12 +469,17 @@ export function parseClientMessage(raw: string): ClientMessage | undefined {
 			return isString(m.token) && typeof m.protocol === "number"
 				? { type: "hello", token: m.token, protocol: m.protocol }
 				: undefined;
-		case "send":
-			if (!isString(m.text) || m.text.trim() === "" || m.text.length > MAX_TEXT) return undefined;
+		case "send": {
+			const attachments = m.attachments === undefined ? undefined : parseAttachments(m.attachments);
+			if (m.attachments !== undefined && !attachments) return undefined;
+			if (!isString(m.text) || m.text.length > MAX_TEXT) return undefined;
+			if (m.text.trim() === "" && !attachments) return undefined;
 			if (!isOptional(m.requestId, isString)) return undefined;
-			return m.requestId === undefined
-				? { type: "send", text: m.text }
-				: { type: "send", text: m.text, requestId: m.requestId as string };
+			const send: Extract<ClientMessage, { type: "send" }> = { type: "send", text: m.text };
+			if (m.requestId !== undefined) send.requestId = m.requestId as string;
+			if (attachments) send.attachments = attachments;
+			return send;
+		}
 		case "steer":
 			return isString(m.text) && m.text.trim() !== "" && m.text.length <= MAX_TEXT
 				? { type: "steer", text: m.text }

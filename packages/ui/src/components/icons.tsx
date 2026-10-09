@@ -101,6 +101,15 @@ export function MicIcon() {
 	);
 }
 
+/** A paper clip: attach files (S31.1). */
+export function PaperclipIcon() {
+	return (
+		<Icon>
+			<path d="m21 11.5-8.5 8.5a5.5 5.5 0 0 1-7.8-7.8l9-9a3.7 3.7 0 0 1 5.2 5.2l-9 9a1.8 1.8 0 0 1-2.6-2.6l8.3-8.3" />
+		</Icon>
+	);
+}
+
 /** A speaker: spoken replies are on. */
 export function SpeakerIcon() {
 	return (

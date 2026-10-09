@@ -2,6 +2,7 @@ import type {
 	Activity,
 	AgentState,
 	Ask,
+	AttachmentInfo,
 	AuthEvent,
 	AuthPrompt,
 	AuthProvider,
@@ -79,6 +80,8 @@ export interface ChatMessage {
 	note?: { kind: "stopped" | "error"; text: string };
 	/** From an earlier session of the chat; a divider follows the last one. */
 	earlier?: boolean;
+	/** Files the user sent with the message. */
+	attachments?: AttachmentInfo[];
 }
 
 export interface Notice {
@@ -208,7 +211,14 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 				interrupted: false,
 				messages: [
 					...state.messages,
-					{ id: message.messageId, role: "user", text: message.text, streaming: false, activities: [] },
+					{
+						id: message.messageId,
+						role: "user",
+						text: message.text,
+						streaming: false,
+						activities: [],
+						...(message.attachments ? { attachments: message.attachments } : {}),
+					},
 				],
 			};
 		case "message_delta":

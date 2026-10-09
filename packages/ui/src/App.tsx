@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { type ConnectionInfo, tokenFromLocation } from "./client.ts";
 import { ChatSurface } from "./components/ChatSurface.tsx";
 import type { ComputerControls } from "./components/Computer.tsx";
@@ -14,6 +14,7 @@ import {
 	startDragging,
 	togglePanel,
 } from "./desktop.ts";
+import { createUploader } from "./uploads.ts";
 import { useComputerRegistration, useComputerState } from "./useComputer.ts";
 import { useDot } from "./useDot.ts";
 import { usePanelWindow } from "./usePanelWindow.ts";
@@ -62,6 +63,8 @@ function Assistant({ surface }: { surface: Surface }) {
 	const [missingToken, setMissingToken] = useState(false);
 	const [focusKey, setFocusKey] = useState(0);
 	const { state, send, dismiss, dispatch } = useDot(info);
+	// Files go to the daemon over HTTP, with the same access key as the WebSocket (S31.2).
+	const upload = useMemo(() => (info ? createUploader(info) : undefined), [info]);
 	const conversations = useRef(state.features.conversations);
 	conversations.current = state.features.conversations;
 	// Computer control lives in the desktop app only (S24.7); the panel registers the helper.
@@ -170,6 +173,7 @@ function Assistant({ surface }: { surface: Surface }) {
 			{...(surface === "panel" ? { onHide: hidePanel } : {})}
 			{...(computer ? { computer } : {})}
 			{...(desktop && surface === "panel" ? { panelWindow: panel.controls } : {})}
+			{...(upload ? { upload } : {})}
 		/>
 	);
 }

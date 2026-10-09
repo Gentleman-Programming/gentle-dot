@@ -1,7 +1,9 @@
 import type { ClientMessage } from "@gentle-dot/protocol";
-import { useState } from "react";
+import { type DragEvent, useState } from "react";
 import { openUrl as openExternal } from "../desktop.ts";
 import { activeTitle, type DotAction, type DotState, isBusy, needsAccount } from "../store.ts";
+import type { Uploader } from "../uploads.ts";
+import { useAttachments } from "../useAttachments.ts";
 import type { PanelWindowControls } from "../usePanelWindow.ts";
 import { useVoice, type VoiceControls } from "../useVoice.ts";
 import { AccountsPanel } from "./AccountsPanel.tsx";
@@ -42,6 +44,8 @@ interface ChatSurfaceProps {
 	computer?: ComputerControls;
 	/** Hiding the rose and full screen (S26), in the desktop panel only; the web page already fills the browser. */
 	panelWindow?: PanelWindowControls;
+	/** Sends files to the daemon (S31); without it the composer has no attachments. */
+	upload?: Uploader;
 }
 
 const CONTINUE_TEXT = "Continue where you left off.";
@@ -70,6 +74,7 @@ export function ChatSurface({
 	openUrl = openExternal,
 	computer,
 	panelWindow,
+	upload,
 }: ChatSurfaceProps) {
 	const openAccounts = () => {
 		send({ type: "auth_list" });
@@ -85,6 +90,28 @@ export function ChatSurface({
 	};
 	const [showConversations, setShowConversations] = useState(false);
 	const voice = useVoice(state, send);
+	const attachments = useAttachments(upload);
+	/** Files are being dragged over the chat. */
+	const [dropping, setDropping] = useState(false);
+	const carriesFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes("Files");
+	const dropHandlers = attachments
+		? {
+				onDragOver: (event: DragEvent<HTMLDivElement>) => {
+					if (!carriesFiles(event)) return;
+					event.preventDefault();
+					setDropping(true);
+				},
+				onDragLeave: (event: DragEvent<HTMLDivElement>) => {
+					if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropping(false);
+				},
+				onDrop: (event: DragEvent<HTMLDivElement>) => {
+					if (!carriesFiles(event)) return;
+					event.preventDefault();
+					setDropping(false);
+					attachments.add(Array.from(event.dataTransfer.files));
+				},
+			}
+		: {};
 	/** A switch that waits for the user to confirm stopping the running answer. */
 	const [pendingSwitch, setPendingSwitch] = useState<SwitchMessage | undefined>(undefined);
 	const switchTo = (message: SwitchMessage) => {
@@ -109,8 +136,9 @@ export function ChatSurface({
 
 	return (
 		<div
-			className={`chat chat-${variant}${panelWindow?.fullscreen ? " chat-fullscreen" : ""}`}
+			className={`chat chat-${variant}${panelWindow?.fullscreen ? " chat-fullscreen" : ""}${dropping ? " chat-dropping" : ""}`}
 			data-state={state.agentState}
+			{...dropHandlers}
 		>
 			<header className="chat-header" data-tauri-drag-region={variant === "panel" ? "" : undefined}>
 				<span className={`state-dot state-${state.agentState}`} aria-hidden="true" />
@@ -327,6 +355,7 @@ export function ChatSurface({
 				focusKey={focusKey}
 				onStartTyping={closeOptions}
 				voice={voice}
+				{...(attachments ? { attachments } : {})}
 			/>
 		</div>
 	);

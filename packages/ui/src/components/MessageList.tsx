@@ -3,6 +3,7 @@ import { Fragment, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage } from "../store.ts";
+import { formatSize } from "../uploads.ts";
 
 const VERBS: Record<ActivityKind, [string, string, string]> = {
 	read: ["Read", "file", "files"],
@@ -92,6 +93,19 @@ export function MessageList({ messages, queued = [], hasEarlier = false, onShowE
 						{message.activities.length > 0 ? <Activities activities={message.activities} /> : null}
 						{message.text && message.role === "user" ? (
 							<div className="message-body message-plain">{message.text}</div>
+						) : null}
+						{message.attachments && message.attachments.length > 0 ? (
+							<ul className="message-attachments" aria-label="Attached files">
+								{message.attachments.map((file, i) => (
+									// biome-ignore lint/suspicious/noArrayIndexKey: two files may share a name across folders
+									<li key={i} className="attachment-chip">
+										<span className="chip-name" title={file.name}>
+											{file.name}
+										</span>
+										<span className="chip-size">{formatSize(file.size)}</span>
+									</li>
+								))}
+							</ul>
 						) : null}
 						{message.text && message.role === "assistant" ? (
 							<div className="message-body">
