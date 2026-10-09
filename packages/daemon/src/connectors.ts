@@ -1452,18 +1452,36 @@ export class ConnectorManager {
 
 	/** The scanned servers `importServers(ids)` would add, by name and what they run; nothing changes. */
 	importChoices(ids: string[]): { name: string; summary: string }[] {
-		return ids.flatMap((key) => {
-			const found = this.scanned.get(key);
-			if (!found?.server || this.duplicateOf(found.server)) return [];
-			return [{ name: found.name, summary: summarize(found.server) }];
-		});
+		return this.importPlan(ids).choices;
 	}
 
-	/** Copies the chosen servers from the last scan, with their values, read only with every tool hidden. */
-	importServers(ids: string[]): string[] {
+	/**
+	 * What importing `ids` would add, frozen: the choices to confirm and a copy of the scanned
+	 * servers behind them. Importing that copy adds exactly what was confirmed, even if a scan
+	 * replaces the list while the user decides (B2, L114).
+	 */
+	importPlan(ids: string[]): {
+		choices: { name: string; summary: string }[];
+		servers: Map<string, ScannedServer>;
+	} {
+		const servers = new Map<string, ScannedServer>();
+		const choices = ids.flatMap((key) => {
+			const found = this.scanned.get(key);
+			if (!found?.server || this.duplicateOf(found.server)) return [];
+			servers.set(key, structuredClone(found));
+			return [{ name: found.name, summary: summarize(found.server) }];
+		});
+		return { choices, servers };
+	}
+
+	/**
+	 * Copies the chosen servers, with their values, read only with every tool hidden: from `from`
+	 * (a confirmed plan) when given, else from the last scan.
+	 */
+	importServers(ids: string[], from: ReadonlyMap<string, ScannedServer> = this.scanned): string[] {
 		const imported: string[] = [];
 		for (const key of ids) {
-			const found = this.scanned.get(key);
+			const found = from.get(key);
 			if (!found?.server || this.duplicateOf(found.server)) continue;
 			const id = this.newId(found.name);
 			const custom: CustomConnector = {

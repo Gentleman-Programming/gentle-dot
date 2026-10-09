@@ -475,9 +475,14 @@ export class DotBridge {
 				return;
 			case "connector_import": {
 				const connectors = this.requireConnectors();
-				const chosen = connectors.importChoices(message.ids);
-				if (chosen.length > 0 && !(await this.confirmChange(client, importApproval(chosen)))) return;
-				this.deliver(client, { type: "connector_imported", names: connectors.importServers(message.ids) });
+				// The confirmed plan is what gets imported, whatever a later scan finds.
+				const plan = connectors.importPlan(message.ids);
+				if (plan.choices.length > 0 && !(await this.confirmChange(client, importApproval(plan.choices))))
+					return;
+				this.deliver(client, {
+					type: "connector_imported",
+					names: connectors.importServers(message.ids, plan.servers),
+				});
 				return;
 			}
 			case "profile_save":

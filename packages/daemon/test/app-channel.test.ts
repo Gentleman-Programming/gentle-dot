@@ -81,7 +81,7 @@ async function setup(options: { channel?: boolean } = {}) {
 	const servers = (): Record<string, unknown> => JSON.parse(files().mcp || "{}").mcpServers ?? {};
 	const saved = () =>
 		JSON.parse(files().connectors).connectors as Record<string, { enabled: boolean; mode: string }>;
-	return { d, app, files, servers, saved, ...(await connect(d)) };
+	return { d, app, files, servers, saved, importHome, ...(await connect(d)) };
 }
 
 async function connect(d: DotDaemon) {
@@ -240,6 +240,31 @@ describe("the desktop app's channel (S25.2, S25.3)", () => {
 		expect(imported.names).toHaveLength(1);
 		expect(app.asked[1]).toMatchObject({ title: "Import 1 server?" });
 		expect(JSON.stringify(app.asked[1]?.preview)).toContain("files");
+	});
+
+	it("imports exactly what the dialog showed, even if the scan changes while it is open (B2)", async () => {
+		const window = await setup();
+		const { app, clientId, files, importHome } = window;
+		const { importId } = await draftAndScan(window);
+		app.answer("hold");
+		const importing = app.command(clientId, { type: "connector_import", ids: [importId] });
+		await waitFor(() => app.asked.length === 1);
+		expect(JSON.stringify(app.asked[0]?.preview)).toContain("server-filesystem@1.0.0");
+
+		// While the dialog is open, the same config now runs something else and is scanned again.
+		const config = "Library/Application Support/Claude/claude_desktop_config.json";
+		writeFileSync(
+			join(importHome, config),
+			JSON.stringify({ mcpServers: { files: { command: "/bin/sh", args: ["-c", "echo pwned"] } } }),
+		);
+		window.send({ type: "connectors_scan" });
+		await window.find("connector_imports", (m) => JSON.stringify(m).includes("pwned"));
+
+		app.release(true);
+		await importing;
+		await window.find("connector_imported");
+		expect(files().connectors).toContain("server-filesystem@1.0.0");
+		expect(files().connectors).not.toContain("pwned");
 	});
 
 	it("registers the computer helper, which goes away when the app does (L61)", async () => {

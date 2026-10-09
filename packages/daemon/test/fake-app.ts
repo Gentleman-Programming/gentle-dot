@@ -10,8 +10,8 @@ export interface AskedApproval {
 	preview: { name: string; value: unknown }[];
 }
 
-/** What the fake app answers: allow, decline, or never answer. */
-export type Answer = "allow" | "decline" | "hang";
+/** What the fake app answers: allow, decline, never answer, or hold until `release`. */
+export type Answer = "allow" | "decline" | "hang" | "hold";
 
 type Frame =
 	| { kind: "request"; id: number; method: string; params?: unknown }
@@ -26,6 +26,7 @@ export function fakeApp(answers: Answer[] = [], otherwise: Answer = "decline") {
 	const asked: AskedApproval[] = [];
 	const queue = [...answers];
 	const pending = new Map<number, { resolve(v: unknown): void; reject(e: Error): void }>();
+	const held: number[] = [];
 	let nextId = 0;
 	let buffer = "";
 	const write = (frame: Frame) => appEnd.write(`${JSON.stringify(frame)}\n`);
@@ -48,7 +49,8 @@ export function fakeApp(answers: Answer[] = [], otherwise: Answer = "decline") {
 			}
 			asked.push(frame.params as AskedApproval);
 			const answer = queue.shift() ?? otherwise;
-			if (answer !== "hang")
+			if (answer === "hold") held.push(frame.id);
+			else if (answer !== "hang")
 				write({ kind: "response", id: frame.id, result: { approved: answer === "allow" } });
 		}
 	});
@@ -61,6 +63,11 @@ export function fakeApp(answers: Answer[] = [], otherwise: Answer = "decline") {
 	return {
 		daemonEnd: daemonEnd as Duplex,
 		asked,
+		/** Answers the oldest held approval, as a user clicking in the dialog later. */
+		release: (approved: boolean) => {
+			const id = held.shift();
+			if (id !== undefined) write({ kind: "response", id, result: { approved } });
+		},
 		/** Queues the answers to the next approvals. */
 		answer: (...next: Answer[]) => queue.push(...next),
 		request,
