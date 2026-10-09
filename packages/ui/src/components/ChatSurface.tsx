@@ -28,6 +28,7 @@ import {
 	SpeakerOffIcon,
 } from "./icons.tsx";
 import { MessageList } from "./MessageList.tsx";
+import { ModelPicker } from "./ModelPicker.tsx";
 import { ProfilesPanel } from "./ProfilesPanel.tsx";
 import { newRequestId, type Send } from "./types.ts";
 
@@ -348,6 +349,13 @@ export function ChatSurface({
 				</div>
 			) : null}
 
+			<ModelPicker
+				models={state.models}
+				send={send}
+				dispatch={dispatch}
+				disabled={!ready}
+				{...(state.model ? { model: state.model } : {})}
+			/>
 			<Composer
 				busy={isBusy(state.agentState)}
 				disabled={!ready}

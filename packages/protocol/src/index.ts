@@ -251,10 +251,46 @@ export interface ModelOption {
 	reasoning: boolean;
 }
 
+/** A model in the chat's model picker (S32); never carries endpoints, headers, keys, or costs. */
+export interface ModelChoice {
+	provider: string;
+	id: string;
+	name: string;
+	/** It accepts images. */
+	images: boolean;
+	/** The thinking levels it supports; absent when it does not think. */
+	thinkingLevels?: ThinkingLevel[];
+}
+
+/** The models of one connected account. */
+export interface ModelGroup {
+	provider: string;
+	/** The account's name, for example "OpenAI". */
+	name: string;
+	models: ModelChoice[];
+}
+
+/** The main assistant's model; `thinking` only when the model thinks. */
+export interface ModelRef {
+	provider: string;
+	id: string;
+	name: string;
+	thinking?: ThinkingLevel;
+}
+
+/** A saved profile offered as a quick pick, with the main assistant's route. */
+export interface ProfilePick {
+	name: string;
+	/** `provider/model-id`. */
+	model?: string;
+	thinking?: ThinkingLevel;
+}
+
 const PROFILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const RESERVED_NAMES = new Set(["__proto__", "constructor", "prototype"]);
 const ROLE_ID = /^[A-Za-z0-9._:@/+%-]{1,128}$/;
 const MODEL_ID = /^[A-Za-z0-9._~:@/+%-]{1,256}$/;
+const PROVIDER_ID = /^[A-Za-z0-9._~:@+%-]{1,128}$/;
 const MAX_ROLES = 200;
 
 /** Profile names follow the engine's rule: 1-64 letters, numbers, `.`, `_`, `-`, starting with a letter or number. */
@@ -312,6 +348,10 @@ export type ClientMessage =
 	| { type: "profile_apply"; name: string }
 	| { type: "profile_import" }
 	| { type: "profile_save_current"; name: string }
+	/** The chat's model picker (S32): the current model, the connected accounts' models, and the profiles. */
+	| { type: "models_list" }
+	/** Switches the main assistant's model; during a reply it applies to the next message. */
+	| { type: "model_set"; provider: string; id: string; thinking?: ThinkingLevel }
 	| { type: "connectors_list" }
 	| {
 			type:
@@ -387,6 +427,15 @@ export type ServerPayload =
 			open?: boolean;
 	  }
 	| { type: "profiles_imported"; imported: { from: string; to: string }[]; missingProviders: string[] }
+	| {
+			type: "models";
+			current?: ModelRef;
+			/** A switch chosen during a reply, waiting for the next message. */
+			next?: ModelRef;
+			groups: ModelGroup[];
+			profiles: ProfilePick[];
+			activeProfile?: string;
+	  }
 	/** Connector sign-ins reuse `auth_event`, `auth_prompt`, and `auth_done`, with flow ids starting `connector-`. */
 	| { type: "connectors"; connectors: ConnectorInfo[]; open?: boolean }
 	| { type: "connector_draft"; draft: ConnectorDraft }
@@ -530,6 +579,18 @@ export function parseClientMessage(raw: string): ClientMessage | undefined {
 		case "profile_apply":
 		case "profile_save_current":
 			return isValidProfileName(m.name) ? { type: m.type, name: m.name } : undefined;
+		case "model_set": {
+			if (!isString(m.provider) || !PROVIDER_ID.test(m.provider)) return undefined;
+			if (!isString(m.id) || !MODEL_ID.test(m.id)) return undefined;
+			if (!isOptional(m.thinking, isThinkingLevel)) return undefined;
+			const set: Extract<ClientMessage, { type: "model_set" }> = {
+				type: "model_set",
+				provider: m.provider,
+				id: m.id,
+			};
+			if (m.thinking !== undefined) set.thinking = m.thinking as ThinkingLevel;
+			return set;
+		}
 		case "connector_connect":
 		case "connector_signin":
 		case "connector_setup":
@@ -567,6 +628,7 @@ export function parseClientMessage(raw: string): ClientMessage | undefined {
 		case "connectors_list":
 		case "connectors_scan":
 		case "profiles_list":
+		case "models_list":
 		case "profile_import":
 		case "abort":
 		case "new_conversation":

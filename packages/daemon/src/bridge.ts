@@ -6,6 +6,8 @@ import {
 	type Features,
 	isThinkingLevel,
 	type MessageQueue,
+	type ModelGroup,
+	type ModelRef,
 	parseQueue,
 	type RoleRoute,
 	type ServerPayload,
@@ -27,6 +29,8 @@ import {
 	ProfileError,
 	type ProfileStore,
 	type SwitchOutcome,
+	splitModel,
+	toModelChoices,
 	toModelOptions,
 } from "./profiles.ts";
 import { DEFAULT_ROTATION, type RotationLimits, SessionRotator } from "./rotation.ts";
@@ -360,6 +364,12 @@ export class DotBridge {
 			case "profiles_list":
 				await this.sendProfiles(client);
 				return;
+			case "models_list":
+				this.deliver(client, await this.modelsPayload());
+				return;
+			case "model_set":
+				await this.setModel(client, message);
+				return;
 			case "connectors_list":
 				this.deliver(client, { type: "connectors", connectors: this.requireConnectors().list() });
 				return;
@@ -687,6 +697,113 @@ export class DotBridge {
 	private async applyProfile(name: string): Promise<void> {
 		const orchestrator = await this.requireProfiles().apply(name);
 		if (orchestrator) this.reportSwitch(await this.liveSwitch.switchTo(orchestrator));
+		// The chat's model picker follows the profile.
+		this.broadcastModels();
+	}
+
+	/**
+	 * The model picker's choice (S32): only a model of a connected account, and a thinking level
+	 * it supports. It is saved like a profile's model and switched live; during a reply the switch
+	 * waits for the next message instead of stopping the reply.
+	 */
+	private async setModel(client: BridgeClient, message: Extract<ClientMessage, { type: "model_set" }>) {
+		const available = await this.supervisor.request({ type: "get_available_models" });
+		const model = toModelChoices(available.data).find(
+			(m) => m.provider === message.provider && m.id === message.id,
+		);
+		if (!model) {
+			this.deliver(client, {
+				type: "error",
+				code: "model_unavailable",
+				message: "That model is not available. Connect its account in Accounts first.",
+			});
+			return;
+		}
+		if (message.thinking && !model.thinkingLevels?.includes(message.thinking)) {
+			this.deliver(client, {
+				type: "error",
+				code: "thinking_unavailable",
+				message: "That model does not support that thinking level.",
+			});
+			return;
+		}
+		const route: RoleRoute = { model: `${model.provider}/${model.id}` };
+		if (message.thinking) route.thinking = message.thinking;
+		await this.options.profiles?.setDefaultModel(route);
+		const outcome = await this.liveSwitch.switchTo(route);
+		if (outcome === "failed") {
+			this.deliver(client, {
+				type: "error",
+				code: "model_switch_failed",
+				message: "That model could not be selected. Try another one.",
+			});
+		}
+		if (outcome === "switched") this.afterModelSwitch();
+		else this.broadcastModels();
+	}
+
+	/** The current model, the connected accounts' models by account, and the profiles as quick picks. */
+	private async modelsPayload(): Promise<Extract<ServerPayload, { type: "models" }>> {
+		const [available, running, accounts] = await Promise.all([
+			this.supervisor.request({ type: "get_available_models" }),
+			this.runningModel(),
+			this.accountNames(),
+		]);
+		const choices = toModelChoices(available.data);
+		const groups: ModelGroup[] = [];
+		for (const model of choices) {
+			let group = groups.find((g) => g.provider === model.provider);
+			if (!group) {
+				const name = accounts.get(model.provider) ?? model.provider;
+				group = { provider: model.provider, name, models: [] };
+				groups.push(group);
+			}
+			group.models.push(model);
+		}
+		const ref = (provider: string, id: string, thinking?: unknown): ModelRef => {
+			const choice = choices.find((m) => m.provider === provider && m.id === id);
+			const found: ModelRef = { provider, id, name: choice?.name ?? id };
+			if (isThinkingLevel(thinking) && choice?.thinkingLevels) found.thinking = thinking;
+			return found;
+		};
+		const waiting = this.liveSwitch.waiting;
+		const target = waiting?.model ? splitModel(waiting.model) : undefined;
+		const { profiles, active } = this.savedProfiles();
+		return {
+			type: "models",
+			...(running ? { current: ref(running.provider, running.id, running.thinking) } : {}),
+			...(target ? { next: ref(target.provider, target.modelId, waiting?.thinking) } : {}),
+			groups,
+			profiles: profiles.map(({ name, roles }) => ({ name, ...roles.orchestrator })),
+			...(active ? { activeProfile: active } : {}),
+		};
+	}
+
+	private savedProfiles(): ReturnType<ProfileStore["list"]> {
+		try {
+			return this.options.profiles?.list() ?? { profiles: [] };
+		} catch {
+			return { profiles: [] };
+		}
+	}
+
+	/** Account names by provider id, as the Accounts screen shows them. */
+	private async accountNames(): Promise<Map<string, string>> {
+		const providers = await (this.options.auth?.providers() ?? Promise.resolve([])).catch(() => []);
+		return new Map(providers.map((p) => [p.id, presentText(p.name)]));
+	}
+
+	private broadcastModels(): void {
+		void this.modelsPayload()
+			.then((payload) => this.broadcast(payload))
+			.catch((error: Error) => this.log(`could not list models: ${error.message}`));
+	}
+
+	/** A new running model: the picker, and the connectors' image note (S24.5), follow it. */
+	private afterModelSwitch(): void {
+		this.broadcastModels();
+		const connectors = this.options.connectors;
+		if (connectors) this.broadcast({ type: "connectors", connectors: connectors.list() });
 	}
 
 	private reportSwitch(outcome: SwitchOutcome): void {
@@ -701,12 +818,18 @@ export class DotBridge {
 
 	/** The main assistant's model and thinking level in the running conversation. */
 	private async runningRoute(): Promise<RoleRoute | undefined> {
+		const running = await this.runningModel();
+		if (!running) return undefined;
+		const route: RoleRoute = { model: `${running.provider}/${running.id}` };
+		if (isThinkingLevel(running.thinking)) route.thinking = running.thinking;
+		return route;
+	}
+
+	private async runningModel(): Promise<{ provider: string; id: string; thinking?: unknown } | undefined> {
 		const response = await this.supervisor.request({ type: "get_state" });
 		const state = response.data as { model?: { provider?: unknown; id?: unknown }; thinkingLevel?: unknown };
 		if (typeof state?.model?.provider !== "string" || typeof state.model.id !== "string") return undefined;
-		const route: RoleRoute = { model: `${state.model.provider}/${state.model.id}` };
-		if (isThinkingLevel(state.thinkingLevel)) route.thinking = state.thinkingLevel;
-		return route;
+		return { provider: state.model.provider, id: state.model.id, thinking: state.thinkingLevel };
 	}
 
 	/** New credentials: refresh every window, and restart the agent once it is idle so it sees new models. */
@@ -745,7 +868,10 @@ export class DotBridge {
 
 	/** A profile applied while the assistant was busy switches the model now. */
 	private settleModelSwitch(): void {
-		void this.liveSwitch.settle().then((outcome) => this.reportSwitch(outcome));
+		void this.liveSwitch.settle().then((outcome) => {
+			this.reportSwitch(outcome);
+			if (outcome === "switched") this.afterModelSwitch();
+		});
 	}
 
 	private afterConversationChange(page: HistoryPage = { messages: [], hasEarlier: false }): void {

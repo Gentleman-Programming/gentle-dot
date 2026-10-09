@@ -1660,3 +1660,139 @@ html[data-surface="glow"] body {
 	outline: 2px dashed var(--accent-line);
 	outline-offset: -6px;
 }
+
+/* ---------- Model picker (S32) ---------- */
+
+.model-picker {
+	position: relative;
+	z-index: 2;
+	align-self: flex-start;
+	margin: 0 12px 6px;
+}
+
+.model-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	max-width: 260px;
+	padding: 3px 10px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-pill);
+	background: var(--surface-2);
+	color: var(--muted);
+	font: 600 12px / 18px var(--font-mono);
+	letter-spacing: 0.04em;
+}
+
+.model-chip:hover:not(:disabled),
+.model-chip[aria-expanded="true"] {
+	border-color: var(--accent-line);
+	color: var(--text);
+}
+
+.model-chip-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.model-popover {
+	position: absolute;
+	bottom: calc(100% + 6px);
+	left: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	width: min(340px, calc(100vw - 24px));
+	max-height: min(420px, 70vh);
+	padding: 10px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-md);
+	background: var(--surface);
+	box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+}
+
+.model-search {
+	width: 100%;
+	padding: 7px 10px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-sm);
+	background: var(--bg);
+	color: var(--text);
+}
+
+.model-search:focus {
+	outline: none;
+	border-color: var(--accent-line);
+	box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.model-list {
+	flex: 1;
+	overflow-y: auto;
+}
+
+.model-group {
+	margin: 0 0 8px;
+}
+
+.model-list .eyebrow {
+	padding: 4px 8px;
+}
+
+.model-option {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	padding: 6px 8px;
+	border-radius: var(--radius-sm);
+	cursor: pointer;
+}
+
+.model-option[aria-selected="true"] {
+	background: var(--accent-soft);
+}
+
+.model-option[aria-current="true"] .model-option-name {
+	color: var(--accent);
+}
+
+.model-option-detail {
+	margin-left: auto;
+	color: var(--muted);
+	font-size: 12px;
+}
+
+.model-note,
+.model-error {
+	margin: 0;
+	font-size: 13px;
+	color: var(--muted);
+}
+
+.model-error {
+	color: var(--red);
+}
+
+.model-thinking {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding-top: 8px;
+	border-top: 1px solid var(--line);
+	color: var(--muted);
+	font-size: 13px;
+}
+
+.model-thinking select {
+	padding: 4px 8px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-sm);
+	background: var(--surface-2);
+	color: var(--text);
+}
+
+.chat-fullscreen .model-picker {
+	margin-inline: max(12px, calc((100% - var(--reading-width)) / 2));
+}

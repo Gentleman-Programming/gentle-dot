@@ -12,8 +12,11 @@ import type {
 	Features,
 	ImportCandidate,
 	MessageQueue,
+	ModelGroup,
 	ModelOption,
+	ModelRef,
 	Profile,
+	ProfilePick,
 	ProfileRole,
 	ServerMessage,
 	VoiceCapability,
@@ -62,6 +65,22 @@ export interface ConnectorsState {
 	imports?: ImportCandidate[];
 }
 
+/** The chat's model picker (S32). */
+export interface ModelsState {
+	current?: ModelRef;
+	/** A switch chosen during a reply, waiting for the next message. */
+	next?: ModelRef;
+	/** Undefined until the first list arrives. */
+	groups?: ModelGroup[];
+	profiles: ProfilePick[];
+	activeProfile?: string;
+	/** Why the last choice did not work, shown in the picker. */
+	error?: string;
+}
+
+/** Errors about the picker's choice show in the picker, not as a notice. */
+const MODEL_ERRORS = new Set(["model_unavailable", "thinking_unavailable", "model_switch_failed"]);
+
 /** The daemon's answer to a voice request, matched by `requestId`. */
 export type VoiceReply = Extract<
 	ServerMessage,
@@ -108,6 +127,7 @@ export interface DotState {
 	auth: AuthState;
 	profiles: ProfilesState;
 	connectors: ConnectorsState;
+	models: ModelsState;
 	/** What the daemon can do with voice (an OpenAI API key). */
 	voice: VoiceCapability;
 	/** The latest answers to voice requests, newest last. */
@@ -123,6 +143,7 @@ export type DotAction =
 	| { type: "connectors"; open: boolean }
 	| { type: "connector_started"; connectorId: string }
 	| { type: "connector_imports_closed" }
+	| { type: "models_opened" }
 	| { type: "auth_started"; providerId: string };
 
 export const initialState: DotState = {
@@ -139,6 +160,7 @@ export const initialState: DotState = {
 	auth: { open: false },
 	profiles: { open: false, roles: [], models: [], importable: false },
 	connectors: { open: false },
+	models: { profiles: [] },
 	voice: { transcribe: false, speak: false },
 	voiceReplies: [],
 };
@@ -177,6 +199,10 @@ export function reduce(state: DotState, action: DotAction): DotState {
 		case "connector_imports_closed": {
 			const { imports: _imports, ...rest } = state.connectors;
 			return { ...state, connectors: rest };
+		}
+		case "models_opened": {
+			const { error: _error, ...models } = state.models;
+			return { ...state, models };
 		}
 		case "auth_started":
 			return {
@@ -315,6 +341,10 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 			const updated = { ...state, profiles: next };
 			return open ? closeConnectors(openProfiles(updated, true), true) : updated;
 		}
+		case "models": {
+			const { type: _type, seq: _seq, ...models } = message;
+			return { ...state, models, model: models.current?.name ?? state.model };
+		}
 		case "profiles_imported":
 			return {
 				...state,
@@ -349,6 +379,8 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 		case "toast":
 			return addNotice(state, message.level, message.message);
 		case "error":
+			if (MODEL_ERRORS.has(message.code))
+				return { ...state, models: { ...state.models, error: message.message } };
 			return addNotice(state, "error", message.message);
 	}
 }

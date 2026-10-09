@@ -20,12 +20,15 @@ import {
 	type AuthProvider,
 	isThinkingLevel,
 	isValidProfileName,
+	type ModelChoice,
 	type ModelOption,
 	type Profile,
 	type ProfileRole,
 	type ProfileRoles,
 	parseProfileRoles,
 	type RoleRoute,
+	THINKING_LEVELS,
+	type ThinkingLevel,
 } from "@gentle-dot/protocol";
 import { presentText } from "./white-label.ts";
 
@@ -231,7 +234,7 @@ async function withFileLock<T>(path: string, fn: () => T): Promise<T> {
 	}
 }
 
-function splitModel(model: string): { provider: string; modelId: string } | undefined {
+export function splitModel(model: string): { provider: string; modelId: string } | undefined {
 	const at = model.indexOf("/");
 	if (at <= 0 || at === model.length - 1) return undefined;
 	return { provider: model.slice(0, at), modelId: model.slice(at + 1) };
@@ -388,6 +391,14 @@ export class ProfileStore {
 		});
 	}
 
+	/**
+	 * Makes `route` the main assistant's saved default (settings.json), so a model chosen in the
+	 * chat outlasts a restart; a missing thinking level keeps the saved one.
+	 */
+	setDefaultModel(route: RoleRoute): Promise<void> {
+		return this.enqueue(() => this.writeOrchestrator(route, false));
+	}
+
 	/** True when the other setup has at least one profile to bring over. */
 	importable(): boolean {
 		if (this.options.importPath === this.storePath) return false;
@@ -442,7 +453,8 @@ export class ProfileStore {
 		writeFileAtomic(this.subagentsPath, jsonText(next));
 	}
 
-	private writeOrchestrator(route: RoleRoute): Promise<void> {
+	/** Without `clearThinking`, a route with no thinking level leaves the saved one as it is. */
+	private writeOrchestrator(route: RoleRoute, clearThinking = true): Promise<void> {
 		const target = route.model ? splitModel(route.model) : undefined;
 		if (!target) throw new ProfileError("settings_invalid");
 		return withFileLock(this.settingsPath, () => {
@@ -453,7 +465,7 @@ export class ProfileStore {
 				defaultModel: target.modelId,
 			};
 			if (route.thinking) next.defaultThinkingLevel = route.thinking;
-			else delete next.defaultThinkingLevel;
+			else if (clearThinking) delete next.defaultThinkingLevel;
 			writeFileAtomic(this.settingsPath, jsonText(next));
 		});
 	}
@@ -656,6 +668,30 @@ export function toModelOptions(data: unknown): ModelOption[] {
 	});
 }
 
+/** Levels past `high` only when the model maps them, as the engine's `getSupportedThinkingLevels` does. */
+function thinkingLevelsOf(model: Record<string, unknown>): ThinkingLevel[] | undefined {
+	if (model.reasoning !== true) return undefined;
+	const map = isRecord(model.thinkingLevelMap) ? model.thinkingLevelMap : {};
+	return THINKING_LEVELS.filter((level) => {
+		if (map[level] === null) return false;
+		return level === "xhigh" || level === "max" ? map[level] !== undefined : true;
+	});
+}
+
+/** Models from `get_available_models` for the chat's model picker: only names and capabilities. */
+export function toModelChoices(data: unknown): ModelChoice[] {
+	const models = isRecord(data) && Array.isArray(data.models) ? data.models : [];
+	return models.flatMap((raw): ModelChoice[] => {
+		if (!isRecord(raw) || typeof raw.provider !== "string" || typeof raw.id !== "string") return [];
+		const name = presentText(typeof raw.name === "string" && raw.name ? raw.name : raw.id);
+		const images = Array.isArray(raw.input) && raw.input.includes("image");
+		const choice: ModelChoice = { provider: raw.provider, id: raw.id, name, images };
+		const levels = thinkingLevelsOf(raw);
+		if (levels) choice.thinkingLevels = levels;
+		return [choice];
+	});
+}
+
 /** The part of the supervisor the live switch needs. */
 export interface LiveAgent {
 	busy: boolean;
@@ -678,6 +714,11 @@ export class LiveModelSwitch {
 	constructor(agent: LiveAgent, log: (line: string) => void = () => {}) {
 		this.agent = agent;
 		this.log = log;
+	}
+
+	/** The switch waiting for the assistant to finish its reply. */
+	get waiting(): RoleRoute | undefined {
+		return this.pending;
 	}
 
 	switchTo(route: RoleRoute): Promise<SwitchOutcome> {
