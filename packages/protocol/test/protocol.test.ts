@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+	APP_REQUIRED,
+	isAppCommand,
 	isValidProfileName,
 	PROTOCOL_VERSION,
 	parseClientMessage,
@@ -316,5 +318,48 @@ describe("computer control messages", () => {
 		]) {
 			expect(parse({ type: "computer_register", url, token: bad }), String(bad)).toBeUndefined();
 		}
+	});
+});
+
+describe("app-only commands (S25.2)", () => {
+	const parse = (value: object) => parseClientMessage(JSON.stringify(value));
+
+	it("are the connector changes, approving a draft, importing, and the computer helper", () => {
+		for (const message of [
+			{ type: "connector_connect", connectorId: "notion" },
+			{ type: "connector_signin", connectorId: "notion" },
+			{ type: "connector_setup", connectorId: "notion" },
+			{ type: "connector_disconnect", connectorId: "notion" },
+			{ type: "connector_remove", connectorId: "notion" },
+			{ type: "connector_mode", connectorId: "notion", mode: "read_only" },
+			{ type: "connector_mode", connectorId: "notion", mode: "read_write" },
+			{ type: "connector_draft_reply", draftId: "d1", approve: true },
+			{ type: "connector_import", ids: ["claude:x"] },
+			{ type: "computer_register", url: "http://127.0.0.1:51234/mcp", token: "k3Y_0123456789abcdef" },
+			{ type: "computer_unregister" },
+		]) {
+			const parsed = parse(message);
+			expect(parsed, message.type).toBeDefined();
+			expect(parsed && isAppCommand(parsed), message.type).toBe(true);
+		}
+	});
+
+	it("leave the chat, the read-only lists, declining a draft, and everything else to every window", () => {
+		for (const message of [
+			{ type: "send", text: "hi" },
+			{ type: "ui_response", requestId: "a", confirmed: true },
+			{ type: "connectors_list" },
+			{ type: "connectors_scan" },
+			{ type: "connector_draft_reply", draftId: "d1", approve: false },
+			{ type: "auth_login", providerId: "openai", method: "api_key" },
+			{ type: "auth_reply", flowId: "connector-x", value: "v" },
+			{ type: "profile_apply", name: "work" },
+			{ type: "models_list" },
+		]) {
+			const parsed = parse(message);
+			expect(parsed, message.type).toBeDefined();
+			expect(parsed && isAppCommand(parsed), message.type).toBe(false);
+		}
+		expect(APP_REQUIRED).toBe("Open the Gentle Dot app to change connectors.");
 	});
 });

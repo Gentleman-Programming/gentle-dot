@@ -294,6 +294,15 @@ describe("talking on the desktop", () => {
 		expect(invoked("voice_stop")).toHaveLength(1);
 	});
 
+	it("listens in the language chosen in Settings instead of the system's", async () => {
+		localStorage.setItem("gentle-dot-voice-language", "es-ES");
+		desktop({ available: true });
+		render(<Harness initial={withVoice(false)} />);
+		await waitFor(() => expect(talk()).toBeEnabled());
+		await userEvent.click(talk());
+		expect(invoked("voice_start")[0]?.[1]).toEqual({ locale: "es-ES" });
+	});
+
 	it("cancels the native recognizer", async () => {
 		desktop({ available: true });
 		render(<Harness initial={withVoice(false)} />);

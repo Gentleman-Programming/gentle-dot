@@ -1,8 +1,11 @@
 //! Tauri wiring: windows, commands, tray menu, global shortcut, Dot snapping,
 //! hiding the rose, the full-screen panel, voice input, the shortcut chosen in Settings,
-//! and the daemon lifecycle (design §9).
+//! the daemon lifecycle (design §9), and the app's private channel to the daemon (S25.1–S25.3).
 
+use crate::app_channel::{self, AppChannel, NO_CHANNEL, REGISTER_TIMEOUT};
+use crate::approvals::{native::NativePrompt, ApprovalRequest, Approvals, Decision, APPROVAL_TIMEOUT};
 use crate::computer::app as computer;
+use crate::computer::server::Endpoint;
 use crate::computer::session::Reason;
 use crate::config::{self, ConnectionInfo, DesktopConfig, DEFAULT_SHORTCUT};
 use crate::daemon::{self, Daemon, RestartOutcome};
@@ -116,6 +119,46 @@ fn window(app: &AppHandle, label: &str) -> CommandResult<WebviewWindow> {
 fn read_connection_info(config: &DesktopConfig) -> CommandResult<ConnectionInfo> {
     let token = std::fs::read_to_string(config.data_dir.join("token")).map_err(|e| format!("cannot read token: {e}"))?;
     Ok(config::connection_info(config.port, token.trim()))
+}
+
+/// Serves the daemon's requests on the app channel: native approvals (S25.3), and registering the
+/// computer helper with a daemon this app just spawned (S24.7, L61).
+struct ChannelService {
+    approvals: Approvals,
+    computer: Option<Endpoint>,
+}
+
+impl app_channel::Handler for ChannelService {
+    fn approve(&self, request: &ApprovalRequest) -> bool {
+        self.approvals.confirm(request) == Decision::Approved
+    }
+
+    fn opened(&self, channel: &Arc<AppChannel>) {
+        let Some(endpoint) = self.computer.clone() else {
+            return;
+        };
+        let channel = channel.clone();
+        thread::spawn(move || {
+            let params = serde_json::json!({ "url": endpoint.url, "token": endpoint.token });
+            if let Err(error) = channel.request("computer_register", params, REGISTER_TIMEOUT) {
+                eprintln!("gentle-dot: computer control was not registered with the assistant: {error}");
+            }
+        });
+    }
+}
+
+/// A connector change from the panel (S25.2), sent over the app's channel on behalf of the panel's
+/// window (`client_id`, from its `ready`), so its sign-in steps reach that window. Waits for the
+/// daemon, which may first confirm a widening change in a native dialog.
+#[tauri::command]
+async fn connector_command(app: AppHandle, client_id: String, message: serde_json::Value) -> CommandResult {
+    let daemon = app.state::<Shell>().daemon.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let channel = daemon.channel().ok_or_else(|| NO_CHANNEL.to_string())?;
+        channel.command(&client_id, message)
+    })
+    .await
+    .map_err(err)?
 }
 
 /// Waits until the daemon answers `/health`, then returns its URLs and token.
@@ -706,6 +749,7 @@ pub fn run() {
             set_panel_fullscreen,
             shortcut_get,
             shortcut_set,
+            connector_command,
             computer::computer_endpoint,
             computer::computer_permissions,
             computer::computer_request_permission,
@@ -726,8 +770,17 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let handle = app.handle().clone();
 
+            // Computer control first: a daemon this app spawns gets the helper over its channel.
+            let computer = computer::start(&handle);
+            let service = ChannelService {
+                approvals: Approvals::new(Arc::new(NativePrompt::new(handle.clone())), APPROVAL_TIMEOUT),
+                computer: computer.endpoint(),
+            };
+            app.manage(computer);
             let runtime_dir = daemon::runtime_dir(|key| std::env::var(key).ok(), app.path().resource_dir().ok());
-            let daemon = Arc::new(Daemon::new(config.port, config.data_dir.clone(), runtime_dir));
+            let daemon = Arc::new(
+                Daemon::new(config.port, config.data_dir.clone(), runtime_dir).with_channel(Arc::new(service)),
+            );
             let starter = daemon.clone();
             thread::spawn(move || {
                 if let Err(error) = starter.ensure_running(DAEMON_START_TIMEOUT) {
@@ -745,7 +798,6 @@ pub fn run() {
                 full_screen: Mutex::new(None),
                 shortcut: Mutex::new(None),
             });
-            app.manage(computer::start(&handle));
             let (voice_input, voice_model) = voice::start(&handle);
             app.manage(voice_input);
             app.manage(voice_model);
@@ -834,11 +886,11 @@ mod tests {
     }
 
     #[test]
-    fn the_shortcut_commands_are_registered_and_granted_to_the_panel_only() {
+    fn the_shortcut_and_connector_commands_are_registered_and_granted_to_the_panel_only() {
         let build = include_str!("../build.rs");
         let capabilities: serde_json::Value =
             serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
-        for command in ["shortcut_get", "shortcut_set"] {
+        for command in ["shortcut_get", "shortcut_set", "connector_command"] {
             assert!(build.contains(&format!("\"{command}\",")), "{command} is missing from build.rs");
             let permission = format!("allow-{}", command.replace('_', "-"));
             let windows: Vec<&serde_json::Value> = capabilities["capabilities"]

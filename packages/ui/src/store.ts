@@ -80,6 +80,8 @@ export interface ModelsState {
 
 /** Errors about the picker's choice show in the picker, not as a notice. */
 const MODEL_ERRORS = new Set(["model_unavailable", "thinking_unavailable", "model_switch_failed"]);
+/** A connector change that did not happen: the app declined it, or there is no app to make it. */
+const CONNECTOR_REFUSALS = new Set(["declined", "app_required"]);
 
 /** The daemon's answer to a voice request, matched by `requestId`. */
 export type VoiceReply = Extract<
@@ -112,6 +114,8 @@ export interface Notice {
 export interface DotState {
 	connection: ConnectionStatus;
 	agentState: AgentState;
+	/** This window's id for the desktop app's connector commands on its behalf (S25.2). */
+	clientId?: string;
 	conversationId?: string;
 	model?: string;
 	features: Features;
@@ -144,7 +148,8 @@ export type DotAction =
 	| { type: "connector_started"; connectorId: string }
 	| { type: "connector_imports_closed" }
 	| { type: "models_opened" }
-	| { type: "auth_started"; providerId: string };
+	| { type: "auth_started"; providerId: string }
+	| { type: "notice"; level: Notice["level"]; message: string };
 
 export const initialState: DotState = {
 	connection: "connecting",
@@ -209,6 +214,8 @@ export function reduce(state: DotState, action: DotAction): DotState {
 				...state,
 				auth: { ...state.auth, open: true, flow: { providerId: action.providerId, events: [] } },
 			};
+		case "notice":
+			return addNotice(state, action.level, action.message);
 		case "server":
 			return reduceServer(state, action.message);
 	}
@@ -220,6 +227,7 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 			return {
 				...state,
 				agentState: message.agentState,
+				...(message.clientId ? { clientId: message.clientId } : {}),
 				// The daemon sends the queue right after ready when one exists.
 				queue: initialState.queue,
 				conversationId: message.conversationId ?? state.conversationId,
@@ -378,10 +386,18 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 		}
 		case "toast":
 			return addNotice(state, message.level, message.message);
-		case "error":
+		case "error": {
 			if (MODEL_ERRORS.has(message.code))
 				return { ...state, models: { ...state.models, error: message.message } };
-			return addNotice(state, "error", message.message);
+			// A sign-in that was only starting never began: back to the list.
+			const flow = state.connectors.flow;
+			const starting = flow !== undefined && flow.flowId === undefined && flow.events.length === 0;
+			const next =
+				CONNECTOR_REFUSALS.has(message.code) && starting
+					? { ...state, connectors: { ...state.connectors, flow: undefined } }
+					: state;
+			return addNotice(next, "error", message.message);
+		}
 	}
 }
 

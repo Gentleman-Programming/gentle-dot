@@ -20,7 +20,11 @@ export interface Activity {
 
 export interface Ask {
 	requestId: string;
-	method: "select" | "confirm" | "input" | "editor";
+	/**
+	 * `app`: an approval the desktop app asks in a native dialog (S25.3). Windows only show that it
+	 * waits there; it cannot be answered with `ui_response`.
+	 */
+	method: "select" | "confirm" | "input" | "editor" | "app";
 	title: string;
 	message?: string;
 	options?: string[];
@@ -377,6 +381,11 @@ export type ServerPayload =
 	| {
 			type: "ready";
 			agentState: AgentState;
+			/**
+			 * This window's id for the desktop app's private channel: an app command on its behalf
+			 * (S25.2) sends its sign-in steps here. It authorizes nothing by itself.
+			 */
+			clientId?: string;
 			conversationId?: string;
 			model?: string;
 			features?: Features;
@@ -447,6 +456,32 @@ export type ServerPayload =
 	| { type: "voice_speech"; requestId: string; mime: string; data: string }
 	/** A voice request did not work; `reason` is plain words for the user. */
 	| { type: "voice_unavailable"; requestId: string; reason: string };
+
+/** Why a window cannot change connectors itself (S25.2). */
+export const APP_REQUIRED = "Open the Gentle Dot app to change connectors.";
+
+/**
+ * Messages only the desktop app that launched the daemon may send, over its private channel
+ * (S25.2): connector changes, approving a draft, importing, and the computer helper. Declining a
+ * draft narrows nothing, so any window may.
+ */
+export const APP_COMMANDS = [
+	"connector_connect",
+	"connector_signin",
+	"connector_setup",
+	"connector_disconnect",
+	"connector_remove",
+	"connector_mode",
+	"connector_draft_reply",
+	"connector_import",
+	"computer_register",
+	"computer_unregister",
+] as const satisfies readonly ClientMessage["type"][];
+
+export function isAppCommand(message: ClientMessage): boolean {
+	if (message.type === "connector_draft_reply") return message.approve;
+	return (APP_COMMANDS as readonly string[]).includes(message.type);
+}
 
 /** Every daemon message carries a per-connection, monotonic `seq`. */
 export type ServerMessage = ServerPayload & { seq: number };

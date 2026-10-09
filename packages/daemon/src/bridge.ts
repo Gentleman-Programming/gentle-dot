@@ -1,18 +1,25 @@
+import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
 	type AgentState,
+	APP_REQUIRED,
 	type Ask,
 	type ClientMessage,
+	type ConnectorDraft,
+	type ConnectorInfo,
 	type Features,
+	isAppCommand,
 	isThinkingLevel,
 	type MessageQueue,
 	type ModelGroup,
 	type ModelRef,
+	parseClientMessage,
 	parseQueue,
 	type RoleRoute,
 	type ServerPayload,
 	type VoiceCapability,
 } from "@gentle-dot/protocol";
+import type { AppApproval, AppLink } from "./app-channel.ts";
 import type { AuthManager } from "./auth.ts";
 import type { ConnectorManager, ConnectorRefusal } from "./connectors.ts";
 import {
@@ -53,6 +60,11 @@ export interface BridgeOptions {
 	voice?: VoiceService;
 	/** Files the user uploaded for their messages (S31). */
 	uploads?: UploadStore;
+	/**
+	 * The desktop app that launched the daemon, over its private channel (S25.1): the only source of
+	 * connector changes and the only place approvals are answered. Without it they fail closed.
+	 */
+	app?: AppLink;
 	/** How long switching conversations waits for a running answer to stop. Default 10 s. */
 	stopTimeoutMs?: number;
 	/** Optional parts of the app; by default one continuous chat. */
@@ -78,9 +90,18 @@ type ProfileCommand = Extract<
 >;
 
 const DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
+const WAITING_IN_APP = "Waiting for your answer in the Gentle Dot app.";
+const DECLINED = { code: "declined", message: "Nothing was changed." } as const;
 
-/** An open dialog; `options` keeps the agent's original option strings for the answer. */
-type PendingAsk = { ask: Ask; options?: string[]; timer?: NodeJS.Timeout };
+/**
+ * An open dialog; `options` keeps the agent's original option strings for the answer. An `app` ask
+ * only shows that the desktop app is asking; windows cannot answer it.
+ */
+type PendingAsk = {
+	ask: Ask;
+	options?: string[];
+	timer?: NodeJS.Timeout;
+};
 const REMEMBERED_REQUEST_IDS = 500;
 const READY_TIMEOUT_MS = 60_000;
 const ANSWER_FAILED = "Something went wrong while answering. Please try again.";
@@ -93,6 +114,8 @@ const HISTORY_PAGE = 100;
  */
 export class DotBridge {
 	private readonly clients = new Set<BridgeClient>();
+	/** Each window's id, for the app's commands on its behalf. */
+	private readonly clientIds = new Map<string, BridgeClient>();
 	private readonly asks = new Map<string, PendingAsk>();
 	private readonly runningTools = new Set<string>();
 	private readonly seenRequestIds: string[] = [];
@@ -146,11 +169,35 @@ export class DotBridge {
 		return this.state;
 	}
 
+	/**
+	 * Asks the user in the desktop app's native dialog (S25.3); windows only see that it waits there.
+	 * Resolves true only when the user allows it; declining, no answer, `signal`, or the app quitting
+	 * resolve false. Rejects when there is no app to ask (fail closed).
+	 */
+	askInApp(request: AppApproval, signal?: AbortSignal): Promise<boolean> {
+		const app = this.options.app;
+		if (!app?.connected) return Promise.reject(new Error(APP_REQUIRED));
+		const requestId = `app-${randomUUID()}`;
+		const ask: Ask = {
+			requestId,
+			method: "app",
+			title: presentText(request.title ?? `Allow ${request.connector} to ${request.action}?`),
+			message: WAITING_IN_APP,
+		};
+		this.asks.set(requestId, { ask });
+		this.broadcast({ type: "ask", ask });
+		this.refreshState();
+		return app.approve(request, signal).finally(() => this.resolveAsk(requestId));
+	}
+
 	attach(client: BridgeClient): () => void {
 		this.clients.add(client);
+		const clientId = randomBytes(18).toString("base64url");
+		this.clientIds.set(clientId, client);
 		this.deliver(client, {
 			type: "ready",
 			agentState: this.state,
+			clientId,
 			...this.conversationRef(),
 			...(this.supervisor.model ? { model: this.supervisor.model } : {}),
 			features: this.features,
@@ -163,13 +210,35 @@ export class DotBridge {
 		if (this.interrupted) this.deliver(client, { type: "interrupted" });
 		return () => {
 			this.clients.delete(client);
+			this.clientIds.delete(clientId);
 			this.options.auth?.cancelOwnedBy(client);
 			this.options.connectors?.cancelOwnedBy(client);
-			this.options.connectors?.unregisterComputer(client);
 		};
 	}
 
+	/** A window's message. Connector changes come only from the desktop app (S25.2). */
 	async handle(client: BridgeClient, message: ClientMessage): Promise<void> {
+		if (isAppCommand(message)) {
+			this.deliver(client, { type: "error", code: "app_required", message: APP_REQUIRED });
+			return;
+		}
+		await this.run(client, message);
+	}
+
+	/**
+	 * A connector change from the desktop app's channel, on behalf of the window with `clientId`: its
+	 * sign-in steps and refusals go to that window. Throws when there is no such window or it is not
+	 * an app command.
+	 */
+	async handleFromApp(clientId: string, raw: unknown): Promise<void> {
+		const client = this.clientIds.get(clientId);
+		if (!client) throw new Error("That window is not connected to the assistant any more.");
+		const message = parseClientMessage(JSON.stringify(raw ?? null));
+		if (!message || !isAppCommand(message)) throw new Error("Only connector changes come from the app.");
+		await this.run(client, message);
+	}
+
+	private async run(client: BridgeClient, message: ClientMessage): Promise<void> {
 		try {
 			await this.dispatch(client, message);
 		} catch (error) {
@@ -261,6 +330,10 @@ export class DotBridge {
 					return;
 				}
 				const { requestId } = message;
+				if (pending.ask.method === "app") {
+					this.deliver(client, { type: "error", code: "app_required", message: WAITING_IN_APP });
+					return;
+				}
 				const answer: Record<string, unknown> = {};
 				if (message.cancelled) answer.cancelled = true;
 				else if (message.confirmed !== undefined) answer.confirmed = message.confirmed;
@@ -384,6 +457,8 @@ export class DotBridge {
 			case "connector_draft_reply": {
 				const emit = (payload: ServerPayload) => this.deliver(client, payload);
 				const { draftId, approve } = message;
+				const draft = this.options.connectors?.drafts().find((d) => d.draftId === draftId);
+				if (approve && draft && !(await this.confirmChange(client, draftApproval(draft)))) return;
 				const refused = this.requireConnectors().decideDraft(client, draftId, approve, emit);
 				if (refused) this.deliver(client, { type: "error", ...refused });
 				else this.broadcast({ type: "connector_draft_resolved", draftId, approved: approve });
@@ -398,12 +473,18 @@ export class DotBridge {
 			case "computer_unregister":
 				this.requireConnectors().unregisterComputer(client);
 				return;
-			case "connector_import":
+			case "connector_import": {
+				const connectors = this.requireConnectors();
+				// The confirmed plan is what gets imported, whatever a later scan finds.
+				const plan = connectors.importPlan(message.ids);
+				if (plan.choices.length > 0 && !(await this.confirmChange(client, importApproval(plan.choices))))
+					return;
 				this.deliver(client, {
 					type: "connector_imported",
-					names: this.requireConnectors().importServers(message.ids),
+					names: connectors.importServers(message.ids, plan.servers),
 				});
 				return;
+			}
 			case "profile_save":
 			case "profile_rename":
 			case "profile_duplicate":
@@ -572,6 +653,8 @@ export class DotBridge {
 	): Promise<void> {
 		const connectors = this.requireConnectors();
 		const emit = (payload: ServerPayload) => this.deliver(client, payload);
+		const widening = wideningApproval(connectors.list(), message);
+		if (widening && !(await this.confirmChange(client, widening))) return;
 		let refused: ConnectorRefusal | undefined;
 		switch (message.type) {
 			case "connector_connect":
@@ -594,6 +677,20 @@ export class DotBridge {
 				break;
 		}
 		if (refused) this.deliver(client, { type: "error", ...refused });
+	}
+
+	/**
+	 * A change that widens what the assistant can reach, confirmed in the app's native dialog even
+	 * though the app sent it (S25.3). False, with a note for the window, when it was not allowed.
+	 */
+	private async confirmChange(client: BridgeClient, request: AppApproval): Promise<boolean> {
+		const allowed = await this.askInApp(request).catch(() => undefined);
+		if (allowed === undefined) {
+			this.deliver(client, { type: "error", code: "app_required", message: APP_REQUIRED });
+			return false;
+		}
+		if (!allowed) this.deliver(client, { type: "error", ...DECLINED });
+		return allowed;
 	}
 
 	/**
@@ -1156,4 +1253,67 @@ function queuedText(message: string): string {
 	if (attachments.length === 0) return text;
 	const names = `📎 ${attachments.map((a) => a.name).join(", ")}`;
 	return text ? `${text}\n${names}` : names;
+}
+
+/**
+ * The native confirmation for a connector change that widens access, or undefined when it narrows
+ * or keeps it (read only, disconnecting, removing, signing in again) or the connector is unknown.
+ */
+function wideningApproval(
+	list: ConnectorInfo[],
+	message: Extract<ClientMessage, { connectorId: string }>,
+): AppApproval | undefined {
+	const info = list.find((c) => c.id === message.connectorId && !c.builtin);
+	if (!info) return undefined;
+	const name = info.name;
+	if (message.type === "connector_mode") {
+		if (message.mode !== "read_write" || info.mode === "read_write") return undefined;
+		return {
+			connector: name,
+			action: "read and send",
+			title: `Let ${name} read and send?`,
+			summary: `The assistant will be able to send, post, and change things in ${name}. It still asks you before each sending action.`,
+			preview: [{ name: "Sends", value: info.sends }],
+		};
+	}
+	if ((message.type === "connector_connect" || message.type === "connector_setup") && !info.enabled) {
+		return {
+			connector: name,
+			action: "connect",
+			title: `Connect ${name}?`,
+			summary: `The assistant will be able to read ${name}. It starts read only.`,
+			preview: [{ name: "Reads", value: info.reads }],
+		};
+	}
+	return undefined;
+}
+
+/** Approving a connector the assistant drafted: everything that will run or be reached. */
+function draftApproval(draft: ConnectorDraft): AppApproval {
+	const preview: AppApproval["preview"] = [
+		draft.transport === "http"
+			? { name: "Address", value: draft.url ?? "" }
+			: { name: "Runs on this computer", value: [draft.command, ...(draft.args ?? [])].join(" ") },
+		{ name: "Secrets it needs", value: draft.envNames.length > 0 ? draft.envNames.join(", ") : "None" },
+	];
+	if (draft.description) preview.unshift({ name: "What it does", value: draft.description });
+	return {
+		connector: draft.name,
+		action: "be added",
+		title: `Add ${draft.name}?`,
+		summary: "The assistant drafted this connector. It starts read only, with all of its tools hidden.",
+		preview,
+	};
+}
+
+/** Importing servers from the user's other apps: each one by name and what it runs. */
+function importApproval(chosen: { name: string; summary?: string }[]): AppApproval {
+	const count = chosen.length;
+	return {
+		connector: count === 1 ? (chosen[0]?.name ?? "1 server") : `${count} servers`,
+		action: "be imported",
+		title: `Import ${count} server${count === 1 ? "" : "s"}?`,
+		summary: "They start read only, with all of their tools hidden.",
+		preview: chosen.map((c) => ({ name: c.name, value: c.summary ?? "" })),
+	};
 }

@@ -12,6 +12,17 @@ export function AskCard({ ask, send }: { ask: Ask; send: Send }) {
 	const answer = (fields: { value?: string; confirmed?: boolean; cancelled?: boolean }) =>
 		send({ type: "ui_response", requestId: ask.requestId, ...fields });
 
+	// The desktop app asks this one in a native dialog (S25.3); here it only shows that it waits.
+	if (ask.method === "app") {
+		return (
+			<section ref={card} className="ask-card" aria-label="Waiting for your answer in the app">
+				<p className="eyebrow">Needs your answer</p>
+				<p className="ask-title">{ask.title}</p>
+				{ask.message ? <p className="connector-note">{ask.message}</p> : null}
+			</section>
+		);
+	}
+
 	return (
 		<section ref={card} className="ask-card" aria-label="The assistant needs your answer">
 			<p className="eyebrow">Needs your answer</p>

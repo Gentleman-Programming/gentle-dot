@@ -76,7 +76,7 @@ impl Recognizer for Preferred {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::voice::fake::{FakeClock, FakeMicrophone, FakeRecognizer, Recorder};
+    use crate::voice::fake::{FakeClock, FakeMicrophone, FakeNative, FakeRecognizer, Recorder};
     use crate::voice::parakeet::{Engine, Loader, Locate};
     use crate::voice::{Authorization, Transcript, Voice, VoiceError, VoiceStatus};
     use std::path::{Path, PathBuf};
@@ -136,6 +136,31 @@ mod tests {
         rig.mic.sink().audio(&[0.0; 320]);
         assert_eq!(rig.voice.stop(), Ok(Transcript { text: "parakeet heard 320".into() }));
         assert!(rig.apple.log.lock().unwrap().locales.is_empty(), "Apple Speech is not used");
+    }
+
+    #[test]
+    fn without_the_model_apple_speech_gets_the_device_buffers() {
+        let mut apple = FakeRecognizer::granted();
+        apple.native = true;
+        let rig = rig(apple, true);
+        rig.voice.start(None, Recorder::default().events()).unwrap();
+        let buffer = FakeNative { rate: 48_000, frames: 960 };
+        rig.mic.sink().audio_native(&[0.0; 320], &buffer);
+        let log = rig.apple.log.lock().unwrap();
+        assert_eq!(log.native, vec![buffer]);
+        assert!(log.fed.is_empty());
+    }
+
+    #[test]
+    fn parakeet_still_receives_the_16k_mono_stream_when_device_buffers_come_along() {
+        let mut apple = FakeRecognizer::granted();
+        apple.native = true;
+        let rig = rig(apple, true);
+        rig.installed.store(true, Ordering::SeqCst);
+        rig.voice.start(None, Recorder::default().events()).unwrap();
+        rig.mic.sink().audio_native(&[0.0; 320], &FakeNative { rate: 48_000, frames: 960 });
+        assert_eq!(rig.voice.stop(), Ok(Transcript { text: "parakeet heard 320".into() }));
+        assert!(rig.apple.log.lock().unwrap().native.is_empty(), "Apple Speech is not used");
     }
 
     #[test]

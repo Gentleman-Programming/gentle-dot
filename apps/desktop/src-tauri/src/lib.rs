@@ -1,3 +1,6 @@
+pub mod alert;
+pub mod app_channel;
+pub mod approvals;
 pub mod computer;
 pub mod config;
 pub mod daemon;
@@ -7,6 +10,7 @@ pub mod geometry;
 pub mod health;
 pub mod platform;
 pub mod position;
+pub mod secure_store;
 mod shell;
 pub mod shortcut;
 pub mod status;

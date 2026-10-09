@@ -294,7 +294,7 @@ describe("importing MCP servers", () => {
 			"perplexity",
 			"stripe",
 		]);
-		const mcp = JSON.parse(readFileSync(join(agentHome, "mcp.json"), "utf8")).mcpServers as Record<
+		const mcp = JSON.parse(readFileSync(store.signinMcpFile, "utf8")).mcpServers as Record<
 			string,
 			Record<string, unknown>
 		>;
@@ -342,8 +342,11 @@ describe("importing MCP servers", () => {
 		expect(prompt).toMatchObject({ kind: "secret", message: expect.stringContaining("Perplexity API Key") });
 		manager.reply(owner, prompt.flowId, { value: "pplx-typed" });
 		await waitFor(() => sent.find((m) => m.type === "auth_done"));
-		const perplexity = JSON.parse(readFileSync(join(agentHome, "mcp.json"), "utf8")).mcpServers.perplexity;
+		const perplexity = JSON.parse(readFileSync(store.signinMcpFile, "utf8")).mcpServers.perplexity;
 		expect(resolveConfigValue(perplexity.env.PERPLEXITY_API_KEY)).toBe("pplx-typed");
+		// The proxy hands the server what was typed, and what it reads from the environment.
+		expect((await store.credentials("perplexity")).env).toEqual({ PERPLEXITY_API_KEY: "pplx-typed" });
+		expect(readFileSync(join(agentHome, "mcp.json"), "utf8")).not.toContain("pplx-typed");
 		expect(JSON.stringify(sent)).not.toContain("pplx-typed");
 		// Importing again adds nothing: they are already connectors.
 		const again = manager.scan();

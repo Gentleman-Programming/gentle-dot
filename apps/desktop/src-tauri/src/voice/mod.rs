@@ -2,7 +2,9 @@
 //! user's message. Two seams keep the backends swappable:
 //!
 //! - `Microphone` captures audio and delivers 16 kHz mono f32 PCM (`audio::SAMPLE_RATE`), the
-//!   format offline models such as sherpa-onnx expect, so any recognizer can consume it.
+//!   format offline models such as sherpa-onnx expect, so any recognizer can consume it. When
+//!   it can, it also passes the device's own buffers along (`NativeAudio`), for a recognizer
+//!   that does better with the audio as captured (Apple Speech, S30.6).
 //! - `Recognizer` turns that PCM into partial and final text. Apple's Speech framework
 //!   (`macos::AppleSpeech`) is the default on macOS; the optional local model (S30.5,
 //!   `parakeet::Parakeet`, NVIDIA Parakeet through sherpa-onnx) is preferred once the user has
@@ -164,8 +166,14 @@ impl From<VoiceError> for String {
     }
 }
 
-/// Native audio capture. Delivers `audio::SAMPLE_RATE` mono f32 chunks to `Sink::audio` (on
-/// the audio thread) and reports interruptions with `Sink::failed`.
+/// The capture in the device's own format (on macOS, the input node's `AVAudioPCMBuffer`),
+/// valid for one call. Opaque to the machine: only the recognition that asks for it downcasts
+/// it, so it must come from the microphone that recognition was made for.
+pub type NativeAudio = dyn std::any::Any;
+
+/// Native audio capture. Delivers `audio::SAMPLE_RATE` mono f32 chunks to `Sink::audio`, or
+/// to `Sink::audio_native` along with the device's own buffer (on the audio thread), and
+/// reports interruptions with `Sink::failed`.
 pub trait Microphone: Send + Sync {
     /// The current permission, without prompting.
     fn authorization(&self) -> Authorization;
@@ -202,6 +210,14 @@ pub trait Recognizer: Send + Sync {
 pub trait Recognition: Send {
     /// More audio. Runs on the audio thread, so it must not block (heavy decoders queue it).
     fn feed(&mut self, samples: &[f32]);
+    /// Whether this recognition takes the device's own buffers (`feed_native`) instead of the
+    /// 16 kHz stream, when the microphone provides them.
+    fn wants_native(&self) -> bool {
+        false
+    }
+    /// The device's own buffer, instead of `feed`; only called when `wants_native`. Runs on
+    /// the audio thread.
+    fn feed_native(&mut self, _audio: &NativeAudio) {}
     /// No more audio: the final text follows through `Sink::finished`.
     fn finish(&mut self);
     /// Discards the recognition.

@@ -1,6 +1,12 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import type { ClientMessage, ConnectorInfo, ServerMessage, ServerPayload } from "@gentle-dot/protocol";
+import {
+	APP_REQUIRED,
+	type ClientMessage,
+	type ConnectorInfo,
+	type ServerMessage,
+	type ServerPayload,
+} from "@gentle-dot/protocol";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useReducer } from "react";
@@ -95,8 +101,15 @@ describe("ConnectorsPanel", () => {
 		const send = vi.fn();
 		const dispatch = vi.fn();
 		const openUrl = vi.fn();
+		// In the desktop panel connector changes go to the app (S25.2); both are the same mock here.
 		render(
-			<ConnectorsPanel connectors={state.connectors} send={send} dispatch={dispatch} openUrl={openUrl} />,
+			<ConnectorsPanel
+				connectors={state.connectors}
+				send={send}
+				appSend={send}
+				dispatch={dispatch}
+				openUrl={openUrl}
+			/>,
 		);
 		return { send, dispatch, openUrl };
 	}
@@ -192,7 +205,16 @@ describe("ConnectorsPanel", () => {
 
 function Harness({ initial, send }: { initial: DotState; send: (m: ClientMessage) => void }) {
 	const [state, dispatch] = useReducer(reduce, initial);
-	return <ChatSurface variant="panel" state={state} send={send} dismiss={vi.fn()} dispatch={dispatch} />;
+	return (
+		<ChatSurface
+			variant="panel"
+			state={state}
+			send={send}
+			appSend={send}
+			dismiss={vi.fn()}
+			dispatch={dispatch}
+		/>
+	);
 }
 
 describe("Connectors in the panel", () => {
@@ -245,5 +267,64 @@ describe("approval cards", () => {
 		expect(rule).toMatch(/white-space: pre-wrap/);
 		expect(rule).toMatch(/overflow-wrap: anywhere/);
 		expect(rule).toMatch(/color: var\(--text\)/);
+	});
+});
+
+describe("connector changes outside the desktop app (S25.2)", () => {
+	it("are shown disabled with the reason, and nothing is sent", async () => {
+		const send = vi.fn();
+		render(
+			<ConnectorsPanel
+				connectors={apply(ready, { type: "connectors", connectors: list, open: true }).connectors}
+				send={send}
+				dispatch={vi.fn()}
+				openUrl={vi.fn()}
+			/>,
+		);
+		expect(screen.getByText(APP_REQUIRED)).toBeInTheDocument();
+		const notion = within(screen.getByRole("listitem", { name: "Notion" }));
+		for (const radio of notion.getAllByRole("radio")) expect(radio).toBeDisabled();
+		for (const name of ["Sign in to Notion again", "Disconnect Notion", "Remove Notion"])
+			expect(notion.getByRole("button", { name })).toBeDisabled();
+		const linear = within(screen.getByRole("listitem", { name: "Linear" }));
+		expect(linear.getByRole("button", { name: "Sign in to Linear" })).toBeDisabled();
+		const atlassian = within(screen.getByRole("listitem", { name: "Atlassian" }));
+		await userEvent.setup().click(atlassian.getByRole("button", { name: "Connect Atlassian" }));
+		expect(send).not.toHaveBeenCalled();
+		// Reading stays available.
+		expect(screen.getByRole("button", { name: "Import my MCP servers" })).toBeEnabled();
+	});
+
+	it("an approval the app asks natively shows only that it waits there", () => {
+		render(
+			<AskCard
+				ask={{
+					requestId: "app-1",
+					method: "app",
+					title: "Allow Notion to create pages?",
+					message: "Waiting for your answer in the Gentle Dot app.",
+				}}
+				send={vi.fn()}
+			/>,
+		);
+		expect(screen.getByText("Allow Notion to create pages?")).toBeInTheDocument();
+		expect(screen.getByText("Waiting for your answer in the Gentle Dot app.")).toBeInTheDocument();
+		expect(screen.queryByRole("button")).toBeNull();
+	});
+});
+
+describe("the window's id for the app's commands", () => {
+	it("comes with ready, and a refused change drops the sign-in that was starting", () => {
+		let s = apply(ready, { type: "ready", agentState: "idle", clientId: "window-1" });
+		expect(s.clientId).toBe("window-1");
+		s = apply(s, { type: "connectors", connectors: list, open: true });
+		s = reduce(s, { type: "connector_started", connectorId: "atlassian" });
+		s = apply(s, { type: "error", code: "declined", message: "Nothing was changed." });
+		expect(s.connectors.flow).toBeUndefined();
+		expect(s.connectors.open).toBe(true);
+		expect(s.notices.at(-1)?.message).toBe("Nothing was changed.");
+		s = reduce(s, { type: "connector_started", connectorId: "atlassian" });
+		s = apply(s, { type: "error", code: "app_required", message: APP_REQUIRED });
+		expect(s.connectors.flow).toBeUndefined();
 	});
 });

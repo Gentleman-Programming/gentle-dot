@@ -1,6 +1,12 @@
 //! The macOS voice backends: the native microphone (AVAudioEngine's input node, resampled to
-//! 16 kHz mono) and Apple's Speech framework (`SFSpeechRecognizer`, on-device when the locale
-//! supports it, else Apple's servers). Nothing here decides policy; `machine` does.
+//! 16 kHz mono, with each tap buffer passed along as it came) and Apple's Speech framework
+//! (`SFSpeechRecognizer`, on-device when the locale supports it, else Apple's servers). Nothing
+//! here decides policy; `machine` does.
+//!
+//! Apple Speech is fed the input node's own buffers (S30.6), as Apple's documented pattern
+//! does: with our 16 kHz box-filtered stream it misheard speech that Parakeet decoded from the
+//! same capture (L101-L102). The 16 kHz path in `AppleRecognition::feed` stays only for a
+//! microphone without device buffers.
 //!
 //! Threads: permission handlers, the audio tap, the interruption notification, and recognition
 //! results all arrive off the main thread (the recognizer gets an operation queue of its own),
@@ -8,7 +14,7 @@
 //! and from those callbacks; AVAudioEngine and the Speech request are not tied to a thread.
 
 use super::audio::{self, Resampler, SAMPLE_RATE};
-use super::{Authorization, Microphone, Recognition, Recognizer, Sink, Stream, VoiceError};
+use super::{Authorization, Microphone, NativeAudio, Recognition, Recognizer, Sink, Stream, VoiceError};
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, ProtocolObject};
@@ -104,9 +110,8 @@ impl Microphone for MacMicrophone {
                 .map(|c| unsafe { std::slice::from_raw_parts((*data.add(c)).as_ptr(), frames) })
                 .collect();
             let pcm = resampler.borrow_mut().process(&audio::mono(&planes));
-            if !pcm.is_empty() {
-                audio_sink.audio(&pcm);
-            }
+            // The buffer itself goes along for Apple Speech, which appends it as captured.
+            audio_sink.audio_native(&pcm, buffer as &NativeAudio);
         });
         let tap_block = &*tap as *const block2::DynBlock<_> as *mut block2::DynBlock<_>;
         // SAFETY: the block matches AVAudioNodeTapBlock and stays alive in the stream.
@@ -275,6 +280,19 @@ impl Recognition for AppleRecognition {
             }
             std::ptr::copy_nonoverlapping(samples.as_ptr(), (*data).as_ptr(), samples.len());
             self.request.appendAudioPCMBuffer(&buffer);
+        }
+    }
+
+    fn wants_native(&self) -> bool {
+        true
+    }
+
+    /// The input node's tap buffer, in its own rate and channel layout. The request retains
+    /// what it needs, as with Apple's `request.append(buffer)` in the tap.
+    fn feed_native(&mut self, audio: &NativeAudio) {
+        if let Some(buffer) = audio.downcast_ref::<AVAudioPCMBuffer>() {
+            // SAFETY: a valid buffer from the engine's tap, used within the tap call.
+            unsafe { self.request.appendAudioPCMBuffer(buffer) };
         }
     }
 

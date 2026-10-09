@@ -1,7 +1,7 @@
 //! Fakes for the voice tests: a microphone and a recognizer that record what the machine asks
 //! of them and let a test play the platform's side (audio, results, failures).
 
-use super::{Authorization, Events, Microphone, Recognition, Recognizer, Sink, Stream, VoiceError, VoiceEvent};
+use super::{Authorization, Events, Microphone, NativeAudio, Recognition, Recognizer, Sink, Stream, VoiceError, VoiceEvent};
 use crate::computer::Clock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -109,6 +109,8 @@ pub struct RecognitionLog {
     pub requests: usize,
     pub locales: Vec<String>,
     pub fed: Vec<f32>,
+    /// Device buffers, for a recognition that takes them.
+    pub native: Vec<FakeNative>,
     pub finished: usize,
     pub cancelled: usize,
     pub sink: Option<Sink>,
@@ -124,6 +126,8 @@ pub struct FakeRecognizer {
     pub final_text: Mutex<Option<String>>,
     /// Reported as a failure when the recognition is finished.
     pub fail_on_finish: Mutex<Option<String>>,
+    /// Plays a recognizer that takes the device's own audio (as Apple Speech does).
+    pub native: bool,
     pub log: Arc<Mutex<RecognitionLog>>,
 }
 
@@ -136,6 +140,7 @@ impl FakeRecognizer {
             supported: vec!["en-US".into(), "es-ES".into(), "es-MX".into()],
             final_text: Mutex::new(None),
             fail_on_finish: Mutex::new(None),
+            native: false,
             log: Arc::default(),
         }
     }
@@ -178,7 +183,7 @@ impl Recognizer for FakeRecognizer {
         log.sink = Some(sink.clone());
         let final_text = self.final_text.lock().unwrap().clone();
         let failure = self.fail_on_finish.lock().unwrap().clone();
-        Ok(Box::new(FakeRecognition { log: self.log.clone(), sink, final_text, failure }))
+        Ok(Box::new(FakeRecognition { log: self.log.clone(), sink, final_text, failure, native: self.native }))
     }
 }
 
@@ -187,11 +192,21 @@ struct FakeRecognition {
     sink: Sink,
     final_text: Option<String>,
     failure: Option<String>,
+    native: bool,
 }
 
 impl Recognition for FakeRecognition {
     fn feed(&mut self, samples: &[f32]) {
         self.log.lock().unwrap().fed.extend_from_slice(samples);
+    }
+
+    fn wants_native(&self) -> bool {
+        self.native
+    }
+
+    fn feed_native(&mut self, audio: &NativeAudio) {
+        let buffer = audio.downcast_ref::<FakeNative>().expect("the fake microphone's buffer");
+        self.log.lock().unwrap().native.push(buffer.clone());
     }
 
     fn finish(&mut self) {
@@ -207,6 +222,13 @@ impl Recognition for FakeRecognition {
     fn cancel(&mut self) {
         self.log.lock().unwrap().cancelled += 1;
     }
+}
+
+/// A device buffer, as a microphone that captures at its own rate would pass it along.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FakeNative {
+    pub rate: u32,
+    pub frames: usize,
 }
 
 /// Collects the events a webview would receive.

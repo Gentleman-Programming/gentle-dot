@@ -5,7 +5,7 @@
 //! `Sink` bound to one recording, so results from an earlier recording are ignored. No
 //! platform call or event is made while the state lock is held.
 
-use super::{audio, locale, Authorization, Events, Microphone, Recognition, Recognizer, Stream, Transcript};
+use super::{audio, locale, Authorization, Events, Microphone, NativeAudio, Recognition, Recognizer, Stream, Transcript};
 use super::{VoiceError, VoiceEvent, VoiceStatus};
 use crate::computer::Clock;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
@@ -55,9 +55,15 @@ struct Feed {
 }
 
 impl Feed {
-    fn push(&mut self, samples: &[f32]) {
-        if self.open {
-            self.recognition.feed(samples);
+    /// The device's own buffer when the recognition takes it, else the 16 kHz stream.
+    fn push(&mut self, samples: &[f32], native: Option<&NativeAudio>) {
+        if !self.open {
+            return;
+        }
+        match native {
+            Some(native) if self.recognition.wants_native() => self.recognition.feed_native(native),
+            _ if !samples.is_empty() => self.recognition.feed(samples),
+            _ => {}
         }
     }
 
@@ -309,6 +315,17 @@ pub struct Sink {
 impl Sink {
     /// A chunk of `audio::SAMPLE_RATE` mono PCM: fed to the recognizer, and metered.
     pub fn audio(&self, samples: &[f32]) {
+        self.capture(samples, None);
+    }
+
+    /// The same, with the device's own buffer it came from: a recognition that wants it gets
+    /// the buffer instead of the samples (S30.6); the meter still follows the samples, which
+    /// may be empty while the resampler fills its first period.
+    pub fn audio_native(&self, samples: &[f32], native: &NativeAudio) {
+        self.capture(samples, Some(native));
+    }
+
+    fn capture(&self, samples: &[f32], native: Option<&NativeAudio>) {
         let Some(inner) = self.inner.upgrade() else { return };
         let (feed, level) = {
             let mut state = lock(&inner.state);
@@ -329,7 +346,7 @@ impl Sink {
         if let Some((events, level)) = level {
             events(level);
         }
-        lock(&feed).push(samples);
+        lock(&feed).push(samples, native);
     }
 
     /// The text so far.
@@ -397,7 +414,7 @@ impl Sink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::voice::fake::{FakeClock, FakeMicrophone, FakeRecognizer, Gate, Recorder};
+    use crate::voice::fake::{FakeClock, FakeMicrophone, FakeNative, FakeRecognizer, Gate, Recorder};
     use crate::voice::{Authorization, Transcript, VoiceError, VoiceEvent, VoiceStatus};
     use std::sync::atomic::AtomicU64;
     use std::sync::Arc;
@@ -590,6 +607,64 @@ mod tests {
             _ => None,
         });
         assert!(last.unwrap() > 0.5, "the meter shows the loudest chunk since the last level");
+    }
+
+    #[test]
+    fn a_recognition_that_wants_native_audio_gets_the_device_buffers_instead_of_the_16k_stream() {
+        let mut recognizer = FakeRecognizer::granted();
+        recognizer.native = true;
+        let rig = rig(FakeMicrophone::granted(), recognizer);
+        rig.start().unwrap();
+        let sink = rig.mic.sink();
+        let buffer = FakeNative { rate: 48_000, frames: 480 };
+        sink.audio_native(&[0.5; 160], &buffer);
+        sink.audio_native(&[0.5; 160], &buffer);
+        let log = rig.recognizer.log.lock().unwrap();
+        assert_eq!(log.native, vec![buffer.clone(), buffer]);
+        assert!(log.fed.is_empty(), "the 16 kHz stream is not fed as well");
+        assert_eq!(rig.recorder.levels(), 1, "the meter still follows the 16 kHz stream");
+    }
+
+    #[test]
+    fn the_16k_stream_feeds_a_recognition_that_does_not_want_native_audio() {
+        let rig = granted();
+        rig.start().unwrap();
+        rig.mic.sink().audio_native(&[0.25; 160], &FakeNative { rate: 48_000, frames: 480 });
+        let log = rig.recognizer.log.lock().unwrap();
+        assert_eq!(log.fed, vec![0.25; 160]);
+        assert!(log.native.is_empty());
+    }
+
+    #[test]
+    fn without_device_buffers_a_recognition_that_wants_them_gets_the_16k_stream() {
+        let mut recognizer = FakeRecognizer::granted();
+        recognizer.native = true;
+        let rig = rig(FakeMicrophone::granted(), recognizer);
+        rig.start().unwrap();
+        rig.mic.sink().audio(&[0.25; 160]);
+        assert_eq!(rig.recognizer.log.lock().unwrap().fed.len(), 160);
+    }
+
+    #[test]
+    fn a_device_buffer_with_no_16k_samples_yet_still_reaches_a_native_recognition() {
+        let mut recognizer = FakeRecognizer::granted();
+        recognizer.native = true;
+        let rig = rig(FakeMicrophone::granted(), recognizer);
+        rig.start().unwrap();
+        rig.mic.sink().audio_native(&[], &FakeNative { rate: 48_000, frames: 2 });
+        assert_eq!(rig.recognizer.log.lock().unwrap().native.len(), 1);
+    }
+
+    #[test]
+    fn no_device_buffers_reach_the_recognizer_after_stop() {
+        let mut recognizer = FakeRecognizer::granted();
+        recognizer.native = true;
+        let rig = rig(FakeMicrophone::granted(), recognizer);
+        rig.start().unwrap();
+        let sink = rig.mic.sink();
+        rig.voice.stop().unwrap();
+        sink.audio_native(&[0.5; 160], &FakeNative { rate: 48_000, frames: 480 });
+        assert!(rig.recognizer.log.lock().unwrap().native.is_empty());
     }
 
     #[test]

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ServerPayload } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
-import { CATALOG, ConnectorManager, ConnectorStore, renderMcpJson } from "../src/connectors.ts";
+import { CATALOG, ConnectorManager, ConnectorStore, renderSigninMcpJson } from "../src/connectors.ts";
 import { tempDir, waitFor } from "./helpers.ts";
 
 const FAKE_CLI = fileURLToPath(new URL("./fixtures/fake-mcp-cli.ts", import.meta.url));
@@ -124,11 +124,11 @@ describe("guided catalog entries", () => {
 	});
 });
 
-describe("guided mcp.json rendering", () => {
+describe("guided mcp.json rendering (the sign-in home)", () => {
 	it("puts typed values in as literals the engine does not run or expand, and hides unknown tools", async () => {
 		const [{ validateMcpServerConfig, getMcpToolExposure }, { resolveConfigValue }] = await engine();
 		const rendered = JSON.parse(
-			renderMcpJson({
+			renderSigninMcpJson({
 				connectors: {
 					discord: { enabled: true, mode: "read_only", values: { token: TOKEN } },
 					slack: { enabled: true, mode: "read_write", values: { client_id: "123.456", client_secret: "" } },
@@ -165,7 +165,7 @@ describe("guided mcp.json rendering", () => {
 
 	it("leaves out a guided connector whose required values are missing", () => {
 		const rendered = JSON.parse(
-			renderMcpJson({ connectors: { discord: { enabled: true, mode: "read_only" } } }),
+			renderSigninMcpJson({ connectors: { discord: { enabled: true, mode: "read_only" } } }),
 		) as { mcpServers: Record<string, unknown> };
 		expect(rendered.mcpServers).toEqual({});
 	});
@@ -232,7 +232,10 @@ describe("guided connector setup", () => {
 		expect(JSON.stringify(manager.list())).not.toContain(TOKEN);
 		expect(JSON.stringify(sent)).not.toContain(TOKEN);
 		expect(logs.join("\n")).not.toContain(TOKEN);
-		expect(readFileSync(join(agentHome, "mcp.json"), "utf8")).toContain("DISCORD_TOKEN");
+		// The real server is only in the daemon's sign-in home; the proxy hands the token to the server it runs.
+		expect(readFileSync(store.signinMcpFile, "utf8")).toContain("DISCORD_TOKEN");
+		expect(readFileSync(join(agentHome, "mcp.json"), "utf8")).not.toContain("DISCORD_TOKEN");
+		expect((await store.credentials("discord")).env).toEqual({ DISCORD_TOKEN: TOKEN });
 		expect(readFileSync(join(dataDir, "connectors.json"), "utf8")).toContain("discord");
 		expect(store.policy().connectors?.discord?.readOnlyTools).toContain("discord_read_messages");
 	});
@@ -249,7 +252,7 @@ describe("guided connector setup", () => {
 	});
 
 	it("asks for Slack's client id and an optional secret, writes them to mcp.json, then signs in on the same flow", async () => {
-		const { manager, store, owner, emit, sent, prompts, agentHome, cliRuns, logs } = setup({
+		const { manager, store, owner, emit, sent, prompts, cliRuns, logs } = setup({
 			FAKE_MCP_CLI_MODE: "auto",
 			FAKE_MCP_CLI_URL: "https://mcp.slack.com/mcp",
 		});
@@ -264,7 +267,7 @@ describe("guided connector setup", () => {
 		const done = await waitFor(() => sent.find((m) => m.type === "auth_done"));
 		expect(done).toMatchObject({ flowId: first.flowId, providerId: "slack", ok: true });
 		expect(cliRuns().map((r) => r.argv)).toEqual([["mcp", "login", "slack"]]);
-		const slack = JSON.parse(readFileSync(join(agentHome, "mcp.json"), "utf8")).mcpServers.slack;
+		const slack = JSON.parse(readFileSync(store.signinMcpFile, "utf8")).mcpServers.slack;
 		expect(slack.oauth).toMatchObject({
 			clientId: "123.456",
 			callbackUrl: "http://localhost:38417/callback",

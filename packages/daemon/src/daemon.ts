@@ -3,6 +3,8 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { extname, join, resolve, sep } from "node:path";
+import type { Duplex } from "node:stream";
+import type { McpTransport } from "@earendil-works/pi-mcp";
 import {
 	type AttachmentLimits,
 	type ClientMessage,
@@ -11,6 +13,7 @@ import {
 	parseClientMessage,
 } from "@gentle-dot/protocol";
 import { type WebSocket, WebSocketServer } from "ws";
+import { AppChannel } from "./app-channel.ts";
 import { AuthManager, type AuthRuntime, createModelAuthRuntime, resolveAgentHome } from "./auth.ts";
 import { type BridgeClient, DotBridge } from "./bridge.ts";
 import {
@@ -21,7 +24,9 @@ import {
 	type McpCli,
 	policyEnv,
 } from "./connectors.ts";
+import { approvalRequest } from "./extensions/approval-guard.ts";
 import { ensureMemoryProject, ensurePrivateDir, isolatedAgentEnv, privateMemory } from "./isolation.ts";
+import { MCP_PREFIX, McpProxy, type ProxiedConnector, type UpstreamCredentials } from "./mcp-proxy.ts";
 import { defaultImportPath, ProfileStore } from "./profiles.ts";
 import { type RotationLimits, rotationLimits } from "./rotation.ts";
 import { AgentSupervisor } from "./supervisor.ts";
@@ -55,6 +60,15 @@ export interface DaemonOptions {
 	connectorCli?: McpCli;
 	/** The home folder "Import my MCP servers" reads other apps' configs from; default `GENTLE_DOT_IMPORT_HOME` or the user's. */
 	importHome?: string;
+	/** The connection the MCP proxy makes to a connector's real server; tests pass a stand-in. */
+	connectorTransport?: (connector: ProxiedConnector, credentials: UpstreamCredentials) => McpTransport;
+	/**
+	 * The desktop app's end of its private channel (fd 3 when the app launched the daemon, S25.1).
+	 * Without it, connector changes and approvals fail closed.
+	 */
+	appChannel?: Duplex;
+	/** How long an approval waits for the app's answer; default 130 s (the app declines at 120 s). */
+	approvalWaitMs?: number;
 	/** Origins allowed to open the WebSocket, besides the daemon's own and the desktop app's. */
 	allowedOrigins?: string[];
 	backoffMs?: number[];
@@ -143,8 +157,26 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		agentHome,
 		workspace: options.workspace,
 		guardPath: APPROVAL_GUARD,
+		env: agentEnv,
 		log,
 	});
+	// The engine reaches every connector through the proxy (S25.4); its key changes with every launch.
+	let port = options.port;
+	const proxy = new McpProxy({
+		connector: (id) => connectorStore.proxyView(id),
+		credentials: (id) => connectorStore.credentials(id),
+		// In the desktop app's native dialog, outside the agent's reach (S25.3).
+		approve: (preview, signal) =>
+			bridge.askInApp(
+				approvalRequest(preview.connector, preview.connectorId, preview.tool, preview.arguments),
+				signal,
+			),
+		...(options.connectorTransport ? { transport: options.connectorTransport } : {}),
+		env: agentEnv,
+		cwd: options.workspace,
+		log,
+	});
+	connectorStore.onUpdated = () => proxy.sync();
 	// The assistant's own engine loads the approval guard for connector actions.
 	const guardArgs = options.agentHome ? ["-e", APPROVAL_GUARD] : [];
 	const supervisor = new AgentSupervisor({
@@ -161,8 +193,10 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		env: agentEnv,
 		// mcp.json is read when a session starts: put back anything not approved, and hand the guard
 		// its policy from the daemon's memory, never from the files.
+		// The proxy's key changes with every launch (after the check, so a change is still reported).
 		prepareSpawn: () => {
 			connectors.enforce();
+			connectorStore.setProxy({ url: `http://127.0.0.1:${port}/mcp`, key: proxy.rotateKey() });
 			return policyEnv(connectorStore);
 		},
 		// The first start in a new home installs the engine's companion packages.
@@ -199,6 +233,12 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		...(options.uploadLimits ? { limits: options.uploadLimits } : {}),
 	});
 	const historyPage = options.historyPage ?? Number(process.env.GENTLE_DOT_HISTORY_PAGE);
+	const app = options.appChannel
+		? new AppChannel(options.appChannel, {
+				log,
+				...(options.approvalWaitMs ? { approvalWaitMs: options.approvalWaitMs } : {}),
+			})
+		: undefined;
 	const bridge = new DotBridge(supervisor, {
 		dataDir: options.dataDir,
 		log,
@@ -207,24 +247,38 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		connectors,
 		voice,
 		uploads,
+		...(app ? { app } : {}),
 		features: { conversations: options.conversations ?? process.env.GENTLE_DOT_CONVERSATIONS === "1" },
 		rotation: options.rotation ?? rotationLimits(process.env),
 		...(Number.isInteger(historyPage) && historyPage > 0 ? { historyPage } : {}),
 	});
+
+	if (app) {
+		app.handler = (method, params) => appRequest(method, params, bridge, connectors, app);
+		// The computer helper belongs to the app that registered it (S24.7).
+		app.onClose(() => {
+			log("the desktop app's channel closed");
+			connectors.unregisterComputer(app);
+		});
+	} else log("no desktop app channel: connector changes and approvals are refused");
 
 	// The files as the daemon writes them (an older version kept a hash), then watched.
 	connectorStore.enforce(false);
 	connectorStore.watch();
 
 	const server = createServer((req, res) => {
-		if (new URL(req.url ?? "/", "http://localhost").pathname === "/upload") {
+		const { pathname } = new URL(req.url ?? "/", "http://localhost");
+		if (pathname === "/upload") {
 			void handleUpload(req, res, token, allowedOrigins(port, options), uploads);
+			return;
+		}
+		if (pathname.startsWith(MCP_PREFIX)) {
+			proxy.handle(req, res);
 			return;
 		}
 		handleHttp(req, res, options.uiDir, bridge);
 	});
 	const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
-	let port = options.port;
 
 	server.on("upgrade", (req, socket, head) => {
 		const url = new URL(req.url ?? "/", "http://localhost");
@@ -251,14 +305,44 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		bridge,
 		supervisor,
 		async close() {
+			app?.close();
 			for (const client of wss.clients) client.terminate();
 			wss.close();
+			// Stops waiting approvals and the connectors' servers (stdio ones are processes of the daemon).
+			await proxy.close();
 			await new Promise<void>((done) => server.close(() => done()));
 			await supervisor.stop();
 			connectorStore.close();
 			await memory?.stop();
 		},
 	};
+}
+
+/** What the desktop app asks over its channel: a window's connector change, or its computer helper. */
+async function appRequest(
+	method: string,
+	params: unknown,
+	bridge: DotBridge,
+	connectors: ConnectorManager,
+	app: AppChannel,
+): Promise<object> {
+	const fields = (typeof params === "object" && params !== null ? params : {}) as Record<string, unknown>;
+	switch (method) {
+		case "command":
+			await bridge.handleFromApp(String(fields.clientId ?? ""), fields.message);
+			return {};
+		case "computer_register": {
+			const parsed = parseClientMessage(JSON.stringify({ ...fields, type: "computer_register" }));
+			if (parsed?.type !== "computer_register") throw new Error("That is not the computer helper's address.");
+			connectors.registerComputer(app, { url: parsed.url, token: parsed.token });
+			return {};
+		}
+		case "computer_unregister":
+			connectors.unregisterComputer(app);
+			return {};
+		default:
+			throw new Error(`Unknown request: ${method}`);
+	}
 }
 
 function mcpCliFromEnv(env: NodeJS.ProcessEnv): McpCli | undefined {

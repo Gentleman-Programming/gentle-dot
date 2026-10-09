@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import type { ClientMessage } from "@gentle-dot/protocol";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type ConnectionInfo, tokenFromLocation } from "./client.ts";
 import { ChatSurface } from "./components/ChatSurface.tsx";
 import type { ComputerControls } from "./components/Computer.tsx";
@@ -7,6 +8,7 @@ import { GlowSurface } from "./components/GlowSurface.tsx";
 import { computerPermissions, requestComputerPermission, setComputerYolo, stopComputer } from "./computer.ts";
 import {
 	connectionInfo,
+	connectorCommand,
 	hidePanel,
 	inDesktop,
 	onDesktopEvent,
@@ -15,7 +17,7 @@ import {
 	togglePanel,
 } from "./desktop.ts";
 import { createUploader } from "./uploads.ts";
-import { useComputerRegistration, useComputerState } from "./useComputer.ts";
+import { useComputerAvailable, useComputerState } from "./useComputer.ts";
 import { useDot } from "./useDot.ts";
 import { usePanelWindow } from "./usePanelWindow.ts";
 
@@ -70,10 +72,17 @@ function Assistant({ surface }: { surface: Surface }) {
 	// Computer control lives in the desktop app only (S24.7); the panel registers the helper.
 	const desktop = inDesktop();
 	const { session: computerSession, yolo } = useComputerState(desktop && surface !== "web");
-	const computerAvailable = useComputerRegistration(
-		desktop && surface === "panel",
-		state.connection === "open",
-		send,
+	const computerAvailable = useComputerAvailable(desktop && surface === "panel", state.connection === "open");
+	// Connector changes go through the app, on behalf of this window (S25.2); the web page has none.
+	const clientId = state.clientId;
+	const appSend = useCallback(
+		(message: ClientMessage) => {
+			if (!clientId) return;
+			connectorCommand(clientId, message).catch((error: unknown) =>
+				dispatch({ type: "notice", level: "error", message: String(error) }),
+			);
+		},
+		[clientId, dispatch],
 	);
 	// The panel's own window (S26): hide the rose, full screen.
 	const panel = usePanelWindow(desktop && surface === "panel");
@@ -171,6 +180,7 @@ function Assistant({ surface }: { surface: Surface }) {
 			dispatch={dispatch}
 			focusKey={focusKey}
 			{...(surface === "panel" ? { onHide: hidePanel } : {})}
+			{...(desktop && surface === "panel" ? { appSend } : {})}
 			{...(computer ? { computer } : {})}
 			{...(desktop && surface === "panel" ? { voiceModel: true } : {})}
 			{...(desktop && surface === "panel" ? { panelWindow: panel.controls } : {})}

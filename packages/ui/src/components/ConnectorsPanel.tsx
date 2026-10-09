@@ -1,4 +1,9 @@
-import type { ConnectorInfo, ConnectorStatus, ImportCandidate } from "@gentle-dot/protocol";
+import {
+	APP_REQUIRED,
+	type ConnectorInfo,
+	type ConnectorStatus,
+	type ImportCandidate,
+} from "@gentle-dot/protocol";
 import { useState } from "react";
 import type { ConnectorsState, DotAction } from "../store.ts";
 import "../accounts.css";
@@ -10,6 +15,11 @@ import { VoiceModelEntry } from "./VoiceModel.tsx";
 interface ConnectorsPanelProps {
 	connectors: ConnectorsState;
 	send: Send;
+	/**
+	 * Connector changes, through the desktop app (S25.2). Without it (the web page, a VPS) the
+	 * controls are disabled with the reason; lists and sign-in answers still go over `send`.
+	 */
+	appSend?: Send;
 	dispatch: (action: DotAction) => void;
 	openUrl: (url: string) => void;
 	/** Computer control, in the desktop app on macOS only. */
@@ -34,6 +44,7 @@ export const addConnectorRequest = (what: string) =>
 export function ConnectorsPanel({
 	connectors,
 	send,
+	appSend,
 	dispatch,
 	openUrl,
 	computer,
@@ -48,9 +59,10 @@ export function ConnectorsPanel({
 		connector: ConnectorInfo,
 		type: "connector_connect" | "connector_signin" | "connector_setup",
 	) => {
+		if (!appSend) return;
 		setGuideFor(undefined);
 		dispatch({ type: "connector_started", connectorId: connector.id });
-		send({ type, connectorId: connector.id });
+		appSend({ type, connectorId: connector.id });
 	};
 	const guided = connectors.list?.find((c) => c.id === guideFor && c.guide);
 	// Values are asked first; once the sign-in page is on its way, it is a sign-in.
@@ -72,6 +84,7 @@ export function ConnectorsPanel({
 			<p className="muted">
 				Let the assistant use your other apps. It always asks you before it sends or changes anything.
 			</p>
+			{appSend ? null : <p className="connector-note">{APP_REQUIRED}</p>}
 
 			{flow ? (
 				<div className="auth-flow">
@@ -113,6 +126,7 @@ export function ConnectorsPanel({
 					openUrl={openUrl}
 					back={() => setGuideFor(undefined)}
 					next={() => start(guided, "connector_connect")}
+					canChange={appSend !== undefined}
 				/>
 			) : (
 				<>
@@ -137,7 +151,9 @@ export function ConnectorsPanel({
 					{connectors.imports ? (
 						<ImportList
 							found={connectors.imports}
-							importServers={(ids) => send({ type: "connector_import", ids })}
+							{...(appSend
+								? { importServers: (ids: string[]) => appSend({ type: "connector_import", ids }) }
+								: {})}
 							close={() => dispatch({ type: "connector_imports_closed" })}
 						/>
 					) : null}
@@ -156,7 +172,7 @@ export function ConnectorsPanel({
 								<ConnectorRow
 									key={connector.id}
 									connector={connector}
-									send={send}
+									{...(appSend ? { appSend } : {})}
 									connect={() =>
 										connector.guide && !connector.added
 											? setGuideFor(connector.id)
@@ -180,10 +196,12 @@ interface ConnectorGuideViewProps {
 	openUrl: (url: string) => void;
 	back: () => void;
 	next: () => void;
+	/** False outside the desktop app: the guide reads, but Continue cannot connect. */
+	canChange: boolean;
 }
 
 /** The steps to create the app or bot the connector signs in with, before "Connect". */
-function ConnectorGuideView({ connector: c, openUrl, back, next }: ConnectorGuideViewProps) {
+function ConnectorGuideView({ connector: c, openUrl, back, next, canChange }: ConnectorGuideViewProps) {
 	const guide = c.guide;
 	if (!guide) return null;
 	return (
@@ -214,7 +232,7 @@ function ConnectorGuideView({ connector: c, openUrl, back, next }: ConnectorGuid
 				<button type="button" onClick={back}>
 					Back
 				</button>
-				<button type="button" className="primary" onClick={next}>
+				<button type="button" className="primary" disabled={!canChange} onClick={next}>
 					Continue
 				</button>
 			</div>
@@ -259,7 +277,8 @@ function AddAnother({ ask, cancel }: { ask: (what: string) => void; cancel: () =
 
 interface ImportListProps {
 	found: ImportCandidate[];
-	importServers: (ids: string[]) => void;
+	/** Missing outside the desktop app: the list reads, but nothing can be imported. */
+	importServers?: (ids: string[]) => void;
 	close: () => void;
 }
 
@@ -317,8 +336,8 @@ function ImportList({ found, importServers, close }: ImportListProps) {
 					<button
 						type="button"
 						className="primary"
-						disabled={count === 0}
-						onClick={() => importServers(chosen)}
+						disabled={count === 0 || !importServers}
+						onClick={() => importServers?.(chosen)}
 					>
 						{count === 0 ? "Import" : `Import ${count} server${count === 1 ? "" : "s"}`}
 					</button>
@@ -347,13 +366,15 @@ function ImportNames({ label, names }: { label: string; names: string[] }) {
 
 interface ConnectorRowProps {
 	connector: ConnectorInfo;
-	send: Send;
+	/** Missing outside the desktop app: every control is disabled. */
+	appSend?: Send;
 	connect: () => void;
 	signIn: () => void;
 	setUp: () => void;
 }
 
-function ConnectorRow({ connector: c, send, connect, signIn, setUp }: ConnectorRowProps) {
+function ConnectorRow({ connector: c, appSend, connect, signIn, setUp }: ConnectorRowProps) {
+	const locked = !appSend;
 	const nameId = `connector-${c.id}`;
 	const readOnlyNote = c.custom
 		? "Its tools stay hidden until you choose Read and send. Then it asks you before every action."
@@ -387,7 +408,8 @@ function ConnectorRow({ connector: c, send, connect, signIn, setUp }: ConnectorR
 								type="radio"
 								name={`mode-${c.id}`}
 								checked={c.mode === mode}
-								onChange={() => send({ type: "connector_mode", connectorId: c.id, mode })}
+								disabled={locked}
+								onChange={() => appSend?.({ type: "connector_mode", connectorId: c.id, mode })}
 							/>
 							{label}
 						</label>
@@ -396,22 +418,40 @@ function ConnectorRow({ connector: c, send, connect, signIn, setUp }: ConnectorR
 			) : null}
 			<div className="provider-actions">
 				{c.enabled ? null : (
-					<button type="button" className="primary" aria-label={`Connect ${c.name}`} onClick={connect}>
+					<button
+						type="button"
+						className="primary"
+						aria-label={`Connect ${c.name}`}
+						disabled={locked}
+						onClick={connect}
+					>
 						Connect
 					</button>
 				)}
 				{c.enabled && c.status === "needs_setup" ? (
-					<button type="button" className="primary" aria-label={`Set up ${c.name}`} onClick={setUp}>
+					<button
+						type="button"
+						className="primary"
+						aria-label={`Set up ${c.name}`}
+						disabled={locked}
+						onClick={setUp}
+					>
 						Set up
 					</button>
 				) : null}
 				{canSignIn && c.status !== "connected" ? (
-					<button type="button" className="primary" aria-label={`Sign in to ${c.name}`} onClick={signIn}>
+					<button
+						type="button"
+						className="primary"
+						aria-label={`Sign in to ${c.name}`}
+						disabled={locked}
+						onClick={signIn}
+					>
 						Sign in
 					</button>
 				) : null}
 				{canSignIn && c.status === "connected" ? (
-					<button type="button" aria-label={`Sign in to ${c.name} again`} onClick={signIn}>
+					<button type="button" aria-label={`Sign in to ${c.name} again`} disabled={locked} onClick={signIn}>
 						Sign in again
 					</button>
 				) : null}
@@ -419,7 +459,8 @@ function ConnectorRow({ connector: c, send, connect, signIn, setUp }: ConnectorR
 					<button
 						type="button"
 						aria-label={`Disconnect ${c.name}`}
-						onClick={() => send({ type: "connector_disconnect", connectorId: c.id })}
+						disabled={locked}
+						onClick={() => appSend?.({ type: "connector_disconnect", connectorId: c.id })}
 					>
 						Disconnect
 					</button>
@@ -429,7 +470,8 @@ function ConnectorRow({ connector: c, send, connect, signIn, setUp }: ConnectorR
 						type="button"
 						className="link"
 						aria-label={`Remove ${c.name}`}
-						onClick={() => send({ type: "connector_remove", connectorId: c.id })}
+						disabled={locked}
+						onClick={() => appSend?.({ type: "connector_remove", connectorId: c.id })}
 					>
 						Remove
 					</button>

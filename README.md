@@ -149,9 +149,9 @@ A small Node daemon starts the agent engine (Gentle Shell, `gentle-shell --mode 
 
 ## Security status
 
-What already holds: computer control's grant, panic stop, blocklist, rate limit, and risky-action confirmations are enforced by the desktop app, not the agent, and the agent's processes do not inherit the app's macOS permissions. Credentials are typed in the app, never in the chat, and the assistant cannot read them with its file tools.
+What already holds: computer control's grant, panic stop, blocklist, rate limit, and risky-action confirmations are enforced by the desktop app, not the agent, and the agent's processes do not inherit the app's macOS permissions. Connectors are reached only through the assistant's own proxy, which hides what their mode does not allow. Approving a connector's action and changing a connector (its mode, connecting, removing, importing) happen only in the desktop app that started the assistant, in native dialogs, over a private channel the agent cannot open; in the browser those controls are read-only. Credentials are typed in the app, never in the chat, and the assistant cannot read them with its file tools.
 
-What does not yet: the agent has a shell, and its shell commands are checked on a best-effort basis only. Connector tokens live in files rather than the Keychain, and the approval cards travel over a channel the agent could reach. Moving connector traffic and approvals out of the agent's reach (a daemon-side MCP proxy with Keychain tokens and native approvals) is the next milestone before a stable release.
+What does not yet: the agent has a shell, and its shell commands are checked on a best-effort basis only. Connector tokens live in files rather than the Keychain. Moving them to the Keychain, and protecting the connector settings file, are the next steps before a stable release.
 
 <div align="right"><a href="#top">Back to top</a></div>
 

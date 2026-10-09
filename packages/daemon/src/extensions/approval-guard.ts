@@ -1,12 +1,15 @@
 /**
  * Approval guard, loaded into the engine with `-e` (docs/design.md §3).
  *
- * Connector tools (`mcp__<server>__<tool>`) run without asking only when they are read-only:
- * the server marks them `readOnlyHint: true` AND they are on the connector's curated list.
- * Anything else asks the user through a confirm card with a preview, and is blocked when the
- * user declines, when nobody can answer, or when the connector is set to read only. Calls made
- * by other tools (nested calls) go through the same hook. The built-in computer server (the desktop
- * app's helper, S24) runs without cards: the app grants sessions and confirms risky actions itself.
+ * The connectors the user added reach the engine only through the daemon's MCP proxy (S25.4), which
+ * filters their tools by mode, refuses hidden ones, and asks before every sending action, so their
+ * tools (`mcp__<server>__<tool>`) pass here. A connector tool the proxy does not front (a server the
+ * daemon did not put in `mcp.json`) runs without asking only when it is read-only: the server marks
+ * it `readOnlyHint: true` AND it is on the connector's curated list. Anything else asks the user
+ * through a confirm card with a preview, and is blocked when the user declines, when nobody can
+ * answer, or when the connector is set to read only or is not approved. Calls made by other tools
+ * (nested calls) go through the same hook. The built-in computer server (the desktop app's helper,
+ * S24) runs without cards: the app grants sessions and confirms risky actions itself.
  *
  * The policy (approved connectors, modes, curated lists, protected files) comes from the
  * daemon in this process's environment, which the assistant cannot change. Without a valid
@@ -21,7 +24,8 @@
  * removed), the data folder, the keychain, or the engine's home variable is blocked. That check is
  * best effort, NOT a security boundary: the assistant runs as the user with a shell, so a command
  * can still build a name the check does not see. The daemon keeps the connector state in memory
- * and puts changed files back (docs/design.md, Connectors), and stage 2 (S25) moves tokens out of reach.
+ * and puts changed files back (docs/design.md, Connectors); the engine's `mcp.json` holds no tokens
+ * (the proxy injects them upstream), and stage 2 (S25) moves the tokens out of reach.
  * The assistant may draft a new connector with `propose_connector`: the draft goes to the daemon as a
  * status update on the engine's own output (`ctx.ui.setStatus`), which only the daemon reads, and the
  * model hears only that the user will review it. The daemon shows the draft as a card and adds it
@@ -121,6 +125,11 @@ export interface ConnectorPolicy {
 	 * helper, which asks the user itself (session grant, risky-action confirmations) outside the engine.
 	 */
 	builtin?: string[];
+	/**
+	 * Connectors the daemon's MCP proxy fronts (S25.4): the proxy shows only what their mode allows,
+	 * refuses hidden tools, and asks before every sending action, so their tools run without a card here.
+	 */
+	proxied?: string[];
 }
 
 /** The only server that can be built in. */
@@ -165,14 +174,27 @@ const PREVIEW_LIMIT = 8000;
 /** Like the engine's tool names: everything but letters, digits, and `_` becomes `_`. */
 const toolId = (server: string, tool: string) => `mcp__${server}__${tool}`.replace(/[^A-Za-z0-9_]/g, "_");
 
-/** Read-only only when the server declares it AND the curated list names it (fail closed). */
+/**
+ * The read-only rule, shared with the daemon's MCP proxy: a tool (by its MCP name) only reads when
+ * the server declares it (`readOnlyHint: true`) AND the connector's curated list names it (fail closed).
+ */
+export function isReadOnlyTool(
+	tool: string,
+	readOnlyHint: unknown,
+	readOnlyTools: readonly string[],
+): boolean {
+	return readOnlyHint === true && readOnlyTools.includes(tool);
+}
+
+/** {@link isReadOnlyTool} for an engine tool name (`mcp__<server>__<tool>`). */
 export function isReadOnlyCall(
 	server: string,
 	toolName: string,
 	readOnlyHint: unknown,
 	readOnlyTools: readonly string[],
 ): boolean {
-	return readOnlyHint === true && readOnlyTools.some((tool) => toolId(server, tool) === toolName);
+	const tool = readOnlyTools.find((name) => toolId(server, name) === toolName);
+	return tool !== undefined && isReadOnlyTool(tool, readOnlyHint, readOnlyTools);
 }
 
 /** The policy from the daemon, or undefined when it is missing or malformed. */
@@ -200,12 +222,21 @@ export function parsePolicy(raw: string | undefined): ConnectorPolicy | undefine
 			entry.readOnlyTools.every((tool) => typeof tool === "string");
 		if (!valid) return undefined;
 	}
-	const { builtin } = policy;
-	if (builtin === undefined) return { connectors, protectedPaths: policy.protectedPaths };
+	const { builtin, proxied } = policy;
 	const known: readonly string[] = BUILTIN_SERVERS;
-	if (!Array.isArray(builtin) || !builtin.every((id) => typeof id === "string" && known.includes(id)))
+	if (
+		builtin !== undefined &&
+		(!Array.isArray(builtin) || !builtin.every((id) => typeof id === "string" && known.includes(id)))
+	)
 		return undefined;
-	return { connectors, protectedPaths: policy.protectedPaths, builtin };
+	if (proxied !== undefined && (!Array.isArray(proxied) || !proxied.every((id) => typeof id === "string")))
+		return undefined;
+	return {
+		connectors,
+		protectedPaths: policy.protectedPaths,
+		...(builtin !== undefined ? { builtin } : {}),
+		...(proxied !== undefined ? { proxied } : {}),
+	};
 }
 
 export function decide(call: GuardCall, policy: ConnectorPolicy): GuardDecision {
@@ -230,6 +261,8 @@ export function decide(call: GuardCall, policy: ConnectorPolicy): GuardDecision 
 	}
 	if (!toolName.startsWith("mcp__")) return { action: "pass" };
 	if (policy.builtin?.some((id) => toolName.startsWith(toolId(id, "")))) return { action: "pass" };
+	// The proxy decides, and asks the user itself; a card here would ask twice.
+	if (policy.proxied?.some((id) => toolName.startsWith(toolId(id, "")))) return { action: "pass" };
 
 	const approved = policy.connectors;
 	const server = approved
@@ -249,30 +282,67 @@ export function decide(call: GuardCall, policy: ConnectorPolicy): GuardDecision 
 			action: "block",
 			reason: `${name} is set to read only, so this action was not run. If the user wants it, ask them to switch ${name} to "Read and send" in Connectors.`,
 		};
-	const action = describeAction(toolName, server ?? "");
 	return {
 		action: "ask",
+		...approvalCard(name, server ?? "", toolName.slice(toolId(server ?? "", "").length), input),
+	};
+}
+
+/**
+ * The approval card for a sending action: the action in words and every argument. Shared with the
+ * daemon's MCP proxy, which asks before it forwards a connector's sending action (S25.4).
+ */
+export function approvalCard(
+	name: string,
+	server: string,
+	tool: string,
+	input: Record<string, unknown>,
+): { title: string; message: string } {
+	const action = describeAction(tool, server);
+	return {
 		title: `Allow ${name} to ${action}?`,
 		message: `The assistant wants to ${action} in ${name}.\n\n${preview(input)}`.trimEnd(),
 	};
 }
 
-/** `mcp__notion__notion_create_pages` -> "create pages". */
-function describeAction(toolName: string, server: string): string {
-	let action = toolName.slice(toolId(server, "").length);
-	if (action.startsWith(`${server}_`)) action = action.slice(server.length + 1);
-	const words = action.split("_").filter(Boolean).join(" ");
+/**
+ * The same approval for the desktop app's native dialog (S25.3): the action in words and every
+ * argument as its own field, key fields first. The app sanitizes and shortens what it shows.
+ */
+export function approvalRequest(
+	name: string,
+	server: string,
+	tool: string,
+	input: Record<string, unknown>,
+): { connector: string; action: string; preview: { name: string; value: unknown }[] } {
+	return {
+		connector: name,
+		action: describeAction(tool, server),
+		preview: rankedKeys(input).map((key) => ({ name: key, value: input[key] })),
+	};
+}
+
+/** The argument names, key fields first. */
+function rankedKeys(input: Record<string, unknown>): string[] {
+	const rank = (key: string) => {
+		const index = KEY_FIELDS.findIndex((pattern) => pattern.test(key));
+		return index < 0 ? KEY_FIELDS.length : index;
+	};
+	return Object.keys(input).sort((a, b) => rank(a) - rank(b));
+}
+
+/** `notion_create_pages` (or `notion-create-pages`) of `notion` -> "create pages". */
+function describeAction(tool: string, server: string): string {
+	let action = tool;
+	if (action.startsWith(`${server}_`) || action.startsWith(`${server}-`))
+		action = action.slice(server.length + 1);
+	const words = action.split(/[_-]/).filter(Boolean).join(" ");
 	return words ? words.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase() : "use a tool";
 }
 
 /** Every argument, key fields first, so the user approves what they saw; very long ones say what was cut. */
 function preview(input: Record<string, unknown>): string {
-	const rank = (key: string) => {
-		const index = KEY_FIELDS.findIndex((pattern) => pattern.test(key));
-		return index < 0 ? KEY_FIELDS.length : index;
-	};
-	const text = Object.keys(input)
-		.sort((a, b) => rank(a) - rank(b))
+	const text = rankedKeys(input)
 		.map((key) => `${key}: ${show(input[key])}`)
 		.join("\n");
 	if (text.length <= PREVIEW_LIMIT) return text;

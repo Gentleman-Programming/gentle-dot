@@ -15,6 +15,7 @@ import approvalGuard, {
 	PROPOSE_TOOL,
 	proposeConnector,
 } from "../src/extensions/approval-guard.ts";
+import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
@@ -234,7 +235,7 @@ describe("connector drafts", () => {
 	});
 
 	it("on approval asks for each secret in the app, then adds the server read only with every tool hidden", async () => {
-		const { manager, store, owner, emit, sent, prompts, agentHome, logs, changes } = setup();
+		const { manager, store, owner, emit, sent, prompts, logs, changes } = setup();
 		const draft = manager.propose(JSON.stringify(stdioDraft));
 		expect(manager.decideDraft(owner, draft?.draftId ?? "", true, emit)).toBeUndefined();
 		const prompt = await waitFor(() => prompts()[0]);
@@ -250,7 +251,7 @@ describe("connector drafts", () => {
 			mode: "read_only",
 			values: { GITHUB_PERSONAL_ACCESS_TOKEN: SECRET },
 		});
-		const server = JSON.parse(readFileSync(join(agentHome, "mcp.json"), "utf8")).mcpServers.github;
+		const server = JSON.parse(readFileSync(store.signinMcpFile, "utf8")).mcpServers.github;
 		expect(server).toMatchObject({
 			command: "npx",
 			args: ["-y", "@modelcontextprotocol/server-github@2025.4.8"],
@@ -281,8 +282,9 @@ describe("connector drafts", () => {
 		// Read and send shows every tool, and each call asks (no curated list).
 		manager.setMode("github", "read_write");
 		expect(
-			JSON.parse(readFileSync(join(agentHome, "mcp.json"), "utf8")).mcpServers.github.toolExposure,
+			JSON.parse(readFileSync(store.signinMcpFile, "utf8")).mcpServers.github.toolExposure,
 		).toBeUndefined();
+		expect(store.proxyView("github")).toMatchObject({ mode: "read_write", readOnlyTools: [] });
 	});
 
 	it("gives a draft with a taken name its own id, and signs in when it needs OAuth", async () => {
@@ -325,20 +327,30 @@ afterEach(async () => {
 	await Promise.all(daemons.splice(0).map((d) => d.close()));
 });
 
-async function connect(d: DotDaemon) {
+async function connect(d: DotDaemon, app: ReturnType<typeof fakeApp>) {
 	const ws = new WebSocket(`ws://127.0.0.1:${d.port}/ws`);
 	const messages: ServerMessage[] = [];
 	ws.on("message", (data) => messages.push(JSON.parse(String(data)) as ServerMessage));
 	await new Promise((resolve) => ws.on("open", resolve));
 	ws.send(JSON.stringify({ type: "hello", token: d.token, protocol: 1 }));
-	await waitFor(() => messages.some((m) => m.type === "ready"));
-	return { ws, messages, send: (m: object) => ws.send(JSON.stringify(m)) };
+	const ready = await waitFor(() => messages.find((m) => m.type === "ready"));
+	const clientId = ready.type === "ready" ? (ready.clientId ?? "") : "";
+	return {
+		ws,
+		messages,
+		send: sendLikeThePanel(
+			app,
+			() => clientId,
+			(m) => ws.send(JSON.stringify(m)),
+		),
+	};
 }
 
 describe("connector drafts through the daemon", () => {
 	it("shows the engine's draft as a card in every window; only the user's answer adds it", async () => {
 		const dataDir = tempDir();
 		const fake = fakeAuthRuntime();
+		const app = fakeApp([], "allow");
 		const d = await startDaemon({
 			port: 0,
 			host: "127.0.0.1",
@@ -352,9 +364,10 @@ describe("connector drafts through the daemon", () => {
 			authRuntime: async () => fake.runtime,
 			connectorCli: { command: process.execPath, args: [FAKE_CLI] },
 			importHome: tempDir(),
+			appChannel: app.daemonEnd,
 		});
 		daemons.push(d);
-		const first = await connect(d);
+		const first = await connect(d, app);
 		first.send({ type: "send", text: `propose:${JSON.stringify({ ...stdioDraft, env_names: [] })}` });
 		const card = await waitFor(() =>
 			first.messages.find(
@@ -363,7 +376,7 @@ describe("connector drafts through the daemon", () => {
 		);
 		expect(card.draft).toMatchObject({ name: "GitHub", command: "npx", envNames: [] });
 		// A window that opens later sees the waiting card too.
-		const second = await connect(d);
+		const second = await connect(d, app);
 		await waitFor(() => second.messages.some((m) => m.type === "connector_draft"));
 		const mcpFile = join(dataDir, "agent", "mcp.json");
 		const before = existsSync(mcpFile) ? readFileSync(mcpFile, "utf8") : undefined;
@@ -381,10 +394,15 @@ describe("connector drafts through the daemon", () => {
 			),
 		);
 		expect(
-			JSON.parse(readFileSync(join(dataDir, "agent", "mcp.json"), "utf8")).mcpServers.github.toolExposure,
+			JSON.parse(readFileSync(join(dataDir, "connector-signin", "mcp.json"), "utf8")).mcpServers.github
+				.toolExposure,
 		).toEqual({
 			"*": "hidden",
 		});
+		// The engine reaches it only through the proxy.
+		expect(
+			JSON.parse(readFileSync(join(dataDir, "agent", "mcp.json"), "utf8")).mcpServers.github.url,
+		).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/mcp\/github$/);
 		first.ws.close();
 		second.ws.close();
 	});

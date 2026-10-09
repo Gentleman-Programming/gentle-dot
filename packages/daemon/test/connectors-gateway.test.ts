@@ -5,11 +5,15 @@ import type { ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
 const FAKE_CLI = fileURLToPath(new URL("./fixtures/fake-mcp-cli.ts", import.meta.url));
 const GUARD = fileURLToPath(new URL("../src/extensions/approval-guard.ts", import.meta.url));
+
+/** The engine's mcp.json without the proxy key, which changes with every engine launch. */
+const withoutKey = (text: string) => text.replace(/Bearer [^"]+/g, "Bearer <key>");
 
 const daemons: DotDaemon[] = [];
 afterEach(async () => {
@@ -23,6 +27,8 @@ async function setup(options: { home?: boolean; cliMode?: "auto" } = {}) {
 	const argsFile = join(dataDir, "agent-args.json");
 	const logs: string[] = [];
 	const fake = fakeAuthRuntime();
+	// Connector changes come from the desktop app (S25.2); it allows the ones it confirms.
+	const app = fakeApp([], "allow");
 	const d = await startDaemon({
 		port: 0,
 		host: "127.0.0.1",
@@ -41,6 +47,7 @@ async function setup(options: { home?: boolean; cliMode?: "auto" } = {}) {
 		...(options.home ? { agentHome } : {}),
 		authRuntime: async () => fake.runtime,
 		connectorCli: { command: process.execPath, args: [FAKE_CLI] },
+		appChannel: app.daemonEnd,
 		log: (line) => logs.push(line),
 	});
 	daemons.push(d);
@@ -53,19 +60,24 @@ async function setup(options: { home?: boolean; cliMode?: "auto" } = {}) {
 		logs,
 		agentEnv,
 		agentArgs,
-		...(await connect(d)),
-		connect: () => connect(d),
+		...(await connect(d, app)),
+		connect: () => connect(d, app),
 	};
 }
 
-async function connect(d: DotDaemon) {
+async function connect(d: DotDaemon, app: ReturnType<typeof fakeApp>) {
 	const ws = new WebSocket(`ws://127.0.0.1:${d.port}/ws`);
 	const messages: ServerMessage[] = [];
 	ws.on("message", (data) => messages.push(JSON.parse(String(data)) as ServerMessage));
 	await new Promise((resolve) => ws.on("open", resolve));
 	ws.send(JSON.stringify({ type: "hello", token: d.token, protocol: 1 }));
-	await waitFor(() => messages.some((m) => m.type === "ready"));
-	const send = (m: object) => ws.send(JSON.stringify(m));
+	const ready = await waitFor(() => messages.find((m) => m.type === "ready"));
+	const clientId = ready.type === "ready" ? (ready.clientId ?? "") : "";
+	const send = sendLikeThePanel(
+		app,
+		() => clientId,
+		(m) => ws.send(JSON.stringify(m)),
+	);
 	function find<T extends ServerMessage["type"]>(
 		type: T,
 		where: (m: Extract<ServerMessage, { type: T }>) => boolean = () => true,
@@ -149,7 +161,8 @@ describe("connectors over the protocol", () => {
 		const approved = readFileSync(file, "utf8");
 		writeFileSync(file, JSON.stringify({ mcpServers: { evil: { command: "sh", args: ["-c", "id"] } } }));
 		await d.supervisor.restart();
-		expect(readFileSync(file, "utf8")).toBe(approved);
+		expect(withoutKey(readFileSync(file, "utf8"))).toBe(withoutKey(approved));
+		expect(readFileSync(file, "utf8")).not.toBe(approved);
 		expect(logs.some((l) => l.includes("put back"))).toBe(true);
 	});
 
@@ -170,8 +183,9 @@ describe("connectors over the protocol", () => {
 		// The new engine got the user's state, not the edited files.
 		const policy = JSON.parse(agentEnv().GENTLE_DOT_CONNECTOR_POLICY ?? "{}");
 		expect(policy.connectors).toEqual({});
+		expect(policy.proxied).toEqual([]);
 		expect(readFileSync(join(dataDir, "connectors.json"), "utf8")).toBe(approved.connectors);
-		expect(readFileSync(join(agentHome, "mcp.json"), "utf8")).toBe(approved.mcp);
+		expect(withoutKey(readFileSync(join(agentHome, "mcp.json"), "utf8"))).toBe(withoutKey(approved.mcp));
 		expect(existsSync(join(dataDir, "workspace", ".pi", "mcp.json"))).toBe(false);
 		await find("toast", (m) => m.message === "A change to your connectors was blocked.");
 		send({ type: "connectors_list" });

@@ -227,8 +227,9 @@ describe.skipIf(!enabled)("@real-agent connector probe", () => {
 				version: 1,
 				connectors: { notion: { enabled: false, mode: "read_only" } },
 			});
+			// The engine reaches Notion only through the daemon's proxy (S25.4), and it stays off.
 			expect(JSON.parse(summary.mcpJson).mcpServers.notion).toMatchObject({
-				url: "https://mcp.notion.com/mcp",
+				url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/mcp\/notion$/),
 				exposure: "direct",
 				enabled: false,
 			});

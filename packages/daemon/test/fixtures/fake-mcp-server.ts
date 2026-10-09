@@ -2,8 +2,12 @@
 // A minimal MCP server over stdio (newline-delimited JSON-RPC) with three tools: `list_messages`
 // and `notion-search` (named like Notion's curated one), which declare themselves read-only, and
 // `send_message`, which does not. Each call is appended to
-// FAKE_MCP_SERVER_CALLS as JSONL, so a test can tell which calls really ran.
-import { appendFileSync } from "node:fs";
+// FAKE_MCP_SERVER_CALLS as JSONL, so a test can tell which calls really ran, and the process id
+// is written to FAKE_MCP_SERVER_PID_FILE when set.
+import { appendFileSync, writeFileSync } from "node:fs";
+
+if (process.env.FAKE_MCP_SERVER_PID_FILE)
+	writeFileSync(process.env.FAKE_MCP_SERVER_PID_FILE, String(process.pid));
 
 type Request = { jsonrpc: "2.0"; id?: number | string; method: string; params?: Record<string, unknown> };
 
