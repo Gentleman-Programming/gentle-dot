@@ -90,6 +90,39 @@ export function SendIcon() {
 	);
 }
 
+/** A microphone: talk to the assistant. */
+export function MicIcon() {
+	return (
+		<Icon>
+			<rect x="9" y="3" width="6" height="11" rx="3" />
+			<path d="M5 11a7 7 0 0 0 14 0" />
+			<path d="M12 18v3" />
+		</Icon>
+	);
+}
+
+/** A speaker: spoken replies are on. */
+export function SpeakerIcon() {
+	return (
+		<Icon>
+			<path d="M4 9v6h4l5 4V5L8 9Z" />
+			<path d="M16.5 8.5a5 5 0 0 1 0 7" />
+			<path d="M19 6a8.5 8.5 0 0 1 0 12" />
+		</Icon>
+	);
+}
+
+/** A crossed speaker: spoken replies are muted. */
+export function SpeakerOffIcon() {
+	return (
+		<Icon>
+			<path d="M4 9v6h4l5 4V5L8 9Z" />
+			<path d="m17 9 5 6" />
+			<path d="m22 9-5 6" />
+		</Icon>
+	);
+}
+
 /** The rose (the app's favicon drawing): who the user is talking to. */
 export function RoseGlyph() {
 	return (

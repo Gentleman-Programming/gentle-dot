@@ -3,6 +3,7 @@ import { useState } from "react";
 import { openUrl as openExternal } from "../desktop.ts";
 import { activeTitle, type DotAction, type DotState, isBusy, needsAccount } from "../store.ts";
 import type { PanelWindowControls } from "../usePanelWindow.ts";
+import { useVoice, type VoiceControls } from "../useVoice.ts";
 import { AccountsPanel } from "./AccountsPanel.tsx";
 import { AskCard } from "./AskCard.tsx";
 import { Composer } from "./Composer.tsx";
@@ -21,6 +22,8 @@ import {
 	PlusIcon,
 	ProfilesIcon,
 	RoseGlyph,
+	SpeakerIcon,
+	SpeakerOffIcon,
 } from "./icons.tsx";
 import { MessageList } from "./MessageList.tsx";
 import { ProfilesPanel } from "./ProfilesPanel.tsx";
@@ -81,6 +84,7 @@ export function ChatSurface({
 		dispatch({ type: "connectors", open: true });
 	};
 	const [showConversations, setShowConversations] = useState(false);
+	const voice = useVoice(state, send);
 	/** A switch that waits for the user to confirm stopping the running answer. */
 	const [pendingSwitch, setPendingSwitch] = useState<SwitchMessage | undefined>(undefined);
 	const switchTo = (message: SwitchMessage) => {
@@ -148,6 +152,7 @@ export function ChatSurface({
 				>
 					<ConnectorsIcon />
 				</button>
+				{voice.mic ? <MuteButton voice={voice} /> : null}
 				{conversations ? (
 					<button
 						type="button"
@@ -321,8 +326,26 @@ export function ChatSurface({
 				send={send}
 				focusKey={focusKey}
 				onStartTyping={closeOptions}
+				voice={voice}
 			/>
 		</div>
+	);
+}
+
+/** Spoken replies on or off (S30.3); the choice is remembered. */
+function MuteButton({ voice }: { voice: VoiceControls }) {
+	const label = voice.muted ? "Unmute spoken replies" : "Mute spoken replies";
+	return (
+		<button
+			type="button"
+			className="icon"
+			aria-label={label}
+			title={label}
+			aria-pressed={voice.muted}
+			onClick={() => voice.setMuted(!voice.muted)}
+		>
+			{voice.muted ? <SpeakerOffIcon /> : <SpeakerIcon />}
+		</button>
 	);
 }
 

@@ -9,6 +9,7 @@ import {
 	parseQueue,
 	type RoleRoute,
 	type ServerPayload,
+	type VoiceCapability,
 } from "@gentle-dot/protocol";
 import type { AuthManager } from "./auth.ts";
 import type { ConnectorManager, ConnectorRefusal } from "./connectors.ts";
@@ -30,6 +31,7 @@ import {
 } from "./profiles.ts";
 import { DEFAULT_ROTATION, type RotationLimits, SessionRotator } from "./rotation.ts";
 import type { AgentRecord, AgentSupervisor, SupervisorEvent } from "./supervisor.ts";
+import type { VoiceService } from "./voice.ts";
 import { isBlockedInput, presentText, shouldShowToast } from "./white-label.ts";
 
 export interface BridgeClient {
@@ -42,6 +44,8 @@ export interface BridgeOptions {
 	auth?: AuthManager;
 	profiles?: ProfileStore;
 	connectors?: ConnectorManager;
+	/** Speech to text and text to speech with an OpenAI API key (S30.2). */
+	voice?: VoiceService;
 	/** How long switching conversations waits for a running answer to stop. Default 10 s. */
 	stopTimeoutMs?: number;
 	/** Optional parts of the app; by default one continuous chat. */
@@ -143,6 +147,7 @@ export class DotBridge {
 			...this.conversationRef(),
 			...(this.supervisor.model ? { model: this.supervisor.model } : {}),
 			features: this.features,
+			...(this.options.voice ? { voice: this.options.voice.capability() } : {}),
 		});
 		if (this.queued()) this.deliver(client, { type: "queue", ...this.queue });
 		for (const { ask } of this.asks.values()) this.deliver(client, { type: "ask", ask });
@@ -322,6 +327,37 @@ export class DotBridge {
 					});
 				}
 				return;
+			case "voice_transcribe":
+			case "voice_speak": {
+				const { requestId } = message;
+				const voice = this.options.voice;
+				if (!voice) {
+					this.deliver(client, {
+						type: "voice_unavailable",
+						requestId,
+						reason: "Voice is not available here.",
+					});
+					return;
+				}
+				if (message.type === "voice_transcribe") {
+					const result = await voice.transcribe(message.mime, message.data);
+					this.deliver(
+						client,
+						result.ok
+							? { type: "voice_transcript", requestId, text: result.text }
+							: { type: "voice_unavailable", requestId, reason: result.reason },
+					);
+					return;
+				}
+				const result = await voice.speak(message.text);
+				this.deliver(
+					client,
+					result.ok
+						? { type: "voice_speech", requestId, mime: result.mime, data: result.data }
+						: { type: "voice_unavailable", requestId, reason: result.reason },
+				);
+				return;
+			}
 			case "auth_logout": {
 				const refused = await this.requireAuth().logout(message.providerId);
 				if (refused) this.deliver(client, { type: "error", ...refused });
@@ -474,7 +510,18 @@ export class DotBridge {
 
 	private async sendProviders(client: BridgeClient, open = false): Promise<void> {
 		const providers = await this.requireAuth().providers();
-		this.deliver(client, { type: "auth_providers", providers, ...(open ? { open: true } : {}) });
+		this.deliver(client, {
+			type: "auth_providers",
+			providers,
+			...(open ? { open: true } : {}),
+			...(await this.voiceCapability()),
+		});
+	}
+
+	/** The voice capability, checked now, for the accounts list. */
+	private async voiceCapability(): Promise<{ voice?: VoiceCapability }> {
+		const voice = this.options.voice;
+		return voice ? { voice: await voice.refresh() } : {};
 	}
 
 	private requireConnectors(): ConnectorManager {
@@ -640,7 +687,9 @@ export class DotBridge {
 	private afterCredentialsChange(): void {
 		void this.requireAuth()
 			.providers()
-			.then((providers) => this.broadcast({ type: "auth_providers", providers }))
+			.then(async (providers) =>
+				this.broadcast({ type: "auth_providers", providers, ...(await this.voiceCapability()) }),
+			)
 			.catch((error: Error) => this.log(`could not list providers: ${error.message}`));
 		if (this.supervisor.busy) {
 			this.restartPending = true;

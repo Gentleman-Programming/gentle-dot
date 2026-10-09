@@ -44,6 +44,22 @@ export interface Features {
 	conversations: boolean;
 }
 
+/** What talking to the assistant can use through the daemon (an OpenAI API key, S30.2). */
+export interface VoiceCapability {
+	/** The daemon can turn a recording into text. */
+	transcribe: boolean;
+	/** The daemon can read a reply aloud. */
+	speak: boolean;
+}
+
+/**
+ * Longest base64 recording in `voice_transcribe`: with the rest of the frame it stays under the
+ * daemon's 1 MiB WebSocket limit (about 700 KB of audio, over a minute of compressed speech).
+ */
+export const MAX_VOICE_AUDIO = 960_000;
+/** Longest text `voice_speak` reads aloud (OpenAI's speech input limit). */
+export const MAX_VOICE_TEXT = 4096;
+
 export interface ConversationSummary {
 	id: string;
 	title: string;
@@ -279,10 +295,20 @@ export type ClientMessage =
 	| { type: "connector_import"; ids: string[] }
 	/** The desktop app's computer-control helper (macOS), at `http://127.0.0.1:<port>/mcp` with its key. */
 	| { type: "computer_register"; url: string; token: string }
-	| { type: "computer_unregister" };
+	| { type: "computer_unregister" }
+	/** A recording to turn into text: its audio type and the bytes in base64. */
+	| { type: "voice_transcribe"; requestId: string; mime: string; data: string }
+	| { type: "voice_speak"; requestId: string; text: string };
 
 export type ServerPayload =
-	| { type: "ready"; agentState: AgentState; conversationId?: string; model?: string; features?: Features }
+	| {
+			type: "ready";
+			agentState: AgentState;
+			conversationId?: string;
+			model?: string;
+			features?: Features;
+			voice?: VoiceCapability;
+	  }
 	| { type: "agent_state"; state: AgentState }
 	| { type: "user_message"; messageId: string; text: string }
 	| { type: "message_delta"; messageId: string; delta: string }
@@ -311,7 +337,8 @@ export type ServerPayload =
 	| { type: "interrupted" }
 	| ({ type: "queue" } & MessageQueue)
 	| { type: "error"; code: string; message: string }
-	| { type: "auth_providers"; providers: AuthProvider[]; open?: boolean }
+	/** `voice` changes with the accounts: an OpenAI API key turns it on. */
+	| { type: "auth_providers"; providers: AuthProvider[]; open?: boolean; voice?: VoiceCapability }
 	| { type: "auth_prompt"; prompt: AuthPrompt }
 	| { type: "auth_event"; flowId: string; event: AuthEvent }
 	| { type: "auth_done"; flowId: string; providerId: string; ok: boolean; message?: string }
@@ -332,7 +359,12 @@ export type ServerPayload =
 	| { type: "connector_draft"; draft: ConnectorDraft }
 	| { type: "connector_draft_resolved"; draftId: string; approved: boolean }
 	| { type: "connector_imports"; found: ImportCandidate[] }
-	| { type: "connector_imported"; names: string[] };
+	| { type: "connector_imported"; names: string[] }
+	| { type: "voice_transcript"; requestId: string; text: string }
+	/** Speech for a `voice_speak` request, in base64. */
+	| { type: "voice_speech"; requestId: string; mime: string; data: string }
+	/** A voice request did not work; `reason` is plain words for the user. */
+	| { type: "voice_unavailable"; requestId: string; reason: string };
 
 /** Every daemon message carries a per-connection, monotonic `seq`. */
 export type ServerMessage = ServerPayload & { seq: number };
@@ -345,6 +377,11 @@ const isConnectorId = (value: unknown): value is string => isString(value) && CO
 const isShortString = (value: unknown): value is string => isString(value) && value.length <= 200;
 const MAX_IMPORTS = 200;
 const COMPUTER_URL = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/mcp$/;
+const VOICE_MIME =
+	/^audio\/(webm|ogg|mp4|mpeg|mp3|wav|x-wav|m4a|x-m4a|aac|flac)(;\s*codecs="?[A-Za-z0-9.,-]+"?)?$/;
+const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
+const isAudio = (value: unknown): value is string =>
+	isString(value) && value.length > 0 && value.length <= MAX_VOICE_AUDIO && BASE64.test(value);
 /** The helper's key goes into an `Authorization` header, so only header-safe characters. */
 const COMPUTER_TOKEN = /^[A-Za-z0-9._~+/=-]{16,512}$/;
 
@@ -459,6 +496,17 @@ export function parseClientMessage(raw: string): ClientMessage | undefined {
 		case "computer_register":
 			return isComputerUrl(m.url) && isString(m.token) && COMPUTER_TOKEN.test(m.token)
 				? { type: "computer_register", url: m.url, token: m.token }
+				: undefined;
+		case "voice_transcribe":
+			return isShortString(m.requestId) && isString(m.mime) && VOICE_MIME.test(m.mime) && isAudio(m.data)
+				? { type: "voice_transcribe", requestId: m.requestId, mime: m.mime, data: m.data }
+				: undefined;
+		case "voice_speak":
+			return isShortString(m.requestId) &&
+				isString(m.text) &&
+				m.text.trim() !== "" &&
+				m.text.length <= MAX_VOICE_TEXT
+				? { type: "voice_speak", requestId: m.requestId, text: m.text }
 				: undefined;
 		case "computer_unregister":
 		case "connectors_list":

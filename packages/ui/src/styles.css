@@ -1183,6 +1183,89 @@ html[data-effects="none"] .chat-panel {
 	border-radius: var(--radius-pill);
 }
 
+/* ---------- Voice (S30.4) ---------- */
+
+.composer-mic {
+	display: grid;
+	place-items: center;
+	width: 32px;
+	height: 32px;
+	padding: 0;
+	border-radius: 50%;
+}
+
+.composer-mic-on {
+	background: var(--accent);
+	border-color: var(--accent);
+	color: var(--accent-ink);
+	box-shadow: 0 0 0 4px var(--accent-soft);
+}
+
+.voice-recording {
+	flex: 1;
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-height: 32px;
+	min-width: 0;
+}
+
+.voice-time {
+	font-family: var(--font-mono);
+	font-variant-numeric: tabular-nums;
+	color: var(--accent);
+}
+
+.voice-meter {
+	appearance: none;
+	width: 56px;
+	height: 6px;
+	flex: none;
+	border: none;
+	border-radius: var(--radius-pill);
+	background: var(--surface-2);
+	overflow: hidden;
+}
+
+.voice-meter::-webkit-meter-bar {
+	height: 6px;
+	border: none;
+	border-radius: var(--radius-pill);
+	background: var(--surface-2);
+}
+
+.voice-meter::-webkit-meter-optimum-value {
+	background: var(--accent);
+}
+
+.voice-meter::-moz-meter-bar {
+	background: var(--accent);
+}
+
+.voice-partial {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--muted);
+}
+
+.voice-cancel {
+	display: grid;
+	place-items: center;
+	width: 28px;
+	height: 28px;
+	padding: 0;
+	border-radius: 50%;
+}
+
+.voice-status {
+	margin: 0 16px 6px;
+	font-size: 13px;
+	color: var(--muted);
+}
+
 /* ---------- Accounts ---------- */
 
 .onboarding {

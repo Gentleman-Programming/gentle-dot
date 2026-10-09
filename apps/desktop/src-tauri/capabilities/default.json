@@ -29,12 +29,7 @@
 			"identifier": "voice",
 			"description": "Voice input (S30.1): the panel's mic button records and transcribes natively; the Dot never records.",
 			"windows": ["panel"],
-			"permissions": [
-				"allow-voice-status",
-				"allow-voice-start",
-				"allow-voice-stop",
-				"allow-voice-cancel"
-			]
+			"permissions": ["allow-voice-status", "allow-voice-start", "allow-voice-stop", "allow-voice-cancel"]
 		},
 		{
 			"identifier": "glow",

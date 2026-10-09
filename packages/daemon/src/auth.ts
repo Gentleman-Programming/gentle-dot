@@ -45,6 +45,11 @@ export interface AuthRuntime {
 		options?: { getDeviceId?: () => string },
 	): Promise<unknown>;
 	logout(providerId: string): Promise<void>;
+	/**
+	 * The connected OpenAI API key, for voice (S30.2). Never the "Sign in with ChatGPT" token:
+	 * OpenAI documents that sign-in does not support transcription.
+	 */
+	openAIApiKey?(): Promise<string | undefined>;
 }
 
 /** The assistant's own engine home: never the user's Gentle Shell or Pi home unless explicitly overridden. */
@@ -71,6 +76,11 @@ export async function createModelAuthRuntime(agentHome: string, cwd: string): Pr
 				getDeviceId: () => settings.getOrCreateDeviceId(),
 			}),
 		logout: (providerId) => runtime.logout(providerId),
+		openAIApiKey: async () => {
+			// Checked first: resolving a sign-in could refresh its token over the network.
+			if ((await runtime.checkAuth("openai"))?.type !== "api_key") return undefined;
+			return (await runtime.getAuth("openai"))?.auth.apiKey || undefined;
+		},
 	};
 }
 
@@ -189,6 +199,12 @@ export class AuthManager {
 		this.log(`signed out of ${providerId}`);
 		this.onCredentialsChanged();
 		return undefined;
+	}
+
+	/** The connected OpenAI API key, read fresh; only for the daemon's own requests to OpenAI. */
+	async openAIApiKey(): Promise<string | undefined> {
+		const runtime = await this.options.runtime();
+		return runtime.openAIApiKey?.();
 	}
 
 	/** True when at least one provider has a credential. */

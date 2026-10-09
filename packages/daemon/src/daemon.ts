@@ -19,6 +19,7 @@ import { ensureMemoryProject, ensurePrivateDir, isolatedAgentEnv, privateMemory 
 import { defaultImportPath, ProfileStore } from "./profiles.ts";
 import { type RotationLimits, rotationLimits } from "./rotation.ts";
 import { AgentSupervisor } from "./supervisor.ts";
+import { VoiceService } from "./voice.ts";
 import { identityArgs } from "./white-label.ts";
 
 export interface DaemonOptions {
@@ -41,6 +42,8 @@ export interface DaemonOptions {
 	profilesImportPath?: string;
 	/** Creates the sign-in runtime; defaults to Pi's ModelRuntime on the agent home. */
 	authRuntime?: () => Promise<AuthRuntime>;
+	/** The fetch for voice requests to OpenAI; tests pass a fake one. */
+	voiceFetch?: typeof fetch;
 	/** The engine's command line for connector sign-in; default `GENTLE_DOT_MCP_CLI` (JSON array) or the bundled one. */
 	connectorCli?: McpCli;
 	/** The home folder "Import my MCP servers" reads other apps' configs from; default `GENTLE_DOT_IMPORT_HOME` or the user's. */
@@ -177,6 +180,11 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 			: {}),
 		log,
 	});
+	const voice = new VoiceService({
+		apiKey: () => auth.openAIApiKey(),
+		...(options.voiceFetch ? { fetch: options.voiceFetch } : {}),
+		log,
+	});
 	const historyPage = options.historyPage ?? Number(process.env.GENTLE_DOT_HISTORY_PAGE);
 	const bridge = new DotBridge(supervisor, {
 		dataDir: options.dataDir,
@@ -184,6 +192,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		auth,
 		profiles,
 		connectors,
+		voice,
 		features: { conversations: options.conversations ?? process.env.GENTLE_DOT_CONVERSATIONS === "1" },
 		rotation: options.rotation ?? rotationLimits(process.env),
 		...(Number.isInteger(historyPage) && historyPage > 0 ? { historyPage } : {}),

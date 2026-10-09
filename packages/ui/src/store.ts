@@ -15,6 +15,7 @@ import type {
 	Profile,
 	ProfileRole,
 	ServerMessage,
+	VoiceCapability,
 } from "@gentle-dot/protocol";
 import { MAX_CONNECTOR_DRAFTS } from "@gentle-dot/protocol";
 
@@ -60,6 +61,12 @@ export interface ConnectorsState {
 	imports?: ImportCandidate[];
 }
 
+/** The daemon's answer to a voice request, matched by `requestId`. */
+export type VoiceReply = Extract<
+	ServerMessage,
+	{ type: "voice_transcript" | "voice_speech" | "voice_unavailable" }
+>;
+
 export type ConnectionStatus = "connecting" | "open" | "closed" | "unauthorized";
 
 export interface ChatMessage {
@@ -98,6 +105,10 @@ export interface DotState {
 	auth: AuthState;
 	profiles: ProfilesState;
 	connectors: ConnectorsState;
+	/** What the daemon can do with voice (an OpenAI API key). */
+	voice: VoiceCapability;
+	/** The latest answers to voice requests, newest last. */
+	voiceReplies: VoiceReply[];
 }
 
 export type DotAction =
@@ -125,7 +136,11 @@ export const initialState: DotState = {
 	auth: { open: false },
 	profiles: { open: false, roles: [], models: [], importable: false },
 	connectors: { open: false },
+	voice: { transcribe: false, speak: false },
+	voiceReplies: [],
 };
+
+const VOICE_REPLIES = 4;
 
 let nextNotice = 0;
 
@@ -181,6 +196,7 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 				conversationId: message.conversationId ?? state.conversationId,
 				model: message.model ?? state.model,
 				features: message.features ?? initialState.features,
+				voice: message.voice ?? initialState.voice,
 				// The daemon sends the drafts still waiting right after ready.
 				connectors: { ...state.connectors, drafts: [] },
 			};
@@ -251,7 +267,12 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 			return {
 				...closeConnectors(closeProfiles(state, message.open === true), message.open === true),
 				auth: { ...state.auth, providers: message.providers, open: message.open ? true : state.auth.open },
+				voice: message.voice ?? state.voice,
 			};
+		case "voice_transcript":
+		case "voice_speech":
+		case "voice_unavailable":
+			return { ...state, voiceReplies: [...state.voiceReplies, message].slice(-VOICE_REPLIES) };
 		case "connectors": {
 			const updated = { ...state, connectors: { ...state.connectors, list: message.connectors } };
 			return message.open ? openConnectors(updated, true) : updated;
