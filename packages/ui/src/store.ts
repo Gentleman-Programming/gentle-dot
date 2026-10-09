@@ -282,14 +282,24 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 			return { ...state, asks: [...state.asks, message.ask] };
 		case "ask_resolved":
 			return { ...state, asks: state.asks.filter((a) => a.requestId !== message.requestId) };
-		case "history":
+		case "history": {
+			// A snapshot taken mid-turn cannot cover the live streaming turn: the
+			// session file only gains the assistant message once it ends, and history
+			// ids (h*) never match the live bridge ids (m*). Keep this conversation's
+			// streaming messages so the remaining deltas and message_done still land
+			// on them instead of freezing a partial bubble and spawning a duplicate.
+			const streaming =
+				message.conversationId === undefined || message.conversationId === state.conversationId
+					? state.messages.filter((m) => m.streaming)
+					: [];
 			return {
 				...state,
 				interrupted: false,
 				conversationId: message.conversationId ?? state.conversationId,
-				messages: message.messages.map((m) => ({ ...m, streaming: false })),
+				messages: [...message.messages.map((m) => ({ ...m, streaming: false })), ...streaming],
 				hasEarlier: message.hasEarlier === true,
 			};
+		}
 		case "earlier": {
 			// A page for messages this window no longer starts with (a newer history replaced them) is dropped.
 			if (state.messages[0]?.id !== message.before) return state;
