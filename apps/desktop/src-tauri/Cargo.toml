@@ -50,6 +50,14 @@ objc2-screen-capture-kit = { version = "0.3", default-features = false, features
 objc2-speech = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-avf-audio", "SFSpeechRecognizer", "SFSpeechRecognitionRequest", "SFSpeechRecognitionResult", "SFSpeechRecognitionTask", "SFTranscription"] }
 objc2-avf-audio = { version = "0.3", default-features = false, features = ["std", "block2", "AVAudioBuffer", "AVAudioEngine", "AVAudioFormat", "AVAudioIONode", "AVAudioNode", "AVAudioTime", "AVAudioTypes"] }
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "AVCaptureDevice", "AVMediaFormat"] }
+# Connector secrets (S25.5): generic password items in the login keychain, created by the app.
+security-framework = "3.7"
+core-foundation = "0.10"
+
+# Connector secrets on Linux (S25.7): the Secret Service over D-Bus. Synchronous, and its `dbus`
+# dependency is already linked by tao on Linux.
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus-secret-service = "4.1"
 
 # Debug builds encode screenshots fast too (S24.8): `image` holds the JPEG encoder and `zune-*`
 # decode JPEGs (tests). The encoder is generic, so most of its code is compiled in this crate,

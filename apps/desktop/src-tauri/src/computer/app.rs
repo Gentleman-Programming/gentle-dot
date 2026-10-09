@@ -12,6 +12,7 @@ use super::control::Control;
 use super::server::Endpoint;
 use super::session::{Reason, StateEvent};
 use super::{Clock, PermissionKind, Permissions, SystemClock};
+use crate::alert::Choice;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -23,11 +24,12 @@ pub const GLOW_TITLE: &str = "Gentle Dot Glow";
 /// ⌥⇧Esc ends the session from anywhere (S24.3).
 pub const PANIC_SHORTCUT: &str = "Alt+Shift+Escape";
 pub const GRANT_TEXT: &str = "Allow Gentle Dot to see and control this Mac for 30 minutes?";
-pub const GRANT_BUTTONS: (&str, &str) = ("Allow", "Deny");
-pub const CONFIRM_BUTTONS: (&str, &str) = ("Allow", "Cancel");
+/// Every computer-control dialog defaults to its refusing button (L75 A2).
+pub const GRANT_CHOICE: Choice = Choice { allow: "Allow", refuse: "Deny" };
+pub const CONFIRM_CHOICE: Choice = Choice { allow: "Allow", refuse: "Cancel" };
 pub const YOLO_TEXT: &str = "Turn on yolo mode? Gentle Dot will send, pay, delete, and submit without asking you first, \
 for up to 1 hour. Stop and ⌥⇧Esc still work.";
-pub const YOLO_BUTTONS: (&str, &str) = ("Turn On", "Cancel");
+pub const YOLO_CHOICE: Choice = Choice { allow: "Turn On", refuse: "Cancel" };
 
 /// The tray's "Yolo mode" item, kept in step with the state.
 pub struct YoloMenuItem(pub tauri::menu::CheckMenuItem<tauri::Wry>);
@@ -296,30 +298,23 @@ struct NativeDialogs {
 
 #[cfg(target_os = "macos")]
 impl NativeDialogs {
-    fn ask(&self, message: &str, (allow, refuse): (&str, &str)) -> bool {
-        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-        self.app
-            .dialog()
-            .message(message)
-            .title("Gentle Dot")
-            .kind(MessageDialogKind::Warning)
-            .buttons(MessageDialogButtons::OkCancelCustom(allow.into(), refuse.into()))
-            .blocking_show()
+    fn ask(&self, message: &str, choice: Choice) -> bool {
+        crate::alert::ask(&self.app, "Gentle Dot", message, choice)
     }
 }
 
 #[cfg(target_os = "macos")]
 impl super::Dialogs for NativeDialogs {
     fn ask_grant(&self) -> bool {
-        self.ask(GRANT_TEXT, GRANT_BUTTONS)
+        self.ask(GRANT_TEXT, GRANT_CHOICE)
     }
 
     fn confirm(&self, message: &str) -> bool {
-        self.ask(message, CONFIRM_BUTTONS)
+        self.ask(message, CONFIRM_CHOICE)
     }
 
     fn ask_yolo(&self) -> bool {
-        self.ask(YOLO_TEXT, YOLO_BUTTONS)
+        self.ask(YOLO_TEXT, YOLO_CHOICE)
     }
 }
 
@@ -330,7 +325,7 @@ mod tests {
     #[test]
     fn the_grant_dialog_asks_exactly_what_the_spec_says() {
         assert_eq!(GRANT_TEXT, "Allow Gentle Dot to see and control this Mac for 30 minutes?");
-        assert_eq!(GRANT_BUTTONS, ("Allow", "Deny"));
+        assert_eq!(GRANT_CHOICE, Choice { allow: "Allow", refuse: "Deny" });
     }
 
     #[test]
@@ -340,7 +335,18 @@ mod tests {
             "Turn on yolo mode? Gentle Dot will send, pay, delete, and submit without asking you first, \
 for up to 1 hour. Stop and ⌥⇧Esc still work."
         );
-        assert_eq!(YOLO_BUTTONS, ("Turn On", "Cancel"));
+        assert_eq!(YOLO_CHOICE, Choice { allow: "Turn On", refuse: "Cancel" });
+    }
+
+    #[test]
+    fn every_computer_dialog_defaults_to_its_refusing_button() {
+        use tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom;
+        for choice in [GRANT_CHOICE, CONFIRM_CHOICE, YOLO_CHOICE] {
+            match choice.buttons() {
+                OkCancelCustom(first, second) => assert_eq!((first.as_str(), second.as_str()), (choice.refuse, choice.allow)),
+                other => panic!("unexpected buttons: {other:?}"),
+            }
+        }
     }
 
     #[test]
