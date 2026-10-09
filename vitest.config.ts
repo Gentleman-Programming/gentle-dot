@@ -6,7 +6,11 @@ export default defineConfig({
 			{
 				test: {
 					name: "node",
-					include: ["packages/protocol/test/**/*.test.ts", "packages/daemon/test/**/*.test.ts"],
+					include: [
+						"packages/protocol/test/**/*.test.ts",
+						"packages/daemon/test/**/*.test.ts",
+						"scripts/package/test/**/*.test.ts",
+					],
 					environment: "node",
 					testTimeout: 20_000,
 				},

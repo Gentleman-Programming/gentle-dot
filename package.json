@@ -9,6 +9,7 @@
 	"scripts": {
 		"dev": "pnpm --filter @gentle-dot/ui build && node packages/daemon/src/cli.ts",
 		"build": "pnpm --filter @gentle-dot/ui build",
+		"package:runtime": "node scripts/package/stage-runtime.mjs",
 		"start": "node packages/daemon/src/cli.ts",
 		"test": "vitest run",
 		"e2e": "playwright test",
