@@ -135,6 +135,8 @@ beforeEach(() => {
 	getUserMedia.mockClear();
 	track.stop.mockClear();
 	localStorage.clear();
+	// These tests cover sending on stop; "review before sending" (the default) has its own below.
+	localStorage.setItem("gentle-dot-voice-send", "1");
 	setSecure(true);
 	vi.stubGlobal("MediaRecorder", FakeRecorder);
 	vi.stubGlobal("SpeechSynthesisUtterance", FakeUtterance);
@@ -428,5 +430,70 @@ describe("the composer with the mic present", () => {
 		expect(sentOf("send").map((m) => m.text)).toEqual(["first", "more"]);
 		await userEvent.click(screen.getByRole("button", { name: "Stop" }));
 		expect(sentOf("abort")).toEqual([{ type: "abort" }]);
+	});
+});
+
+describe("reviewing a dictation before sending (the default)", () => {
+	function desktop(stopText: string) {
+		h.tauri = true;
+		h.invoke = vi.fn(async (command: string) => {
+			if (command === "voice_status") return { available: true };
+			if (command === "voice_stop") return { text: stopText };
+			return undefined;
+		});
+	}
+	const box = () => screen.getByRole("textbox") as HTMLTextAreaElement;
+
+	beforeEach(() => localStorage.removeItem("gentle-dot-voice-send"));
+
+	it("leaves the transcript in the input, added to what was typed, and sends it on Enter", async () => {
+		desktop("hola mundo");
+		render(<Harness initial={withVoice(false)} />);
+		await waitFor(() => expect(talk()).toBeEnabled());
+		await userEvent.type(box(), "dijo:");
+		await userEvent.click(talk());
+		await userEvent.click(await screen.findByRole("button", { name: "Stop and review" }));
+		await waitFor(() => expect(box().value).toBe("dijo: hola mundo"));
+		expect(sentOf("send")).toEqual([]);
+		await waitFor(() => expect(box()).toHaveFocus());
+
+		await userEvent.type(box(), "{Enter}");
+		expect(sentOf("send")).toEqual([
+			{ type: "send", text: "dijo: hola mundo", requestId: expect.any(String) },
+		]);
+	});
+
+	it("still reads the reply aloud when the message sent included a dictation", async () => {
+		desktop("hi");
+		render(<Harness initial={withVoice(false, false)} />);
+		await waitFor(() => expect(talk()).toBeEnabled());
+		await userEvent.click(talk());
+		await userEvent.click(await screen.findByRole("button", { name: "Stop and review" }));
+		await waitFor(() => expect(box().value).toBe("hi"));
+		await userEvent.type(box(), "{Enter}");
+		server({ type: "user_message", messageId: "u1", text: "hi" });
+		server(
+			{ type: "agent_state", state: "thinking" },
+			{ type: "message_done", messageId: "a1", text: "Hello there" },
+			{ type: "agent_state", state: "idle" },
+		);
+		await waitFor(() => expect(synth.speak).toHaveBeenCalledTimes(1));
+	});
+
+	it("offers sending on stop as a remembered option while recording", async () => {
+		desktop("hola");
+		render(<Harness initial={withVoice(false)} />);
+		await waitFor(() => expect(talk()).toBeEnabled());
+		await userEvent.click(talk());
+		const option = await screen.findByRole("switch", { name: "Send when I stop" });
+		expect(option).toHaveAttribute("aria-checked", "false");
+		await userEvent.click(option);
+		expect(option).toHaveAttribute("aria-checked", "true");
+		expect(localStorage.getItem("gentle-dot-voice-send")).toBe("1");
+		await userEvent.click(screen.getByRole("button", { name: "Stop and send" }));
+		await waitFor(() =>
+			expect(sentOf("send")).toEqual([{ type: "send", text: "hola", requestId: expect.any(String) }]),
+		);
+		expect(box().value).toBe("");
 	});
 });

@@ -1813,3 +1813,20 @@ html[data-surface="glow"] body {
 .voice-model-error {
 	color: var(--red, #ff6b8a);
 }
+
+/* Send a dictation on stop, or leave it in the input for review (the default). */
+.voice-send-option {
+	flex: none;
+	border: 1px solid var(--line, rgba(255, 255, 255, 0.14));
+	border-radius: 999px;
+	background: transparent;
+	color: var(--muted, inherit);
+	font-size: 11px;
+	padding: 2px 8px;
+	cursor: pointer;
+}
+
+.voice-send-option.on {
+	border-color: var(--accent);
+	color: var(--accent);
+}

@@ -33,6 +33,21 @@ export function Composer({
 	const recording = voice?.phase === "recording";
 	const voiceStatus = voice?.phase === "transcribing" ? "Transcribing…" : voice?.note;
 
+	// A dictation to review joins what was already typed, and the cursor waits at its end.
+	const draft = voice?.draft;
+	const draftTaken = voice?.draftTaken;
+	useEffect(() => {
+		if (!draft || !draftTaken) return;
+		setText((current) => (current.trim() ? `${current.trimEnd()} ${draft.text}` : draft.text));
+		draftTaken(draft.id);
+		requestAnimationFrame(() => {
+			const input = box.current;
+			if (!input) return;
+			input.focus();
+			input.setSelectionRange(input.value.length, input.value.length);
+		});
+	}, [draft, draftTaken]);
+
 	useEffect(() => {
 		if (focusKey !== undefined) box.current?.focus();
 	}, [focusKey]);
@@ -49,7 +64,7 @@ export function Composer({
 		if (files.length > 0 && !refs) return;
 		send({ type: "send", text: value, requestId: newRequestId(), ...(refs ? { attachments: refs } : {}) });
 		attachments?.clear();
-		voice?.typed();
+		voice?.sent();
 		setText("");
 	}
 
@@ -127,6 +142,15 @@ export function Composer({
 						<span className="voice-partial">{voice.partial || "Listening…"}</span>
 						<button
 							type="button"
+							role="switch"
+							aria-checked={voice.sendOnStop}
+							className={`voice-send-option${voice.sendOnStop ? " on" : ""}`}
+							onClick={() => voice.setSendOnStop(!voice.sendOnStop)}
+						>
+							Send when I stop
+						</button>
+						<button
+							type="button"
 							className="voice-cancel"
 							aria-label="Cancel recording"
 							title="Cancel (Esc)"
@@ -167,8 +191,14 @@ export function Composer({
 					<button
 						type="button"
 						className={`composer-mic${recording ? " composer-mic-on" : ""}`}
-						aria-label={recording ? "Stop and send" : "Talk"}
-						title={voice.mic.available ? "Tap to talk, tap again to send" : voice.mic.reason}
+						aria-label={recording ? (voice.sendOnStop ? "Stop and send" : "Stop and review") : "Talk"}
+						title={
+							voice.mic.available
+								? voice.sendOnStop
+									? "Tap to talk, tap again to send"
+									: "Tap to talk, tap again to review before sending"
+								: voice.mic.reason
+						}
 						disabled={disabled || !voice.mic.available || voice.phase === "transcribing"}
 						onClick={recording ? voice.stop : voice.start}
 					>

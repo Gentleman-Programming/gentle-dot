@@ -41,11 +41,22 @@ export interface VoiceControls {
 	setMuted(muted: boolean): void;
 	/** The user sent a typed message: its reply is not read aloud. */
 	typed(): void;
+	/** Whether a dictation is sent when recording stops, or left in the input for review. */
+	sendOnStop: boolean;
+	setSendOnStop(send: boolean): void;
+	/** A dictation waiting in the input for review; `id` changes with each one. */
+	draft?: { id: number; text: string };
+	/** The input took the draft. */
+	draftTaken(id: number): void;
+	/** The user sent the input: its reply is read aloud when it included a dictation. */
+	sent(): void;
 }
 
 /** Recordings stop on their own so they fit the daemon's WebSocket limit (S30.2). */
 const MAX_RECORDING_MS = 60_000;
 const MUTED_KEY = "gentle-dot-voice-muted";
+/** Set when a dictation is sent on stop; otherwise it stays in the input for review. */
+const SEND_KEY = "gentle-dot-voice-send";
 const RECORDING_TYPES = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
 const REASONS = {
 	insecure: "Voice needs a secure page (HTTPS or localhost).",
@@ -100,7 +111,7 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 	const [partial, setPartial] = useState("");
 	const [note, setNote] = useState<string | undefined>(undefined);
 	const [speaking, setSpeaking] = useState(false);
-	const [muted, setMutedState] = useState(() => readMuted());
+	const [muted, setMutedState] = useState(() => readFlag(MUTED_KEY));
 
 	const phaseNow = useRef<VoicePhase>("idle");
 	const recording = useRef<Recording | undefined>(undefined);
@@ -172,6 +183,13 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 		[send, speakWithSystem],
 	);
 
+	const [sendOnStop, setSendOnStopState] = useState(readFlag(SEND_KEY));
+	const sendOnStopNow = useRef(sendOnStop);
+	sendOnStopNow.current = sendOnStop;
+	const [draft, setDraft] = useState<{ id: number; text: string }>();
+	/** The input holds dictated text that has not been sent yet. */
+	const dictated = useRef(false);
+
 	const sendTranscript = useCallback(
 		(transcript: string) => {
 			const text = transcript.trim();
@@ -179,12 +197,36 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 				finish(REASONS.empty);
 				return;
 			}
-			voiceTurn.current = new Set(latest.current.messages.map((m) => m.id));
-			send({ type: "send", text, requestId: newRequestId() });
+			if (sendOnStopNow.current) {
+				voiceTurn.current = new Set(latest.current.messages.map((m) => m.id));
+				send({ type: "send", text, requestId: newRequestId() });
+			} else {
+				dictated.current = true;
+				setDraft((previous) => ({ id: (previous?.id ?? 0) + 1, text }));
+			}
 			finish();
 		},
 		[send, finish],
 	);
+
+	const setSendOnStop = useCallback((next: boolean) => {
+		setSendOnStopState(next);
+		try {
+			if (next) localStorage.setItem(SEND_KEY, "1");
+			else localStorage.removeItem(SEND_KEY);
+		} catch {
+			// Private browsing: the choice lasts for this window only.
+		}
+	}, []);
+
+	const draftTaken = useCallback((id: number) => {
+		setDraft((current) => (current?.id === id ? undefined : current));
+	}, []);
+
+	const sent = useCallback(() => {
+		voiceTurn.current = dictated.current ? new Set(latest.current.messages.map((m) => m.id)) : undefined;
+		dictated.current = false;
+	}, []);
 
 	const begin = useCallback(
 		(entry: Recording) => {
@@ -406,12 +448,17 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 		stopSpeaking,
 		setMuted,
 		typed,
+		sendOnStop,
+		setSendOnStop,
+		...(draft ? { draft } : {}),
+		draftTaken,
+		sent,
 	};
 }
 
-function readMuted(): boolean {
+function readFlag(key: string): boolean {
 	try {
-		return localStorage.getItem(MUTED_KEY) === "1";
+		return localStorage.getItem(key) === "1";
 	} catch {
 		return false;
 	}
