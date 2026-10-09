@@ -5,7 +5,10 @@
 -- ~/.config/hypr/gentle-dot.lua and add `require("hypr.gentle-dot")` at the end of hyprland.lua.
 -- Using hyprland.conf instead? See gentle-dot.conf next to this file.
 
-local toggle = (os.getenv("HOME") or "") .. "/.local/bin/gentle-dot --toggle"
+-- Installed from the package (.deb or Arch package): /usr/bin/gentle-dot.
+local toggle = "/usr/bin/gentle-dot --toggle"
+-- Built from source with scripts/linux/setup-*.sh: use this line instead of the one above.
+-- local toggle = (os.getenv("HOME") or "") .. "/.local/bin/gentle-dot --toggle"
 
 -- The rose: a 72 px transparent window with no border, shadow, or blur.
 hl.window_rule({

@@ -1,6 +1,6 @@
 # Testing Gentle Dot on Linux
 
-Thanks for testing! This guide walks you through installing Gentle Dot from source and checking that it works on your desktop. It takes about 30 minutes, most of it waiting for the first build.
+Thanks for testing! This guide walks you through installing Gentle Dot, from a package or from source, and checking that it works on your desktop. With a package it takes about 20 minutes; from source, about 30, most of it waiting for the first build.
 
 We test three setups. Pick the one you have:
 
@@ -22,9 +22,19 @@ The tray icon, the floating rose, the panel, and the toggle shortcut should work
 
    Write down the answer for the report (for example `wayland / ubuntu:GNOME` or `wayland / Hyprland`).
 2. Have an API key ready for one model provider (for example OpenAI, OpenRouter, or Anthropic). You need it in step 8.
-3. Get the source code: clone the repository or unpack the archive you were sent, then open a terminal in its folder.
+3. Get the files: the package for your system (see below), or, to install from source, the source code (clone the repository or unpack the archive you were sent, then open a terminal in its folder). The Hyprland snippets in step 3 are in the source, under `scripts/linux/hyprland/`.
 
-## What the setup script does
+## Package or source
+
+| | Package | From source |
+|---|---|---|
+| A. Debian or B. Ubuntu | `gentle-dot_<version>_amd64.deb` (or `_arm64.deb`; `dpkg --print-architecture` tells which) | `scripts/linux/setup-debian.sh` |
+| C. Omarchy (x86_64) | `gentle-dot-<version>-1-x86_64.pkg.tar.zst` | `scripts/linux/setup-arch.sh` |
+| The app command | `gentle-dot`, that is `/usr/bin/gentle-dot` | `~/.local/bin/gentle-dot` |
+
+The package needs nothing else installed: it carries its own Node.js, assistant engine, and Engram (in `/usr/lib/Gentle Dot/runtime`). In the steps below, **the app command** means `/usr/bin/gentle-dot` if you installed the package and `~/.local/bin/gentle-dot` if you built from source. To remove the package later, run `sudo apt remove gentle-dot` or `sudo pacman -R gentle-dot`; your assistant data in `~/.gentle-dot` stays.
+
+## What the setup script does (from source only)
 
 | Step | Uses sudo? |
 |---|---|
@@ -53,18 +63,20 @@ Do each step in order and note **Pass**, **Fail**, or **Partial** for each one. 
 
 ### 1. Install
 
-| Your setup | Command |
-|---|---|
-| A. Debian or B. Ubuntu | `scripts/linux/setup-debian.sh` |
-| C. Omarchy | `scripts/linux/setup-arch.sh` |
+| Your setup | Package | From source |
+|---|---|---|
+| A. Debian or B. Ubuntu | `sudo apt install ./gentle-dot_<version>_<arch>.deb` | `scripts/linux/setup-debian.sh` |
+| C. Omarchy | `sudo pacman -U gentle-dot-<version>-1-x86_64.pkg.tar.zst` | `scripts/linux/setup-arch.sh` |
 
-**Expected:** each step prints a numbered heading (`==> 1. Checking the system` and so on). The script explains why it needs sudo before it asks for your password. It ends with `Done.` and asks "Start Gentle Dot now?". Answer **no** for now.
+**Expected with a package:** the package manager lists the libraries it adds (WebKitGTK and tray support), installs them, and finishes without errors. With `apt`, keep the `./` in front of the file name. A note that `_apt` could not access the file is harmless.
+
+**Expected from source:** each step prints a numbered heading (`==> 1. Checking the system` and so on). The script explains why it needs sudo before it asks for your password. It ends with `Done.` and asks "Start Gentle Dot now?". Answer **no** for now.
 
 If the build fails, copy the last 40 lines of the output into the report.
 
 ### 2. Run the installer again
 
-Run the same command a second time.
+**From source only** (with a package, write N/A). Run the same command a second time.
 
 **Expected:** it finishes in under a minute, says "All present" for the system libraries, and does not ask for sudo.
 
@@ -82,11 +94,13 @@ ls ~/.config/hypr/hyprland.lua ~/.config/hypr/hyprland.conf 2>/dev/null
 - If you have `hyprland.lua` (Omarchy 4, or Hyprland 0.55 and later), use [`scripts/linux/hyprland/gentle-dot.lua`](../scripts/linux/hyprland/gentle-dot.lua). Paste it at the end of `~/.config/hypr/hyprland.lua`. Omarchy 4 configures Hyprland in Lua: see `config/hypr/hyprland.lua` and `default/hypr/helpers.lua` (`o.window`, `o.bind`) in the Omarchy repository, tag [v4.0.4](https://github.com/basecamp/omarchy/tree/v4.0.4/config/hypr), released 2026-09-15 and checked on 2026-10-08.
 - If you have only `hyprland.conf`, use [`scripts/linux/hyprland/gentle-dot.conf`](../scripts/linux/hyprland/gentle-dot.conf). Paste it at the end of `~/.config/hypr/hyprland.conf`. It has one block for Hyprland 0.53 and 0.54, and one for 0.48 to 0.52 (before 0.48, write `windowrulev2` instead of `windowrule`). Keep only the block for your version.
 
+The snippets call `/usr/bin/gentle-dot`, the packaged app. If you built from source, switch to the `~/.local/bin/gentle-dot` line the snippet shows right below it.
+
 Hyprland reloads the file when you save it. If it shows a configuration error, write the error message in the report.
 
 ### 4. First launch
 
-Open **Gentle Dot** from your app menu (or run `~/.local/bin/gentle-dot` in a terminal, which also shows its log messages).
+Open **Gentle Dot** from your app menu (or run the app command in a terminal, which also shows its log messages).
 
 **Expected:**
 - Within a few seconds, a black circle with a glowing pink rose appears at the right edge of the screen, vertically centered.
@@ -133,16 +147,17 @@ gnome-extensions enable ubuntu-appindicators@ubuntu.com
 
 **GNOME:** open Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts → Add Shortcut:
 - Name: `Gentle Dot`
-- Command: `/home/<you>/.local/bin/gentle-dot --toggle` (the full path; the setup script printed it)
+- Command: `/usr/bin/gentle-dot --toggle` with the package, or `/home/<you>/.local/bin/gentle-dot --toggle` from source (the full path; the setup script printed it)
 - Shortcut: `Super + Alt + D`
 
 Or set the same shortcut from a terminal:
 
 ```sh
+app=/usr/bin/gentle-dot   # from source: app=$HOME/.local/bin/gentle-dot
 path=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/gentle-dot/
 gsettings set org.gnome.settings-daemon.plugins.media-keys custom-keybindings "['$path']"
 gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$path name 'Gentle Dot'
-gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$path command "$HOME/.local/bin/gentle-dot --toggle"
+gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$path command "$app --toggle"
 gsettings set org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:$path binding '<Super><Alt>d'
 ```
 
@@ -150,7 +165,7 @@ The first `gsettings` line replaces any custom shortcuts you already have. If yo
 
 **Hyprland:** the binding is already in the snippet from step 3.
 
-**Expected:** pressing `Super + Alt + D` while any other app has focus shows the panel; pressing it again hides it. Also run `~/.local/bin/gentle-dot --toggle` in a terminal: it toggles the panel and returns right away.
+**Expected:** pressing `Super + Alt + D` while any other app has focus shows the panel; pressing it again hides it. Also run the app command with `--toggle` (for example `gentle-dot --toggle`) in a terminal: it toggles the panel and returns right away.
 
 The app's own `Alt + Space` shortcut works only on an X11 session. On Wayland, desktops do not let apps register global shortcuts, which is why you set one in your desktop settings instead. On GNOME, `Alt + Space` is also the window menu.
 
@@ -205,16 +220,16 @@ Some things Wayland does not allow at all, and we already work around them: apps
 3. what happened instead,
 4. the output of `echo "$XDG_SESSION_TYPE $GDK_BACKEND $WAYLAND_DISPLAY $DISPLAY"`, run in the same terminal you started the app from.
 
-For a quick comparison on GNOME, you can start the app as a native Wayland client with `GDK_BACKEND=wayland ~/.local/bin/gentle-dot`, and note which steps change.
+For a quick comparison on GNOME, you can start the app as a native Wayland client with `GDK_BACKEND=wayland gentle-dot` (from source: `GDK_BACKEND=wayland ~/.local/bin/gentle-dot`), and note which steps change.
 
 ## Troubleshooting
 
 | Symptom | Try |
 |---|---|
-| The panel or rose is blank, or the app prints `Failed to create GBM buffer` (often with NVIDIA) | Quit the app, then start it with `WEBKIT_DISABLE_DMABUF_RENDERER=1 ~/.local/bin/gentle-dot`. Note in the report whether it helped. |
+| The panel or rose is blank, or the app prints `Failed to create GBM buffer` (often with NVIDIA) | Quit the app, then start it with `WEBKIT_DISABLE_DMABUF_RENDERER=1` before the app command, for example `WEBKIT_DISABLE_DMABUF_RENDERER=1 gentle-dot`. Note in the report whether it helped. |
 | The rose stays dimmed | Look at `~/.gentle-dot/daemon.log` and attach it (see below). |
 | No tray icon on GNOME | Check that the AppIndicator extension is on: `gnome-extensions list --enabled` |
-| `gentle-dot: command not found` | Use the full path, `~/.local/bin/gentle-dot` |
+| `gentle-dot: command not found` | Use the full path: `/usr/bin/gentle-dot` with the package, `~/.local/bin/gentle-dot` from source |
 
 ## Report template
 
@@ -229,7 +244,8 @@ Session type:                 (output of: echo "$XDG_SESSION_TYPE / $XDG_CURRENT
 Hyprland config:              (hyprland.lua or hyprland.conf; Omarchy only)
 GPU and driver:               (output of: lspci -k | grep -A 2 -E "VGA|3D")
 CPU architecture:             (output of: uname -m)
-Source version:               (output of: git rev-parse --short HEAD, or the archive name)
+Install method:               (package file name, or "source")
+Source version:               (from source: output of git rev-parse --short HEAD, or the archive name)
 
 | # | Step                       | Result (Pass / Fail / Partial) | Notes |
 |---|----------------------------|--------------------------------|-------|
@@ -259,7 +275,7 @@ Logs: (see below)
 
 ### Logs to attach
 
-- The terminal output of `~/.local/bin/gentle-dot`, if you started it from a terminal.
+- The terminal output of the app command, if you started it from a terminal.
 - The assistant log, with the access key removed. The key is a secret: never share `~/.gentle-dot/token`. This command copies the log and masks the key:
 
   ```sh

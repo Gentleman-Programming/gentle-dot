@@ -1,0 +1,22 @@
+# Gentle Dot for Arch Linux and Omarchy: repackages the self-contained .deb (S29.3).
+# `node scripts/package/package-linux.mjs --arch amd64` builds the .deb, fills in pkgver and the
+# checksum, and runs makepkg in an archlinux container. By hand: put gentle-dot_<pkgver>_amd64.deb
+# next to this file, then run `updpkgsums && makepkg -si`.
+# The app carries its own Node.js, engine, and Engram under /usr/lib/Gentle Dot/runtime.
+pkgname=gentle-dot
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Always-on desktop assistant backed by Gentle Shell"
+arch=('x86_64' 'aarch64')
+depends=('gtk3' 'webkit2gtk-4.1' 'libayatana-appindicator')
+# Keep the bundled binaries (Node.js, Engram, native modules) byte for byte as in the .deb.
+options=('!strip' '!debug')
+source_x86_64=("${pkgname}_${pkgver}_amd64.deb")
+source_aarch64=("${pkgname}_${pkgver}_arm64.deb")
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+	# makepkg unpacked the .deb into control.tar.*, data.tar.*, and debian-binary.
+	bsdtar -xf "$srcdir"/data.tar.* -C "$pkgdir"
+}
