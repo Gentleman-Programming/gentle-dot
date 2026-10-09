@@ -95,6 +95,14 @@ describe("local voice model (S30.5)", () => {
 		expect(screen.getByRole("button", { name: "Download local voice model (487 MB)" })).toBeInTheDocument();
 	});
 
+	it("shows nothing to act on, and does not fail, when the app reports no status", async () => {
+		h.status = null as unknown as Record<string, unknown>;
+		render(<VoiceModelEntry />);
+		await waitFor(() => expect(h.invoke).toHaveBeenCalledWith("voice_model_status", undefined));
+		expect(screen.queryByRole("button")).toBeNull();
+		expect(screen.getByText("Voice")).toBeInTheDocument();
+	});
+
 	it("appears in Connectors only when the desktop app offers it", () => {
 		const props = {
 			connectors: { open: true, list: [] },

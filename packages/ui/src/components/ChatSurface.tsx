@@ -24,12 +24,14 @@ import {
 	PlusIcon,
 	ProfilesIcon,
 	RoseGlyph,
+	SettingsIcon,
 	SpeakerIcon,
 	SpeakerOffIcon,
 } from "./icons.tsx";
 import { MessageList } from "./MessageList.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
 import { ProfilesPanel } from "./ProfilesPanel.tsx";
+import { SettingsPanel } from "./SettingsPanel.tsx";
 import { newRequestId, type Send } from "./types.ts";
 
 interface ChatSurfaceProps {
@@ -49,6 +51,8 @@ interface ChatSurfaceProps {
 	panelWindow?: PanelWindowControls;
 	/** Sends files to the daemon (S31); without it the composer has no attachments. */
 	upload?: Uploader;
+	/** The Settings screen (S33.1), in the desktop panel only: its options belong to the app. */
+	settings?: boolean;
 }
 
 const CONTINUE_TEXT = "Continue where you left off.";
@@ -79,18 +83,31 @@ export function ChatSurface({
 	voiceModel,
 	panelWindow,
 	upload,
+	settings,
 }: ChatSurfaceProps) {
+	const [showSettings, setShowSettings] = useState(false);
 	const openAccounts = () => {
+		setShowSettings(false);
 		send({ type: "auth_list" });
 		dispatch({ type: "accounts", open: true });
 	};
 	const openProfiles = () => {
+		setShowSettings(false);
 		send({ type: "profiles_list" });
 		dispatch({ type: "profiles", open: true });
 	};
 	const openConnectors = () => {
+		setShowSettings(false);
 		send({ type: "connectors_list" });
 		dispatch({ type: "connectors", open: true });
+	};
+	/** Settings is a screen like the others: opening it closes them, except a sign-in waiting for an answer. */
+	const openSettings = () => {
+		if (state.auth.open && !state.auth.flow?.prompt) dispatch({ type: "accounts", open: false });
+		if (state.profiles.open) dispatch({ type: "profiles", open: false });
+		if (state.connectors.open && !state.connectors.flow?.prompt)
+			dispatch({ type: "connectors", open: false });
+		setShowSettings(true);
 	};
 	const [showConversations, setShowConversations] = useState(false);
 	const voice = useVoice(state, send);
@@ -126,12 +143,14 @@ export function ChatSurface({
 	/** Typing means the user is back to the chat; a sign-in waiting for an answer stays. */
 	const closeOptions = () => {
 		setShowConversations(false);
+		setShowSettings(false);
 		if (state.auth.open && !state.auth.flow?.prompt) dispatch({ type: "accounts", open: false });
 		if (state.profiles.open) dispatch({ type: "profiles", open: false });
 		if (state.connectors.open && !state.connectors.flow?.prompt)
 			dispatch({ type: "connectors", open: false });
 	};
 	const covered = state.auth.open || state.profiles.open || state.connectors.open;
+	const settingsShown = settings === true && showSettings && !covered;
 	// One continuous chat unless the daemon turns the conversations list on.
 	const conversations = state.features.conversations;
 	const status = statusText(state);
@@ -195,6 +214,18 @@ export function ChatSurface({
 						onClick={() => switchTo({ type: "new_conversation" })}
 					>
 						<PlusIcon />
+					</button>
+				) : null}
+				{settings ? (
+					<button
+						type="button"
+						className="icon"
+						aria-label="Settings"
+						title="Settings"
+						aria-expanded={settingsShown}
+						onClick={() => (settingsShown ? setShowSettings(false) : openSettings())}
+					>
+						<SettingsIcon />
 					</button>
 				) : null}
 				{panelWindow ? (
@@ -273,7 +304,13 @@ export function ChatSurface({
 				</main>
 			) : null}
 
-			<main className="chat-body" hidden={covered}>
+			{settingsShown ? (
+				<main className="chat-body">
+					<SettingsPanel close={() => setShowSettings(false)} />
+				</main>
+			) : null}
+
+			<main className="chat-body" hidden={covered || settingsShown}>
 				{/* In the chat's own flow, so messages start below it instead of sliding under it. */}
 				{needsAccount(state) ? (
 					<div className="onboarding">

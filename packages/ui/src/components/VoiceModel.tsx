@@ -38,6 +38,11 @@ export function VoiceModelEntry() {
 	const refresh = useCallback(() => {
 		voiceModelStatus().then(
 			(next) => {
+				// An app without the local model support answers nothing usable.
+				if (!next || typeof next !== "object" || typeof next.engine !== "string") {
+					setStatus(undefined);
+					return;
+				}
 				setStatus(next);
 				if (next.downloading) {
 					const percent = next.total ? Math.floor(((next.received ?? 0) / next.total) * 100) : 0;

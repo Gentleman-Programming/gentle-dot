@@ -1,0 +1,45 @@
+/* Settings screen (SettingsPanel). Uses the shared tokens, the Accounts header, and button styles. */
+
+.shortcut-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	margin: 4px 0 10px;
+	padding: 12px 14px;
+	border-radius: var(--radius-md);
+	border: 1px solid var(--line);
+	background: var(--surface);
+}
+
+.shortcut-keys {
+	font: 600 16px / 24px var(--font-mono);
+	letter-spacing: 0.04em;
+	color: var(--text);
+}
+
+.shortcut-recording {
+	font-size: 13px;
+	color: var(--accent);
+	outline: none;
+}
+
+.shortcut-row:has(.shortcut-recording) {
+	border-color: var(--accent-line);
+	box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.settings-ok {
+	color: var(--green);
+}
+
+.settings-error {
+	color: var(--red);
+}
+
+.settings-ok,
+.settings-error,
+.settings .muted {
+	margin: 6px 0;
+	font-size: 12px;
+}

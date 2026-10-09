@@ -233,7 +233,7 @@ The user changes the main assistant's model from the chat, in the panel and the 
 ### The panel (expanded)
 
 - 420 × 640 px, rounded 20 px, translucent (macOS vibrancy), anchored to the Dot.
-- Header (one continuous chat): the rose glyph and "Gentle Dot", then Accounts, Profiles, Connectors (a plug; also `/connectors`), Hide the rose (an eye) and Full screen (desktop panel only), and Hide as 18 px stroke icons with tooltips. With `features.conversations` on, the conversation title, the conversations list, and New conversation return.
+- Header (one continuous chat): the rose glyph and "Gentle Dot", then Accounts, Profiles, Connectors (a plug; also `/connectors`), Settings (a gear), Hide the rose (an eye) and Full screen (desktop panel only), and Hide as 18 px stroke icons with tooltips. The web UI has no Settings for now. With `features.conversations` on, the conversation title, the conversations list, and New conversation return.
 - "Show earlier" at the top of the chat loads the previous page; a subtle "Earlier messages" divider marks where the chat's earlier session ends.
 - Body: message list with streaming Markdown and code blocks; activity rows are collapsed one-liners grouped under the assistant turn ("Read 3 files · Ran tests").
 - Ask cards: when the agent needs the user, an inline card with the question and buttons (select and confirm) or a text field (input and editor). The Dot turns amber until the user answers.
@@ -308,6 +308,8 @@ When the panel opens, it is placed next to the Dot on the side with more room, a
 | `rose_hidden` | — | `true` when the user hid the rose |
 | `set_rose_hidden` | `{ "hidden": boolean }` | hides or shows the Dot window, saves the choice, emits `dot://rose`; returns the resulting state |
 | `set_panel_fullscreen` | `{ "on": boolean }` | fills the work area of the panel's display, or restores the frame before; returns the resulting state |
+| `shortcut_get` (panel only) | — | `{ "shortcut": "Alt+Space", "default": "Alt+Space" }`: the shortcut that toggles the panel now, in its normal spelling |
+| `shortcut_set` (panel only) | `{ "shortcut": string }` | `{ "shortcut": string }` as saved, or a rejection with a reason for the user (see "Menu bar and shortcut") |
 
 The Dot drags with `getCurrentWindow().startDragging()` (permission `core:window:allow-start-dragging`). After a drag ends (no move events for 300 ms), Rust snaps the Dot, by its real window size, to the nearest monitor edge with a 12 px margin and saves the position in `~/.gentle-dot/desktop.json`; the next launch restores it, or defaults to the right edge, vertically centered.
 
@@ -322,7 +324,13 @@ The Dot drags with `getCurrentWindow().startDragging()` (permission `core:window
 
 ### Menu bar and shortcut
 
-Tray menu: Open (`⌥ Space`), New conversation (only with `GENTLE_DOT_CONVERSATIONS=1`, read like the daemon reads it), Open in browser, Hide the rose / Show the rose, Restart assistant, Launch at login (check item), Quit. The global shortcut `Alt+Space` (configurable as `shortcut` in `config.json`) toggles the panel. Launch at login uses `tauri-plugin-autostart`; Open in browser uses `tauri-plugin-opener` with `webUrl`.
+Tray menu: Open (`⌥ Space`), New conversation (only with `GENTLE_DOT_CONVERSATIONS=1`, read like the daemon reads it), Open in browser, Hide the rose / Show the rose, Restart assistant, Launch at login (check item), Quit. The global shortcut `Alt+Space` (configurable as `shortcut` in `config.json`, or in the panel's Settings) toggles the panel.
+
+Settings (S33): a gear in the desktop panel header opens a Settings screen styled like Accounts. Its "Keyboard shortcut" section shows the shortcut (⌘ ⌥ ⌃ ⇧ on macOS, names elsewhere); "Change" records the next key combination from the physical key (`code`), Esc alone cancels recording without hiding the panel (the recorder listens in the capture phase and marks the keys it takes as handled), and "Reset to default" sets `Alt+Space`. `shortcut_set` applies it live, with no restart (`src/shortcut.rs`):
+
+- Rules: the accelerator must parse; it needs a modifier unless it is F1–F24; Esc alone and the panic shortcut ⌥⇧Esc (any spelling) are refused. The saved spelling is normal: modifiers as `Ctrl+Alt+Shift+Super`, then the key (`K`, `1`, `Space`, `F5`).
+- Apply: the new shortcut is bound first; if the system or another app holds it, the old one stays and the reason is "That shortcut is taken by the system or another app." Then `shortcut` is saved in `config.json` (read, change that key only, write a 0600 temporary file and rename it; a file that cannot be read or is not a JSON object is reported, never replaced); if saving fails, the new binding is released and the old one stays. Last, the old shortcut is released and the tray's Open item shows the new one.
+- Native Wayland: the desktop owns shortcuts, so `shortcut_set` explains how to bind `gentle-dot --toggle` instead. Launch at login uses `tauri-plugin-autostart`; Open in browser uses `tauri-plugin-opener` with `webUrl`.
 
 ### Hiding the rose and full screen (S26)
 
@@ -356,6 +364,6 @@ On launch, the app checks `GET /health`. If the daemon does not answer, the app 
 { "port": 4317, "workspace": "~/Documents", "shortcut": "Alt+Space", "launchAtLogin": false }
 ```
 
-All keys are optional. `workspace` is the user's preferred working folder: the engine is told about it but always runs in `<dataDir>/workspace`.
+All keys are optional. `workspace` is the user's preferred working folder: the engine is told about it but always runs in `<dataDir>/workspace`. Changing the shortcut in Settings rewrites `shortcut` and keeps every other key.
 
 Environment overrides: `GENTLE_DOT_AGENT_HOME` (default `~/.gentle-dot/agent`), `GENTLE_DOT_ENGRAM_DATA_DIR` (default: the user's Engram data folder), `GENTLE_DOT_ENGRAM` (`private` for a memory of the assistant's own), `GENTLE_DOT_ENGRAM_PORT` (private memory only, default `7438`), `GENTLE_DOT_PORT`, `GENTLE_DOT_HOST` (default `127.0.0.1`; `0.0.0.0` only inside a container), `GENTLE_DOT_DATA_DIR`, `GENTLE_DOT_WORKSPACE`, `GENTLE_DOT_UI_DIR`, `GENTLE_DOT_AGENT_BIN`, `GENTLE_DOT_AGENT_ARGS` (JSON array), `GENTLE_DOT_ALLOWED_ORIGINS` (JSON array), `GENTLE_DOT_CONVERSATIONS` (`1` turns the conversations list on), `GENTLE_DOT_ROTATE_BYTES` (default 20 MB), `GENTLE_DOT_ROTATE_COMPACTIONS` (default 10), `GENTLE_DOT_HISTORY_PAGE` (default 100), `GENTLE_DOT_MCP_CLI` (JSON array: the command line used for connector sign-in, for tests; default the bundled engine's).

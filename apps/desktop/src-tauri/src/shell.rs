@@ -1,5 +1,6 @@
 //! Tauri wiring: windows, commands, tray menu, global shortcut, Dot snapping,
-//! hiding the rose, the full-screen panel, voice input, and the daemon lifecycle (design §9).
+//! hiding the rose, the full-screen panel, voice input, the shortcut chosen in Settings,
+//! and the daemon lifecycle (design §9).
 
 use crate::computer::app as computer;
 use crate::computer::session::Reason;
@@ -8,6 +9,7 @@ use crate::daemon::{self, Daemon, RestartOutcome};
 use crate::geometry::{self, Rect};
 use crate::platform::{self, LaunchRequest, Os, DOT_TITLE, PANEL_TITLE};
 use crate::position::{self, DotPosition};
+use crate::shortcut;
 use crate::status::{is_template, tray_status, TrayGlyph};
 use crate::voice::app as voice;
 use std::path::PathBuf;
@@ -26,7 +28,7 @@ use tauri::{
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutEvent, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
 
 const DOT: &str = "dot";
@@ -54,10 +56,19 @@ struct Shell {
     panel_spot: Mutex<Option<(i32, i32)>>,
     /// While the panel fills the screen (S26.2): its frame before, to restore.
     full_screen: Mutex<Option<Rect>>,
+    /// The shortcut that toggles the panel now; `None` while none is bound (native Wayland).
+    shortcut: Mutex<Option<String>>,
 }
 
 /// The tray's rose item, relabeled when the rose is hidden or shown.
 struct RoseMenuItem(MenuItem<tauri::Wry>);
+
+/// The tray's "Open" item, whose accelerator label follows the shortcut (S33.3).
+struct OpenMenuItem(MenuItem<tauri::Wry>);
+
+/// On native Wayland the desktop binds `gentle-dot --toggle` itself.
+const DESKTOP_OWNS_SHORTCUTS: &str =
+    "On this desktop, global shortcuts are set in the system keyboard settings: bind `gentle-dot --toggle` there.";
 
 /// Where `show_panel` puts the panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +205,81 @@ fn set_panel_fullscreen(app: AppHandle, on: bool) -> CommandResult<bool> {
         _ => {}
     }
     Ok(full_screen.is_some())
+}
+
+/// Result of `shortcut_get`: the shortcut that opens the panel and the default one.
+#[derive(serde::Serialize)]
+struct ShortcutInfo {
+    shortcut: String,
+    default: String,
+}
+
+/// Result of `shortcut_set`: the shortcut as saved.
+#[derive(serde::Serialize)]
+struct ShortcutChoice {
+    shortcut: String,
+}
+
+#[tauri::command]
+fn shortcut_get(app: AppHandle) -> ShortcutInfo {
+    let shell = app.state::<Shell>();
+    let current = shell.shortcut.lock().unwrap().clone().unwrap_or_else(|| shell.config.shortcut.clone());
+    ShortcutInfo {
+        shortcut: shortcut::normalize(&current).unwrap_or(current),
+        default: DEFAULT_SHORTCUT.to_string(),
+    }
+}
+
+/// Binds, saves, and shows a new panel shortcut at once (S33.3), or says why it cannot.
+#[tauri::command]
+async fn shortcut_set(app: AppHandle, shortcut: String) -> CommandResult<ShortcutChoice> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let shell = app.state::<Shell>();
+        if !shell.places_windows {
+            return Err(DESKTOP_OWNS_SHORTCUTS.to_string());
+        }
+        let mut current = shell.shortcut.lock().unwrap();
+        let host = ShortcutHost { app: &app, config_file: shell.config.data_dir.join("config.json") };
+        let saved = shortcut::apply(&host, current.as_deref(), &shortcut)?;
+        *current = Some(saved.clone());
+        Ok(ShortcutChoice { shortcut: saved })
+    })
+    .await
+    .map_err(err)?
+}
+
+struct ShortcutHost<'a> {
+    app: &'a AppHandle,
+    config_file: PathBuf,
+}
+
+impl shortcut::Host for ShortcutHost<'_> {
+    fn bind_toggle(&self, shortcut: &str) -> Result<(), String> {
+        self.app.global_shortcut().on_shortcut(shortcut, toggle_on_press).map_err(err)
+    }
+
+    fn unbind(&self, shortcut: &str) {
+        if let Err(error) = self.app.global_shortcut().unregister(shortcut) {
+            eprintln!("gentle-dot: cannot release shortcut `{shortcut}`: {error}");
+        }
+    }
+
+    fn save(&self, shortcut: &str) -> Result<(), String> {
+        config::save_shortcut(&self.config_file, shortcut)
+    }
+
+    fn label_tray(&self, shortcut: &str) {
+        label_tray_open(self.app, shortcut);
+    }
+}
+
+/// The accelerator is only a label; one the menu cannot show is left off.
+fn label_tray_open(app: &AppHandle, shortcut: &str) {
+    if let Some(item) = app.try_state::<OpenMenuItem>() {
+        if item.0.set_accelerator(Some(shortcut)).is_err() {
+            let _ = item.0.set_accelerator(None::<&str>);
+        }
+    }
 }
 
 #[tauri::command]
@@ -429,6 +515,7 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tau
     // The accelerator is only a label here; an unparsable one must not break the menu.
     let open = MenuItem::with_id(app, "open", "Open", true, Some(config.shortcut.as_str()))
         .or_else(|_| MenuItem::with_id(app, "open", "Open", true, None::<&str>))?;
+    app.manage(OpenMenuItem(open.clone()));
     let menu = Menu::new(app)?;
     let conversations = conversations_on(std::env::var("GENTLE_DOT_CONVERSATIONS").ok().as_deref());
     for id in tray_menu_ids(conversations, cfg!(target_os = "macos")) {
@@ -561,20 +648,25 @@ fn register_panic_shortcut(app: &AppHandle) {
     }
 }
 
-fn register_shortcut(app: &AppHandle, shortcut: &str) {
-    let handler = |app: &AppHandle, _: &_, event: tauri_plugin_global_shortcut::ShortcutEvent| {
-        if event.state() == ShortcutState::Pressed {
-            if let Err(error) = toggle_panel(app.clone()) {
-                eprintln!("gentle-dot: cannot toggle the panel: {error}");
-            }
-        }
-    };
-    if let Err(error) = app.global_shortcut().on_shortcut(shortcut, handler) {
-        eprintln!("gentle-dot: shortcut `{shortcut}` is unavailable ({error}); using {DEFAULT_SHORTCUT}");
-        if shortcut != DEFAULT_SHORTCUT {
-            let _ = app.global_shortcut().on_shortcut(DEFAULT_SHORTCUT, handler);
+/// What the panel shortcut does, at launch and after a change in Settings.
+fn toggle_on_press(app: &AppHandle, _: &Shortcut, event: ShortcutEvent) {
+    if event.state() == ShortcutState::Pressed {
+        if let Err(error) = toggle_panel(app.clone()) {
+            eprintln!("gentle-dot: cannot toggle the panel: {error}");
         }
     }
+}
+
+/// Binds the configured shortcut, or the default one when it is unavailable. Returns the bound one.
+fn register_shortcut(app: &AppHandle, shortcut: &str) -> Option<String> {
+    match app.global_shortcut().on_shortcut(shortcut, toggle_on_press) {
+        Ok(()) => return Some(shortcut.to_string()),
+        Err(error) => eprintln!("gentle-dot: shortcut `{shortcut}` is unavailable ({error}); using {DEFAULT_SHORTCUT}"),
+    }
+    if shortcut != DEFAULT_SHORTCUT && app.global_shortcut().on_shortcut(DEFAULT_SHORTCUT, toggle_on_press).is_ok() {
+        return Some(DEFAULT_SHORTCUT.to_string());
+    }
+    None
 }
 
 /// A launch of `gentle-dot` (usually `--toggle` from a desktop shortcut) reaches the running app.
@@ -612,6 +704,8 @@ pub fn run() {
             rose_hidden,
             set_rose_hidden,
             set_panel_fullscreen,
+            shortcut_get,
+            shortcut_set,
             computer::computer_endpoint,
             computer::computer_permissions,
             computer::computer_request_permission,
@@ -649,6 +743,7 @@ pub fn run() {
                 rose_hidden: AtomicBool::new(rose_hidden),
                 panel_spot: Mutex::new(None),
                 full_screen: Mutex::new(None),
+                shortcut: Mutex::new(None),
             });
             app.manage(computer::start(&handle));
             let (voice_input, voice_model) = voice::start(&handle);
@@ -660,7 +755,11 @@ pub fn run() {
             build_windows(&handle, &config, places_windows, rose_hidden)?;
             build_tray(&handle, &config, rose_hidden)?;
             if places_windows {
-                register_shortcut(&handle, &config.shortcut);
+                let bound = register_shortcut(&handle, &config.shortcut);
+                if let Some(bound) = &bound {
+                    label_tray_open(&handle, bound);
+                }
+                *app.state::<Shell>().shortcut.lock().unwrap() = bound;
                 let snap = app.state::<Shell>().snap.clone();
                 window(&handle, DOT)?.on_window_event(move |event| {
                     // A move, or a new monitor scale, re-snaps the Dot and restores its size.
@@ -732,6 +831,25 @@ mod tests {
         assert_eq!(panel_placement(true, true, true), Placement::Keep);
         assert_eq!(panel_placement(true, true, false), Placement::Keep);
         assert_eq!(panel_placement(false, false, true), Placement::Keep);
+    }
+
+    #[test]
+    fn the_shortcut_commands_are_registered_and_granted_to_the_panel_only() {
+        let build = include_str!("../build.rs");
+        let capabilities: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        for command in ["shortcut_get", "shortcut_set"] {
+            assert!(build.contains(&format!("\"{command}\",")), "{command} is missing from build.rs");
+            let permission = format!("allow-{}", command.replace('_', "-"));
+            let windows: Vec<&serde_json::Value> = capabilities["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|c| c["permissions"].as_array().unwrap().iter().any(|p| p == permission.as_str()))
+                .flat_map(|c| c["windows"].as_array().unwrap())
+                .collect();
+            assert_eq!(windows, ["panel"], "{permission}");
+        }
     }
 
     #[test]
