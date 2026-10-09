@@ -30,7 +30,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
 
 const DOT: &str = "dot";
-const PANEL: &str = "panel";
+pub(crate) const PANEL: &str = "panel";
 const TRAY: &str = "main";
 /// The Dot window, in points: a 66 pt black disc with the rose, plus a 3 pt
 /// ring for its shadow. About the screen area of the earlier 64 × 84 rose.
@@ -619,7 +619,11 @@ pub fn run() {
             voice::voice_status,
             voice::voice_start,
             voice::voice_stop,
-            voice::voice_cancel
+            voice::voice_cancel,
+            voice::voice_model_status,
+            voice::voice_model_download,
+            voice::voice_model_cancel,
+            voice::voice_model_remove
         ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]
@@ -645,7 +649,9 @@ pub fn run() {
                 full_screen: Mutex::new(None),
             });
             app.manage(computer::start(&handle));
-            app.manage(voice::start());
+            let (voice_input, voice_model) = voice::start(&handle);
+            app.manage(voice_input);
+            app.manage(voice_model);
             #[cfg(target_os = "macos")]
             register_panic_shortcut(&handle);
 

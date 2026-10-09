@@ -20,6 +20,10 @@ const COMMANDS: &[&str] = &[
     "voice_start",
     "voice_stop",
     "voice_cancel",
+    "voice_model_status",
+    "voice_model_download",
+    "voice_model_cancel",
+    "voice_model_remove",
 ];
 
 fn find_in_path(program: &str, path: &str) -> Option<PathBuf> {

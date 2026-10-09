@@ -140,7 +140,10 @@ impl Voice {
     /// on the first `start`.
     pub fn status(&self) -> VoiceStatus {
         let (recognizer, microphone) = (&self.inner.recognizer, &self.inner.microphone);
-        let reason = blocked(recognizer.authorization(), VoiceError::SpeechDenied, VoiceError::SpeechRestricted)
+        let reason = recognizer
+            .availability()
+            .err()
+            .or_else(|| blocked(recognizer.authorization(), VoiceError::SpeechDenied, VoiceError::SpeechRestricted))
             .or_else(|| blocked(microphone.authorization(), VoiceError::MicrophoneDenied, VoiceError::MicrophoneRestricted))
             .or_else(|| locale::resolve(None, &recognizer.current_locale(), &recognizer.supported_locales()).err());
         match reason {
@@ -195,9 +198,11 @@ impl Voice {
         Ok(())
     }
 
-    /// Locale first (no point prompting without a recognizer), then Speech, then Microphone.
+    /// Availability and locale first (no point prompting without a recognizer), then Speech,
+    /// then Microphone.
     fn prepare(&self, requested: Option<&str>, recording: u64) -> Result<String, VoiceError> {
         let (recognizer, microphone) = (&self.inner.recognizer, &self.inner.microphone);
+        recognizer.availability()?;
         let locale = locale::resolve(requested, &recognizer.current_locale(), &recognizer.supported_locales())?;
         authorize(recognizer.authorization(), || recognizer.request_authorization(), VoiceError::SpeechDenied, VoiceError::SpeechRestricted)?;
         self.still_starting(recording)?;
@@ -214,7 +219,8 @@ impl Voice {
     }
 
     /// Stops the microphone and resolves with the final transcript, or the latest partial when
-    /// the recognizer does not answer within the timeout. Blocks, so it runs off the main thread.
+    /// the recognizer does not answer within the timeout (the recognition's own, when it sets
+    /// one, else the machine's). Blocks, so it runs off the main thread.
     pub fn stop(&self) -> Result<Transcript, VoiceError> {
         let (recording, mut stream, feed) = {
             let mut state = lock(&self.inner.state);
@@ -239,9 +245,13 @@ impl Voice {
         if let Some(stream) = stream.as_mut() {
             stream.close();
         }
-        lock(&feed).finish();
+        let timeout = {
+            let mut feed = lock(&feed);
+            feed.finish();
+            feed.recognition.final_timeout().unwrap_or(self.final_timeout)
+        };
 
-        let deadline = Instant::now() + self.final_timeout;
+        let deadline = Instant::now() + timeout;
         let mut state = lock(&self.inner.state);
         loop {
             let State::Stopping(session) = &*state else { return Err(VoiceError::Cancelled) };

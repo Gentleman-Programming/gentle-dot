@@ -1,14 +1,31 @@
-//! The app side of voice input (S30.1, L88): the `voice_*` commands and the `voice://*` events,
-//! sent only to the webview that started the recording. Off macOS `voice_status` answers
-//! "unavailable" and the other commands fail. Every command runs on a blocking thread: starting
-//! may wait on a permission prompt and stopping waits for the final transcript.
+//! The app side of voice input (S30.1, L88) and of the optional local model (S30.5): the
+//! `voice_*` commands and the `voice://*` events. Recording events go only to the webview that
+//! started the recording; `voice://model` events go to the panel. On macOS, Apple Speech records
+//! until the local model is installed; on Linux, the local model is the only engine; elsewhere
+//! `voice_status` answers "unavailable" and the other recording commands fail. Every command
+//! runs on a blocking thread: starting may wait on a permission prompt, stopping waits for the
+//! final transcript, and removing the model deletes files.
 
+use super::engine::{fallback_engine, Preferred};
+use super::model::{HttpFetcher, ModelError, ModelEvent, ModelEvents, ModelManager, ModelSpec, ModelStatus, MODEL_EVENT};
+use super::parakeet::{self, Loader, Locate, Parakeet};
 use super::{Events, Transcript, Voice, VoiceError, VoiceEvent, VoiceStatus, UNSUPPORTED};
+use crate::computer::SystemClock;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, EventTarget, Manager};
 
 /// The commands, as registered in `build.rs` and granted to the panel.
-pub const COMMANDS: [&str; 4] = ["voice_status", "voice_start", "voice_stop", "voice_cancel"];
+pub const COMMANDS: [&str; 8] = [
+    "voice_status",
+    "voice_start",
+    "voice_stop",
+    "voice_cancel",
+    "voice_model_status",
+    "voice_model_download",
+    "voice_model_cancel",
+    "voice_model_remove",
+];
 
 /// Voice input, when this platform has a backend.
 pub struct VoiceInput {
@@ -45,16 +62,81 @@ impl VoiceInput {
     }
 }
 
-/// Apple's Speech framework over the native microphone on macOS; nothing elsewhere.
-pub fn start() -> VoiceInput {
+/// The local model's files and the recognizer that keeps it loaded.
+pub struct VoiceModel {
+    manager: Arc<ModelManager>,
+    local: Arc<Parakeet>,
+}
+
+impl VoiceModel {
+    pub fn status(&self) -> ModelStatus {
+        self.manager.status()
+    }
+
+    pub fn download(&self) -> Result<(), ModelError> {
+        self.manager.download()
+    }
+
+    pub fn cancel(&self) {
+        self.manager.cancel();
+    }
+
+    /// Deletes the files and drops the loaded model.
+    pub fn remove(&self) -> Result<(), ModelError> {
+        self.manager.remove()?;
+        self.local.release();
+        Ok(())
+    }
+}
+
+/// Where models are installed: `<app data>/models`.
+pub fn models_dir(app_data: Option<PathBuf>) -> PathBuf {
+    app_data.unwrap_or_else(|| std::env::temp_dir().join("gentle-dot")).join("models")
+}
+
+/// Voice input with the engine this platform prefers, and the local model's manager.
+pub fn start(app: &AppHandle) -> (VoiceInput, VoiceModel) {
+    let emitter = app.clone();
+    let events: ModelEvents = Arc::new(move |event: ModelEvent| {
+        if let Err(error) = emitter.emit_to(EventTarget::webview_window(crate::shell::PANEL), MODEL_EVENT, event) {
+            eprintln!("gentle-dot: cannot send a voice model event: {error}");
+        }
+    });
+    let manager = Arc::new(ModelManager::new(
+        ModelSpec::parakeet(),
+        models_dir(app.path().app_data_dir().ok()),
+        Arc::new(HttpFetcher),
+        Arc::new(SystemClock),
+        events,
+        fallback_engine(),
+    ));
+    let installed = manager.clone();
+    let locate: Locate = Arc::new(move || installed.installed());
+    let loader: Loader = Arc::new(parakeet::load);
+    let local = Arc::new(Parakeet::new(locate, loader));
+    (platform_input(local.clone()), VoiceModel { manager, local })
+}
+
+/// macOS: the native microphone, Parakeet when installed, else Apple Speech. Linux: a
+/// command-line recorder and Parakeet. Elsewhere: nothing.
+fn platform_input(local: Arc<Parakeet>) -> VoiceInput {
     #[cfg(target_os = "macos")]
     return VoiceInput::new(Voice::new(
         Arc::new(super::MacMicrophone),
-        Arc::new(super::AppleSpeech),
-        Arc::new(crate::computer::SystemClock),
+        Arc::new(Preferred::new(local, Some(Arc::new(super::AppleSpeech)))),
+        Arc::new(SystemClock),
     ));
-    #[cfg(not(target_os = "macos"))]
-    VoiceInput::unsupported()
+    #[cfg(target_os = "linux")]
+    return VoiceInput::new(Voice::new(
+        Arc::new(super::pipe::PipeMicrophone::system()),
+        Arc::new(Preferred::new(local, None)),
+        Arc::new(SystemClock),
+    ));
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = local;
+        VoiceInput::unsupported()
+    }
 }
 
 async fn blocking<T: Send + 'static>(
@@ -94,10 +176,49 @@ pub async fn voice_cancel(app: AppHandle) -> Result<(), String> {
     blocking(app, VoiceInput::cancel).await
 }
 
+async fn model<T: Send + 'static>(
+    app: AppHandle,
+    action: impl FnOnce(&VoiceModel) -> Result<T, ModelError> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(move || action(&app.state::<VoiceModel>()))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(String::from)
+}
+
+/// `{installed, bytes?, downloading, received?, total?, engine}`.
+#[tauri::command]
+pub async fn voice_model_status(app: AppHandle) -> Result<ModelStatus, String> {
+    model(app, |model| Ok(model.status())).await
+}
+
+/// Starts the download; `voice://model` events report progress and the outcome.
+#[tauri::command]
+pub async fn voice_model_download(app: AppHandle) -> Result<(), String> {
+    model(app, VoiceModel::download).await
+}
+
+/// Stops a download in flight (harmless otherwise); a `failed` event follows.
+#[tauri::command]
+pub async fn voice_model_cancel(app: AppHandle) -> Result<(), String> {
+    model(app, |model| {
+        model.cancel();
+        Ok(())
+    })
+    .await
+}
+
+/// Deletes the model; a `removed` event follows when there was one.
+#[tauri::command]
+pub async fn voice_model_remove(app: AppHandle) -> Result<(), String> {
+    model(app, VoiceModel::remove).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::voice::{VoiceError, VoiceStatus, UNSUPPORTED};
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     #[test]
@@ -107,12 +228,30 @@ mod tests {
         assert_eq!(input.start(None, Arc::new(|_| {})), Err(VoiceError::Unsupported));
         assert_eq!(input.stop(), Err(VoiceError::Unsupported));
         assert_eq!(input.cancel(), Err(VoiceError::Unsupported));
-        assert_eq!(String::from(VoiceError::Unsupported), "Voice input is available on macOS.");
+        assert_eq!(String::from(VoiceError::Unsupported), "Voice input is available on macOS and Linux.");
     }
 
     #[test]
-    fn the_command_names_match_the_l88_contract() {
-        assert_eq!(COMMANDS, ["voice_status", "voice_start", "voice_stop", "voice_cancel"]);
+    fn the_command_names_match_the_l88_and_s30_5_contracts() {
+        assert_eq!(
+            COMMANDS,
+            [
+                "voice_status",
+                "voice_start",
+                "voice_stop",
+                "voice_cancel",
+                "voice_model_status",
+                "voice_model_download",
+                "voice_model_cancel",
+                "voice_model_remove",
+            ]
+        );
+    }
+
+    #[test]
+    fn models_live_under_the_app_data_dir() {
+        assert_eq!(models_dir(Some(PathBuf::from("/data/app"))), PathBuf::from("/data/app/models"));
+        assert_eq!(models_dir(None), std::env::temp_dir().join("gentle-dot").join("models"));
     }
 
     #[test]

@@ -26,6 +26,15 @@ getrandom = "0.3"
 base64 = "0.22"
 tiny_http = "0.12"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# The optional local voice model (S30.5): Parakeet through sherpa-onnx, linked statically (its
+# build script downloads the prebuilt static libraries from the sherpa-onnx GitHub release unless
+# SHERPA_ONNX_LIB_DIR or SHERPA_ONNX_ARCHIVE_DIR points at a local copy). The model itself is
+# downloaded only when the user asks, over HTTPS, checked against a pinned SHA-256, and unpacked.
+sherpa-onnx = "1.13.8"
+ureq = { version = "2.12", default-features = false, features = ["tls", "proxy-from-env"] }
+sha2 = "0.10"
+tar = { version = "0.4", default-features = false }
+bzip2 = "0.6"
 
 # The computer-control helper (S24) is macOS only.
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -57,3 +66,11 @@ opt-level = 3
 
 [profile.dev.package.gentle-dot]
 opt-level = 1
+
+# Installing the local voice model (S30.5) hashes a 487 MB download and unpacks 640 MB from
+# bzip2; unoptimized, that alone took 90 s on an M-series Mac.
+[profile.dev.package.libbz2-rs-sys]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3

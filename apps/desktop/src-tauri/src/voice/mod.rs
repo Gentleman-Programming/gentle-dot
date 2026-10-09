@@ -3,24 +3,32 @@
 //!
 //! - `Microphone` captures audio and delivers 16 kHz mono f32 PCM (`audio::SAMPLE_RATE`), the
 //!   format offline models such as sherpa-onnx expect, so any recognizer can consume it.
-//! - `Recognizer` turns that PCM into partial and final text. Apple's Speech framework is the
-//!   default (`macos::AppleSpeech`); a local model can be added as a second implementation.
+//! - `Recognizer` turns that PCM into partial and final text. Apple's Speech framework
+//!   (`macos::AppleSpeech`) is the default on macOS; the optional local model (S30.5,
+//!   `parakeet::Parakeet`, NVIDIA Parakeet through sherpa-onnx) is preferred once the user has
+//!   downloaded it (`model`), and it is the only engine on Linux (`engine::Preferred`).
 //!
 //! `Voice` is the pure state machine between them (idle → starting → recording → stopping,
 //! single flight, cancel, error mapping, level throttling, locale fallback), tested on every OS
-//! with fakes. The objc2 bindings live in `macos`; off macOS the commands answer "unavailable".
+//! with fakes. The objc2 bindings live in `macos`; Linux records through a command-line recorder
+//! (`pipe`); elsewhere the commands answer "unavailable".
 //!
 //! SpeechAnalyzer/SpeechTranscriber (macOS 26) are Swift-only, with no Objective-C interface to
 //! bind from Rust, and the app supports macOS 12.3, so `SFSpeechRecognizer` is the recognizer.
 
 pub mod app;
 pub mod audio;
+pub mod engine;
 #[cfg(test)]
 mod fake;
 pub mod locale;
 mod machine;
 #[cfg(target_os = "macos")]
 mod macos;
+pub mod model;
+pub mod parakeet;
+#[cfg(unix)]
+pub mod pipe;
 
 pub use machine::{Sink, Voice};
 #[cfg(target_os = "macos")]
@@ -29,6 +37,7 @@ pub use macos::{AppleSpeech, MacMicrophone};
 use serde::Serialize;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Live text while the user speaks: `{text}`.
 pub const PARTIAL_EVENT: &str = "voice://partial";
@@ -36,7 +45,7 @@ pub const PARTIAL_EVENT: &str = "voice://partial";
 pub const LEVEL_EVENT: &str = "voice://level";
 /// A failure while recording (permission, recognizer, interruption): `{message}`.
 pub const ERROR_EVENT: &str = "voice://error";
-pub const UNSUPPORTED: &str = "Voice input is available on macOS.";
+pub const UNSUPPORTED: &str = "Voice input is available on macOS and Linux.";
 
 /// The `voice_status` reply: `{available, reason?}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -112,7 +121,11 @@ pub enum VoiceError {
     MicrophoneDenied,
     MicrophoneRestricted,
     NoRecognizer(String),
+    /// The local model is the only engine here (Linux) and it is not downloaded.
+    NoModel,
     NoMicrophone,
+    /// Linux: neither `parec` nor `arecord` is installed.
+    NoRecorder,
     Interrupted,
     Failed(String),
 }
@@ -134,7 +147,11 @@ impl fmt::Display for VoiceError {
             ),
             VoiceError::MicrophoneRestricted => f.write_str("Microphone access is restricted on this Mac."),
             VoiceError::NoRecognizer(locale) => write!(f, "Speech recognition is not available for {locale}."),
+            VoiceError::NoModel => f.write_str("Download the local voice model to use voice input."),
             VoiceError::NoMicrophone => f.write_str("No microphone is available."),
+            VoiceError::NoRecorder => f.write_str(
+                "No audio recorder was found. Install pulseaudio-utils (parec) or alsa-utils (arecord).",
+            ),
             VoiceError::Interrupted => f.write_str("The microphone was interrupted."),
             VoiceError::Failed(message) => f.write_str(message),
         }
@@ -166,6 +183,11 @@ pub trait Stream: Send {
 /// `Sink::finished`, and `Sink::failed`, from any thread, but never from inside `feed`,
 /// `finish`, or `cancel` while reporting a failure.
 pub trait Recognizer: Send + Sync {
+    /// Whether this recognizer can work at all, apart from permissions (a local model that is
+    /// not downloaded cannot).
+    fn availability(&self) -> Result<(), VoiceError> {
+        Ok(())
+    }
     /// The current permission, without prompting (`Authorized` when none is needed).
     fn authorization(&self) -> Authorization;
     /// Prompts when not yet determined. Blocks until the user answers: never on the main thread.
@@ -184,6 +206,11 @@ pub trait Recognition: Send {
     fn finish(&mut self);
     /// Discards the recognition.
     fn cancel(&mut self);
+    /// How long `stop` waits for the final text, when this recognition needs longer than the
+    /// machine's default (an offline model decodes everything after `finish`).
+    fn final_timeout(&self) -> Option<Duration> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -205,7 +232,7 @@ mod tests {
         assert_eq!(serde_json::to_value(VoiceStatus::available()).unwrap(), serde_json::json!({"available": true}));
         assert_eq!(
             serde_json::to_value(VoiceStatus::unavailable(UNSUPPORTED)).unwrap(),
-            serde_json::json!({"available": false, "reason": "Voice input is available on macOS."})
+            serde_json::json!({"available": false, "reason": "Voice input is available on macOS and Linux."})
         );
     }
 
