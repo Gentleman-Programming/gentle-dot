@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-shortcut-get"
+description = "Enables the shortcut_get command without any pre-configured scope."
+commands.allow = ["shortcut_get"]
+
+[[permission]]
+identifier = "deny-shortcut-get"
+description = "Denies the shortcut_get command without any pre-configured scope."
+commands.deny = ["shortcut_get"]

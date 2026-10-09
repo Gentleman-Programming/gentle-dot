@@ -174,6 +174,7 @@ function Assistant({ surface }: { surface: Surface }) {
 			{...(computer ? { computer } : {})}
 			{...(desktop && surface === "panel" ? { voiceModel: true } : {})}
 			{...(desktop && surface === "panel" ? { panelWindow: panel.controls } : {})}
+			{...(desktop && surface === "panel" ? { settings: true } : {})}
 			{...(upload ? { upload } : {})}
 		/>
 	);

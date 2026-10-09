@@ -8,6 +8,7 @@ pub mod health;
 pub mod platform;
 pub mod position;
 mod shell;
+pub mod shortcut;
 pub mod status;
 pub mod voice;
 
