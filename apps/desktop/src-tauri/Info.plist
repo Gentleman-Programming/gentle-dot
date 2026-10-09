@@ -5,5 +5,10 @@
 	<!-- Accessory app: no Dock icon, even before the activation policy is applied. -->
 	<key>LSUIElement</key>
 	<true/>
+	<!-- Voice input (S30.1): shown by macOS the first time the mic button is used. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Gentle Dot listens to your voice when you press the microphone button.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Gentle Dot turns what you say into a message when you press the microphone button.</string>
 </dict>
 </plist>

@@ -1,5 +1,5 @@
 //! Tauri wiring: windows, commands, tray menu, global shortcut, Dot snapping,
-//! hiding the rose, the full-screen panel, and the daemon lifecycle (design §9).
+//! hiding the rose, the full-screen panel, voice input, and the daemon lifecycle (design §9).
 
 use crate::computer::app as computer;
 use crate::computer::session::Reason;
@@ -9,6 +9,7 @@ use crate::geometry::{self, Rect};
 use crate::platform::{self, LaunchRequest, Os, DOT_TITLE, PANEL_TITLE};
 use crate::position::{self, DotPosition};
 use crate::status::{is_template, tray_status, TrayGlyph};
+use crate::voice::app as voice;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -614,7 +615,11 @@ pub fn run() {
             computer::computer_request_permission,
             computer::computer_stop,
             computer::computer_status,
-            computer::computer_set_yolo
+            computer::computer_set_yolo,
+            voice::voice_status,
+            voice::voice_start,
+            voice::voice_stop,
+            voice::voice_cancel
         ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]
@@ -640,6 +645,7 @@ pub fn run() {
                 full_screen: Mutex::new(None),
             });
             app.manage(computer::start(&handle));
+            app.manage(voice::start());
             #[cfg(target_os = "macos")]
             register_panic_shortcut(&handle);
 

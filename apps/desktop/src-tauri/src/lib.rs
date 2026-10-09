@@ -9,5 +9,6 @@ pub mod platform;
 pub mod position;
 mod shell;
 pub mod status;
+pub mod voice;
 
 pub use shell::run;

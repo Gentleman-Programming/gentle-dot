@@ -26,6 +26,17 @@
 			]
 		},
 		{
+			"identifier": "voice",
+			"description": "Voice input (S30.1): the panel's mic button records and transcribes natively; the Dot never records.",
+			"windows": ["panel"],
+			"permissions": [
+				"allow-voice-status",
+				"allow-voice-start",
+				"allow-voice-stop",
+				"allow-voice-cancel"
+			]
+		},
+		{
 			"identifier": "glow",
 			"description": "What the computer-control glow overlay (S28) may call: listening to the glow and session events, nothing else.",
 			"windows": ["glow"],

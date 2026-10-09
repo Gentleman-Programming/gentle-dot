@@ -16,6 +16,10 @@ const COMMANDS: &[&str] = &[
     "computer_stop",
     "computer_status",
     "computer_set_yolo",
+    "voice_status",
+    "voice_start",
+    "voice_stop",
+    "voice_cancel",
 ];
 
 fn find_in_path(program: &str, path: &str) -> Option<PathBuf> {
