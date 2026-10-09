@@ -45,6 +45,7 @@ describe("local voice model (S30.5)", () => {
 	it("downloads only when asked, showing the size and the progress", async () => {
 		render(<VoiceModelEntry />);
 		expect(await screen.findByText("Using: macOS speech")).toBeInTheDocument();
+		expect(screen.getByText("macOS")).toHaveClass("chip");
 		expect(h.invoke).not.toHaveBeenCalledWith("voice_model_download", undefined);
 
 		await userEvent.click(screen.getByRole("button", { name: "Download local voice model (487 MB)" }));
@@ -76,6 +77,8 @@ describe("local voice model (S30.5)", () => {
 		h.status = { installed: true, bytes: 670_478_772, downloading: false, engine: "parakeet" };
 		render(<VoiceModelEntry />);
 		expect(await screen.findByText("Using: local model (Parakeet), works offline")).toBeInTheDocument();
+		expect(screen.getByText("Offline")).toHaveClass("chip");
+		expect(screen.queryByText("Built in")).toBeNull();
 
 		h.status = { installed: false, downloading: false, engine: "apple" };
 		await userEvent.click(screen.getByRole("button", { name: "Remove local model (670 MB)" }));

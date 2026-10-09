@@ -18,6 +18,13 @@ const ENGINES: Record<VoiceModelStatus["engine"], string> = {
 	none: "Voice input needs the local model on this computer",
 };
 
+/** The chip names the engine that listens now. */
+const CHIPS: Record<VoiceModelStatus["engine"], string> = {
+	parakeet: "Offline",
+	apple: "macOS",
+	none: "Off",
+};
+
 const megabytes = (bytes: number) => `${Math.round(bytes / 1_000_000)} MB`;
 
 type Progress = { kind: "downloading"; percent: number } | { kind: "verifying" };
@@ -80,7 +87,7 @@ export function VoiceModelEntry() {
 		<li className="computer-entry" aria-labelledby="connector-voice">
 			<div className="provider-name">
 				<b id="connector-voice">Voice</b>
-				<span className="chip connector-connected">Built in</span>
+				{status ? <span className="chip connector-connected">{CHIPS[status.engine]}</span> : null}
 			</div>
 			{status ? <p className="connector-note">{ENGINES[status.engine]}</p> : null}
 			<p className="connector-note">
