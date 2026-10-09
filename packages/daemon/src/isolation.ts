@@ -27,6 +27,18 @@ export function ensurePrivateDir(path: string): void {
 	chmodSync(path, 0o700);
 }
 
+/**
+ * Marks `agentHome` as owned by gentle-shell so that pre-created connector files
+ * do not make gentle-shell treat it as a foreign directory.
+ */
+export function ensureAgentHomeMarker(agentHome: string): void {
+	const marker = join(agentHome, ".gentle-shell-home");
+	if (!existsSync(marker)) {
+		ensurePrivateDir(agentHome);
+		writeFileSync(marker, `${JSON.stringify({ createdBy: "gentle-shell" })}\n`, { mode: 0o600 });
+	}
+}
+
 /** Variables that could point the engine back at the user's own setup. */
 const INHERITED_HOMES = ["PI_CODING_AGENT_DIR", "GENTLE_PI_AGENT_HOME", "GENTLE_SHELL_CONFIG"];
 
@@ -106,6 +118,10 @@ export function isolatedAgentEnv(base: NodeJS.ProcessEnv, dataDir: string): Node
 	if (runtime) env.ENGRAM_BIN = resolveEngramBin(base, runtime, { home: realHome });
 	const gitConfig = join(realHome, ".gitconfig");
 	if (!base.GIT_CONFIG_GLOBAL && existsSync(gitConfig)) env.GIT_CONFIG_GLOBAL = gitConfig;
+	const npmrc = join(home, ".npmrc");
+	if (!existsSync(npmrc)) writeFileSync(npmrc, "");
+	env.npm_config_userconfig = npmrc;
+	delete env.npm_config_allow_scripts;
 	return env;
 }
 

@@ -25,7 +25,13 @@ import {
 	policyEnv,
 } from "./connectors.ts";
 import { approvalRequest } from "./extensions/approval-guard.ts";
-import { ensureMemoryProject, ensurePrivateDir, isolatedAgentEnv, privateMemory } from "./isolation.ts";
+import {
+	ensureAgentHomeMarker,
+	ensureMemoryProject,
+	ensurePrivateDir,
+	isolatedAgentEnv,
+	privateMemory,
+} from "./isolation.ts";
 import { MCP_PREFIX, McpProxy, type ProxiedConnector, type UpstreamCredentials } from "./mcp-proxy.ts";
 import { defaultImportPath, ProfileStore } from "./profiles.ts";
 import { type RotationLimits, rotationLimits } from "./rotation.ts";
@@ -151,6 +157,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		agentEnv.GENTLE_PI_CONFIG_HOME = join(options.dataDir, "gentle-ai");
 	}
 	const agentHome = options.agentHome ?? resolveAgentHome(process.env, options.dataDir);
+	if (options.agentHome) ensureAgentHomeMarker(agentHome);
 	// The approved connectors are read once, here; the engine cannot change them (docs/design.md).
 	const connectorStore = new ConnectorStore({
 		dataDir: options.dataDir,
@@ -200,7 +207,13 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 			return policyEnv(connectorStore);
 		},
 		// The first start in a new home installs the engine's companion packages.
-		...(options.agentHome ? { startTimeoutMs: 180_000 } : {}),
+		...(options.agentHome
+			? {
+					startTimeoutMs: process.env.GENTLE_DOT_START_TIMEOUT_MS
+						? Number(process.env.GENTLE_DOT_START_TIMEOUT_MS)
+						: 360_000,
+				}
+			: {}),
 		...(options.backoffMs ? { backoffMs: options.backoffMs } : {}),
 		log: (line) => log(`[agent] ${line}`),
 	});
