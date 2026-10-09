@@ -8,6 +8,8 @@
 			"!apps/desktop/src-tauri/target",
 			"!apps/desktop/src-tauri/gen",
 			"!odd",
+			"!build",
+			"!.cache",
 			"!docs",
 			"!test-results",
 			"!playwright-report"

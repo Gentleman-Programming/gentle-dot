@@ -173,3 +173,103 @@ bin=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd -P) || exit 1
 exec "$bin/node" "$bin/../lib/node_modules/npm/bin/${cli}" "$@"
 `;
 }
+
+// macOS installer (`package-mac.mjs`).
+
+export const MAC_USAGE =
+	"usage: package-mac [--sign <identity>] [--skip-stage] [--check] [--check-dmg <dmg>] [--finder-layout]";
+
+/** The ad hoc signing identity: no certificate, and no identity that survives a rebuild. */
+export const AD_HOC = "-";
+
+/**
+ * Parses package-mac's command line. The signing identity is `--sign`, else
+ * `GENTLE_DOT_SIGN_IDENTITY`, else ad hoc.
+ */
+export function parseMacArgs(argv, env = process.env) {
+	const args = argv.filter((arg) => arg !== "--");
+	const options = { skipStage: false, check: false, finderLayout: false };
+	const switches = { "--skip-stage": "skipStage", "--check": "check", "--finder-layout": "finderLayout" };
+	const values = { "--sign": "sign", "--check-dmg": "checkDmg" };
+	for (let i = 0; i < args.length; i++) {
+		if (switches[args[i]]) {
+			options[switches[args[i]]] = true;
+			continue;
+		}
+		const name = values[args[i]];
+		const value = args[i + 1];
+		if (!name || value === undefined || value === "" || value.startsWith("--"))
+			throw new Error(`Unexpected argument ${args[i]}.\n${MAC_USAGE}`);
+		options[name] = value;
+		i++;
+	}
+	const identity = options.sign ?? (env.GENTLE_DOT_SIGN_IDENTITY || AD_HOC);
+	delete options.sign;
+	return { ...options, identity };
+}
+
+/**
+ * Whether a file's first bytes are a Mach-O header: thin 32/64-bit, or universal.
+ * A universal header shares Java's class-file magic; it counts its architectures,
+ * a small number, where a class file has its version, 45 or more.
+ */
+export function isMachO(bytes) {
+	if (bytes.length < 8) return false;
+	const magic = bytes.readUInt32BE(0);
+	if ([0xcffaedfe, 0xcefaedfe, 0xfeedfacf, 0xfeedface].includes(magic)) return true;
+	if (magic !== 0xcafebabe && magic !== 0xcafebabf) return false;
+	const architectures = bytes.readUInt32BE(4);
+	return architectures > 0 && architectures < 20;
+}
+
+/**
+ * Runtime binaries that must keep their own signature: re-signing changes their
+ * bytes, and gentle-pi refuses a Gentle AI binary whose SHA-256 is not its pinned release's.
+ */
+export function keepsOwnSignature(relative) {
+	return /(^|\/)node_modules\/gentle-pi\/\.gentle-ai\//.test(relative);
+}
+
+/** Signing order for nested code: the deepest paths first, so nothing is signed before what it holds. */
+export function insideOut(paths) {
+	const depth = (path) => path.split("/").length;
+	return [...paths].sort((a, b) => depth(b) - depth(a) || a.localeCompare(b));
+}
+
+/**
+ * The configuration `tauri build --config` merges for a release: the staged runtime
+ * as the app's `runtime` resource, and the signing identity. They stay out of
+ * `tauri.macos.conf.json` because tauri-build copies resources on every build, so a
+ * source build (`cargo test`, `tauri dev`) would need a staged runtime.
+ */
+export function tauriReleaseConfig({ runtime, identity }) {
+	return {
+		bundle: {
+			resources: { [runtime]: "runtime" },
+			macOS: { signingIdentity: identity },
+		},
+	};
+}
+
+/** The DMG name Tauri's bundler gives a product, version, and Node-style arch. */
+export function dmgFileName(productName, version, arch) {
+	const names = { arm64: "aarch64", x64: "x64" };
+	if (!names[arch]) throw new Error(`No DMG for arch ${arch}.`);
+	return `${productName}_${version}_${names[arch]}.dmg`;
+}
+
+/**
+ * Files whose permission bits differ between the staged runtime and the app's copy,
+ * or that the copy lacks. Both maps are relative path → mode.
+ */
+export function modeDifferences(staged, bundled) {
+	const differences = [];
+	for (const [path, mode] of staged) {
+		if (!bundled.has(path)) differences.push(`${path} (missing)`);
+		else if ((bundled.get(path) & 0o777) !== (mode & 0o777))
+			differences.push(
+				`${path} (${(mode & 0o777).toString(8)} → ${(bundled.get(path) & 0o777).toString(8)})`,
+			);
+	}
+	return differences;
+}
