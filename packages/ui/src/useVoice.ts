@@ -4,6 +4,7 @@ import { newRequestId, type Send } from "./components/types.ts";
 import { inDesktop } from "./desktop.ts";
 import { guessLanguage, pickVoice, speakableText } from "./speech.ts";
 import { type DotState, isBusy } from "./store.ts";
+import { voiceLanguage } from "./voice-language.ts";
 import {
 	cancelNativeVoice,
 	type NativeVoiceStatus,
@@ -297,7 +298,8 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 
 	const startNative = useCallback(async () => {
 		try {
-			await startNativeVoice(navigator.language);
+			// Apple's recognizer listens in one language: the one chosen in Settings, else the system's.
+			await startNativeVoice(voiceLanguage() ?? navigator.language);
 		} catch (error) {
 			finish(startRefusal(error));
 			return;

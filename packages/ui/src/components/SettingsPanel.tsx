@@ -7,6 +7,7 @@ import {
 	type ShortcutInfo,
 	saveShortcut,
 } from "../shortcut.ts";
+import { setVoiceLanguage, VOICE_LANGUAGES, voiceLanguage } from "../voice-language.ts";
 import "../settings.css";
 
 type Status =
@@ -24,6 +25,7 @@ function reasonOf(error: unknown): string {
 
 /** The desktop panel's settings (S33.1); for now, the shortcut that opens the panel. */
 export function SettingsPanel({ close }: { close: () => void }) {
+	const [language, setLanguage] = useState(() => voiceLanguage() ?? "");
 	const mac = isMac();
 	const show = (accelerator: string) => formatShortcut(accelerator, mac);
 	const [info, setInfo] = useState<ShortcutInfo | undefined>(undefined);
@@ -145,6 +147,27 @@ export function SettingsPanel({ close }: { close: () => void }) {
 				>
 					Reset to default
 				</button>
+			</section>
+
+			<section className="provider-section" aria-labelledby="settings-voice-language">
+				<h3 id="settings-voice-language">Voice language</h3>
+				<p className="muted">
+					The language macOS speech listens in. The local voice model detects it by itself.
+				</p>
+				<select
+					aria-label="Voice language"
+					value={language}
+					onChange={(event) => {
+						setLanguage(event.target.value);
+						setVoiceLanguage(event.target.value);
+					}}
+				>
+					{VOICE_LANGUAGES.map(([locale, label]) => (
+						<option key={locale || "auto"} value={locale}>
+							{label}
+						</option>
+					))}
+				</select>
 			</section>
 		</section>
 	);

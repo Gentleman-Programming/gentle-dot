@@ -162,6 +162,18 @@ describe("the Settings screen (S33.1)", () => {
 	});
 });
 
+describe("voice language (S30.6)", () => {
+	it("defaults to the system language and remembers the one chosen for macOS speech", async () => {
+		await openSettings();
+		const picker = screen.getByRole("combobox", { name: "Voice language" });
+		expect(picker).toHaveValue("");
+		await userEvent.selectOptions(picker, "es-ES");
+		expect(localStorage.getItem("gentle-dot-voice-language")).toBe("es-ES");
+		await userEvent.selectOptions(picker, "");
+		expect(localStorage.getItem("gentle-dot-voice-language")).toBeNull();
+	});
+});
+
 describe("changing the shortcut (S33.2, S33.3)", () => {
 	it("records the next combination and applies it", async () => {
 		await startRecording();
