@@ -1,6 +1,7 @@
 //! Connector secrets in the OS secure store (S25.5, S25.7): OAuth tokens, bot tokens, client
 //! secrets, and imported headers, keyed by a connector secret id. The app owns the store; the
-//! daemon gets a secret in memory over the app channel (wired in T23c), never from a file.
+//! daemon gets a secret in memory over the app channel (`secret_get`, `secret_put`,
+//! `secret_delete`, `secret_list` in `app_channel`, T23d), never from a file.
 //!
 //! - macOS (`Keychain`): generic password items in the login keychain, service
 //!   [`SERVICE`], account = the secret id, created by the app process. See `macos.rs` for how
@@ -104,6 +105,17 @@ pub trait SecretStore: Send + Sync {
     fn delete(&self, id: &str) -> Result<bool, StoreError>;
     /// Every id in this store, sorted, without duplicates.
     fn list_ids(&self) -> Result<Vec<String>, StoreError>;
+}
+
+/// The store the app serves connector secrets from: the login keychain on macOS, the Secret
+/// Service on Linux. Nothing is touched until the first request.
+pub fn connector_store() -> Box<dyn SecretStore> {
+    #[cfg(target_os = "macos")]
+    return Box::new(Keychain::new());
+    #[cfg(target_os = "linux")]
+    return Box::new(SecretServiceStore::new());
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    return Box::new(MemoryStore::new());
 }
 
 /// Accepts 1 to [`MAX_ID_LEN`] bytes of `[A-Za-z0-9._:@/-]`.

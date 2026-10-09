@@ -3,13 +3,11 @@
 // wherever it sits in the command line or address, and still shows the useful shape (command, host, path).
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import type { ImportCandidate } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import { ConnectorManager, ConnectorStore, summarize } from "../src/connectors.ts";
+import { MemorySecretSource } from "../src/secret-source.ts";
 import { tempDir } from "./helpers.ts";
-
-const FAKE_CLI = fileURLToPath(new URL("./fixtures/fake-mcp-cli.ts", import.meta.url));
 
 function write(home: string, path: string, value: unknown) {
 	const file = join(home, path);
@@ -168,14 +166,12 @@ afterEach(() => {
 
 function setup(home: string) {
 	const dataDir = tempDir();
-	const store = new ConnectorStore({ dataDir, agentHome: join(dataDir, "agent") });
-	const manager = new ConnectorManager({
-		store,
-		cli: { command: process.execPath, args: [FAKE_CLI] },
-		env: { ...process.env, HOME: join(dataDir, "home") },
-		cwd: dataDir,
-		importHome: home,
+	const store = new ConnectorStore({
+		dataDir,
+		agentHome: join(dataDir, "agent"),
+		secrets: new MemorySecretSource(),
 	});
+	const manager = new ConnectorManager({ store, importHome: home });
 	managers.push(manager);
 	return { store, manager };
 }
@@ -197,10 +193,10 @@ describe("masking credentials in server summaries", () => {
 		}
 	});
 
-	it("keeps every credential out of the Connectors list after the import", () => {
+	it("keeps every credential out of the Connectors list after the import", async () => {
 		const { manager } = setup(fixtureHome());
 		const found = manager.scan();
-		const imported = manager.importServers(found.map((c) => c.id));
+		const imported = await manager.importServers(found.map((c) => c.id));
 		expect(imported).toHaveLength(CASES.length);
 		const list = manager.list();
 		for (const { name, secret, summary } of CASES) {

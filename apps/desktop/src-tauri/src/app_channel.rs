@@ -11,8 +11,15 @@
 //! `computer_register`, and `computer_unregister`. The daemon sends `approve` with an
 //! [`ApprovalRequest`]; the app shows the native dialog on a worker thread (never the main thread)
 //! and answers `{"approved": bool}`. A failed dialog, malformed request, or closed channel refuses.
+//!
+//! The daemon also keeps connector secrets in the app's secure store (S25.5), on worker threads too:
+//! `secret_get {id}` answers `{"secret": …}` or `null`, `secret_put {id, secret}` answers `{}`,
+//! `secret_delete {id}` answers `{"deleted": bool}`, and `secret_list` answers `{"ids": […]}`.
+//! Ids are checked with [`check_id`]; a refusal names what failed and never the secret, and nothing
+//! about a secret request is logged. The answer goes back over this channel only.
 
 use crate::approvals::ApprovalRequest;
+use crate::secure_store::{check_id, Secret, SecretStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -78,6 +85,58 @@ pub trait Handler: Send + Sync {
     fn approve(&self, request: &ApprovalRequest) -> bool;
     /// The channel to a freshly spawned daemon is open (for example, register the computer helper).
     fn opened(&self, _channel: &Arc<AppChannel>) {}
+    /// Where connector secrets live (the Keychain on macOS); `None` refuses secret requests.
+    fn secrets(&self) -> Option<&dyn SecretStore> {
+        None
+    }
+}
+
+/// The id (and, for `secret_put`, the secret) of a secret request. Shows the id only.
+pub(crate) struct SecretParams {
+    id: String,
+    secret: Option<Secret>,
+}
+
+impl std::fmt::Debug for SecretParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretParams").field("id", &self.id).field("secret", &self.secret).finish()
+    }
+}
+
+impl SecretParams {
+    /// Reads `{id, secret?}` by hand, so a refusal never repeats a value the daemon sent.
+    pub(crate) fn parse(params: &Value) -> Result<Self, String> {
+        let id = params.get("id").and_then(Value::as_str).ok_or("A secret request needs an id.")?;
+        check_id(id).map_err(|error| error.to_string())?;
+        let secret = match params.get("secret") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(text)) => Some(Secret::new(text.as_str())),
+            Some(_) => return Err("A secret must be text.".into()),
+        };
+        Ok(SecretParams { id: id.to_owned(), secret })
+    }
+}
+
+/// Answers one secret request from `store`. Errors name what failed, never a secret.
+pub(crate) fn serve_secret(store: &dyn SecretStore, method: &str, params: &Value) -> Result<Value, String> {
+    if method == "secret_list" {
+        return store.list_ids().map(|ids| json!({ "ids": ids })).map_err(|error| error.to_string());
+    }
+    let request = SecretParams::parse(params)?;
+    let failed = |error: crate::secure_store::StoreError| error.to_string();
+    match method {
+        "secret_get" => Ok(match store.get(&request.id).map_err(failed)? {
+            Some(secret) => json!({ "secret": secret.expose() }),
+            None => Value::Null,
+        }),
+        "secret_put" => {
+            let secret = request.secret.as_ref().ok_or("A secret to store is needed.")?;
+            store.put(&request.id, secret).map_err(failed)?;
+            Ok(json!({}))
+        }
+        "secret_delete" => Ok(json!({ "deleted": store.delete(&request.id).map_err(failed)? })),
+        other => Err(format!("Unknown request: {other}")),
+    }
 }
 
 type Reply = mpsc::Sender<Result<Value, String>>;
@@ -199,6 +258,16 @@ impl AppChannel {
                 let approved = serde_json::from_value::<ApprovalRequest>(params).is_ok_and(|r| handler.approve(&r));
                 Frame::Response { id, result: Some(json!({"approved": approved})), error: None }
             }
+            "secret_get" | "secret_put" | "secret_delete" | "secret_list" => {
+                let answer = match handler.secrets() {
+                    Some(store) => serve_secret(store, method, &params),
+                    None => Err("This app has no secure store for connector secrets.".into()),
+                };
+                match answer {
+                    Ok(result) => Frame::Response { id, result: Some(result), error: None },
+                    Err(error) => Frame::Response { id, result: None, error: Some(error) },
+                }
+            }
             other => Frame::Response { id, result: None, error: Some(format!("Unknown request: {other}")) },
         };
         let _ = self.write(&frame);
@@ -210,6 +279,7 @@ mod tests {
     use super::*;
     use crate::approvals::fake::{Answer, FakePrompt};
     use crate::approvals::{Approvals, Decision};
+    use crate::secure_store::{MemoryStore, MAX_ID_LEN};
     use std::time::Instant;
 
     /// The daemon's side of the pair, read and written frame by frame.
@@ -362,6 +432,86 @@ mod tests {
         assert_eq!(daemon.next(), Frame::Response { id: 2, result: Some(json!({"approved": false})), error: None });
         assert_eq!(prompt.shown_titles(), ["Allow Slack to send message?", "Allow Slack to send message?"]);
         assert!(prompt.shown.lock().unwrap()[0].message.contains("channel: #general"));
+    }
+
+    /// A handler with the in-memory secure store, as the app has the Keychain.
+    #[derive(Default)]
+    struct WithStore {
+        store: MemoryStore,
+    }
+
+    impl Handler for WithStore {
+        fn approve(&self, _: &ApprovalRequest) -> bool {
+            false
+        }
+
+        fn secrets(&self) -> Option<&dyn SecretStore> {
+            Some(&self.store)
+        }
+    }
+
+    fn ask(daemon: &mut FakeDaemon, id: u64, method: &str, params: Value) -> Frame {
+        daemon.send(&Frame::Request { id, method: method.into(), params });
+        daemon.next()
+    }
+
+    #[test]
+    fn the_daemon_stores_reads_lists_and_deletes_secrets_in_the_apps_store() {
+        let handler = Arc::new(WithStore::default());
+        let (_channel, mut daemon) = pair(handler.clone());
+        let id = "connector/discord/value/token";
+        let ok = |id, result| Frame::Response { id, result: Some(result), error: None };
+        assert_eq!(ask(&mut daemon, 1, "secret_put", json!({"id": id, "secret": "xoxb-123"})), ok(1, json!({})));
+        assert_eq!(handler.store.get(id).unwrap().unwrap().expose(), "xoxb-123");
+        assert_eq!(ask(&mut daemon, 2, "secret_get", json!({"id": id})), ok(2, json!({"secret": "xoxb-123"})));
+        assert_eq!(ask(&mut daemon, 3, "secret_list", json!({})), ok(3, json!({"ids": [id]})));
+        assert_eq!(ask(&mut daemon, 4, "secret_delete", json!({"id": id})), ok(4, json!({"deleted": true})));
+        assert_eq!(ask(&mut daemon, 5, "secret_delete", json!({"id": id})), ok(5, json!({"deleted": false})));
+        // A missing secret is `"result": null` on the wire (which reads back as no result), not an error.
+        assert_eq!(ask(&mut daemon, 6, "secret_get", json!({"id": id})), Frame::Response { id: 6, result: None, error: None });
+        let line = serde_json::to_string(&Frame::Response { id: 6, result: Some(Value::Null), error: None }).unwrap();
+        assert_eq!(line, r#"{"kind":"response","id":6,"result":null}"#);
+    }
+
+    #[test]
+    fn secret_ids_are_checked_and_malformed_requests_refused_without_echoing_the_secret() {
+        let handler = Arc::new(WithStore::default());
+        let (_channel, mut daemon) = pair(handler.clone());
+        let refused = |frame: Frame| match frame {
+            Frame::Response { result: None, error: Some(error), .. } => error,
+            other => panic!("not refused: {other:?}"),
+        };
+        for (n, params) in [
+            json!({"id": "has space", "secret": "hunter2-secret"}),
+            json!({"id": "../x\n", "secret": "hunter2-secret"}),
+            json!({"id": "x".repeat(MAX_ID_LEN + 1), "secret": "hunter2-secret"}),
+            json!({"id": "ok/id", "secret": 7_123_456}),
+            json!({"id": "ok/id"}),
+            json!({"secret": "hunter2-secret"}),
+            json!("hunter2-secret"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let error = refused(ask(&mut daemon, n as u64 + 1, "secret_put", params));
+            assert!(!error.contains("hunter2") && !error.contains("7123456"), "{error}");
+        }
+        assert_eq!(refused(ask(&mut daemon, 20, "secret_get", json!({"id": "a b"}))), "invalid secret id");
+        assert!(handler.store.list_ids().unwrap().is_empty());
+
+        // An app without a secure store refuses every secret request.
+        let (_channel, mut bare) = pair(Arc::new(Recorder::default()));
+        assert!(refused(ask(&mut bare, 1, "secret_get", json!({"id": "ok/id"}))).contains("secure store"));
+    }
+
+    #[test]
+    fn secret_requests_and_their_answers_never_show_the_secret_in_debug_output() {
+        let params = SecretParams::parse(&json!({"id": "slack/bot", "secret": "xoxb-very-secret"})).unwrap();
+        let shown = format!("{params:?}");
+        assert!(shown.contains("slack/bot") && !shown.contains("xoxb"), "{shown}");
+        let store = MemoryStore::new();
+        serve_secret(&store, "secret_put", &json!({"id": "slack/bot", "secret": "xoxb-very-secret"})).unwrap();
+        assert!(!format!("{store:?}").contains("xoxb"));
     }
 
     #[test]

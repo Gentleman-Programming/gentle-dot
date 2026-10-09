@@ -6,19 +6,19 @@ import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { McpClient, type McpError, StreamableHttpTransport, type Tool } from "@earendil-works/pi-mcp";
 import { APP_REQUIRED, type ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { NO_APP } from "../src/secret-source.ts";
 import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
+import { oauthOptions } from "./fake-oauth.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
-const FAKE_CLI = fileURLToPath(new URL("./fixtures/fake-mcp-cli.ts", import.meta.url));
-/** What the fake sign-in command stores (see fixtures/fake-mcp-cli.ts). */
-const SIGNED_IN_TOKEN = "fake-access-token-value";
+/** What the stand-in provider issues first (see fake-oauth.ts). */
+const SIGNED_IN_TOKEN = "access-token-1";
 
 const TOOLS: Tool[] = [
 	{ name: "notion-search", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
@@ -90,9 +90,8 @@ async function setup() {
 		agentArgs: [FAKE_AGENT],
 		agentHome,
 		backoffMs: [50],
-		agentEnv: { ...process.env, FAKE_MCP_CLI_MODE: "auto" },
 		authRuntime: async () => fake.runtime,
-		connectorCli: { command: process.execPath, args: [FAKE_CLI] },
+		connectorOAuth: oauthOptions(true),
 		// The real credentials, sent to a stand-in for Notion's address.
 		connectorTransport: (_connector, credentials) =>
 			new StreamableHttpTransport({
@@ -164,8 +163,12 @@ describe("connectors through the daemon's proxy (regression, S25.4)", () => {
 
 	it("asks the app once before a sending action: declined or unanswered sends nothing, allowed runs it, and windows cannot answer", async () => {
 		const { d, notion, app, send, raw, messages, mcpText, engineClient } = await setup();
+		// Connecting restarts the engine, and so does the mode change; each restart rotates the proxy
+		// key, so wait for both before reading the key the engine would use.
+		const beforeConnect = d.supervisor.pid;
 		send({ type: "connector_connect", connectorId: "notion" });
 		await waitFor(() => messages.find((m) => m.type === "auth_done" && m.ok));
+		await waitFor(() => d.supervisor.pid !== beforeConnect && d.supervisor.state === "ready");
 		const pid = d.supervisor.pid;
 		send({ type: "connector_mode", connectorId: "notion", mode: "read_write" });
 		await waitFor(() => d.supervisor.pid !== pid && d.supervisor.state === "ready");
@@ -237,8 +240,12 @@ describe("connectors through the daemon's proxy (regression, S25.4)", () => {
 
 	it("refuses a sending action when the app quits while asking, and when there is no app", async () => {
 		const { d, notion, app, send, raw, messages, engineClient } = await setup();
+		// Connecting restarts the engine, and so does the mode change; each restart rotates the proxy
+		// key, so wait for both before reading the key the engine would use.
+		const beforeConnect = d.supervisor.pid;
 		send({ type: "connector_connect", connectorId: "notion" });
 		await waitFor(() => messages.find((m) => m.type === "auth_done" && m.ok));
+		await waitFor(() => d.supervisor.pid !== beforeConnect && d.supervisor.state === "ready");
 		const pid = d.supervisor.pid;
 		send({ type: "connector_mode", connectorId: "notion", mode: "read_write" });
 		await waitFor(() => d.supervisor.pid !== pid && d.supervisor.state === "ready");
@@ -257,9 +264,8 @@ describe("connectors through the daemon's proxy (regression, S25.4)", () => {
 		app.close();
 		expect((await pending)?.message).toMatch(/did not allow/);
 
-		expect((await failure(client.callTool("notion-create-pages", { title: "y" })))?.message).toMatch(
-			/approval/,
-		);
+		// Without the app its sign-in is gone from memory too: it fails closed before anything is asked.
+		expect((await failure(client.callTool("notion-create-pages", { title: "y" })))?.message).toBe(NO_APP);
 		expect(notion.calls()).toEqual([]);
 		// And a window cannot turn it back on or change it without the app.
 		raw({ type: "connector_mode", connectorId: "notion", mode: "read_only" });

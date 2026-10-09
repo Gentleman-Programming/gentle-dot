@@ -7,9 +7,9 @@ import WebSocket from "ws";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
+import { oauthOptions } from "./fake-oauth.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
-const FAKE_CLI = fileURLToPath(new URL("./fixtures/fake-mcp-cli.ts", import.meta.url));
 const GUARD = fileURLToPath(new URL("../src/extensions/approval-guard.ts", import.meta.url));
 
 /** The engine's mcp.json without the proxy key, which changes with every engine launch. */
@@ -20,7 +20,7 @@ afterEach(async () => {
 	await Promise.all(daemons.splice(0).map((d) => d.close()));
 });
 
-async function setup(options: { home?: boolean; cliMode?: "auto" } = {}) {
+async function setup(options: { home?: boolean; browser?: "auto" } = {}) {
 	const dataDir = tempDir();
 	const agentHome = join(dataDir, "agent");
 	const envFile = join(dataDir, "agent-env.json");
@@ -42,11 +42,10 @@ async function setup(options: { home?: boolean; cliMode?: "auto" } = {}) {
 			...process.env,
 			FAKE_AGENT_ENV_FILE: envFile,
 			FAKE_AGENT_ARGS_FILE: argsFile,
-			...(options.cliMode ? { FAKE_MCP_CLI_MODE: options.cliMode } : {}),
 		},
 		...(options.home ? { agentHome } : {}),
 		authRuntime: async () => fake.runtime,
-		connectorCli: { command: process.execPath, args: [FAKE_CLI] },
+		connectorOAuth: oauthOptions(options.browser === "auto"),
 		appChannel: app.daemonEnd,
 		log: (line) => logs.push(line),
 	});
@@ -112,7 +111,7 @@ describe("connectors over the protocol", () => {
 	});
 
 	it("connects: the sign-in goes to the window that asked, every window is refreshed, and the agent restarts with the new policy", async () => {
-		const { d, send, find, agentEnv, connect: other } = await setup({ cliMode: "auto" });
+		const { d, send, find, agentEnv, connect: other } = await setup({ browser: "auto" });
 		const second = await other();
 		const pid = d.supervisor.pid;
 		expect(JSON.parse(agentEnv().GENTLE_DOT_CONNECTOR_POLICY ?? "{}").connectors).toEqual({});
@@ -130,7 +129,7 @@ describe("connectors over the protocol", () => {
 	});
 
 	it("waits for the running answer before restarting for a connector change", async () => {
-		const { d, send, find } = await setup({ cliMode: "auto" });
+		const { d, send, find } = await setup({ browser: "auto" });
 		send({ type: "send", text: "hang" });
 		await find("agent_state", (m) => m.state === "thinking");
 		const pid = d.supervisor.pid;
@@ -153,7 +152,7 @@ describe("connectors over the protocol", () => {
 	});
 
 	it("restores a changed mcp.json before the agent starts again", async () => {
-		const { d, send, find, agentHome, logs } = await setup({ cliMode: "auto" });
+		const { d, send, find, agentHome, logs } = await setup({ browser: "auto" });
 		send({ type: "connector_connect", connectorId: "notion" });
 		await find("auth_done");
 		await waitFor(() => d.supervisor.state === "ready");
@@ -167,9 +166,12 @@ describe("connectors over the protocol", () => {
 	});
 
 	it("keeps a connector the user turned off turned off when the agent edits the files and ends itself (B1)", async () => {
-		const { d, send, find, messages, dataDir, agentHome, agentEnv } = await setup({ cliMode: "auto" });
+		const { d, send, find, messages, dataDir, agentHome, agentEnv } = await setup({ browser: "auto" });
+		const started = d.supervisor.pid;
 		send({ type: "connector_connect", connectorId: "notion" });
 		await find("auth_done");
+		// The sign-in is quick: let the restart for connecting finish before the next change.
+		await waitFor(() => d.supervisor.pid !== started && d.supervisor.state === "ready");
 		send({ type: "connector_disconnect", connectorId: "notion" });
 		await waitFor(() => !JSON.parse(agentEnv().GENTLE_DOT_CONNECTOR_POLICY ?? "{}").connectors?.notion);
 		await waitFor(() => d.supervisor.state === "ready" && !d.supervisor.busy);

@@ -34,6 +34,7 @@ import {
 } from "@earendil-works/pi-mcp";
 import { McpOAuthAuthorizationRequiredError } from "@earendil-works/pi-mcp/oauth";
 import { type ConnectorMode, isReadOnlyTool } from "./extensions/approval-guard.ts";
+import { SecretsUnavailableError } from "./secret-source.ts";
 
 /** Where the engine reaches a connector: `/mcp/<id>`. */
 export const MCP_PREFIX = "/mcp/";
@@ -50,6 +51,8 @@ export interface ProxiedConnector {
 	server: { url: string } | { command: string; args?: string[]; cwd?: string };
 	/** Changes whenever the server or its values change, so the connection to it is made again. */
 	revision: string;
+	/** Why it cannot run now (a secret it needs is not available); safe to show. */
+	unavailable?: string;
 }
 
 /** What the daemon adds to the real server's requests: headers and tokens, or a stdio server's environment. */
@@ -71,6 +74,8 @@ export interface ApprovalPreview {
 export interface McpProxyOptions {
 	/** The connector's current state, read on every request. */
 	connector(id: string): ProxiedConnector | undefined;
+	/** Runs before the state is read (the daemon reads the connector's secrets from the app). */
+	prepare?(id: string): Promise<void>;
 	credentials(id: string): Promise<UpstreamCredentials>;
 	/** Asks the user; false or a failure refuses the action. The signal aborts when the engine gave up. */
 	approve(preview: ApprovalPreview, signal: AbortSignal): Promise<boolean>;
@@ -182,6 +187,7 @@ export class McpProxy {
 			}
 			return this.empty(req, res, 202);
 		}
+		await this.options.prepare?.(id).catch(() => {});
 		const connector = this.options.connector(id);
 		if (!connector)
 			return this.reply(req, res, 404, rpcId, {
@@ -221,6 +227,8 @@ export class McpProxy {
 				REFUSED,
 				`${connector.name} is turned off. If the user wants it, ask them to turn it on in Connectors.`,
 			);
+		// Without its secrets it fails closed, with the reason.
+		if (connector.unavailable) throw new ProxyError(REFUSED, connector.unavailable);
 		const reads = readsAllowed(connector);
 		switch (method) {
 			case "initialize": {
@@ -401,6 +409,7 @@ export class McpProxy {
 
 	private rpcError(connector: ProxiedConnector, error: unknown): { code: number; message: string } {
 		if (error instanceof ProxyError) return { code: error.code, message: error.message };
+		if (error instanceof SecretsUnavailableError) return { code: REFUSED, message: error.message };
 		// The server's own answer, passed on as it came.
 		if (error instanceof McpError) return { code: error.code, message: error.message };
 		const upstream = this.upstreams.get(connector.id);

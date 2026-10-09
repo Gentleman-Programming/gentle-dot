@@ -1,17 +1,15 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: the fixtures are other apps' configs, written with their `${...}` references.
 // S20: the user's MCP servers from other apps, found read-only in a fixture home, imported on request.
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ImportCandidate, ServerPayload } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import { scanClientConfigs } from "../src/connector-import.ts";
 import { ConnectorManager, ConnectorStore } from "../src/connectors.ts";
+import { MemorySecretSource } from "../src/secret-source.ts";
 import { tempDir, waitFor } from "./helpers.ts";
 
-const FAKE_CLI = fileURLToPath(new URL("./fixtures/fake-mcp-cli.ts", import.meta.url));
 const SECRETS = ["ghp_desktopsecret", "sk_cursorsecret", "bar-secret-value", "lin-token-123"];
 
 function write(home: string, path: string, value: unknown) {
@@ -128,21 +126,6 @@ function snapshot(home: string): Record<string, string> {
 	return out;
 }
 
-async function engine() {
-	const require = createRequire(import.meta.url);
-	const load = async <T>(path: string) => {
-		const file = (require.resolve.paths("@earendil-works/pi-coding-agent") ?? [])
-			.map((dir) => join(dir, "@earendil-works", "pi-coding-agent", "dist", "core", path))
-			.find((candidate) => existsSync(candidate));
-		if (!file) throw new Error("the engine package is missing");
-		return (await import(pathToFileURL(file).href)) as T;
-	};
-	return {
-		...(await load<{ validateMcpServerConfig(name: string, raw: unknown): unknown }>("mcp-servers.js")),
-		...(await load<{ resolveConfigValue(config: string): string | undefined }>("resolve-config-value.js")),
-	};
-}
-
 describe("scanning other apps' MCP configs", () => {
 	it("reads every client format and maps it to the engine's schema", () => {
 		const home = fixtureHome();
@@ -213,12 +196,15 @@ function setup(home: string) {
 	const dataDir = tempDir();
 	const agentHome = join(dataDir, "agent");
 	const logs: string[] = [];
-	const store = new ConnectorStore({ dataDir, agentHome });
+	const secrets = new MemorySecretSource();
+	const store = new ConnectorStore({
+		dataDir,
+		agentHome,
+		secrets,
+		env: { PATH: "/usr/bin", GH_TOKEN: "gh-from-env" },
+	});
 	const manager = new ConnectorManager({
 		store,
-		cli: { command: process.execPath, args: [FAKE_CLI] },
-		env: { ...process.env, HOME: join(dataDir, "home") },
-		cwd: dataDir,
 		importHome: home,
 		log: (line) => logs.push(line),
 	});
@@ -226,7 +212,7 @@ function setup(home: string) {
 	const owner = {};
 	const sent: ServerPayload[] = [];
 	const emit = (payload: ServerPayload) => sent.push(payload);
-	return { agentHome, dataDir, store, manager, logs, owner, sent, emit };
+	return { agentHome, dataDir, store, manager, logs, owner, sent, emit, secrets };
 }
 
 const pick = (found: ImportCandidate[], name: string) => {
@@ -278,43 +264,33 @@ describe("importing MCP servers", () => {
 		expect(found.filter((c) => c.name === "github")).toHaveLength(1);
 	});
 
-	it("copies the chosen servers with their values into private state, read only and hidden, without touching the sources", async () => {
+	it("copies the chosen servers, their values into the app's secure store, read only and hidden, without touching the sources", async () => {
 		const home = fixtureHome();
 		const before = snapshot(home);
-		const { manager, store, agentHome, dataDir, logs, owner, emit, sent } = setup(home);
-		const { validateMcpServerConfig, resolveConfigValue } = await engine();
+		const { manager, store, agentHome, dataDir, logs, owner, emit, sent, secrets } = setup(home);
 		const found = manager.scan();
 		const chosen = ["github", "stripe", "copilot", "everything", "perplexity", "legacy", "linear"].map(
 			(name) => pick(found, name).id,
 		);
-		expect(manager.importServers(chosen).sort()).toEqual([
+		expect((await manager.importServers(chosen)).sort()).toEqual([
 			"copilot",
 			"everything",
 			"github",
 			"perplexity",
 			"stripe",
 		]);
-		const mcp = JSON.parse(readFileSync(store.signinMcpFile, "utf8")).mcpServers as Record<
-			string,
-			Record<string, unknown>
-		>;
-		for (const [name, config] of Object.entries(mcp)) {
-			expect(typeof validateMcpServerConfig(name, config), name).toBe("object");
-			expect(config.toolExposure, name).toEqual({ "*": "hidden" });
-		}
-		expect(
-			resolveConfigValue(
-				(mcp.github?.env as Record<string, string> | undefined)?.GITHUB_PERSONAL_ACCESS_TOKEN ?? "",
-			),
-		).toBe("ghp_desktopsecret");
-		expect(
-			resolveConfigValue((mcp.stripe?.headers as Record<string, string> | undefined)?.Authorization ?? ""),
-		).toBe("Bearer sk_cursorsecret");
-		expect((mcp.copilot?.headers as Record<string, string> | undefined)?.Authorization).toBe(
-			"Bearer ${GH_TOKEN}",
-		);
+		// Read only with no curated list: the proxy shows none of their tools.
+		for (const id of ["copilot", "everything", "github", "stripe"])
+			expect(store.proxyView(id), id).toMatchObject({ mode: "read_only", readOnlyTools: [] });
+		expect((await store.credentials("github")).env).toEqual({
+			GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_desktopsecret",
+		});
+		expect((await store.credentials("stripe")).headers).toEqual({ Authorization: "Bearer sk_cursorsecret" });
+		// An environment reference stays one, resolved only when the proxy connects.
+		expect(secrets.values.get("connector/copilot/header/Authorization")).toBe("Bearer ${GH_TOKEN}");
+		expect((await store.credentials("copilot")).headers).toEqual({ Authorization: "Bearer gh-from-env" });
 		// A server that still needs a typed value waits for it.
-		expect(mcp.perplexity).toBeUndefined();
+		expect(store.proxyView("perplexity")).toBeUndefined();
 		const list = manager.list();
 		expect(list.find((c) => c.id === "perplexity")).toMatchObject({
 			status: "needs_setup",
@@ -335,15 +311,26 @@ describe("importing MCP servers", () => {
 			expect(JSON.stringify(list)).not.toContain(secret);
 			expect(logs.join("\n")).not.toContain(secret);
 		}
-		expect(readFileSync(join(dataDir, "connectors.json"), "utf8")).toContain("ghp_desktopsecret");
+		const record = readFileSync(join(dataDir, "connectors.json"), "utf8");
+		for (const secret of ["ghp_desktopsecret", "Bearer sk_cursorsecret"])
+			expect(record).not.toContain(secret);
+		const saved = JSON.parse(record).connectors;
+		expect(saved.everything.custom.server.env).toEqual({
+			FOO: { secretRef: "connector/everything/env/FOO" },
+		});
+		expect(secrets.values.get("connector/everything/env/FOO")).toBe("bar-secret-value");
+		// A credential inside the address or the command line stays there (a documented limit; masked when shown).
+		expect(saved.stripe.custom.server.url).toBe("https://mcp.stripe.com?key=sk_cursorsecret");
+		expect(saved.everything.custom.server.args).toContain("bar-secret-value");
+		expect(JSON.parse(record).connectors.github.custom.server.env).toEqual({
+			GITHUB_PERSONAL_ACCESS_TOKEN: { secretRef: "connector/github/env/GITHUB_PERSONAL_ACCESS_TOKEN" },
+		});
 		// The VS Code input is typed in the app.
 		expect(manager.setup(owner, "perplexity", emit)).toBeUndefined();
 		const prompt = await waitFor(() => sent.flatMap((m) => (m.type === "auth_prompt" ? [m.prompt] : []))[0]);
 		expect(prompt).toMatchObject({ kind: "secret", message: expect.stringContaining("Perplexity API Key") });
 		manager.reply(owner, prompt.flowId, { value: "pplx-typed" });
 		await waitFor(() => sent.find((m) => m.type === "auth_done"));
-		const perplexity = JSON.parse(readFileSync(store.signinMcpFile, "utf8")).mcpServers.perplexity;
-		expect(resolveConfigValue(perplexity.env.PERPLEXITY_API_KEY)).toBe("pplx-typed");
 		// The proxy hands the server what was typed, and what it reads from the environment.
 		expect((await store.credentials("perplexity")).env).toEqual({ PERPLEXITY_API_KEY: "pplx-typed" });
 		expect(readFileSync(join(agentHome, "mcp.json"), "utf8")).not.toContain("pplx-typed");
@@ -351,13 +338,13 @@ describe("importing MCP servers", () => {
 		// Importing again adds nothing: they are already connectors.
 		const again = manager.scan();
 		expect(pick(again, "github")).toMatchObject({ importable: false, duplicateOf: "github" });
-		expect(manager.importServers([pick(again, "github").id, "unknown:id"])).toEqual([]);
+		expect(await manager.importServers([pick(again, "github").id, "unknown:id"])).toEqual([]);
 		expect(snapshot(home)).toEqual(before);
 	});
 
-	it("imports nothing before a scan", () => {
+	it("imports nothing before a scan", async () => {
 		const { manager, store } = setup(fixtureHome());
-		expect(manager.importServers(["Cursor:github"])).toEqual([]);
+		expect(await manager.importServers(["Cursor:github"])).toEqual([]);
 		expect(store.state()).toEqual({ connectors: {} });
 	});
 });

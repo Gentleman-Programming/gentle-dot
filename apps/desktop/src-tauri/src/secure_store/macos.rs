@@ -25,6 +25,19 @@
 //! item's access list is the default one (only this app), even if another process created an
 //! item under the same name first with a wider list. If an item reappears between the two
 //! calls, `put` fails rather than write into it.
+//!
+//! What `get` can and cannot check (T23d, L110 advisory): whether an item was created by this
+//! app is recorded only in its access list, and `security-framework` 3.7 has no binding to read
+//! it (`SecKeychainItemCopyAccess`, `SecAccessCopyACLList`, `SecACLCopyContents`, and
+//! `SecTrustedApplicationCopyData` are deprecated file-keychain calls the crate leaves out).
+//! The attributes it can read (label, creator code, dates) are set by whoever adds the item, so
+//! checking them would prove nothing. So `get` does not verify the item: a same-user process
+//! could plant an item with an open access list before the first `put`, or delete one and plant
+//! its own. The daemon narrows this: it only reads ids it recorded after its own `put` (the
+//! `secretRef`s in `connectors.json`; T23e adds an HMAC to it), it never imports a sign-in file after
+//! the one-time migration, and every `put` replaces whatever item was there. An item planted
+//! with an access list that does not trust this app makes `get` ask the user through
+//! SecurityAgent ("Deny" fails closed).
 
 use super::{check_id, wipe, Secret, SecretStore, StoreError, SERVICE};
 use core_foundation::data::CFData;

@@ -24,6 +24,9 @@ type Frame =
 export function fakeApp(answers: Answer[] = [], otherwise: Answer = "decline") {
 	const [daemonEnd, appEnd] = duplexPair();
 	const asked: AskedApproval[] = [];
+	/** The app's Keychain, by secret id; `secretCalls` records the methods and ids only. */
+	const secrets = new Map<string, string>();
+	const secretCalls: string[] = [];
 	const queue = [...answers];
 	const pending = new Map<number, { resolve(v: unknown): void; reject(e: Error): void }>();
 	const held: number[] = [];
@@ -41,6 +44,19 @@ export function fakeApp(answers: Answer[] = [], otherwise: Answer = "decline") {
 				pending.delete(frame.id);
 				if (frame.error !== undefined) waiting?.reject(new Error(frame.error));
 				else waiting?.resolve(frame.result);
+				continue;
+			}
+			if (frame.method.startsWith("secret_")) {
+				const params = (frame.params ?? {}) as { id?: string; secret?: string };
+				secretCalls.push(params.id === undefined ? frame.method : `${frame.method} ${params.id}`);
+				const id = params.id ?? "";
+				let result: unknown = { ids: [...secrets.keys()].sort() };
+				if (frame.method === "secret_get") result = secrets.has(id) ? { secret: secrets.get(id) } : null;
+				else if (frame.method === "secret_put") {
+					secrets.set(id, params.secret ?? "");
+					result = {};
+				} else if (frame.method === "secret_delete") result = { deleted: secrets.delete(id) };
+				write({ kind: "response", id: frame.id, result });
 				continue;
 			}
 			if (frame.method !== "approve") {
@@ -63,6 +79,8 @@ export function fakeApp(answers: Answer[] = [], otherwise: Answer = "decline") {
 	return {
 		daemonEnd: daemonEnd as Duplex,
 		asked,
+		secrets,
+		secretCalls,
 		/** Answers the oldest held approval, as a user clicking in the dialog later. */
 		release: (approved: boolean) => {
 			const id = held.shift();
