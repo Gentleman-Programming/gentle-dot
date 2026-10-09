@@ -1,70 +1,205 @@
-# Gentle Dot
+<!-- markdownlint-disable-next-line MD041 -->
+<a id="top"></a>
 
-An always-available personal assistant: a floating Dot on the macOS desktop, a menu bar item, a global shortcut (`⌥ Space`), and the same interface in the browser.
+<div align="center">
 
-Design: [docs/design.md](docs/design.md) · Plan: [odd/tasks/gentle-dot.md](odd/tasks/gentle-dot.md)
+<img width="100%" alt="Gentle Dot banner: the neon rose glowing inside a black circle, the Gentle Dot wordmark, and the tagline Your assistant, always one key away" src="docs/assets/brand/gentle-dot-banner.png" />
 
-## Requirements
+<h1>Gentle Dot</h1>
 
-- Node.js 24 and pnpm 10
-- Nothing else: the assistant brings its own Gentle Shell engine (the `gentle-pi` dependency) and signs in from its Accounts screen
-- Rust stable (only for the desktop app)
+<p><strong>A personal assistant that lives on your desktop, remembers what matters, and can use your Mac for you.</strong></p>
 
-## Run locally
+<p>
+<img src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Web-D7A0B8?style=for-the-badge&labelColor=1A1218" alt="Platform">
+<img src="https://img.shields.io/badge/status-early%20preview-F095C8?style=for-the-badge&labelColor=1A1218" alt="Status: early preview">
+<a href="LICENSE"><img src="https://img.shields.io/badge/MIT-D7A0B8?style=for-the-badge&labelColor=1A1218" alt="License: MIT"></a>
+</p>
 
-```bash
-pnpm install
-pnpm dev          # builds the UI and starts the daemon on http://127.0.0.1:4317
-```
+<p>
+<a href="https://gentlemanprogramming.com/"><strong>Website</strong></a> &bull;
+<a href="docs/install.md"><strong>Install</strong></a> &bull;
+<a href="docs/design.md"><strong>Design</strong></a> &bull;
+<a href="https://github.com/Gentleman-Programming/gentle-ai"><strong>Gentle-AI</strong></a>
+</p>
 
-On a terminal, the daemon prints a URL that already carries the access key; open it in a browser. When its output goes to a file (the desktop app's `~/.gentle-dot/daemon.log`, or `docker logs`), it prints the URL without the key and says where the key is: `~/.gentle-dot/token`.
+<br/>
 
-## Desktop app (macOS)
+<p>
+Assistants live in a browser tab you have to go find, forget you between chats, and stop at the edge of the page.
+<strong>Gentle Dot is one key away, keeps one continuous conversation with a real memory, and can talk, read your files, and operate your apps.</strong>
+</p>
 
-```bash
-PATH=/opt/homebrew/opt/rustup/bin:$PATH pnpm --filter @gentle-dot/desktop dev
-```
+</div>
 
-The app puts the Dot on the desktop and an item in the menu bar, and `⌥ Space` opens the panel. If the daemon is not running, the app starts it. See [apps/desktop/README.md](apps/desktop/README.md).
+<br/>
 
-## Desktop app (Linux)
+> [!WARNING]
+> **Early preview.** Gentle Dot can see your screen and control your Mac when you allow it, and it runs an AI agent with a shell. Its safety checks are real, but some still live within the agent's reach (see [Security status](#security-status)). Use it on a machine and accounts you are comfortable letting an assistant act on.
 
-Debian and Ubuntu (GNOME) and Omarchy (Hyprland) build the app from source with one script, which asks before using sudo for system packages:
+<br/>
+
+<div align="center"><img src="docs/assets/brand/rose.png" width="28" alt="" /></div>
+
+## Features
+
+---
+
+### Always one key away
+
+A glowing rose sits on your desktop. Click it, press **`⌥ Space`**, or use the menu bar, and the chat opens over whatever you are doing. Hide the rose if you prefer, or open the chat full screen with **`⌘⇧F`**. The same chat runs in the browser, on your machine or on your own server.
+
+---
+
+### One conversation, with memory
+
+There is one continuous chat, not a list of threads to manage. When it grows too large, Gentle Dot quietly carries on in a fresh session seeded with a summary, so it stays fast and affordable. It remembers through your global **Engram™** memory: it saves to its own project, `gentle-dot`, and recalls from everything you keep there.
+
+---
+
+### Uses your Mac (macOS)
+
+With your permission, Gentle Dot sees the screen and operates your apps: clicks, typing, shortcuts, and opening apps, batched into quick sequences. A pink glow shows where it acts. Every control session needs your approval in a native dialog, risky actions (send, pay, delete, submit) ask first, password managers and System Settings are off limits, and **`⌥⇧Esc`** stops everything instantly. Yolo mode skips the per-action questions for up to an hour, and only you can turn it on.
+
+---
+
+### Talk to it
+
+Press the mic and speak: the transcript lands in the input for you to review, or goes out as soon as you stop if you prefer. Replies to what you said are read aloud. Speech runs on your Mac by default; download the optional local model (NVIDIA Parakeet, 25 languages including Spanish) to keep your voice fully offline, or connect an OpenAI API key.
+
+---
+
+### Your accounts, your models
+
+Sign in with the subscriptions or API keys you already have (OpenAI, NaN, and others), save role profiles, and switch models from a chip above the input without leaving the chat.
+
+---
+
+### Connectors, with approvals
+
+Notion, Linear, and Atlassian connect through their official servers; Discord, Slack, and Gmail come with a step-by-step guide; your existing MCP servers can be imported from Claude, Cursor, VS Code, and others. Each connector is read only or read and send, and the assistant shows you a preview and asks before every action that sends or changes something.
+
+---
+
+### Files in the chat
+
+Attach files with the paperclip, drag and drop, or paste. Images go straight to the model when it can see them; everything else lands in the assistant's workspace for it to read.
+
+---
+
+### Also in the box
+
+| Component | What it does |
+| :--- | :--- |
+| **Self-contained installers** | A macOS DMG and Linux `.deb` and Arch packages carry their own Node, engine, and Engram |
+| **Stable signing** | A self-signed identity keeps macOS permissions across updates |
+| **Isolated engine** | The assistant runs its own engine and home folder; it never touches your own agent setup |
+| **Web and server** | The same interface in the browser, and a Docker setup for your own VPS behind HTTPS |
+| **White label** | Built on [Gentle Shell](https://github.com/Gentleman-Programming/gentle-pi), presented as Gentle Dot |
+
+<div align="right"><a href="#top">Back to top</a></div>
+
+<div align="center"><img src="docs/assets/brand/rose.png" width="28" alt="" /></div>
+
+## Get started
+
+There are no published releases yet: build the installer for your system. You need Node.js 24 and pnpm; the macOS app also needs Rust and the Xcode command line tools, and the Linux packages need Docker.
 
 ```sh
-scripts/linux/setup-debian.sh   # Debian, Ubuntu
-scripts/linux/setup-arch.sh     # Omarchy, Arch
+pnpm install
+
+# macOS (Apple Silicon): writes a DMG
+pnpm package:mac
+
+# Linux: a .deb (amd64 also builds the Arch package)
+pnpm package:linux --arch arm64
+pnpm package:linux --arch amd64
 ```
 
-Wayland differences and the tester checklist: [apps/desktop/README.md](apps/desktop/README.md#linux) and [docs/linux-testing.md](docs/linux-testing.md).
+Then follow **[docs/install.md](docs/install.md)**: opening an unsigned app on macOS 15 and later goes through **System Settings → Privacy & Security → Open Anyway**, and the guide covers permissions, where your data lives, and uninstalling.
 
-## Server
+Prefer to run it from the source?
 
-`Dockerfile` and `compose.yaml` run the same daemon on a VPS behind HTTPS. See [docs/deploy-vps.md](docs/deploy-vps.md).
+```sh
+pnpm dev   # builds the UI and starts the daemon on http://127.0.0.1:4317
+PATH=/opt/homebrew/opt/rustup/bin:$PATH pnpm --filter @gentle-dot/desktop dev   # the macOS app
+```
+
+On a terminal, the daemon prints a URL that already carries its access key. Linux users can also build from source with `scripts/linux/setup-debian.sh` or `scripts/linux/setup-arch.sh`.
+
+<div align="right"><a href="#top">Back to top</a></div>
+
+<div align="center"><img src="docs/assets/brand/rose.png" width="28" alt="" /></div>
 
 ## How it works
 
-The daemon starts the agent (`gentle-shell --mode rpc`) as a child process and gives it the Gentle Dot identity. It restarts the agent if it crashes, reopening the same conversation, and translates its events into a small WebSocket protocol for the desktop and web interfaces. You get one continuous chat: when its session grows too large, the daemon quietly continues it in a fresh session seeded with a summary, and earlier messages stay one "Show earlier" away (set `GENTLE_DOT_CONVERSATIONS=1` for several conversations). Sessions live in `~/.gentle-dot/sessions`; the access key is in `~/.gentle-dot/token`, and `~/.gentle-dot` is private to your user (mode 0700).
+A small Node daemon starts the agent engine (Gentle Shell, `gentle-shell --mode rpc`) as a child process, gives it the Gentle Dot identity, restarts it if it crashes, and translates its events into a WebSocket protocol for the desktop app and the browser. The desktop app is Tauri 2: it draws the rose and the panel, owns the global shortcuts, and hosts a native helper for computer control and speech, so the session grant, the panic stop, the blocklist, and the risky-action dialogs live outside the agent.
 
-The assistant keeps to its own instance. The agent works in `~/.gentle-dot/workspace` and runs with its own home folder (`~/.gentle-dot/home`), so it never writes to your own Gentle Shell or Pi setup. To point it at a folder of yours, set `GENTLE_DOT_WORKSPACE` or `"workspace"` in `~/.gentle-dot/config.json`: the agent is told to work there, but nothing is written into that folder for setup. It keeps `PATH` and reads your `~/.gitconfig` for your git identity.
+- **Your data:** `~/.gentle-dot` (mode 0700): sessions, settings, the access key (`token`), and the engine's own home and workspace. Point the assistant at a folder of yours with `GENTLE_DOT_WORKSPACE` or `"workspace"` in `~/.gentle-dot/config.json`.
+- **Memory:** your global Engram (`~/.engram`, port 7437), project `gentle-dot`; `GENTLE_DOT_ENGRAM=private` gives the assistant a memory of its own.
+- **Connectors:** the daemon alone writes `~/.gentle-dot/connectors.json` and the engine's `mcp.json`, and puts them back if anything else changes them.
+- **Screenshots:** each model call carries only the latest one; earlier ones become one-line log entries, which keeps long control sessions fast.
 
-Memory uses your global Engram (`~/.engram`, server on port 7437, or your own `ENGRAM_DATA_DIR`, `ENGRAM_PORT`, and `ENGRAM_URL`), and everything the assistant remembers goes to the project `gentle-dot`. If Engram is not running, the assistant starts it with your data folder. `GENTLE_DOT_ENGRAM_DATA_DIR` points at another data folder; `GENTLE_DOT_ENGRAM=private` gives the assistant a memory of its own instead (port 7438, `GENTLE_DOT_ENGRAM_PORT`). Memories saved by earlier versions in `~/.gentle-dot/home/.engram` are not moved to the global Engram.
+<div align="right"><a href="#top">Back to top</a></div>
 
-Connectors let the assistant use Notion, Linear, and Atlassian through their official MCP servers: open Connectors (the plug icon, or type `/connectors`), choose Connect, and approve access in the browser. Discord, Slack, and Gmail show a step-by-step guide first: Discord runs a community server (`@pasympa/discord-mcp`, pinned) with a bot token you create; Slack and Gmail use their official servers with an app or Google Cloud project of your own, whose redirect address the guide shows. "Add another connector" asks the assistant in the chat; it answers with a draft card that lists the command or address and the secrets it needs, and nothing is added until you approve it. "Import my MCP servers" reads (only reads) the configs of Claude Desktop, Claude Code, Cursor, VS Code, Windsurf, OpenCode, and Gentle Shell, and lists what it found by name; you pick which to copy. Secrets are always typed in the app, never in the chat, and drafted or imported servers start read only with all of their tools hidden. Each connector is "Read only" (it can search and read) or "Read and send"; even then, the assistant asks you with a preview before every action that sends or changes something. The daemon reads `~/.gentle-dot/connectors.json` once when it starts and keeps your choices in memory; it alone writes that file and the engine's `mcp.json` (`~/.gentle-dot/agent`), and if anything else changes them while it runs, it puts them back and tells you "A change to your connectors was blocked." The assistant cannot read your sign-ins and keys with its file tools; its shell commands are checked too, but that check is best effort, not a security boundary.
+<div align="center"><img src="docs/assets/brand/rose.png" width="28" alt="" /></div>
 
-## Checks
+## Security status
 
-```bash
-pnpm typecheck
-pnpm lint
-pnpm test         # unit and integration tests (fake agent)
-pnpm e2e          # Playwright against the daemon with the fake agent
+What already holds: computer control's grant, panic stop, blocklist, rate limit, and risky-action confirmations are enforced by the desktop app, not the agent, and the agent's processes do not inherit the app's macOS permissions. Credentials are typed in the app, never in the chat, and the assistant cannot read them with its file tools.
+
+What does not yet: the agent has a shell, and its shell commands are checked on a best-effort basis only. Connector tokens live in files rather than the Keychain, and the approval cards travel over a channel the agent could reach. Moving connector traffic and approvals out of the agent's reach (a daemon-side MCP proxy with Keychain tokens and native approvals) is the next milestone before a stable release.
+
+<div align="right"><a href="#top">Back to top</a></div>
+
+<div align="center"><img src="docs/assets/brand/rose.png" width="28" alt="" /></div>
+
+## Documentation
+
+| Where to go | What you'll find |
+| :--- | :--- |
+| **[Install](docs/install.md)** | Installers, first open, permissions, data, uninstall |
+| **[Design](docs/design.md)** | Architecture, protocol, desktop shell, computer control, voice, attachments |
+| **[Linux testing](docs/linux-testing.md)** | GNOME and Hyprland setup and the tester checklist |
+| **[Deploy to a VPS](docs/deploy-vps.md)** | Docker and HTTPS on your own server |
+| **[Desktop app](apps/desktop/README.md)** | The Tauri shell and platform notes |
+
+### Checks
+
+```sh
+pnpm typecheck && pnpm lint && pnpm test   # unit and integration tests, with a fake agent
+pnpm e2e                                   # Playwright against the daemon
 ```
 
-Tests tagged `@real-agent` start the real `gentle-shell`; they are skipped when it is not installed.
+<div align="right"><a href="#top">Back to top</a></div>
 
-To check that a first start writes nothing outside the assistant's instance and that memory goes to the global Engram in the project `gentle-dot` (it uses a temporary stand-in Engram, never yours; it installs the engine's companion packages, so it needs internet access, `engram`, and `lsof`):
+<div align="center"><img src="docs/assets/brand/rose.png" width="28" alt="" /></div>
 
-```bash
-GENTLE_DOT_ISOLATION_PROBE=1 npx vitest run packages/daemon/test/isolation-probe.test.ts
-```
+## About the author
+
+Built by [Alan Buscaglia](https://github.com/Gentleman-Programming) (Gentleman Programming), on top of [Gentle-AI](https://github.com/Gentleman-Programming/gentle-ai) and its own workflow.
+
+<div align="center">
+
+<a href="https://gentlemanprogramming.com/"><img src="https://img.shields.io/badge/Website-F095C8?style=for-the-badge&labelColor=1A1218&logo=googlechrome&logoColor=F095C8" alt="Website"></a>
+<a href="https://www.youtube.com/@GentlemanProgramming"><img src="https://img.shields.io/badge/YouTube-F095C8?style=for-the-badge&labelColor=1A1218&logo=youtube&logoColor=F095C8" alt="YouTube"></a>
+<a href="https://github.com/Gentleman-Programming"><img src="https://img.shields.io/badge/GitHub-D7A0B8?style=for-the-badge&labelColor=1A1218&logo=github&logoColor=D7A0B8" alt="GitHub"></a>
+
+</div>
+
+---
+
+<div align="center">
+
+<img src="docs/assets/brand/rose.png" width="56" alt="" />
+
+<br/>
+
+<h3>Gentle Dot is crafted with Gentle-AI</h3>
+
+<br/><br/>
+
+<a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-F095C8?style=for-the-badge&labelColor=1A1218" alt="License: MIT"></a>
+
+</div>
+
+> **Trademark notice:** Gentle AI™ and Engram™ are trademarks of Alan Buscaglia. The MIT License applies to the code; it does not permit implying endorsement or official affiliation. See [Gentle-AI's TRADEMARKS.md](https://github.com/Gentleman-Programming/gentle-ai/blob/main/TRADEMARKS.md).
