@@ -122,7 +122,7 @@ describe("the in-chat model picker (S32)", () => {
 		});
 		await client.find("profiles", (m) => m.profiles.length === 1);
 		client.send({ type: "models_list" });
-		const list = await client.find("models");
+		const list = await client.find("models", (m) => m.profiles.length === 1);
 		expect(list.current).toEqual({
 			provider: "fake",
 			id: "fake-model",
