@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { extname, join, resolve, sep } from "node:path";
+import type { McpTransport } from "@earendil-works/pi-mcp";
 import {
 	type AttachmentLimits,
 	type ClientMessage,
@@ -21,7 +22,9 @@ import {
 	type McpCli,
 	policyEnv,
 } from "./connectors.ts";
+import { approvalCard } from "./extensions/approval-guard.ts";
 import { ensureMemoryProject, ensurePrivateDir, isolatedAgentEnv, privateMemory } from "./isolation.ts";
+import { MCP_PREFIX, McpProxy, type ProxiedConnector, type UpstreamCredentials } from "./mcp-proxy.ts";
 import { defaultImportPath, ProfileStore } from "./profiles.ts";
 import { type RotationLimits, rotationLimits } from "./rotation.ts";
 import { AgentSupervisor } from "./supervisor.ts";
@@ -55,6 +58,8 @@ export interface DaemonOptions {
 	connectorCli?: McpCli;
 	/** The home folder "Import my MCP servers" reads other apps' configs from; default `GENTLE_DOT_IMPORT_HOME` or the user's. */
 	importHome?: string;
+	/** The connection the MCP proxy makes to a connector's real server; tests pass a stand-in. */
+	connectorTransport?: (connector: ProxiedConnector, credentials: UpstreamCredentials) => McpTransport;
 	/** Origins allowed to open the WebSocket, besides the daemon's own and the desktop app's. */
 	allowedOrigins?: string[];
 	backoffMs?: number[];
@@ -143,8 +148,25 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		agentHome,
 		workspace: options.workspace,
 		guardPath: APPROVAL_GUARD,
+		env: agentEnv,
 		log,
 	});
+	// The engine reaches every connector through the proxy (S25.4); its key changes with every launch.
+	let port = options.port;
+	const proxy = new McpProxy({
+		connector: (id) => connectorStore.proxyView(id),
+		credentials: (id) => connectorStore.credentials(id),
+		// For now on the same card path as the engine's approvals; T23c moves it to the app's native dialog.
+		approve: (preview, signal) => {
+			const card = approvalCard(preview.connector, preview.connectorId, preview.tool, preview.arguments);
+			return bridge.confirm(card.title, card.message, signal);
+		},
+		...(options.connectorTransport ? { transport: options.connectorTransport } : {}),
+		env: agentEnv,
+		cwd: options.workspace,
+		log,
+	});
+	connectorStore.onUpdated = () => proxy.sync();
 	// The assistant's own engine loads the approval guard for connector actions.
 	const guardArgs = options.agentHome ? ["-e", APPROVAL_GUARD] : [];
 	const supervisor = new AgentSupervisor({
@@ -161,8 +183,10 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		env: agentEnv,
 		// mcp.json is read when a session starts: put back anything not approved, and hand the guard
 		// its policy from the daemon's memory, never from the files.
+		// The proxy's key changes with every launch (after the check, so a change is still reported).
 		prepareSpawn: () => {
 			connectors.enforce();
+			connectorStore.setProxy({ url: `http://127.0.0.1:${port}/mcp`, key: proxy.rotateKey() });
 			return policyEnv(connectorStore);
 		},
 		// The first start in a new home installs the engine's companion packages.
@@ -217,14 +241,18 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	connectorStore.watch();
 
 	const server = createServer((req, res) => {
-		if (new URL(req.url ?? "/", "http://localhost").pathname === "/upload") {
+		const { pathname } = new URL(req.url ?? "/", "http://localhost");
+		if (pathname === "/upload") {
 			void handleUpload(req, res, token, allowedOrigins(port, options), uploads);
+			return;
+		}
+		if (pathname.startsWith(MCP_PREFIX)) {
+			proxy.handle(req, res);
 			return;
 		}
 		handleHttp(req, res, options.uiDir, bridge);
 	});
 	const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
-	let port = options.port;
 
 	server.on("upgrade", (req, socket, head) => {
 		const url = new URL(req.url ?? "/", "http://localhost");
@@ -253,6 +281,8 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		async close() {
 			for (const client of wss.clients) client.terminate();
 			wss.close();
+			// Stops waiting approvals and the connectors' servers (stdio ones are processes of the daemon).
+			await proxy.close();
 			await new Promise<void>((done) => server.close(() => done()));
 			await supervisor.stop();
 			connectorStore.close();

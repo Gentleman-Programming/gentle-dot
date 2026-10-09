@@ -238,6 +238,7 @@ describe.skipIf(!enabled)("@real-agent T18b connector probe", () => {
 				imports: scan.found,
 				engineList,
 				mcpJson: JSON.parse(readFileSync(join(agentHome, "mcp.json"), "utf8")),
+				signinMcpJson: JSON.parse(readFileSync(join(dataDir, "connector-signin", "mcp.json"), "utf8")),
 				toolsOfferedLast: lastTools.filter(
 					(name) => name.startsWith("mcp__") || name === "propose_connector",
 				),
@@ -257,10 +258,12 @@ describe.skipIf(!enabled)("@real-agent T18b connector probe", () => {
 			expect(byName.discord).toMatchObject({ enabled: false, state: "disabled" });
 			expect(byName["probe-tools"]).toMatchObject({ enabled: true, state: "connected" });
 			expect(byName.imported).toMatchObject({ enabled: true, state: "connected" });
-			expect(byName["probe-tools"]?.tools).toContain("send_message");
-			// Read only with no curated list: the model sees none of their tools.
+			// Read only with no curated list: the proxy shows none of their tools (S25.4).
+			expect(byName["probe-tools"]?.tools).toEqual([]);
 			expect(lastTools.filter((name) => /^mcp__(probe_tools|imported)__/.test(name))).toEqual([]);
-			expect(summary.mcpJson.mcpServers.discord.env.DISCORD_TOKEN).not.toBe("dummy-token-$!x");
+			// The engine's mcp.json holds only proxy addresses; the real servers are in the sign-in home.
+			expect(JSON.stringify(summary.mcpJson)).not.toContain("DISCORD_TOKEN");
+			expect(summary.signinMcpJson.mcpServers.discord.env.DISCORD_TOKEN).not.toBe("dummy-token-$!x");
 		} finally {
 			if (child.exitCode === null) child.kill("SIGTERM");
 			await exited;

@@ -234,7 +234,7 @@ describe("connector drafts", () => {
 	});
 
 	it("on approval asks for each secret in the app, then adds the server read only with every tool hidden", async () => {
-		const { manager, store, owner, emit, sent, prompts, agentHome, logs, changes } = setup();
+		const { manager, store, owner, emit, sent, prompts, logs, changes } = setup();
 		const draft = manager.propose(JSON.stringify(stdioDraft));
 		expect(manager.decideDraft(owner, draft?.draftId ?? "", true, emit)).toBeUndefined();
 		const prompt = await waitFor(() => prompts()[0]);
@@ -250,7 +250,7 @@ describe("connector drafts", () => {
 			mode: "read_only",
 			values: { GITHUB_PERSONAL_ACCESS_TOKEN: SECRET },
 		});
-		const server = JSON.parse(readFileSync(join(agentHome, "mcp.json"), "utf8")).mcpServers.github;
+		const server = JSON.parse(readFileSync(store.signinMcpFile, "utf8")).mcpServers.github;
 		expect(server).toMatchObject({
 			command: "npx",
 			args: ["-y", "@modelcontextprotocol/server-github@2025.4.8"],
@@ -281,8 +281,9 @@ describe("connector drafts", () => {
 		// Read and send shows every tool, and each call asks (no curated list).
 		manager.setMode("github", "read_write");
 		expect(
-			JSON.parse(readFileSync(join(agentHome, "mcp.json"), "utf8")).mcpServers.github.toolExposure,
+			JSON.parse(readFileSync(store.signinMcpFile, "utf8")).mcpServers.github.toolExposure,
 		).toBeUndefined();
+		expect(store.proxyView("github")).toMatchObject({ mode: "read_write", readOnlyTools: [] });
 	});
 
 	it("gives a draft with a taken name its own id, and signs in when it needs OAuth", async () => {
@@ -381,10 +382,15 @@ describe("connector drafts through the daemon", () => {
 			),
 		);
 		expect(
-			JSON.parse(readFileSync(join(dataDir, "agent", "mcp.json"), "utf8")).mcpServers.github.toolExposure,
+			JSON.parse(readFileSync(join(dataDir, "connector-signin", "mcp.json"), "utf8")).mcpServers.github
+				.toolExposure,
 		).toEqual({
 			"*": "hidden",
 		});
+		// The engine reaches it only through the proxy.
+		expect(
+			JSON.parse(readFileSync(join(dataDir, "agent", "mcp.json"), "utf8")).mcpServers.github.url,
+		).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/mcp\/github$/);
 		first.ws.close();
 		second.ws.close();
 	});

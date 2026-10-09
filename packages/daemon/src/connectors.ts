@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
 	existsSync,
 	type FSWatcher,
@@ -15,6 +15,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { McpOAuthState } from "@earendil-works/pi-mcp/oauth";
 import type {
 	ConnectorDraft,
 	ConnectorGuide,
@@ -24,8 +25,11 @@ import type {
 	ServerPayload,
 } from "@gentle-dot/protocol";
 import { MAX_CONNECTOR_DRAFTS } from "@gentle-dot/protocol";
+import { resolveRecord, resolveValue, storedSignIn } from "./connector-credentials.ts";
 import { type ScannedServer, scanClientConfigs, valueNotes } from "./connector-import.ts";
 import { type ConnectorPolicy, draftSecretProblem, POLICY_ENV } from "./extensions/approval-guard.ts";
+import { ensurePrivateDir } from "./isolation.ts";
+import type { ProxiedConnector, UpstreamCredentials } from "./mcp-proxy.ts";
 import { runtimeDir, runtimeModules } from "./runtime.ts";
 
 /** A value the user types in the app (a token, client credentials); kept only in the assistant's private state. */
@@ -307,10 +311,19 @@ export interface ComputerEndpoint {
 	token: string;
 }
 
+/** The daemon's MCP proxy (S25.4) for this engine launch: its base address (`…/mcp`) and its key. */
+export interface ProxyEndpoint {
+	url: string;
+	key: string;
+}
+
 /** The built-in server's name in `mcp.json`; no connector can take it. */
 export const COMPUTER_ID = "computer";
-/** Seconds the engine waits for one helper call: enough to answer its grant or confirmation dialog. */
-const COMPUTER_TIMEOUT_SECONDS = 300;
+/**
+ * Seconds the engine waits for one call to the helper or the proxy: enough for the user to answer
+ * a dialog or an approval card (the engine's 30 s default would cut them).
+ */
+const CALL_TIMEOUT_SECONDS = 300;
 
 const COMPUTER_INFO = {
 	id: COMPUTER_ID,
@@ -445,19 +458,59 @@ function ordered(state: ConnectorsState): [string, SavedConnector][] {
 	];
 }
 
+/** The real server of a connector with the user's values in place, or undefined while one is missing. */
+function filledServer(id: string, saved: SavedConnector | undefined) {
+	const spec = specOf(id, saved);
+	const server = spec && fillServer(spec.server, spec.fields, saved?.values ?? {});
+	return spec && server ? { spec, server } : undefined;
+}
+
 /**
- * The engine's `mcp.json` for the added connectors. The assistant turns codemode off, so every
- * server is `direct`. Read only hides every tool (`*`) except the curated ones (exact names win
- * over patterns in the engine), so a tool the catalog does not know stays hidden; a server of the
- * user's own has no curated list, so all of its tools are hidden. A connector that still waits for
- * a value the user types is left out.
+ * The engine's `mcp.json` (S25.4): every connector is the daemon's proxy address for it, with this
+ * launch's key, and nothing else: no real address, token, environment, or command. The proxy filters
+ * the tools by mode and asks before sending actions, so every server is `direct` (the assistant
+ * turns codemode off). Until the proxy listens, the connectors are left out. A connector that still
+ * waits for a value the user types is left out too.
  */
-export function renderMcpJson(state: ConnectorsState, computer?: ComputerEndpoint): string {
+export function renderMcpJson(
+	state: ConnectorsState,
+	computer?: ComputerEndpoint,
+	proxy?: ProxyEndpoint,
+): string {
+	const servers: Record<string, unknown> = {};
+	if (proxy)
+		for (const [id, saved] of ordered(state)) {
+			if (!filledServer(id, saved)) continue;
+			servers[id] = {
+				url: `${proxy.url}/${encodeURIComponent(id)}`,
+				headers: { Authorization: `Bearer ${literal(proxy.key)}` },
+				exposure: "direct",
+				timeout: CALL_TIMEOUT_SECONDS,
+				...(saved.enabled ? {} : { enabled: false }),
+			};
+		}
+	// The helper checks its own key and asks the user itself, so all of its tools are direct.
+	if (computer)
+		servers[COMPUTER_ID] = {
+			url: computer.url,
+			headers: { Authorization: `Bearer ${literal(computer.token)}` },
+			exposure: "direct",
+			timeout: CALL_TIMEOUT_SECONDS,
+		};
+	return `${JSON.stringify({ mcpServers: servers }, null, 2)}\n`;
+}
+
+/**
+ * The real servers, in the engine's format, for the daemon's own sign-in home: only the engine's
+ * `mcp login` and `mcp logout` commands read it, never the engine that talks to the model. Read only
+ * still hides every tool (`*`) except the curated ones, as the engine would have.
+ */
+export function renderSigninMcpJson(state: ConnectorsState): string {
 	const servers: Record<string, unknown> = {};
 	for (const [id, saved] of ordered(state)) {
-		const spec = specOf(id, saved);
-		const server = spec && fillServer(spec.server, spec.fields, saved.values ?? {});
-		if (!spec || !server) continue;
+		const filled = filledServer(id, saved);
+		if (!filled) continue;
+		const { spec, server } = filled;
 		servers[id] = {
 			...server,
 			exposure: "direct",
@@ -472,15 +525,6 @@ export function renderMcpJson(state: ConnectorsState, computer?: ComputerEndpoin
 			...(saved.enabled ? {} : { enabled: false }),
 		};
 	}
-	// The helper checks its own key and asks the user itself, so all of its tools are direct.
-	// Its calls wait while the user answers a native dialog, so the engine's 30 s default would cut them.
-	if (computer)
-		servers[COMPUTER_ID] = {
-			url: computer.url,
-			headers: { Authorization: `Bearer ${literal(computer.token)}` },
-			exposure: "direct",
-			timeout: COMPUTER_TIMEOUT_SECONDS,
-		};
 	return `${JSON.stringify({ mcpServers: servers }, null, 2)}\n`;
 }
 
@@ -492,8 +536,10 @@ function writePrivate(path: string, text: string): void {
 
 export interface ConnectorStoreOptions {
 	dataDir: string;
-	/** The engine's home, which holds `mcp.json` and `mcp-auth.json`. */
+	/** The engine's home, which holds its `mcp.json` (and held `mcp-auth.json` before the proxy). */
 	agentHome: string;
+	/** The environment the values of imported servers may read (`$NAME`); default the daemon's. */
+	env?: NodeJS.ProcessEnv;
 	/** The engine's working folder; a project `.pi/mcp.json` there would add servers. */
 	workspace?: string;
 	/** The approval guard's own file, protected like the connector files. */
@@ -504,20 +550,40 @@ export interface ConnectorStoreOptions {
 /**
  * The connectors the user approved. The daemon reads `<data>/connectors.json` once, when it
  * starts, and from then on the state lives in memory and changes only through the Connectors
- * screen. The files (`connectors.json`, the engine's `mcp.json`) are written from memory; a change
- * made by anything else (the assistant has a shell) is put back, and a project `.pi/mcp.json` in
- * the workspace is removed. Checked on every file event, before every engine start, and after
- * every run. A change made while the daemon is not running is loaded at its next start (stage 2, S25).
+ * screen. The files (`connectors.json`, the engine's `mcp.json`, and the sign-in home's `mcp.json`)
+ * are written from memory; a change made by anything else (the assistant has a shell) is put back,
+ * and a project `.pi/mcp.json` in the workspace is removed. The sign-ins (`mcp-auth.json`) change
+ * only during a sign-in or a token refresh; other changes are put back too. Checked on every file
+ * event, before every engine start, and after every run. A change made while the daemon is not
+ * running is loaded at its next start (S25.6).
+ *
+ * The engine's `mcp.json` lists only the daemon's proxy (S25.4). The real servers and the sign-ins
+ * are in the daemon's own sign-in home (`<data>/connector-signin`), which only the engine's
+ * `mcp login`/`mcp logout` commands are pointed at.
  */
 export class ConnectorStore {
 	readonly file: string;
 	readonly mcpFile: string;
+	/** The daemon's own folder for the sign-in command: the real servers and the sign-ins. */
+	readonly signinHome: string;
+	readonly signinMcpFile: string;
+	/** The sign-ins (pi-mcp's OAuth state by `mcp__<server>|<url>`), in the sign-in home. */
 	readonly authFile: string;
+	/** Where the engine kept the sign-ins before the proxy; moved once into the sign-in home. */
+	readonly legacyAuthFile: string;
 	/** Called after a change made outside the Connectors screen was put back. */
 	onReverted: () => void = () => {};
+	/** Called after every change to the state (the proxy closes what it no longer may use). */
+	onUpdated: () => void = () => {};
 	private saved: ConnectorsState;
 	/** The desktop app's helper while a window has it registered; only in memory and `mcp.json`. */
 	private computer: ComputerEndpoint | undefined;
+	/** The daemon's proxy for the running engine; only in memory and `mcp.json`. */
+	private proxy: ProxyEndpoint | undefined;
+	/** The sign-ins as the last sign-in or refresh left them (undefined: no file). */
+	private authText: string | undefined;
+	/** Sign-in commands running now; they write the sign-ins themselves. */
+	private signins = 0;
 	private watchers: FSWatcher[] = [];
 	private readonly options: ConnectorStoreOptions;
 
@@ -525,7 +591,12 @@ export class ConnectorStore {
 		this.options = options;
 		this.file = join(options.dataDir, "connectors.json");
 		this.mcpFile = join(options.agentHome, "mcp.json");
-		this.authFile = join(options.agentHome, "mcp-auth.json");
+		this.signinHome = join(options.dataDir, "connector-signin");
+		this.signinMcpFile = join(this.signinHome, "mcp.json");
+		this.authFile = join(this.signinHome, "mcp-auth.json");
+		this.legacyAuthFile = join(options.agentHome, "mcp-auth.json");
+		this.moveLegacySignIns();
+		this.authText = readOrUndefined(this.authFile);
 		const { state, renamed } = this.load();
 		this.saved = state;
 		if (renamed) writePrivate(this.file, this.recordText());
@@ -539,14 +610,17 @@ export class ConnectorStore {
 		return structuredClone(this.saved);
 	}
 
-	/** Changes the state, then writes both files (each atomically, mode 0600). */
+	/** Changes the state, then writes the files (each atomically, mode 0600). */
 	update(change: (state: ConnectorsState) => void): void {
 		const state = this.state();
 		change(state);
 		this.saved = state;
 		mkdirSync(this.options.agentHome, { recursive: true, mode: 0o700 });
+		ensurePrivateDir(this.signinHome);
 		writePrivate(this.file, this.recordText());
-		writePrivate(this.mcpFile, renderMcpJson(state, this.computer));
+		writePrivate(this.mcpFile, this.engineMcpText());
+		writePrivate(this.signinMcpFile, renderSigninMcpJson(state));
+		this.onUpdated();
 	}
 
 	/** Adds, replaces, or removes the computer helper in `mcp.json`; true when that changed it. */
@@ -555,8 +629,92 @@ export class ConnectorStore {
 		if (same) return false;
 		this.computer = endpoint ? { ...endpoint } : undefined;
 		mkdirSync(this.options.agentHome, { recursive: true, mode: 0o700 });
-		writePrivate(this.mcpFile, renderMcpJson(this.saved, this.computer));
+		writePrivate(this.mcpFile, this.engineMcpText());
 		return true;
+	}
+
+	/** Points `mcp.json` at the proxy with the key for the next engine launch; true when that changed it. */
+	setProxy(endpoint: ProxyEndpoint): boolean {
+		if (endpoint.url === this.proxy?.url && endpoint.key === this.proxy?.key) return false;
+		this.proxy = { ...endpoint };
+		mkdirSync(this.options.agentHome, { recursive: true, mode: 0o700 });
+		writePrivate(this.mcpFile, this.engineMcpText());
+		return true;
+	}
+
+	/** A connector as the proxy sees it, from the state in memory; undefined when it cannot run. */
+	proxyView(id: string): ProxiedConnector | undefined {
+		const saved = this.saved.connectors[id];
+		const filled = saved && filledServer(id, saved);
+		if (!saved || !filled) return undefined;
+		const { spec, server } = filled;
+		return {
+			id,
+			name: spec.name,
+			enabled: saved.enabled,
+			mode: saved.mode,
+			readOnlyTools: [...spec.readOnlyTools],
+			server:
+				"url" in server
+					? { url: server.url }
+					: {
+							command: server.command,
+							...(server.args ? { args: [...server.args] } : {}),
+							...(server.cwd !== undefined ? { cwd: server.cwd } : {}),
+						},
+			// The server with its values: a new token or address makes a new connection.
+			revision: createHash("sha256").update(JSON.stringify(server)).digest("hex"),
+		};
+	}
+
+	/**
+	 * What the proxy adds to the real server: the values the user typed (headers, a stdio server's
+	 * environment) as they were typed, and for a remote server without its own Authorization header,
+	 * the stored sign-in, refreshed when it expires.
+	 */
+	async credentials(id: string): Promise<UpstreamCredentials> {
+		const filled = filledServer(id, this.saved.connectors[id]);
+		if (!filled) throw new Error(`The connector ${id} is not set up.`);
+		const { spec, server } = filled;
+		const env = this.options.env ?? process.env;
+		if ("command" in server) {
+			const resolved = resolveRecord(server.env, env, spec.name);
+			return resolved ? { env: resolved } : {};
+		}
+		const headers = resolveRecord(server.headers, env, spec.name);
+		const ownAuthorization = Object.keys(server.headers ?? {}).some(
+			(h) => h.toLowerCase() === "authorization",
+		);
+		if (ownAuthorization) return headers ? { headers } : {};
+		const key = authKey(id, server.url);
+		const { oauth } = server;
+		const authProvider = storedSignIn(
+			server.url,
+			{ load: () => this.signIn(key), save: (state) => this.saveSignIn(key, state) },
+			() => ({
+				...(oauth?.clientId ? { clientId: oauth.clientId } : {}),
+				...(oauth?.clientSecret
+					? { clientSecret: resolveValue(oauth.clientSecret, env, `${spec.name} client secret`) }
+					: {}),
+				...(oauth?.callbackUrl ? { redirectUrl: oauth.callbackUrl } : {}),
+			}),
+		);
+		return { ...(headers ? { headers } : {}), authProvider };
+	}
+
+	/**
+	 * While the engine's sign-in command runs, it writes the sign-ins itself; call the returned
+	 * function when it ended, so what it wrote is kept.
+	 */
+	signingIn(): () => void {
+		this.signins++;
+		let done = false;
+		return () => {
+			if (done) return;
+			done = true;
+			this.signins--;
+			this.authText = readOrUndefined(this.authFile);
+		};
 	}
 
 	/** The helper's address while it is registered (never its key). */
@@ -575,13 +733,24 @@ export class ConnectorStore {
 		const changed: string[] = [];
 		for (const [file, text, empty] of [
 			[this.file, this.recordText(), noConnectors],
-			[this.mcpFile, renderMcpJson(this.saved, this.computer), noConnectors && !this.computer],
+			[this.mcpFile, this.engineMcpText(), noConnectors && !this.computer],
+			[this.signinMcpFile, renderSigninMcpJson(this.saved), noConnectors],
 		] as const) {
-			const current = existsSync(file) ? readFileSync(file, "utf8") : undefined;
+			const current = readOrUndefined(file);
 			if (current === text || (current === undefined && empty)) continue;
 			mkdirSync(this.options.agentHome, { recursive: true, mode: 0o700 });
+			ensurePrivateDir(this.signinHome);
 			writePrivate(file, text);
 			changed.push(file);
+		}
+		// The sign-ins change only through a sign-in or a refresh.
+		if (this.signins === 0 && readOrUndefined(this.authFile) !== this.authText) {
+			if (this.authText === undefined) unlinkSync(this.authFile);
+			else {
+				ensurePrivateDir(this.signinHome);
+				writePrivate(this.authFile, this.authText);
+			}
+			changed.push(this.authFile);
 		}
 		if (this.removeProjectConfig()) changed.push("the workspace's .pi/mcp.json");
 		if (changed.length === 0 || !report) return changed.length > 0;
@@ -610,7 +779,8 @@ export class ConnectorStore {
 				this.watchProjectConfig();
 			}, 20);
 		};
-		const folders = [this.options.dataDir, this.options.agentHome, this.options.workspace];
+		ensurePrivateDir(this.signinHome);
+		const folders = [this.options.dataDir, this.options.agentHome, this.signinHome, this.options.workspace];
 		for (const folder of folders) {
 			if (!folder) continue;
 			mkdirSync(folder, { recursive: true, mode: 0o700 });
@@ -629,19 +799,28 @@ export class ConnectorStore {
 		this.projectWatcher = undefined;
 	}
 
-	/** What the approval guard enforces: the turned-on connectors and the files only the daemon writes. */
+	/**
+	 * What the approval guard enforces: the turned-on connectors, which of them the proxy fronts (it
+	 * filters and asks, so the guard lets their tools through), and the files only the daemon writes.
+	 */
 	policy(): ConnectorPolicy {
 		const connectors: NonNullable<ConnectorPolicy["connectors"]> = {};
-		for (const [id, saved] of Object.entries(this.state().connectors)) {
+		const proxied: string[] = [];
+		for (const [id, saved] of ordered(this.saved)) {
 			const spec = specOf(id, saved);
-			if (spec && saved.enabled)
-				connectors[id] = { name: spec.name, mode: saved.mode, readOnlyTools: [...spec.readOnlyTools] };
+			if (!spec || !saved.enabled) continue;
+			connectors[id] = { name: spec.name, mode: saved.mode, readOnlyTools: [...spec.readOnlyTools] };
+			if (filledServer(id, saved)) proxied.push(id);
 		}
 		return {
 			connectors,
+			proxied,
 			// Sign-ins and keys, connector state, and the daemon's access key.
 			protectedPaths: [
 				this.mcpFile,
+				this.legacyAuthFile,
+				this.signinHome,
+				this.signinMcpFile,
 				this.authFile,
 				join(this.options.agentHome, "auth.json"),
 				join(this.options.agentHome, "models.json"),
@@ -654,24 +833,70 @@ export class ConnectorStore {
 	}
 
 	/**
-	 * True when the engine stored tokens for the connector (key `mcp__<server>|<url>`, `-` as `_`).
-	 * Token values are dropped while parsing, so they are never kept or passed on.
+	 * True when the sign-in command stored tokens for the connector (key `mcp__<server>|<url>`, `-`
+	 * as `_`). Token values are dropped while parsing, so they are never kept or passed on.
 	 */
 	isSignedIn(id: string): boolean {
-		const saved = this.saved.connectors[id];
-		const spec = specOf(id, saved);
-		const server = spec && fillServer(spec.server, spec.fields, saved?.values ?? {});
+		const server = filledServer(id, this.saved.connectors[id])?.server;
 		if (!server || !("url" in server) || !URL.canParse(server.url) || !existsSync(this.authFile))
 			return false;
 		try {
 			const states = JSON.parse(readFileSync(this.authFile, "utf8"), (key, value) =>
 				key === "tokens" && typeof value === "object" && value !== null ? {} : value,
 			) as Record<string, { tokens?: unknown } | undefined>;
-			const key = `mcp__${id.replace(/-/g, "_")}|${new URL(server.url).href}`;
-			return typeof states[key]?.tokens === "object";
+			return typeof states[authKey(id, server.url)]?.tokens === "object";
 		} catch {
 			return false;
 		}
+	}
+
+	/** One server's stored sign-in, for the proxy. */
+	private signIn(key: string): McpOAuthState | undefined {
+		try {
+			const states = JSON.parse(readFileSync(this.authFile, "utf8")) as Record<
+				string,
+				McpOAuthState | undefined
+			>;
+			return states[key];
+		} catch {
+			return undefined;
+		}
+	}
+
+	/** Keeps a refreshed sign-in; the file is then what it should be. */
+	private saveSignIn(key: string, state: McpOAuthState): void {
+		let states: Record<string, unknown> = {};
+		try {
+			states = JSON.parse(readFileSync(this.authFile, "utf8")) as Record<string, unknown>;
+		} catch {}
+		states[key] = state;
+		const text = `${JSON.stringify(states, null, 2)}\n`;
+		ensurePrivateDir(this.signinHome);
+		writePrivate(this.authFile, text);
+		this.authText = text;
+	}
+
+	/**
+	 * Before the proxy, the engine kept the sign-ins in its home. They move once, the first time the
+	 * sign-in home is made: the copy is read back before the old file is removed. A file that shows up
+	 * in the engine's home later is never taken over.
+	 */
+	private moveLegacySignIns(): void {
+		if (existsSync(this.signinHome)) return;
+		ensurePrivateDir(this.signinHome);
+		const text = readOrUndefined(this.legacyAuthFile);
+		if (text === undefined) return;
+		writePrivate(this.authFile, text);
+		if (readOrUndefined(this.authFile) !== text) {
+			this.options.log?.("could not move the connector sign-ins; they stay where they were");
+			return;
+		}
+		unlinkSync(this.legacyAuthFile);
+		this.options.log?.("moved the connector sign-ins to the daemon's sign-in folder");
+	}
+
+	private engineMcpText(): string {
+		return renderMcpJson(this.saved, this.computer, this.proxy);
 	}
 
 	private check: () => void = () => {};
@@ -781,6 +1006,19 @@ function parseCustom(value: unknown): CustomConnector | undefined {
 		fields,
 		oauth: custom.oauth === true,
 	};
+}
+
+/** A sign-in's key in `mcp-auth.json`, like the engine's (`mcp__<server>|<url>`, `-` as `_`). */
+function authKey(id: string, url: string): string {
+	return `mcp__${id.replace(/-/g, "_")}|${new URL(url).href}`;
+}
+
+function readOrUndefined(path: string): string | undefined {
+	try {
+		return readFileSync(path, "utf8");
+	} catch {
+		return undefined;
+	}
 }
 
 function lstatOrUndefined(path: string) {
@@ -1371,13 +1609,18 @@ export class ConnectorManager {
 		return undefined;
 	}
 
+	/** The engine's sign-in command, pointed at the daemon's sign-in home (the real servers), never the engine's. */
 	private run(subcommand: "login" | "logout", id: string): ChildProcess {
-		const { cli, env, cwd } = this.options;
-		return spawn(cli.command, [...cli.args, "mcp", subcommand, id], {
+		const { cli, env, cwd, store } = this.options;
+		const done = store.signingIn();
+		const child = spawn(cli.command, [...cli.args, "mcp", subcommand, id], {
 			cwd,
-			env: { ...env, PI_CODING_AGENT_DIR: this.options.store.agentHome },
+			env: { ...env, PI_CODING_AGENT_DIR: store.signinHome },
 			stdio: ["ignore", "pipe", "pipe"],
 		});
+		child.on("error", done);
+		child.on("close", done);
+		return child;
 	}
 
 	private startLogin(owner: object, connectorId: string, emit: Emit, flowId?: string): void {

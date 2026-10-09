@@ -21,6 +21,7 @@ import {
 	ConnectorManager,
 	ConnectorStore,
 	renderMcpJson,
+	renderSigninMcpJson,
 } from "../src/connectors.ts";
 import { isReadOnlyCall } from "../src/extensions/approval-guard.ts";
 import { tempDir, waitFor } from "./helpers.ts";
@@ -74,10 +75,10 @@ describe("connectors catalog", () => {
 });
 
 describe("mcp.json rendering", () => {
-	it("renders direct servers the engine accepts; read only hides every tool but the curated ones", async () => {
+	it("renders the real servers for the sign-in command as the engine accepts them; read only hides every tool but the curated ones", async () => {
 		const { validateMcpServerConfig, getMcpToolExposure } = await engineMcp();
 		const rendered = JSON.parse(
-			renderMcpJson({
+			renderSigninMcpJson({
 				connectors: {
 					notion: { enabled: true, mode: "read_only" },
 					linear: { enabled: true, mode: "read_write" },
@@ -106,6 +107,7 @@ describe("mcp.json rendering", () => {
 
 	it("renders an empty server list when nothing is added", () => {
 		expect(JSON.parse(renderMcpJson({ connectors: {} }))).toEqual({ mcpServers: {} });
+		expect(JSON.parse(renderSigninMcpJson({ connectors: {} }))).toEqual({ mcpServers: {} });
 	});
 });
 
@@ -152,14 +154,16 @@ describe("connector store", () => {
 		s.update((state) => {
 			state.connectors.notion = { enabled: true, mode: "read_only" };
 		});
-		const mcp = readFileSync(join(agentHome, "mcp.json"), "utf8");
-		expect(JSON.parse(mcp).mcpServers.notion.url).toBe("https://mcp.notion.com/mcp");
+		expect(JSON.parse(readFileSync(s.signinMcpFile, "utf8")).mcpServers.notion.url).toBe(
+			"https://mcp.notion.com/mcp",
+		);
 		expect(JSON.parse(readFileSync(join(dataDir, "connectors.json"), "utf8"))).toEqual({
 			version: 1,
 			connectors: { notion: { enabled: true, mode: "read_only" } },
 		});
 		expect(statSync(join(dataDir, "connectors.json")).mode & 0o777).toBe(0o600);
 		expect(statSync(join(agentHome, "mcp.json")).mode & 0o777).toBe(0o600);
+		expect(statSync(s.signinMcpFile).mode & 0o777).toBe(0o600);
 		expect(readdirSync(agentHome).filter((f) => f.includes(".tmp"))).toEqual([]);
 		const next = new ConnectorStore({ dataDir, agentHome, workspace });
 		stores.push(next);
@@ -220,7 +224,7 @@ describe("connector store", () => {
 			version: 1,
 			connectors: { linear: { enabled: true, mode: "read_write" } },
 		});
-		expect(JSON.parse(readFileSync(join(agentHome, "mcp.json"), "utf8")).mcpServers.linear).toBeDefined();
+		expect(JSON.parse(readFileSync(s.signinMcpFile, "utf8")).mcpServers.linear).toBeDefined();
 		expect(s.enforce()).toBe(false);
 	});
 
@@ -313,9 +317,13 @@ describe("connector store", () => {
 			mode: "read_write",
 			readOnlyTools: CATALOG[0]?.readOnlyTools,
 		});
+		expect(policy.proxied).toEqual(["notion"]);
 		expect(policy.protectedPaths).toEqual([
 			join(agentHome, "mcp.json"),
 			join(agentHome, "mcp-auth.json"),
+			join(dataDir, "connector-signin"),
+			join(dataDir, "connector-signin", "mcp.json"),
+			join(dataDir, "connector-signin", "mcp-auth.json"),
 			join(agentHome, "auth.json"),
 			join(agentHome, "models.json"),
 			join(dataDir, "connectors.json"),
@@ -325,17 +333,17 @@ describe("connector store", () => {
 	});
 
 	it("tells a stored sign-in from a pending one without exposing token values", () => {
-		const { store: s, agentHome } = store();
+		const { store: s } = store();
 		expect(s.isSignedIn("notion")).toBe(false);
-		writeFileSync(join(agentHome, "mcp-auth.json"), "{oops");
+		writeFileSync(s.authFile, "{oops");
 		expect(s.isSignedIn("notion")).toBe(false);
 		writeFileSync(
-			join(agentHome, "mcp-auth.json"),
+			s.authFile,
 			JSON.stringify({ [NOTION_KEY]: { clientInformation: { client_id: "c" }, codeVerifier: "v" } }),
 		);
 		expect(s.isSignedIn("notion")).toBe(false);
 		writeFileSync(
-			join(agentHome, "mcp-auth.json"),
+			s.authFile,
 			JSON.stringify({ [NOTION_KEY]: { tokens: { access_token: "secret-token-value" } } }),
 		);
 		expect(s.isSignedIn("notion")).toBe(true);
@@ -441,7 +449,7 @@ describe("connector sign-in", () => {
 	});
 
 	it("connects: adds the server, relays the sign-in link, finishes through a pasted address", async () => {
-		const { manager, store, agentHome, dataDir, changes, owner, emit, find, sent, logs, cliRuns } = setup();
+		const { manager, store, dataDir, changes, owner, emit, find, sent, logs, cliRuns } = setup();
 		expect(manager.connect(owner, "notion", emit)).toBeUndefined();
 		expect(store.state().connectors.notion).toEqual({ enabled: true, mode: "read_only" });
 		expect(changes).toEqual([true]);
@@ -456,7 +464,8 @@ describe("connector sign-in", () => {
 		expect(prompt.prompt).toMatchObject({ flowId: link.flowId, kind: "manual_code" });
 		const [run] = cliRuns();
 		expect(run?.argv).toEqual(["mcp", "login", "notion"]);
-		expect(run?.env).toEqual({ PI_CODING_AGENT_DIR: agentHome, HOME: join(dataDir, "home") });
+		// The sign-in command reads the real servers from the daemon's sign-in home, never the engine's.
+		expect(run?.env).toEqual({ PI_CODING_AGENT_DIR: store.signinHome, HOME: join(dataDir, "home") });
 		const redirect = new URL(
 			new URL(link.event.kind === "auth_url" ? link.event.url : "").searchParams.get("redirect_uri") ?? "",
 		);
@@ -566,7 +575,7 @@ describe("connector sign-in", () => {
 		manager.connect(owner, "notion", emit);
 		await find("auth_done");
 		expect(manager.setMode("notion", "read_write")).toBeUndefined();
-		expect(JSON.parse(readFileSync(join(agentHome, "mcp.json"), "utf8")).mcpServers.notion).toEqual({
+		expect(JSON.parse(readFileSync(store.signinMcpFile, "utf8")).mcpServers.notion).toEqual({
 			url: "https://mcp.notion.com/mcp",
 			exposure: "direct",
 		});
@@ -590,7 +599,8 @@ describe("connector sign-in", () => {
 		]);
 		expect(store.state().connectors).toEqual({});
 		expect(JSON.parse(readFileSync(join(agentHome, "mcp.json"), "utf8"))).toEqual({ mcpServers: {} });
-		expect(JSON.parse(readFileSync(join(agentHome, "mcp-auth.json"), "utf8"))).toEqual({});
+		expect(JSON.parse(readFileSync(store.signinMcpFile, "utf8"))).toEqual({ mcpServers: {} });
+		expect(JSON.parse(readFileSync(store.authFile, "utf8"))).toEqual({});
 		expect(manager.list()[0]).toMatchObject({ added: false, status: "off" });
 		expect(changes).toEqual([true, false, true, true, true]);
 		expect(manager.setMode("notion", "read_only")).toMatchObject({ code: "connector_not_added" });

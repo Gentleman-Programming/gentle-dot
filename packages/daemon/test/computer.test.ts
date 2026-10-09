@@ -63,7 +63,10 @@ async function setup(options: Setup = {}) {
 		existsSync(mcpFile) ? JSON.parse(readFileSync(mcpFile, "utf8")).mcpServers : {};
 	const agentEnv = () => readFileSync(envFile, "utf8");
 	const policy = () =>
-		JSON.parse(JSON.parse(agentEnv()).GENTLE_DOT_CONNECTOR_POLICY ?? "{}") as { builtin?: string[] };
+		JSON.parse(JSON.parse(agentEnv()).GENTLE_DOT_CONNECTOR_POLICY ?? "{}") as {
+			builtin?: string[];
+			connectors?: Record<string, { mode: string }>;
+		};
 	return {
 		d,
 		dataDir,
@@ -231,7 +234,7 @@ describe("computer control registration (S24.7)", () => {
 	});
 
 	it("cannot be changed or removed through the connector messages, and a saved connector with its name is renamed", async () => {
-		const { servers, send, messages, list } = await setup({
+		const { d, servers, send, messages, list } = await setup({
 			saved: {
 				version: 1,
 				connectors: {
@@ -249,7 +252,8 @@ describe("computer control registration (S24.7)", () => {
 			name: "Computer",
 			enabled: true,
 		});
-		expect(servers()["computer-2"]).toMatchObject({ url: "http://127.0.0.1:9/mcp" });
+		// The engine reaches it through the proxy; its real address stays in the daemon.
+		expect(servers()["computer-2"]).toMatchObject({ url: `http://127.0.0.1:${d.port}/mcp/computer-2` });
 
 		send({ type: "computer_register", url: HELPER, token: KEY });
 		await waitFor(() => servers().computer);
@@ -323,7 +327,7 @@ describe("computer control registration (S24.7)", () => {
 
 describe("connectors next to the computer (regression)", () => {
 	it("connects, changes, and removes a connector while the helper is registered, and puts back a tampered mcp.json", async () => {
-		const { mcpFile, servers, send, find, list } = await setup({ cliMode: "auto" });
+		const { d, mcpFile, servers, send, find, list, policy } = await setup({ cliMode: "auto" });
 		send({ type: "computer_register", url: HELPER, token: KEY });
 		await waitFor(() => servers().computer);
 
@@ -340,10 +344,13 @@ describe("connectors next to the computer (regression)", () => {
 			["computer", "connected"],
 		]);
 		expect(Object.keys(servers())).toEqual(["notion", "computer"]);
-		expect(servers().notion).toMatchObject({ url: "https://mcp.notion.com/mcp", exposure: "direct" });
+		expect(servers().notion).toMatchObject({
+			url: `http://127.0.0.1:${d.port}/mcp/notion`,
+			exposure: "direct",
+		});
 
 		send({ type: "connector_mode", connectorId: "notion", mode: "read_write" });
-		await waitFor(() => !(servers().notion as { toolExposure?: unknown }).toolExposure);
+		await waitFor(() => d.supervisor.state === "ready" && policy().connectors?.notion?.mode === "read_write");
 
 		writeFileSync(mcpFile, '{"mcpServers":{}}\n');
 		await waitFor(() => servers().computer && servers().notion);

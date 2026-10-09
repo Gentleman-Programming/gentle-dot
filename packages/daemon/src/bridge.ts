@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
 	type AgentState,
@@ -79,8 +80,16 @@ type ProfileCommand = Extract<
 
 const DIALOG_METHODS = new Set(["select", "confirm", "input", "editor"]);
 
-/** An open dialog; `options` keeps the agent's original option strings for the answer. */
-type PendingAsk = { ask: Ask; options?: string[]; timer?: NodeJS.Timeout };
+/**
+ * An open dialog; `options` keeps the agent's original option strings for the answer. `settle` is set
+ * for the daemon's own questions (the MCP proxy's approvals): the answer goes there, not to the agent.
+ */
+type PendingAsk = {
+	ask: Ask;
+	options?: string[];
+	timer?: NodeJS.Timeout;
+	settle?: (allowed: boolean) => void;
+};
 const REMEMBERED_REQUEST_IDS = 500;
 const READY_TIMEOUT_MS = 60_000;
 const ANSWER_FAILED = "Something went wrong while answering. Please try again.";
@@ -144,6 +153,30 @@ export class DotBridge {
 
 	get agentState(): AgentState {
 		return this.state;
+	}
+
+	/**
+	 * Asks every window to confirm an action of the daemon's own (a connector's sending action through
+	 * the MCP proxy), on the same card as the engine's approvals. Resolves true only when the user
+	 * confirms; declining, stopping the answer, or `signal` resolves false. Rejects when no window can
+	 * answer. T23c moves this to the desktop app's native dialog.
+	 */
+	confirm(title: string, message: string, signal?: AbortSignal): Promise<boolean> {
+		if (this.clients.size === 0) return Promise.reject(new Error("no window can answer"));
+		if (signal?.aborted) return Promise.resolve(false);
+		const requestId = `daemon-${randomUUID()}`;
+		return new Promise((resolve) => {
+			const ask: Ask = {
+				requestId,
+				method: "confirm",
+				title: presentText(title),
+				message: presentText(message),
+			};
+			this.asks.set(requestId, { ask, settle: resolve });
+			signal?.addEventListener("abort", () => this.resolveAsk(requestId), { once: true });
+			this.broadcast({ type: "ask", ask });
+			this.refreshState();
+		});
 	}
 
 	attach(client: BridgeClient): () => void {
@@ -261,6 +294,11 @@ export class DotBridge {
 					return;
 				}
 				const { requestId } = message;
+				if (pending.settle) {
+					pending.settle(message.confirmed === true && !message.cancelled);
+					this.resolveAsk(requestId);
+					return;
+				}
 				const answer: Record<string, unknown> = {};
 				if (message.cancelled) answer.cancelled = true;
 				else if (message.confirmed !== undefined) answer.confirmed = message.confirmed;
@@ -1098,6 +1136,8 @@ export class DotBridge {
 		const entry = this.asks.get(requestId);
 		if (!entry) return;
 		clearTimeout(entry.timer);
+		// A question of the daemon's that closes unanswered is a refusal (its answer, if any, came first).
+		entry.settle?.(false);
 		this.asks.delete(requestId);
 		this.broadcast({ type: "ask_resolved", requestId });
 		this.refreshState();

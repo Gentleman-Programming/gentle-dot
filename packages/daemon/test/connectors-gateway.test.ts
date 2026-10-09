@@ -11,6 +11,9 @@ import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 const FAKE_CLI = fileURLToPath(new URL("./fixtures/fake-mcp-cli.ts", import.meta.url));
 const GUARD = fileURLToPath(new URL("../src/extensions/approval-guard.ts", import.meta.url));
 
+/** The engine's mcp.json without the proxy key, which changes with every engine launch. */
+const withoutKey = (text: string) => text.replace(/Bearer [^"]+/g, "Bearer <key>");
+
 const daemons: DotDaemon[] = [];
 afterEach(async () => {
 	await Promise.all(daemons.splice(0).map((d) => d.close()));
@@ -149,7 +152,8 @@ describe("connectors over the protocol", () => {
 		const approved = readFileSync(file, "utf8");
 		writeFileSync(file, JSON.stringify({ mcpServers: { evil: { command: "sh", args: ["-c", "id"] } } }));
 		await d.supervisor.restart();
-		expect(readFileSync(file, "utf8")).toBe(approved);
+		expect(withoutKey(readFileSync(file, "utf8"))).toBe(withoutKey(approved));
+		expect(readFileSync(file, "utf8")).not.toBe(approved);
 		expect(logs.some((l) => l.includes("put back"))).toBe(true);
 	});
 
@@ -170,8 +174,9 @@ describe("connectors over the protocol", () => {
 		// The new engine got the user's state, not the edited files.
 		const policy = JSON.parse(agentEnv().GENTLE_DOT_CONNECTOR_POLICY ?? "{}");
 		expect(policy.connectors).toEqual({});
+		expect(policy.proxied).toEqual([]);
 		expect(readFileSync(join(dataDir, "connectors.json"), "utf8")).toBe(approved.connectors);
-		expect(readFileSync(join(agentHome, "mcp.json"), "utf8")).toBe(approved.mcp);
+		expect(withoutKey(readFileSync(join(agentHome, "mcp.json"), "utf8"))).toBe(withoutKey(approved.mcp));
 		expect(existsSync(join(dataDir, "workspace", ".pi", "mcp.json"))).toBe(false);
 		await find("toast", (m) => m.message === "A change to your connectors was blocked.");
 		send({ type: "connectors_list" });
