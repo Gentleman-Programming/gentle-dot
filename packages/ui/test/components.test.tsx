@@ -110,9 +110,9 @@ describe("MessageList", () => {
 						text: "All **good**",
 						streaming: false,
 						activities: [
-							{ id: "a", kind: "read", title: "Reading a.md", status: "done" },
-							{ id: "b", kind: "read", title: "Reading b.md", status: "done" },
-							{ id: "c", kind: "run", title: "Running a command", status: "failed" },
+							{ id: "a", kind: "read", title: "Read a.md", status: "done" },
+							{ id: "b", kind: "read", title: "Read b.md", status: "done" },
+							{ id: "c", kind: "run", title: "A command failed", status: "failed" },
 						],
 					},
 				]}
@@ -121,7 +121,8 @@ describe("MessageList", () => {
 		expect(screen.getByText("good").tagName).toBe("STRONG");
 		const summary = screen.getByRole("button", { name: /Read 2 files · Ran 1 command/ });
 		await userEvent.click(summary);
-		expect(screen.getByText("Reading b.md")).toBeInTheDocument();
+		expect(screen.getByText("Read b.md")).toBeInTheDocument();
+		expect(screen.getByText("A command failed")).toBeInTheDocument();
 	});
 });
 

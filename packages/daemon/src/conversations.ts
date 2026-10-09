@@ -206,8 +206,7 @@ function activitiesOf(message: AgentMessage, failed: Set<string>): Activity[] {
 		const b = block as { type?: string; id?: string; name?: string; arguments?: unknown };
 		if (b?.type !== "toolCall" || typeof b.name !== "string") return [];
 		const id = b.id ?? b.name;
-		return [
-			{ id, ...describeTool(b.name, b.arguments), status: failed.has(id) ? "failed" : "done" } as Activity,
-		];
+		const status = failed.has(id) ? "failed" : "done";
+		return [{ id, ...describeTool(b.name, b.arguments, status), status } as Activity];
 	});
 }
