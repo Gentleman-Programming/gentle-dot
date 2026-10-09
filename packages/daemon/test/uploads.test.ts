@@ -138,6 +138,62 @@ describe("upload store", () => {
 		expect(outcome).toMatchObject({ ok: false, status: 404, code: "upload_not_found" });
 	});
 
+	it("expires only unsent siblings, preserving sent files and refusing reuse", async () => {
+		const workspace = tempDir();
+		let now = 0;
+		const uploads = new UploadStore({ workspace, ttlMs: 100, now: () => now });
+		const sent = await uploads.receive(Readable.from(["SENT"]), { name: "sent.txt" });
+		if (!sent.ok) throw new Error(sent.message);
+		const pending = await uploads.receive(Readable.from(["UNSENT"]), {
+			name: "pending.txt",
+			uploadId: sent.file.uploadId,
+		});
+		if (!pending.ok) throw new Error(pending.message);
+		uploads.consume([sent.file]);
+
+		now = 99;
+		const fresh = await uploads.receive(Readable.from(["FRESH"]), { name: "fresh.txt" });
+		if (!fresh.ok) throw new Error(fresh.message);
+		expect(uploads.resolve([pending.file]).ok).toBe(true);
+		expect(readFileSync(join(workspace, pending.file.path), "utf8")).toBe("UNSENT");
+
+		now = 100;
+		const trigger = await uploads.receive(Readable.from(["TRIGGER"]), { name: "trigger.txt" });
+		expect(trigger.ok).toBe(true);
+		expect(existsSync(join(workspace, pending.file.path))).toBe(false);
+		expect(readFileSync(join(workspace, sent.file.path), "utf8")).toBe("SENT");
+		const unavailable = {
+			ok: false,
+			code: "attachment_not_found",
+			message: "A file you attached is no longer available. Attach it again.",
+		};
+		expect(uploads.resolve([sent.file])).toEqual(unavailable);
+		expect(uploads.resolve([pending.file])).toEqual(unavailable);
+		expect(uploads.resolve([fresh.file]).ok).toBe(true);
+		expect(readFileSync(join(workspace, fresh.file.path), "utf8")).toBe("FRESH");
+	});
+
+	it("still removes wholly unsent expired folders and preserves wholly sent folders", async () => {
+		const workspace = tempDir();
+		let now = 0;
+		const uploads = new UploadStore({ workspace, ttlMs: 100, now: () => now });
+		const pending = await uploads.receive(Readable.from(["UNSENT"]), { name: "pending.txt" });
+		if (!pending.ok) throw new Error(pending.message);
+		const sent = await uploads.receive(Readable.from(["SENT"]), { name: "sent.txt" });
+		if (!sent.ok) throw new Error(sent.message);
+		uploads.consume([sent.file]);
+
+		now = 100;
+		const trigger = await uploads.receive(Readable.from(["TRIGGER"]), { name: "trigger.txt" });
+		if (!trigger.ok) throw new Error(trigger.message);
+		expect(existsSync(join(workspace, "uploads", pending.file.uploadId))).toBe(false);
+		expect(readFileSync(join(workspace, sent.file.path), "utf8")).toBe("SENT");
+		expect(uploads.resolve([pending.file]).ok).toBe(false);
+		expect(uploads.resolve([sent.file]).ok).toBe(false);
+		expect(uploads.resolve([trigger.file]).ok).toBe(true);
+		expect(readFileSync(join(workspace, trigger.file.path), "utf8")).toBe("TRIGGER");
+	});
+
 	it("hands out stored files once: unknown names and used uploads are refused", async () => {
 		const { workspace, uploads } = store();
 		const sent = await uploads.receive(Readable.from(["hello"]), { name: "a.txt" });
