@@ -261,6 +261,14 @@ describe("createModelAuthRuntime (Pi's runtime, offline)", () => {
 			if (saved !== undefined) process.env.OPENAI_API_KEY = saved;
 		}
 	});
+
+	it("lists NaN, the provider the engine's own extension registers, with its API key sign-in", async () => {
+		const home = tempDir();
+		const runtime = await createModelAuthRuntime(home, home);
+		const nan = runtime.getProviders().find((provider) => provider.name === "NaN");
+		expect(nan?.auth.apiKey?.name).toBe("NaN API key");
+		expect(runtime.getProviderAuthStatus(nan?.id ?? "").configured).toBe(false);
+	});
 });
 
 describe("resolveAgentHome", () => {

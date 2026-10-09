@@ -57,6 +57,23 @@ export function resolveAgentHome(env: NodeJS.ProcessEnv, dataDir: string): strin
 	return resolve(env.GENTLE_DOT_AGENT_HOME ?? join(dataDir, "agent"));
 }
 
+/**
+ * Providers the engine adds through its own extensions, so the Accounts screen can sign in to them
+ * too: today NaN (gentle-pi's `nan-provider`). gentle-pi ships them as TypeScript inside
+ * node_modules, which Node will not strip, so they load through jiti as the engine loads them.
+ */
+async function registerEngineProviders(runtime: {
+	registerNativeProvider(provider: never): void;
+}): Promise<void> {
+	const { createJiti } = await import("jiti");
+	const jiti = createJiti(import.meta.url);
+	const { createNanProviderConfig } = await jiti.import<{
+		createNanProviderConfig: () => { id: string };
+	}>("gentle-pi/lib/nan-provider.ts");
+	// A provider object, as `pi.registerProvider(config)` passes it, is a native provider.
+	runtime.registerNativeProvider(createNanProviderConfig() as never);
+}
+
 /** Pi's ModelRuntime on the assistant's home: same auth.json format and file locking as Gentle Shell. */
 export async function createModelAuthRuntime(agentHome: string, cwd: string): Promise<AuthRuntime> {
 	mkdirSync(agentHome, { recursive: true, mode: 0o700 });
@@ -67,6 +84,7 @@ export async function createModelAuthRuntime(agentHome: string, cwd: string): Pr
 		// Offline, but refreshed on create so credentials saved by other runtimes are visible.
 		allowModelNetwork: false,
 	});
+	await registerEngineProviders(runtime);
 	const settings = SettingsManager.create(cwd, agentHome);
 	return {
 		getProviders: () => runtime.getProviders() as unknown as ReturnType<AuthRuntime["getProviders"]>,

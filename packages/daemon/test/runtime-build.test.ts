@@ -69,6 +69,7 @@ describe("build:runtime", () => {
 			"@earendil-works/pi-coding-agent": "1.0.4",
 			"@earendil-works/pi-tui": "1.0.4",
 			"gentle-pi": "4.0.0",
+			jiti: "2.7.0",
 			ws: "8.22.0",
 		});
 	});
