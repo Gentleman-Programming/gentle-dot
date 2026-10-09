@@ -55,15 +55,11 @@ const banner = `<!doctype html><html><head><style>${css}
 		color: #ffe3ef; text-shadow: 0 0 6px var(--neon), 0 0 28px var(--neon-soft); }
 	h1 span { color: var(--accent); }
 	p { margin-top: 34px; font-size: 36px; line-height: 1.4; color: #e9c6d7; }
-	.keys { margin-top: 40px; display: inline-flex; gap: 14px; font-size: 26px; color: var(--accent); }
-	.keys b { border: 2px solid rgba(240, 149, 200, 0.55); border-radius: 12px; padding: 6px 16px;
-		box-shadow: 0 0 18px rgba(240, 149, 200, 0.25); }
 </style></head><body>
 	<div class="disc">${rose(400)}</div>
 	<div>
 		<h1>Gentle <span>Dot</span></h1>
 		<p>Your assistant, always one key away.<br/>Memory, voice, files, and your Mac.</p>
-		<div class="keys"><b>⌥ Space</b></div>
 	</div>
 </body></html>`;
 
