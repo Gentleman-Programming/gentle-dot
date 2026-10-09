@@ -1,7 +1,9 @@
 //! The local model backend (S30.5): NVIDIA Parakeet TDT 0.6B v3 (int8) through sherpa-onnx's
 //! offline transducer recognizer, on the CPU. Parakeet is not streaming: a recognition keeps the
 //! recording's PCM and decodes it once `finish` is called, on a thread of its own, then answers
-//! through `Sink::finished`. There are no partials. It detects the language itself (25 European
+//! through `Sink::finished`. While the user speaks, the recording so far is decoded again about
+//! every `PARTIAL_EVERY` samples to show live text (`Sink::partial`), never waiting for a model
+//! that is still loading or for a decode already running. It detects the language itself (25 European
 //! languages), so the locale is ignored, and it needs no Speech Recognition permission.
 //!
 //! The loaded model (about 0.7 GB in memory) is shared by recordings: loading starts in the
@@ -24,6 +26,10 @@ pub const MAX_SAMPLES: usize = SAMPLE_RATE as usize * 300;
 pub const DECODE_TIMEOUT: Duration = Duration::from_secs(60);
 /// An unused model is dropped after this long.
 pub const IDLE_UNLOAD: Duration = Duration::from_secs(300);
+/// New audio (0.8 s at 16 kHz) between two live transcripts while the user speaks.
+pub const PARTIAL_EVERY: usize = SAMPLE_RATE as usize * 4 / 5;
+/// A live transcript decodes at most the last 30 s, so it stays quick in long recordings.
+const PARTIAL_WINDOW: usize = SAMPLE_RATE as usize * 30;
 /// The locale Parakeet reports: it picks the language from the audio.
 const AUTO: &str = "auto";
 
@@ -118,6 +124,15 @@ impl Cache {
         *lock(&self.slot) = None;
     }
 
+    /// The model in `dir` if it is already in memory; never waits for a load in progress.
+    fn ready(&self, dir: &Path) -> Option<Arc<dyn Engine>> {
+        let slot = self.slot.try_lock().ok()?;
+        match slot.as_ref() {
+            Some((loaded, engine)) if loaded == dir => Some(engine.clone()),
+            _ => None,
+        }
+    }
+
     /// Drops the model after `idle` unless it is used again before.
     fn unload_when_idle(self: &Arc<Self>, idle: Duration) {
         let mark = self.uses.load(Ordering::SeqCst);
@@ -208,6 +223,9 @@ impl Recognizer for Parakeet {
             idle: self.idle,
             samples: Samples::default(),
             cancelled,
+            since_partial: 0,
+            done: Arc::new(AtomicBool::new(false)),
+            decoding: Arc::new(Mutex::new(())),
         }))
     }
 }
@@ -225,6 +243,11 @@ impl Samples {
     pub(crate) fn take(&mut self) -> Vec<f32> {
         std::mem::take(&mut self.0)
     }
+
+    /// A copy of the last `count` samples.
+    fn tail(&self, count: usize) -> Vec<f32> {
+        self.0[self.0.len().saturating_sub(count)..].to_vec()
+    }
 }
 
 struct ParakeetRecognition {
@@ -234,19 +257,59 @@ struct ParakeetRecognition {
     idle: Duration,
     samples: Samples,
     cancelled: Arc<AtomicBool>,
+    /// Audio received since the last live transcript started.
+    since_partial: usize,
+    /// Set once the recording stops or is cancelled: no live transcript is shown after it.
+    done: Arc<AtomicBool>,
+    /// One decode at a time on the shared model; the final one waits, live ones skip.
+    decoding: Arc<Mutex<()>>,
+}
+
+impl ParakeetRecognition {
+    /// Decodes the recording so far on a thread of its own and shows it as live text. Called on
+    /// the audio thread, so it never waits: no model in memory yet, or a decode running, skips it.
+    fn show_partial(&self) {
+        let Some(engine) = self.cache.ready(&self.dir) else { return };
+        let samples = self.samples.tail(PARTIAL_WINDOW);
+        let (sink, done, decoding) = (self.sink.clone(), self.done.clone(), self.decoding.clone());
+        let _ = std::thread::Builder::new().name("voice-model-partial".into()).spawn(move || {
+            let Ok(_turn) = decoding.try_lock() else { return };
+            if done.load(Ordering::SeqCst) {
+                return;
+            }
+            if let Ok(text) = engine.transcribe(&samples) {
+                if !done.load(Ordering::SeqCst) {
+                    sink.partial(text.trim());
+                }
+            }
+        });
+    }
 }
 
 impl Recognition for ParakeetRecognition {
     fn feed(&mut self, samples: &[f32]) {
         self.samples.push(samples);
+        self.since_partial += samples.len();
+        if self.since_partial >= PARTIAL_EVERY {
+            self.since_partial = 0;
+            self.show_partial();
+        }
     }
 
     fn finish(&mut self) {
+        self.done.store(true, Ordering::SeqCst);
         let samples = self.samples.take();
-        let (dir, sink, cache, idle, cancelled) =
-            (self.dir.clone(), self.sink.clone(), self.cache.clone(), self.idle, self.cancelled.clone());
+        let (dir, sink, cache, idle, cancelled, decoding) = (
+            self.dir.clone(),
+            self.sink.clone(),
+            self.cache.clone(),
+            self.idle,
+            self.cancelled.clone(),
+            self.decoding.clone(),
+        );
         let decode = move || {
             let result = cache.get(&dir, idle).and_then(|engine| {
+                let _turn = lock(&decoding);
                 if cancelled.load(Ordering::SeqCst) {
                     return Ok(None);
                 }
@@ -268,6 +331,7 @@ impl Recognition for ParakeetRecognition {
     }
 
     fn cancel(&mut self) {
+        self.done.store(true, Ordering::SeqCst);
         self.cancelled.store(true, Ordering::SeqCst);
         self.samples.take();
     }
@@ -425,6 +489,59 @@ mod tests {
         assert_eq!(result, Ok(Transcript { text: "2400 samples".into() }));
         assert_ne!(setup.threads.lock().unwrap()[0], stop_thread, "decoding runs on its own thread");
         assert!(recorder.seen().iter().all(|e| !matches!(e, crate::voice::VoiceEvent::Partial(_))), "no partials");
+    }
+
+    fn partials(recorder: &Recorder) -> Vec<String> {
+        recorder
+            .seen()
+            .into_iter()
+            .filter_map(|e| match e {
+                crate::voice::VoiceEvent::Partial(text) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn it_shows_what_it_heard_so_far_while_the_user_speaks() {
+        let setup = Setup::new(None);
+        let parakeet = Arc::new(setup.parakeet());
+        let (voice, mic) = voice(parakeet.clone());
+        let recorder = Recorder::default();
+        voice.start(None, recorder.events()).unwrap();
+        wait_until("the model to load", || parakeet.loaded());
+        mic.sink().audio(&vec![0.0; PARTIAL_EVERY]);
+        wait_until("a partial", || !partials(&recorder).is_empty());
+        assert_eq!(partials(&recorder)[0], format!("{PARTIAL_EVERY} samples"));
+        assert_eq!(voice.stop(), Ok(Transcript { text: format!("{PARTIAL_EVERY} samples") }));
+    }
+
+    #[test]
+    fn no_partial_waits_for_the_model_or_runs_after_stop_or_cancel() {
+        // Not loaded yet: the audio thread never waits for a load, so no partial.
+        let gate = Arc::new(Gate::default());
+        let setup = Setup::new(Some(gate.clone()));
+        let parakeet = Arc::new(setup.parakeet());
+        let (warm, mic) = voice(parakeet.clone());
+        let recorder = Recorder::default();
+        warm.start(None, recorder.events()).unwrap();
+        wait_until("the model to load", || parakeet.loaded());
+        mic.sink().audio(&vec![0.0; PARTIAL_EVERY]);
+        wait_until("the partial decode", || !setup.threads.lock().unwrap().is_empty());
+        warm.cancel().unwrap();
+        gate.release();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(partials(&recorder).is_empty(), "a partial after cancel: {:?}", partials(&recorder));
+
+        let cold = Setup::new(None);
+        cold.fail_load.store(true, Ordering::SeqCst);
+        let cold_parakeet = Arc::new(cold.parakeet());
+        let (cold_voice, cold_mic) = voice(cold_parakeet);
+        let cold_recorder = Recorder::default();
+        cold_voice.start(None, cold_recorder.events()).unwrap();
+        cold_mic.sink().audio(&vec![0.0; PARTIAL_EVERY * 2]);
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(partials(&cold_recorder).is_empty());
     }
 
     #[test]
