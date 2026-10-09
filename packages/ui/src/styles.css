@@ -1,0 +1,1832 @@
+/* Visual tokens measured from gentlemanprogramming.com (S15). Dark only. */
+:root {
+	--bg: #1a1218;
+	--bg-glass: rgba(26, 18, 24, 0.82);
+	--surface: #20161e;
+	--surface-2: #241822;
+	--line: #342230;
+	--text: #f6eff3;
+	--muted: #a78e9b;
+	--accent: #f095c8;
+	/* Text on the pink accent: white is 2.13:1 there, this is 8.60:1 (the site's pills do the same). */
+	--accent-ink: #1a1218;
+	--accent-soft: rgba(240, 149, 200, 0.12);
+	--accent-line: rgba(240, 149, 200, 0.35);
+	--accent-shadow: 0 10px 30px rgba(240, 149, 200, 0.3);
+	--green: #b4e7c7;
+	--red: #ff718f;
+	--yellow: #e0c27a;
+	/* The rose Dot's badge (S9) keeps its own amber. */
+	--amber: #f5a524;
+	--radius-sm: 8px;
+	--radius-md: 12px;
+	--radius-lg: 16px;
+	--radius-pill: 999px;
+	--radius: 20px;
+	/* The reading column of the web page and of the full-screen panel (S26.2). */
+	--reading-width: 780px;
+	--ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+	--font-text: Inter, "SF Pro Text", system-ui, -apple-system, "Segoe UI", sans-serif;
+	--font-mono: "IosevkaTerm NF", "Iosevka Term", "JetBrains Mono", "SF Mono", ui-monospace, Menlo, monospace;
+	color-scheme: dark;
+	font: 14px / 20px var(--font-text);
+	color: var(--text);
+	-webkit-font-smoothing: antialiased;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+	height: 100%;
+	margin: 0;
+}
+
+body {
+	background: radial-gradient(900px 480px at 12% -12%, rgba(240, 149, 200, 0.1), transparent 70%), var(--bg);
+}
+
+html[data-surface="dot"] body,
+html[data-surface="panel"] body {
+	background: transparent;
+	overflow: hidden;
+}
+
+button,
+input,
+select,
+textarea {
+	font: inherit;
+	color: inherit;
+}
+
+button {
+	cursor: pointer;
+	border: 1px solid var(--line);
+	background: var(--surface);
+	border-radius: var(--radius-sm);
+	padding: 7px 14px;
+	font-weight: 600;
+	transition:
+		background 120ms var(--ease),
+		border-color 120ms var(--ease),
+		box-shadow 120ms var(--ease);
+}
+
+button:hover:not(:disabled) {
+	background: var(--surface-2);
+	border-color: var(--accent-line);
+}
+
+button:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+
+button.primary {
+	background: var(--accent);
+	border-color: var(--accent);
+	color: var(--accent-ink);
+	box-shadow: var(--accent-shadow);
+}
+
+button.primary:hover:not(:disabled) {
+	background: #f4aad4;
+	border-color: #f4aad4;
+}
+
+button.primary:disabled {
+	box-shadow: none;
+}
+
+button.icon {
+	display: inline-grid;
+	place-items: center;
+	border: 1px solid transparent;
+	background: none;
+	width: 32px;
+	height: 32px;
+	padding: 0;
+	border-radius: var(--radius-sm);
+	color: var(--muted);
+}
+
+button.icon:hover:not(:disabled) {
+	color: var(--text);
+	background: var(--surface-2);
+	border-color: var(--line);
+}
+
+button.icon[aria-expanded="true"] {
+	color: var(--accent);
+	background: var(--accent-soft);
+	border-color: var(--accent-line);
+}
+
+input,
+select,
+textarea {
+	border: 1px solid var(--line);
+	background: var(--bg);
+	border-radius: var(--radius-sm);
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+	outline: none;
+	border-color: var(--accent-line);
+	box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: 2px;
+}
+
+/* Uppercase monospace label for sections, like the site's eyebrows. */
+.eyebrow {
+	margin: 0;
+	font: 600 12px / 16px var(--font-mono);
+	letter-spacing: 0.12em;
+	text-transform: uppercase;
+	color: var(--accent);
+}
+
+/* Headings: heavy, light-to-pink gradient text. */
+.gradient-text {
+	font-weight: 800;
+	letter-spacing: -0.01em;
+	background: linear-gradient(100deg, var(--text) 20%, var(--accent));
+	-webkit-background-clip: text;
+	background-clip: text;
+	color: transparent;
+}
+
+.muted {
+	color: var(--muted);
+	font-size: 12px;
+	line-height: 16px;
+}
+
+.chip {
+	display: inline-flex;
+	align-items: center;
+	padding: 1px 9px;
+	border-radius: var(--radius-pill);
+	border: 1px solid var(--line);
+	font: 600 11px / 16px var(--font-mono);
+	letter-spacing: 0.04em;
+	color: var(--muted);
+}
+
+.chip.ok {
+	border-color: rgba(180, 231, 199, 0.3);
+	background: rgba(180, 231, 199, 0.1);
+	color: var(--green);
+}
+
+.card {
+	padding: 14px;
+	border-radius: var(--radius-md);
+	border: 1px solid var(--line);
+	background: var(--surface);
+}
+
+/* ---------- Dot: the rose in a black circle (docs/brand/rose-design.html) ---------- */
+
+/* The window is this square (DOT_SIZE in shell.rs); outside the disc it stays transparent. */
+.dot {
+	--neon: #ff2d7a;
+	--neon-soft: rgba(255, 45, 122, 0.35);
+	--core: #ffd6e8;
+	position: relative;
+	display: block;
+	width: 72px;
+	height: 72px;
+	padding: 0;
+	border: none;
+	border-radius: 50%;
+	background: none;
+	user-select: none;
+	-webkit-user-select: none;
+}
+
+.dot:hover:not(:disabled) {
+	background: none;
+}
+
+.dot:focus-visible {
+	outline-offset: -2px;
+}
+
+/* The black disc, as on the app icon: a near-black radial fill with a faint pink rim.
+   The 3 px inset leaves room for its outer shadow inside the window. The rim carries a
+   subtle state cue; the glow and the traveling light stay on the rose's strokes. */
+.dot-disc {
+	--rim: rgba(255, 45, 122, 0.22);
+	--rim-glow: rgba(255, 45, 122, 0);
+	position: absolute;
+	inset: 3px;
+	border-radius: 50%;
+	background: radial-gradient(circle at 50% 40%, #1a0a12, #050506 75%);
+	box-shadow:
+		0 1px 2px rgba(0, 0, 0, 0.6),
+		0 0 1px rgba(0, 0, 0, 0.5),
+		inset 0 1px 0 rgba(255, 255, 255, 0.07),
+		inset 0 0 0 1px var(--rim),
+		inset 0 0 6px var(--rim-glow);
+	transition: box-shadow 400ms var(--ease);
+}
+
+.dot-thinking .dot-disc {
+	--rim: rgba(255, 45, 122, 0.32);
+}
+
+.dot-working .dot-disc {
+	--rim: rgba(255, 45, 122, 0.45);
+	--rim-glow: rgba(255, 45, 122, 0.22);
+}
+
+.dot-needs_you .dot-disc {
+	--rim: rgba(245, 165, 36, 0.55);
+	--rim-glow: rgba(245, 165, 36, 0.2);
+}
+
+.dot-starting .dot-disc,
+.dot-restarting .dot-disc {
+	--rim: rgba(255, 255, 255, 0.1);
+}
+
+.dot-error .dot-disc {
+	--rim: rgba(255, 255, 255, 0.06);
+}
+
+/* In control of the Mac (S24.6): the accent rim glows steadily over every other state. */
+.dot-in_control .dot-disc {
+	--rim: rgba(240, 149, 200, 0.8);
+	--rim-glow: rgba(240, 149, 200, 0.35);
+}
+
+/* Yolo mode (S24.9): the rim turns amber while risky actions run unasked; after in-control so it wins. */
+.dot-yolo .dot-disc {
+	--rim: var(--yellow);
+	--rim-glow: rgba(224, 194, 122, 0.45);
+}
+
+.rose {
+	position: relative;
+	display: block;
+	width: 100%;
+	height: 100%;
+}
+
+.rose svg {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	overflow: visible;
+}
+
+.rose path {
+	fill: none;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	vector-effect: non-scaling-stroke;
+}
+
+.rose-base {
+	opacity: 0.8;
+	filter: drop-shadow(0 0 1px var(--neon)) drop-shadow(0 0 4px var(--neon-soft));
+}
+
+.rose-base path {
+	stroke: var(--neon);
+	stroke-width: 1.1;
+}
+
+/* The light layer: one dash per stroke that travels from start to end. */
+.rose-light {
+	opacity: 0;
+	filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 3px var(--neon));
+}
+
+.rose-light path {
+	stroke: var(--core);
+	stroke-width: 1.6;
+	stroke-dasharray: 0 1;
+}
+
+.rose-sparkles {
+	filter: drop-shadow(0 0 2px var(--neon));
+}
+
+.rose-sparkles circle {
+	fill: var(--core);
+	opacity: 0.8;
+}
+
+.rose-idle .rose-base {
+	animation: rose-breathe 3.6s ease-in-out infinite;
+}
+
+.rose-idle .rose-sparkles circle {
+	animation: rose-twinkle 2.8s ease-in-out infinite;
+	animation-delay: calc(var(--i) * -0.37s);
+}
+
+.rose-thinking .rose-base {
+	opacity: 0.65;
+}
+
+.rose-thinking .rose-light {
+	opacity: 1;
+}
+
+.rose-thinking .rose-light path {
+	stroke-dasharray: 0.16 1.2;
+	animation: rose-run calc(var(--d) * 1.6) linear infinite;
+	animation-delay: calc(var(--i) * -0.53s);
+}
+
+.rose-thinking .rose-sparkles {
+	opacity: 0.35;
+}
+
+.rose-working .rose-base {
+	opacity: 0.9;
+}
+
+.rose-working .rose-light {
+	opacity: 1;
+}
+
+.rose-working .rose-light path {
+	stroke-dasharray: 0.22 0.5;
+	animation: rose-run calc(var(--d) * 0.55) linear infinite;
+	animation-delay: calc(var(--i) * -0.29s);
+}
+
+.rose-working .rose-sparkles circle {
+	animation: rose-twinkle 0.9s ease-in-out infinite;
+	animation-delay: calc(var(--i) * -0.13s);
+}
+
+.rose-needs .rose-base {
+	opacity: 1;
+	animation: rose-call 1.4s ease-in-out infinite;
+}
+
+.rose-needs .rose-sparkles circle {
+	animation: rose-twinkle 1.4s ease-in-out infinite;
+}
+
+.rose-restarting {
+	filter: grayscale(1) brightness(0.8);
+}
+
+.rose-restarting .rose-base {
+	opacity: 0.4;
+}
+
+.rose-restarting .rose-light {
+	opacity: 0.8;
+}
+
+.rose-restarting .rose-light path {
+	stroke-dasharray: 0.1 2;
+	animation: rose-run calc(var(--d) * 2.4) linear infinite;
+	animation-delay: calc(var(--i) * -0.71s);
+}
+
+.rose-restarting .rose-sparkles,
+.rose-offline .rose-sparkles {
+	display: none;
+}
+
+.rose-offline {
+	filter: grayscale(0.85) brightness(0.6);
+}
+
+.rose-offline .rose-base {
+	opacity: 0.55;
+	filter: none;
+}
+
+/* In control: the whole rose lit and calling, with a steady, quick light along every stroke. */
+.rose-control .rose-base {
+	opacity: 1;
+	animation: rose-call 2s ease-in-out infinite;
+}
+
+.rose-control .rose-light {
+	opacity: 1;
+}
+
+.rose-control .rose-light path {
+	stroke-dasharray: 0.3 0.4;
+	animation: rose-run calc(var(--d) * 0.8) linear infinite;
+	animation-delay: calc(var(--i) * -0.2s);
+}
+
+.rose-control .rose-sparkles circle {
+	animation: rose-twinkle 1.2s ease-in-out infinite;
+	animation-delay: calc(var(--i) * -0.17s);
+}
+
+/* On the circle's edge, at the top right. */
+.dot-badge {
+	position: absolute;
+	top: 4px;
+	right: 4px;
+	width: 16px;
+	height: 16px;
+	border-radius: 50%;
+	background: var(--amber);
+	color: #241600;
+	font-size: 11px;
+	font-weight: 800;
+	line-height: 16px;
+	text-align: center;
+	box-shadow:
+		0 0 0 1.5px #050506,
+		0 0 4px rgba(245, 165, 36, 0.7);
+}
+
+/* Reduce motion: no traveling light (frozen dashes would look broken); the glow stays, stronger when busy.
+   Glow radii stay small so the glow stays inside the disc. */
+@media (prefers-reduced-motion: reduce) {
+	.rose-light {
+		display: none;
+	}
+
+	.rose-working .rose-base,
+	.rose-needs .rose-base,
+	.rose-control .rose-base {
+		filter: drop-shadow(0 0 1.5px var(--neon)) drop-shadow(0 0 4px var(--neon));
+	}
+}
+
+@keyframes rose-run {
+	from {
+		stroke-dashoffset: 1.2;
+	}
+	to {
+		stroke-dashoffset: -0.2;
+	}
+}
+
+@keyframes rose-breathe {
+	0%,
+	100% {
+		filter: drop-shadow(0 0 1px var(--neon)) drop-shadow(0 0 2px var(--neon-soft));
+	}
+	50% {
+		filter: drop-shadow(0 0 1.5px var(--neon)) drop-shadow(0 0 4px var(--neon));
+	}
+}
+
+@keyframes rose-call {
+	0%,
+	100% {
+		filter: drop-shadow(0 0 1px var(--neon)) drop-shadow(0 0 4px var(--neon-soft));
+	}
+	50% {
+		filter: drop-shadow(0 0 1px #fff) drop-shadow(0 0 3px var(--neon)) drop-shadow(0 0 5px var(--neon-soft));
+	}
+}
+
+@keyframes rose-twinkle {
+	50% {
+		opacity: 0.15;
+	}
+}
+
+@keyframes pulse {
+	50% {
+		transform: scale(0.94);
+	}
+}
+
+/* ---------- Chat ---------- */
+
+.chat {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	position: relative;
+}
+
+.chat-panel {
+	background: rgba(26, 18, 24, 0.94);
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	overflow: hidden;
+	backdrop-filter: blur(24px) saturate(1.3);
+	-webkit-backdrop-filter: blur(24px) saturate(1.3);
+}
+
+/* No vibrancy behind the window (Linux): nothing to blur, so the panel is opaque. */
+html[data-effects="none"] .chat-panel {
+	background: var(--bg);
+	backdrop-filter: none;
+	-webkit-backdrop-filter: none;
+}
+
+.chat-web {
+	max-width: var(--reading-width);
+	margin: 0 auto;
+	border-left: 1px solid var(--line);
+	border-right: 1px solid var(--line);
+}
+
+.chat-header {
+	position: relative;
+	z-index: 3;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	padding: 10px 10px 10px 16px;
+	background: var(--bg-glass);
+	border-bottom: 1px solid var(--line);
+	backdrop-filter: blur(12px);
+	-webkit-backdrop-filter: blur(12px);
+}
+
+.chat-header h1 {
+	flex: 1;
+	margin: 0 0 0 4px;
+	font-size: 15px;
+	line-height: 20px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+/* The single chat's header: the assistant, not a conversation title. */
+.chat-header h1.assistant-name {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.rose-glyph {
+	flex: none;
+	color: #ff2d7a;
+	filter: drop-shadow(0 0 4px rgba(255, 45, 122, 0.45));
+}
+
+.state-dot {
+	flex: none;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: var(--muted);
+}
+
+.state-idle {
+	background: var(--green);
+	box-shadow: 0 0 8px rgba(180, 231, 199, 0.5);
+}
+
+.state-thinking,
+.state-working {
+	background: var(--accent);
+	box-shadow: 0 0 8px rgba(240, 149, 200, 0.6);
+	animation: pulse 1s var(--ease) infinite;
+}
+
+.state-needs_you {
+	background: var(--yellow);
+}
+
+.state-error {
+	background: var(--red);
+}
+
+.conversations {
+	position: absolute;
+	top: 56px;
+	left: 10px;
+	right: 10px;
+	z-index: 4;
+	max-height: 60%;
+	overflow: auto;
+	padding: 12px 8px 8px;
+	background: var(--surface);
+	border: 1px solid var(--line);
+	border-radius: var(--radius-md);
+	box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+}
+
+.conversations .eyebrow {
+	padding: 0 8px 8px;
+}
+
+.conversations > .muted {
+	margin: 0;
+	padding: 0 8px 4px;
+}
+
+.conversations button {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 2px;
+	width: 100%;
+	padding: 8px 10px;
+	border: 1px solid transparent;
+	background: none;
+	font-weight: 500;
+	text-align: left;
+}
+
+.conversations button.active {
+	background: var(--accent-soft);
+	border-color: var(--accent-line);
+}
+
+.conversations time {
+	color: var(--muted);
+	font: 11px / 16px var(--font-mono);
+}
+
+.status {
+	margin: 10px 12px 0;
+	padding: 8px 12px;
+	border-radius: var(--radius-md);
+	border: 1px solid var(--line);
+	background: var(--surface);
+	color: var(--muted);
+	font-size: 12px;
+	line-height: 16px;
+}
+
+/* While the assistant controls the Mac (S24.6): time left and Stop, always in view. */
+.computer-banner {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin: 10px 12px 0;
+	padding: 8px 8px 8px 12px;
+	border-radius: var(--radius-md);
+	border: 1px solid var(--accent-line);
+	background: var(--accent-soft);
+	color: var(--text);
+	font-size: 13px;
+	font-weight: 600;
+	line-height: 18px;
+}
+
+.computer-banner > span:nth-child(2) {
+	flex: 1;
+	font-variant-numeric: tabular-nums;
+}
+
+.computer-banner button {
+	padding: 4px 14px;
+}
+
+.computer-banner-light {
+	width: 8px;
+	height: 8px;
+	border-radius: var(--radius-pill);
+	background: var(--accent);
+	box-shadow: 0 0 8px var(--accent);
+	animation: pulse 1.6s ease-in-out infinite;
+}
+
+.computer-yolo-chip {
+	color: var(--yellow);
+	border-color: var(--yellow);
+}
+
+.computer-yolo {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-top: 8px;
+	font-size: 13px;
+}
+
+.computer-yolo > span:first-child {
+	flex: 1;
+}
+
+/* An on/off switch: a pill with a knob, the accent when on. */
+.switch {
+	position: relative;
+	flex: none;
+	width: 36px;
+	height: 20px;
+	padding: 0;
+	border-radius: var(--radius-pill);
+	border: 1px solid var(--line);
+	background: var(--surface);
+}
+
+.switch[aria-checked="true"] {
+	border-color: var(--accent);
+	background: var(--accent);
+	box-shadow: var(--accent-shadow);
+}
+
+.switch-knob {
+	position: absolute;
+	top: 2px;
+	left: 2px;
+	width: 14px;
+	height: 14px;
+	border-radius: 50%;
+	background: var(--muted);
+	transition: transform 150ms var(--ease);
+}
+
+.switch[aria-checked="true"] .switch-knob {
+	transform: translateX(16px);
+	background: var(--accent-ink);
+}
+
+.computer-permissions {
+	display: grid;
+	gap: 6px;
+	margin: 8px 0;
+	padding: 0;
+	list-style: none;
+}
+
+.computer-permissions li {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 13px;
+}
+
+.computer-permissions li > span:first-child {
+	flex: 1;
+}
+
+.computer-permissions button {
+	padding: 3px 12px;
+	font-size: 12px;
+}
+
+.computer-warning {
+	color: var(--yellow);
+}
+
+.chat-body {
+	flex: 1;
+	overflow-y: auto;
+	padding: 14px 16px;
+}
+
+.empty {
+	height: 100%;
+	display: grid;
+	place-items: center;
+	color: var(--muted);
+}
+
+.empty p {
+	margin: 0;
+	font-size: 15px;
+}
+
+.message {
+	margin: 0 0 14px;
+}
+
+.show-earlier {
+	display: block;
+	margin: 0 auto 14px;
+	padding: 5px 14px;
+	border-radius: var(--radius-pill);
+	color: var(--muted);
+	font-size: 12px;
+	line-height: 16px;
+}
+
+/* Where the earlier session of the chat ends: a hairline with a quiet label. */
+.earlier-divider {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin: 4px 0 18px;
+	color: var(--muted);
+	font: 600 10px / 14px var(--font-mono);
+	letter-spacing: 0.12em;
+	text-transform: uppercase;
+}
+
+.earlier-divider hr,
+.earlier-line {
+	flex: 1;
+	height: 1px;
+	margin: 0;
+	border: 0;
+	background: var(--line);
+}
+
+.message-user {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-end;
+}
+
+.message-user .message-body {
+	max-width: 85%;
+	padding: 9px 13px;
+	border-radius: var(--radius-lg) var(--radius-lg) 4px var(--radius-lg);
+	border: 1px solid var(--accent-line);
+	background: rgba(240, 149, 200, 0.16);
+	color: var(--text);
+}
+
+/* Sent while the assistant works; waiting to be taken. */
+.message-queued {
+	opacity: 0.6;
+}
+
+.message-queued .message-body {
+	border-style: dashed;
+	background: transparent;
+}
+
+.queued-label {
+	margin: 0 4px 4px 0;
+	font: 600 10px / 14px var(--font-mono);
+	letter-spacing: 0.12em;
+	text-transform: uppercase;
+	color: var(--muted);
+}
+
+.message-plain {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.message-assistant .message-body {
+	line-height: 22px;
+}
+
+.message-body > :first-child {
+	margin-top: 0;
+}
+
+.message-body > :last-child {
+	margin-bottom: 0;
+}
+
+.message-body pre {
+	overflow-x: auto;
+	padding: 10px 12px;
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--line);
+	background: var(--surface);
+	font: 12px / 18px var(--font-mono);
+}
+
+.message-body code {
+	font-family: var(--font-mono);
+	font-size: 12px;
+}
+
+.message-body :not(pre) > code {
+	padding: 1px 5px;
+	border-radius: 6px;
+	background: var(--surface-2);
+	color: var(--accent);
+}
+
+.message-body a {
+	color: var(--accent);
+}
+
+.caret {
+	display: inline-block;
+	width: 7px;
+	height: 14px;
+	margin-left: 2px;
+	background: var(--accent);
+	animation: blink 1s steps(2) infinite;
+	vertical-align: text-bottom;
+}
+
+@keyframes blink {
+	50% {
+		opacity: 0;
+	}
+}
+
+.activities {
+	margin-bottom: 6px;
+}
+
+.activities-summary {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	padding: 3px 11px;
+	border-radius: var(--radius-pill);
+	color: var(--muted);
+	font-size: 12px;
+	font-weight: 500;
+	line-height: 16px;
+}
+
+.activities-summary .pulse {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--accent);
+	animation: pulse 1s var(--ease) infinite;
+}
+
+.activities ul {
+	margin: 6px 0 0;
+	padding-left: 18px;
+	color: var(--muted);
+	font-size: 12px;
+}
+
+.activity-failed {
+	color: var(--red);
+}
+
+.ask-card,
+.interrupted {
+	margin: 4px 0 14px;
+	padding: 14px;
+	border-radius: var(--radius-md);
+	border: 1px solid var(--line);
+	background: var(--surface);
+}
+
+.ask-card {
+	border-color: rgba(224, 194, 122, 0.45);
+	box-shadow: 0 10px 30px rgba(224, 194, 122, 0.08);
+}
+
+.ask-card .eyebrow {
+	margin-bottom: 6px;
+	color: var(--yellow);
+}
+
+.interrupted {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+}
+
+.interrupted p,
+.ask-title {
+	margin: 0;
+	font-weight: 700;
+}
+
+.ask-message {
+	margin: 6px 0 0;
+	color: var(--text);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	line-height: 20px;
+	/* A long preview scrolls inside the card, so every character can be read before approving. */
+	max-height: min(40vh, 320px);
+	overflow-y: auto;
+}
+
+.ask-options,
+.ask-form {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 12px;
+}
+
+.ask-card .ask-options button:not(.primary) {
+	border-radius: var(--radius-pill);
+}
+
+.ask-form input,
+.ask-form textarea {
+	flex: 1 1 100%;
+	padding: 8px 10px;
+}
+
+.ask-skip {
+	margin-top: 10px;
+	border: none;
+	background: none;
+	padding: 0;
+	color: var(--muted);
+	font-size: 12px;
+	font-weight: 500;
+}
+
+.ask-skip:hover:not(:disabled) {
+	background: none;
+	color: var(--text);
+}
+
+.message-note {
+	margin: 6px 0 0;
+	font-size: 12px;
+	line-height: 16px;
+	color: var(--muted);
+}
+
+.message-note-error {
+	display: inline-block;
+	padding: 6px 10px;
+	border-radius: var(--radius-sm);
+	border: 1px solid rgba(255, 113, 143, 0.4);
+	background: rgba(255, 113, 143, 0.08);
+	color: var(--red);
+}
+
+.switch-confirm {
+	margin: 0 12px 10px;
+	padding: 14px;
+	border-radius: var(--radius-md);
+	border: 1px solid rgba(224, 194, 122, 0.45);
+	background: var(--surface);
+	box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
+}
+
+.switch-confirm p {
+	margin: 0 0 12px;
+	font-weight: 600;
+}
+
+.switch-actions {
+	display: flex;
+	gap: 8px;
+}
+
+.notices {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 0 12px 8px;
+}
+
+.notice {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 8px 12px;
+	border-radius: var(--radius-md);
+	border: 1px solid var(--line);
+	background: var(--surface);
+	font-size: 12px;
+}
+
+.notice-error {
+	border-color: rgba(255, 113, 143, 0.4);
+	color: var(--red);
+}
+
+.notice-warning {
+	border-color: rgba(224, 194, 122, 0.4);
+	color: var(--yellow);
+}
+
+.notice button {
+	border: none;
+	background: none;
+	padding: 0 4px;
+	color: inherit;
+}
+
+.composer {
+	display: flex;
+	align-items: flex-end;
+	gap: 8px;
+	margin: 0 12px 12px;
+	padding: 7px 7px 7px 14px;
+	border-radius: var(--radius-lg);
+	border: 1px solid var(--line);
+	background: var(--surface);
+	transition:
+		border-color 120ms var(--ease),
+		box-shadow 120ms var(--ease);
+}
+
+.composer:focus-within {
+	border-color: var(--accent-line);
+	box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.composer textarea {
+	flex: 1;
+	resize: none;
+	max-height: 160px;
+	field-sizing: content;
+	padding: 6px 0;
+	border: none;
+	border-radius: 0;
+	background: none;
+	outline: none;
+}
+
+.composer textarea:focus {
+	box-shadow: none;
+}
+
+.composer textarea::placeholder {
+	color: var(--muted);
+}
+
+.composer-send {
+	display: grid;
+	place-items: center;
+	width: 32px;
+	height: 32px;
+	padding: 0;
+	border-radius: 50%;
+	background: var(--accent);
+	border-color: var(--accent);
+	color: var(--accent-ink);
+}
+
+.composer-send:hover:not(:disabled) {
+	background: #f4aad4;
+	border-color: #f4aad4;
+}
+
+.composer-send:not(:disabled) {
+	box-shadow: 0 6px 18px rgba(240, 149, 200, 0.3);
+}
+
+.composer-send:disabled {
+	opacity: 1;
+	background: var(--surface-2);
+	border-color: var(--line);
+	color: var(--muted);
+}
+
+/* A fixed height with the global button padding left the text low; center it instead. */
+.composer-stop {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	height: 32px;
+	padding: 0 14px;
+	line-height: 1;
+	border-radius: var(--radius-pill);
+}
+
+/* ---------- Voice (S30.4) ---------- */
+
+.composer-mic {
+	display: grid;
+	place-items: center;
+	width: 32px;
+	height: 32px;
+	padding: 0;
+	border-radius: 50%;
+}
+
+.composer-mic-on {
+	background: var(--accent);
+	border-color: var(--accent);
+	color: var(--accent-ink);
+	box-shadow: 0 0 0 4px var(--accent-soft);
+}
+
+.voice-recording {
+	flex: 1;
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-height: 32px;
+	min-width: 0;
+}
+
+.voice-time {
+	font-family: var(--font-mono);
+	font-variant-numeric: tabular-nums;
+	color: var(--accent);
+}
+
+.voice-meter {
+	appearance: none;
+	width: 56px;
+	height: 6px;
+	flex: none;
+	border: none;
+	border-radius: var(--radius-pill);
+	background: var(--surface-2);
+	overflow: hidden;
+}
+
+.voice-meter::-webkit-meter-bar {
+	height: 6px;
+	border: none;
+	border-radius: var(--radius-pill);
+	background: var(--surface-2);
+}
+
+.voice-meter::-webkit-meter-optimum-value {
+	background: var(--accent);
+}
+
+.voice-meter::-moz-meter-bar {
+	background: var(--accent);
+}
+
+.voice-partial {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	color: var(--muted);
+}
+
+.voice-cancel {
+	display: grid;
+	place-items: center;
+	width: 28px;
+	height: 28px;
+	padding: 0;
+	border-radius: 50%;
+}
+
+.voice-status {
+	margin: 0 16px 6px;
+	font-size: 13px;
+	color: var(--muted);
+}
+
+/* ---------- Accounts ---------- */
+
+.onboarding {
+	margin: 0 0 14px;
+	padding: 14px;
+	border-radius: var(--radius-md);
+	border: 1px solid var(--accent-line);
+	background: var(--surface);
+	box-shadow: 0 10px 30px rgba(240, 149, 200, 0.08);
+}
+
+.onboarding p {
+	margin: 0 0 12px;
+}
+
+.accounts-header,
+.profiles-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+}
+
+/* The screen title reads as the section eyebrow. */
+.accounts h2,
+.profiles h2 {
+	margin: 0;
+	font: 600 12px / 16px var(--font-mono);
+	letter-spacing: 0.12em;
+	text-transform: uppercase;
+	color: var(--accent);
+}
+
+.accounts > .muted,
+.profiles .muted {
+	margin: 6px 0 12px;
+}
+
+.accounts-search {
+	width: 100%;
+	padding: 8px 10px;
+}
+
+.providers {
+	list-style: none;
+	margin: 10px 0 0;
+	padding: 0;
+}
+
+.providers li {
+	padding: 12px 0;
+	border-bottom: 1px solid var(--line);
+}
+
+.providers li:last-child {
+	border-bottom: none;
+}
+
+.provider-name {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-bottom: 8px;
+}
+
+.provider-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+button.link {
+	border: none;
+	background: none;
+	padding: 4px 2px;
+	color: var(--muted);
+	font-weight: 500;
+	text-decoration: underline;
+	text-underline-offset: 3px;
+}
+
+button.link:hover:not(:disabled) {
+	background: none;
+	color: var(--accent);
+}
+
+.auth-flow {
+	padding: 14px;
+	border-radius: var(--radius-md);
+	border: 1px solid var(--line);
+	background: var(--surface);
+}
+
+.auth-flow-title {
+	margin: 0 0 8px;
+	font-weight: 700;
+}
+
+.auth-step {
+	margin: 12px 0;
+}
+
+.auth-step p {
+	margin: 0 0 8px;
+}
+
+.auth-step label {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	flex: 1 1 100%;
+}
+
+.device-code {
+	display: block;
+	margin: 0 0 10px;
+	font: 600 22px / 28px var(--font-mono);
+	letter-spacing: 0.08em;
+	color: var(--accent);
+}
+
+.auth-result.ok {
+	color: var(--green);
+}
+
+.auth-result.failed {
+	color: var(--red);
+}
+
+.auth-actions {
+	display: flex;
+	gap: 8px;
+}
+
+/* Full screen (S26.2): the panel fills the display, and the conversation, its notes, and the
+   composer keep the web page's readable centered column. */
+.chat-fullscreen .chat-body,
+.chat-fullscreen .notices {
+	padding-inline: max(16px, calc((100% - var(--reading-width)) / 2));
+}
+
+.chat-fullscreen .status,
+.chat-fullscreen .computer-banner,
+.chat-fullscreen .switch-confirm,
+.chat-fullscreen .composer {
+	margin-inline: max(12px, calc((100% - var(--reading-width)) / 2));
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		/* biome-ignore lint/complexity/noImportantStyles: reduced motion must override every animation */
+		animation: none !important;
+		/* biome-ignore lint/complexity/noImportantStyles: reduced motion must override every transition */
+		transition: none !important;
+	}
+}
+
+/* The glow where the agent acts (S28), in the desktop's click-through overlay: the accent pink, like
+   the neon rose. A pulse on a click, a trail along a drag, short markers for moves and scrolls, and an
+   outline around the focused element for keys. Shown while the agent acts, faded about 1.5 s later. */
+html[data-surface="glow"] body {
+	background: transparent;
+	overflow: hidden;
+	pointer-events: none;
+}
+
+.glow-layer {
+	position: fixed;
+	inset: 0;
+	pointer-events: none;
+	transition: opacity 300ms var(--ease);
+}
+
+.glow-layer.glow-fading {
+	opacity: 0;
+}
+
+.glow-mark {
+	position: absolute;
+	width: 28px;
+	height: 28px;
+	margin: -14px 0 0 -14px;
+	border-radius: 50%;
+	background: radial-gradient(
+		circle,
+		rgba(255, 255, 255, 0.9) 0 12%,
+		var(--accent) 28%,
+		rgba(240, 149, 200, 0) 70%
+	);
+	box-shadow:
+		0 0 12px 4px rgba(240, 149, 200, 0.55),
+		0 0 32px 10px rgba(240, 149, 200, 0.25);
+}
+
+.glow-click::after {
+	content: "";
+	position: absolute;
+	inset: -6px;
+	border: 2px solid var(--accent);
+	border-radius: 50%;
+	animation: glow-pulse 700ms var(--ease) both;
+}
+
+.glow-move,
+.glow-scroll {
+	width: 16px;
+	height: 16px;
+	margin: -8px 0 0 -8px;
+	box-shadow: 0 0 10px 3px rgba(240, 149, 200, 0.45);
+	animation: glow-blip 600ms var(--ease) both;
+}
+
+.glow-trail {
+	position: absolute;
+	height: 6px;
+	margin-top: -3px;
+	border-radius: var(--radius-pill);
+	transform-origin: 0 50%;
+	background: linear-gradient(90deg, rgba(240, 149, 200, 0), var(--accent));
+	box-shadow: 0 0 14px 3px rgba(240, 149, 200, 0.45);
+	animation: glow-trail 450ms var(--ease) both;
+}
+
+.glow-key {
+	margin: -4px 0 0 -4px;
+	padding: 4px;
+	box-sizing: content-box;
+	border: 2px solid var(--accent);
+	border-radius: var(--radius-sm);
+	background: var(--accent-soft);
+	box-shadow:
+		0 0 14px 2px rgba(240, 149, 200, 0.5),
+		inset 0 0 10px rgba(240, 149, 200, 0.3);
+	animation: glow-blip 600ms var(--ease) both;
+}
+
+/* Reduce motion: the glow stays still (no pulse, no trail; the overlay draws only the drag's end). */
+.glow-static .glow-mark,
+.glow-static .glow-mark::after {
+	animation: none;
+}
+
+.glow-static .glow-click::after {
+	display: none;
+}
+
+@keyframes glow-pulse {
+	from {
+		opacity: 1;
+		transform: scale(0.4);
+	}
+	to {
+		opacity: 0;
+		transform: scale(1.8);
+	}
+}
+
+@keyframes glow-blip {
+	from {
+		opacity: 0;
+		transform: scale(0.6);
+	}
+	to {
+		opacity: 1;
+		transform: scale(1);
+	}
+}
+
+@keyframes glow-trail {
+	from {
+		clip-path: inset(0 100% 0 0);
+	}
+	to {
+		clip-path: inset(0 0 0 0);
+	}
+}
+
+/* ---------- Attachments (S31) ---------- */
+
+.visually-hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	margin: -1px;
+	padding: 0;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+	border: 0;
+}
+
+.composer-attach {
+	position: relative;
+	display: grid;
+	place-items: center;
+	flex: none;
+	width: 32px;
+	height: 32px;
+	margin-left: -8px;
+	border-radius: 50%;
+	color: var(--muted);
+	cursor: pointer;
+}
+
+.composer-attach:hover,
+.composer-attach:focus-within {
+	color: var(--text);
+	background: var(--surface-2);
+}
+
+.attachment-chips,
+.message-attachments {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.attachment-chips {
+	margin: 0 12px 8px;
+}
+
+.message-attachments {
+	justify-content: flex-end;
+	max-width: 85%;
+	margin-top: 6px;
+}
+
+.attachment-chip {
+	display: inline-flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 6px;
+	max-width: 100%;
+	padding: 4px 6px 4px 10px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-pill);
+	background: var(--surface-2);
+	font-size: 12px;
+	line-height: 18px;
+}
+
+.message-attachments .attachment-chip {
+	padding-right: 10px;
+	border-color: var(--accent-line);
+}
+
+.attachment-chip-error {
+	border-color: var(--red);
+	border-radius: var(--radius-md);
+}
+
+.chip-name {
+	max-width: 180px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.chip-size {
+	color: var(--muted);
+	font-variant-numeric: tabular-nums;
+}
+
+.chip-progress {
+	width: 56px;
+	height: 4px;
+	accent-color: var(--accent);
+}
+
+.chip-error {
+	flex-basis: 100%;
+	color: var(--red);
+}
+
+.chip-remove {
+	padding: 0 6px;
+	border: none;
+	background: none;
+	color: var(--muted);
+	line-height: 18px;
+}
+
+.chip-remove:hover:not(:disabled) {
+	color: var(--text);
+}
+
+.chat-dropping {
+	outline: 2px dashed var(--accent-line);
+	outline-offset: -6px;
+}
+
+/* ---------- Model picker (S32) ---------- */
+
+.model-picker {
+	position: relative;
+	z-index: 2;
+	align-self: flex-start;
+	margin: 0 12px 6px;
+}
+
+.model-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	max-width: 260px;
+	padding: 3px 10px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-pill);
+	background: var(--surface-2);
+	color: var(--muted);
+	font: 600 12px / 18px var(--font-mono);
+	letter-spacing: 0.04em;
+}
+
+.model-chip:hover:not(:disabled),
+.model-chip[aria-expanded="true"] {
+	border-color: var(--accent-line);
+	color: var(--text);
+}
+
+.model-chip-name {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.model-popover {
+	position: absolute;
+	bottom: calc(100% + 6px);
+	left: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	width: min(340px, calc(100vw - 24px));
+	max-height: min(420px, 70vh);
+	padding: 10px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-md);
+	background: var(--surface);
+	box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+}
+
+.model-search {
+	width: 100%;
+	padding: 7px 10px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-sm);
+	background: var(--bg);
+	color: var(--text);
+}
+
+.model-search:focus {
+	outline: none;
+	border-color: var(--accent-line);
+	box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.model-list {
+	flex: 1;
+	overflow-y: auto;
+}
+
+.model-group {
+	margin: 0 0 8px;
+}
+
+.model-list .eyebrow {
+	padding: 4px 8px;
+}
+
+.model-option {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	padding: 6px 8px;
+	border-radius: var(--radius-sm);
+	cursor: pointer;
+}
+
+.model-option[aria-selected="true"] {
+	background: var(--accent-soft);
+}
+
+.model-option[aria-current="true"] .model-option-name {
+	color: var(--accent);
+}
+
+.model-option-detail {
+	margin-left: auto;
+	color: var(--muted);
+	font-size: 12px;
+}
+
+.model-note,
+.model-error {
+	margin: 0;
+	font-size: 13px;
+	color: var(--muted);
+}
+
+.model-error {
+	color: var(--red);
+}
+
+.model-thinking {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding-top: 8px;
+	border-top: 1px solid var(--line);
+	color: var(--muted);
+	font-size: 13px;
+}
+
+.model-thinking select {
+	padding: 4px 8px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-sm);
+	background: var(--surface-2);
+	color: var(--text);
+}
+
+.chat-fullscreen .model-picker {
+	margin-inline: max(12px, calc((100% - var(--reading-width)) / 2));
+}
+
+/* The local voice model's download (S30.5). */
+.voice-model-progress {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-top: 6px;
+}
+
+.voice-model-progress progress {
+	flex: 1;
+	accent-color: var(--accent);
+}
+
+.voice-model-error {
+	color: var(--red, #ff6b8a);
+}
+
+/* Send a dictation on stop, or leave it in the input for review (the default). */
+.voice-send-option {
+	flex: none;
+	border: 1px solid var(--line, rgba(255, 255, 255, 0.14));
+	border-radius: 999px;
+	background: transparent;
+	color: var(--muted, inherit);
+	font-size: 11px;
+	padding: 2px 8px;
+	cursor: pointer;
+}
+
+.voice-send-option.on {
+	border-color: var(--accent);
+	color: var(--accent);
+}

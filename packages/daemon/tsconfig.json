@@ -1,0 +1,15 @@
+{
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"composite": true,
+		"emitDeclarationOnly": true,
+		"noEmit": false,
+		"outDir": "dist"
+	},
+	"references": [
+		{
+			"path": "../protocol"
+		}
+	],
+	"include": ["src", "test"]
+}

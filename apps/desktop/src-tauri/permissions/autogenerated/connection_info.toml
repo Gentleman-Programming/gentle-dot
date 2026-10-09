@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-connection-info"
+description = "Enables the connection_info command without any pre-configured scope."
+commands.allow = ["connection_info"]
+
+[[permission]]
+identifier = "deny-connection-info"
+description = "Denies the connection_info command without any pre-configured scope."
+commands.deny = ["connection_info"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-hide-panel"
+description = "Enables the hide_panel command without any pre-configured scope."
+commands.allow = ["hide_panel"]
+
+[[permission]]
+identifier = "deny-hide-panel"
+description = "Denies the hide_panel command without any pre-configured scope."
+commands.deny = ["hide_panel"]

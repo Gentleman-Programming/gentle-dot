@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-computer-set-yolo"
+description = "Enables the computer_set_yolo command without any pre-configured scope."
+commands.allow = ["computer_set_yolo"]
+
+[[permission]]
+identifier = "deny-computer-set-yolo"
+description = "Denies the computer_set_yolo command without any pre-configured scope."
+commands.deny = ["computer_set_yolo"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-model-status"
+description = "Enables the voice_model_status command without any pre-configured scope."
+commands.allow = ["voice_model_status"]
+
+[[permission]]
+identifier = "deny-voice-model-status"
+description = "Denies the voice_model_status command without any pre-configured scope."
+commands.deny = ["voice_model_status"]

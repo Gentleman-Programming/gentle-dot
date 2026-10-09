@@ -1,0 +1,14 @@
+{
+	"$schema": "https://schema.tauri.app/config/2",
+	"bundle": {
+		"targets": ["deb"],
+		"publisher": "Gentleman Programming",
+		"shortDescription": "Always-on desktop assistant backed by Gentle Shell",
+		"longDescription": "A floating rose, a panel, and a tray icon for an assistant that runs Gentle Shell with Engram memory. The package carries its own Node.js runtime, engine, and Engram.",
+		"linux": {
+			"deb": {
+				"section": "utils"
+			}
+		}
+	}
+}

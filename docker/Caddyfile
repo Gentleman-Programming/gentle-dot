@@ -1,0 +1,7 @@
+{$DOT_DOMAIN} {
+	encode zstd gzip
+	basic_auth {
+		{$DOT_USER} {$DOT_PASSWORD_HASH}
+	}
+	reverse_proxy gentle-dot:4317
+}

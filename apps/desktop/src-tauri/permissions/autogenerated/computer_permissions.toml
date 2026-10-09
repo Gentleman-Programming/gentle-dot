@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-computer-permissions"
+description = "Enables the computer_permissions command without any pre-configured scope."
+commands.allow = ["computer_permissions"]
+
+[[permission]]
+identifier = "deny-computer-permissions"
+description = "Denies the computer_permissions command without any pre-configured scope."
+commands.deny = ["computer_permissions"]

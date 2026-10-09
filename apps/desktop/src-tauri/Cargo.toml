@@ -1,0 +1,76 @@
+[package]
+name = "gentle-dot"
+version = "0.1.0"
+description = "Gentle Dot desktop shell"
+edition = "2021"
+publish = false
+
+[lib]
+name = "gentle_dot_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+getrandom = "0.3"
+base64 = "0.22"
+tiny_http = "0.12"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# The optional local voice model (S30.5): Parakeet through sherpa-onnx, linked statically (its
+# build script downloads the prebuilt static libraries from the sherpa-onnx GitHub release unless
+# SHERPA_ONNX_LIB_DIR or SHERPA_ONNX_ARCHIVE_DIR points at a local copy). The model itself is
+# downloaded only when the user asks, over HTTPS, checked against a pinned SHA-256, and unpacked.
+sherpa-onnx = "1.13.8"
+ureq = { version = "2.12", default-features = false, features = ["tls", "proxy-from-env"] }
+sha2 = "0.10"
+tar = { version = "0.4", default-features = false }
+bzip2 = "0.6"
+
+# The computer-control helper (S24) is macOS only.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSArray", "NSDictionary", "NSError", "NSLocale", "NSNotification", "NSOperation", "NSSet", "NSString", "NSValue"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFArray", "CFCGTypes", "CFData", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGDataProvider", "CGDirectDisplay", "CGError", "CGEvent", "CGEventTypes", "CGImage", "CGRemoteOperation", "CGWindow"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "libc", "NSRunningApplication", "NSWorkspace"] }
+objc2-application-services = { version = "0.3", default-features = false, features = ["std", "libc", "AXError", "AXUIElement", "AXValue", "HIServices"] }
+objc2-screen-capture-kit = { version = "0.3", default-features = false, features = ["std", "block2", "libc", "objc2-core-foundation", "objc2-core-graphics", "SCScreenshotManager", "SCShareableContent", "SCStream"] }
+# Voice input (S30.1): the Speech framework, the audio engine, and the microphone permission.
+objc2-speech = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-avf-audio", "SFSpeechRecognizer", "SFSpeechRecognitionRequest", "SFSpeechRecognitionResult", "SFSpeechRecognitionTask", "SFTranscription"] }
+objc2-avf-audio = { version = "0.3", default-features = false, features = ["std", "block2", "AVAudioBuffer", "AVAudioEngine", "AVAudioFormat", "AVAudioIONode", "AVAudioNode", "AVAudioTime", "AVAudioTypes"] }
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "AVCaptureDevice", "AVMediaFormat"] }
+
+# Debug builds encode screenshots fast too (S24.8): `image` holds the JPEG encoder and `zune-*`
+# decode JPEGs (tests). The encoder is generic, so most of its code is compiled in this crate,
+# which gets opt-level 1 as well (measured on a 1280 × 800 encode: 200 ms unoptimized, 126 ms
+# with the dependencies optimized, 40 ms with this crate at 1). Other dependencies are untouched.
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+
+[profile.dev.package.zune-core]
+opt-level = 3
+
+[profile.dev.package.gentle-dot]
+opt-level = 1
+
+# Installing the local voice model (S30.5) hashes a 487 MB download and unpacks 640 MB from
+# bzip2; unoptimized, that alone took 90 s on an M-series Mac.
+[profile.dev.package.libbz2-rs-sys]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3

@@ -1,0 +1,11 @@
+packages:
+  - packages/*
+  - apps/*
+allowBuilds:
+  # Vite's bundler verifies its platform binary.
+  esbuild: true
+  # Installs the gentle-ai binary that the bundled Gentle Shell uses.
+  gentle-pi: true
+  # Not needed: optional extras of the Pi SDK.
+  '@google/genai': false
+  protobufjs: false

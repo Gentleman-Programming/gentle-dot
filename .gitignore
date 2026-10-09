@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.vite/
+coverage/
+test-results/
+playwright-report/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+*.log
+
+# Installer staging: downloads cache and the default runtime output
+/.cache/
+/build/
+.DS_Store
+
+# Declarations emitted next to sources by accident
+packages/*/src/**/*.d.ts

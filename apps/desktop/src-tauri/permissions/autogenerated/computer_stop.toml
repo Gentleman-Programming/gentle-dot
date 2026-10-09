@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-computer-stop"
+description = "Enables the computer_stop command without any pre-configured scope."
+commands.allow = ["computer_stop"]
+
+[[permission]]
+identifier = "deny-computer-stop"
+description = "Denies the computer_stop command without any pre-configured scope."
+commands.deny = ["computer_stop"]
