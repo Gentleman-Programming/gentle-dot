@@ -1,0 +1,53 @@
+// Gentle Dot on Niri (opt-in snippet, never installed automatically).
+//
+// Niri does not let apps place their own windows, so these rules open the rose
+// and the panel floating on their first map instead of tiling them. Titles are
+// matched narrowly and anchored (`^...$`) because the native Wayland app-id has
+// not been observed and must not be guessed; if a future build reports a stable
+// app-id, prefer matching on that instead of title.
+//
+// The panel position below is a FALLBACK near the upper-right tray area, not the
+// exact tray icon geometry: the selected tray backend supplies no icon rectangle,
+// so exact anchoring has not been established. Position retention after moving,
+// hiding, and remapping the panel still requires a real Niri session test.
+//
+// Opt-in, all manual:
+//   1. Copy this file next to your Niri config (for example to
+//      `~/.config/niri/gentle-dot.kdl`) and add this line at the top of
+//      `~/.config/niri/config.kdl`:
+//        include "./gentle-dot.kdl"
+//      Check it parses with `niri validate --config ~/.config/niri/config.kdl`.
+//   2. Pick the right `spawn` line below: `/usr/bin/gentle-dot` for the package
+//      install, or your absolute `~/.local/bin/gentle-dot` path when built from
+//      source (`~` is not expanded inside `spawn`, so write it out in full).
+//   3. Check the binding does not conflict: this snippet suggests `Mod+Alt+D`
+//      and deliberately avoids `Mod+Space` (used by launchers such as DMS
+//      Spotlight). Search your config for `Mod+Alt+D` first; if it is taken,
+//      change the key here.
+//   4. Reload Niri (it reloads the config on save). Rules apply on first map,
+//      so restart the app for already-open windows to pick them up.
+//
+// `gentle-dot --toggle` reaches the running app through single-instance (D-Bus
+// on Linux) and toggles the panel; any other second launch shows it. Syntax
+// validated with `niri validate` on Niri 26.04; that checks syntax only, not
+// runtime behavior (tray clicks, focus, exact placement).
+
+window-rule {
+    match title="^Gentle Dot$"
+    open-floating true
+}
+
+window-rule {
+    match title="^Gentle Dot Panel$"
+    open-floating true
+    // Fallback only: just inside the top-right corner, near the tray area.
+    default-floating-position x=24 y=12 relative-to="top-right"
+}
+
+binds {
+    // Package install (.deb or Arch package).
+    Mod+Alt+D hotkey-overlay-title="Toggle Gentle Dot panel" { spawn "/usr/bin/gentle-dot" "--toggle"; }
+    // Built from source with scripts/linux/setup-*.sh: use this line INSTEAD of
+    // the one above, with your username filled in.
+    // Mod+Alt+D hotkey-overlay-title="Toggle Gentle Dot panel" { spawn "/home/<you>/.local/bin/gentle-dot" "--toggle"; }
+}
