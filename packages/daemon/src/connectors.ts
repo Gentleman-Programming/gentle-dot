@@ -1449,25 +1449,33 @@ export class ConnectorStore {
 	/**
 	 * Writes the child guard's file when it differs or is missing; true when it did. An extensions
 	 * folder that is a link loses the link, never what it points to. When the folder or the file's
-	 * place holds something else, that is reported once and left alone, and the engine starts with
-	 * subagents off ({@link childGuardReady}).
+	 * place holds something else, or it cannot be written, that is reported once and left alone, and
+	 * the engine starts with subagents off ({@link childGuardReady}); the other connector files are
+	 * still checked.
 	 */
 	private enforceChildGuard(): boolean {
 		if (!this.childGuard || this.childGuardReady()) return false;
 		const { file, text } = this.childGuard;
 		const folder = dirname(file);
-		if (lstatOrUndefined(folder)?.isSymbolicLink()) unlinkSync(folder);
-		const inFolder = lstatOrUndefined(folder);
-		const inPlace = inFolder && lstatOrUndefined(file);
-		if ((inFolder && !inFolder.isDirectory()) || inPlace?.isDirectory()) {
+		const cannot = (why?: unknown) => {
 			if (!this.childGuardReported)
-				this.options.log?.(`the subagents' approval guard cannot be written to ${file}`);
+				this.options.log?.(
+					`the subagents' approval guard cannot be written to ${file}${why instanceof Error ? `: ${why.message}` : ""}`,
+				);
 			this.childGuardReported = true;
 			return false;
+		};
+		try {
+			if (lstatOrUndefined(folder)?.isSymbolicLink()) unlinkSync(folder);
+			const inFolder = lstatOrUndefined(folder);
+			const inPlace = inFolder && lstatOrUndefined(file);
+			if ((inFolder && !inFolder.isDirectory()) || inPlace?.isDirectory()) return cannot();
+			mkdirSync(folder, { recursive: true, mode: 0o700 });
+			writePrivate(file, text);
+		} catch (error) {
+			return cannot(error);
 		}
 		this.childGuardReported = false;
-		mkdirSync(folder, { recursive: true, mode: 0o700 });
-		writePrivate(file, text);
 		return true;
 	}
 

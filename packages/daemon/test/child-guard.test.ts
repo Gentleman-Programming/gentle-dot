@@ -4,7 +4,16 @@
 // (it loads the guard with `-e`) or in any engine Gentle Dot did not start, and the daemon writes it
 // at every engine start and puts it back when it changes. The proxy and the native approvals stay
 // the boundary; the guard in children is defense in depth.
-import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { APPROVAL_GUARD } from "../src/connectors.ts";
@@ -156,5 +165,43 @@ describe("subagents in the assistant's engine (S25.4)", () => {
 		});
 		expect(env().GENTLE_PI_AGENTS).toBe("0");
 		expect(lines.some((line) => /subagents are off/i.test(line))).toBe(true);
+	});
+
+	it("starts with subagents off when the extensions folder cannot be written, on or off", async () => {
+		for (const env of [{}, { GENTLE_DOT_SUBAGENTS: "off" }]) {
+			let folder = "";
+			try {
+				const started = await start({
+					env,
+					before: (agentHome) => {
+						folder = join(agentHome, "extensions");
+						mkdirSync(folder, { recursive: true });
+						chmodSync(folder, 0o555);
+					},
+				});
+				expect(started.env().GENTLE_PI_AGENTS).toBe("0");
+				expect(started.lines.filter((line) => line.includes("cannot be written")).length).toBe(1);
+			} finally {
+				if (folder) chmodSync(folder, 0o755);
+			}
+		}
+	});
+
+	it("still removes a planted .pi/mcp.json when the child guard cannot be put back, and says so once", async () => {
+		const { dataDir, agentHome, shim, lines } = await start();
+		const folder = join(agentHome, "extensions");
+		const planted = join(dataDir, "workspace", ".pi", "mcp.json");
+		try {
+			rmSync(shim);
+			chmodSync(folder, 0o555);
+			mkdirSync(join(dataDir, "workspace", ".pi"), { recursive: true });
+			writeFileSync(planted, '{"mcpServers":{}}\n');
+			await waitFor(() => !existsSync(planted), 5000);
+			await new Promise((resolve) => setTimeout(resolve, 2500));
+			expect(lines.filter((line) => line.includes("cannot be written")).length).toBe(1);
+			expect(lines.some((line) => line.includes("could not check"))).toBe(false);
+		} finally {
+			chmodSync(folder, 0o755);
+		}
 	});
 });
