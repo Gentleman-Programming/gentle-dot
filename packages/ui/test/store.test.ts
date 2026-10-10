@@ -71,6 +71,51 @@ describe("reduce", () => {
 		expect(s).toMatchObject({ conversationId: "b.jsonl", interrupted: false });
 	});
 
+	it("keeps a streaming message when a mid-turn history snapshot arrives", () => {
+		// A reconnect during a run refetches history, but the session file only
+		// gains the assistant message when it ends, and history ids (h*) never
+		// match the live bridge ids (m*), so the snapshot cannot cover the
+		// streaming turn. The turn must survive and finish in place.
+		let s = apply(
+			initialState,
+			{ type: "ready", agentState: "working", conversationId: "a.jsonl", model: "Fake" },
+			{ type: "user_message", messageId: "u1", text: "hi" },
+			{ type: "message_delta", messageId: "m2", delta: "Hel" },
+		);
+		s = apply(s, {
+			type: "history",
+			conversationId: "a.jsonl",
+			messages: [{ id: "h1", role: "user", text: "hi", activities: [] }],
+		});
+		expect(s.messages.map((m) => [m.id, m.role, m.text, m.streaming])).toEqual([
+			["h1", "user", "hi", false],
+			["m2", "assistant", "Hel", true],
+		]);
+		s = apply(
+			s,
+			{ type: "message_delta", messageId: "m2", delta: "lo!" },
+			{ type: "message_done", messageId: "m2", text: "Hello!" },
+		);
+		expect(s.messages.map((m) => [m.id, m.text, m.streaming])).toEqual([
+			["h1", "hi", false],
+			["m2", "Hello!", false],
+		]);
+	});
+
+	it("replaces streaming messages when the history is for another conversation", () => {
+		const s = apply(
+			initialState,
+			{ type: "ready", agentState: "working", conversationId: "a.jsonl", model: "Fake" },
+			{ type: "message_delta", messageId: "m2", delta: "Hel" },
+		);
+		const switched = apply(s, {
+			type: "history",
+			conversationId: "b.jsonl",
+			messages: [{ id: "h1", role: "user", text: "other", activities: [] }],
+		});
+		expect(switched.messages.map((m) => m.id)).toEqual(["h1"]);
+	});
+
 	it("clears the interruption when a new user message arrives", () => {
 		const s = apply(
 			initialState,
