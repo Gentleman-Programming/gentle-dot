@@ -10,6 +10,7 @@
 			"!odd",
 			"!build",
 			"!.cache",
+			"!.vitest",
 			"!docs",
 			"!test-results",
 			"!playwright-report"
