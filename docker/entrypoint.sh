@@ -11,6 +11,6 @@ if [ "${GENTLE_DOT_VPS:-}" = "1" ]; then
 	chown root:root "$volume"
 	chmod 0755 "$volume"
 	mkdir -p "$GENTLE_DOT_ENGRAM_DATA_DIR"
-	chown -R -P dot:dot "$GENTLE_DOT_ENGRAM_DATA_DIR"
+	chown -R -P --from=0:0 dot:dot "$GENTLE_DOT_ENGRAM_DATA_DIR"
 fi
 exec node /app/packages/daemon/src/cli.ts

@@ -127,7 +127,7 @@ const CONTENT_TYPES: Record<string, string> = {
 
 /**
  * Reads the access token from `<dataDir>/token`, creating a random one when
- * absent. The data folder is kept at 0700 and the token at 0600.
+ * absent. The data folder is kept at 0700 (0711 in server mode, so the engine reaches its own folders by name) and the token at 0600.
  */
 export function ensureToken(dataDir: string): string {
 	ensurePrivateDir(dataDir);

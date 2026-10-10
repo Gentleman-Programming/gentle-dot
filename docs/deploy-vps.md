@@ -45,9 +45,9 @@ The image runs in server mode (`GENTLE_DOT_VPS=1`). The assistant has a shell, s
 | Capability | Why the daemon needs it |
 |---|---|
 | `SETUID`, `SETGID` | Start the agent as `dot` and connector servers as `dotmcp`, without supplementary groups |
-| `CHOWN` | Give the agent the files the daemon writes for it (`mcp.json`, sign-ins, settings, uploads) |
-| `FOWNER` | Keep the agent's folders private (`chmod` on folders the agent owns) |
-| `DAC_OVERRIDE` | Read and write in the agent's folders: history, uploads, settings |
+| `CHOWN` | At start, hand the agent the files an older image left owned by root (`chown -R -P --from=0:0`) |
+| `FOWNER` | At start, set the modes of folders it does not own (`connector-home`, the agent's folders) |
+| `DAC_OVERRIDE` | Reach and watch the agent's private folders as root; their contents are opened only as `dot` |
 | `KILL` | Stop the agent and connector servers, which run as other users |
 
 ## Steps

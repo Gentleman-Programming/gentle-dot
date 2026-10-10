@@ -21,9 +21,9 @@ services:
     cap_add:
       - SETUID # start the engine and connector servers as their users
       - SETGID # with their own group and no supplementary groups
-      - CHOWN # hand the files the daemon writes for the engine to the engine's user
-      - FOWNER # keep the engine's folders private (chmod on folders the engine owns)
-      - DAC_OVERRIDE # read and write the engine's folders (sessions, uploads, settings)
+      - CHOWN # at start, hand files an older image left owned by root to the engine's user
+      - FOWNER # at start, set the modes of folders the daemon does not own
+      - DAC_OVERRIDE # reach and watch the engine's private folders; their files are opened as the engine's user
       - KILL # stop the engine and connector servers, which run as other users
     volumes:
       - dot-home:/home/dot

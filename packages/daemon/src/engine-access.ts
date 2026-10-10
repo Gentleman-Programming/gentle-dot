@@ -57,11 +57,12 @@ export function engineAccess(user: OsUser, onFatal: (error: Error) => never = fa
 		}
 		const groups = process.getgroups?.() ?? [];
 		const egid = process.getegid?.() ?? 0;
-		process.setgroups?.([user.gid]);
-		process.setegid?.(user.gid);
-		process.seteuid?.(user.uid);
 		depth++;
 		try {
+			// Inside the try, so a switch that fails halfway is undone like a finished one.
+			process.setgroups?.([user.gid]);
+			process.setegid?.(user.gid);
+			process.seteuid?.(user.uid);
 			return refuseAsync(fn());
 		} finally {
 			depth--;
