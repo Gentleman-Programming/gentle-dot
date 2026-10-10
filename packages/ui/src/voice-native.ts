@@ -37,6 +37,13 @@ export function cancelNativeVoice(): Promise<void> {
 	return invoke<void>("voice_cancel");
 }
 
+/** One shared load of the event module (under Vitest mocks, a second concurrent import got the real one). */
+let events: Promise<typeof import("@tauri-apps/api/event")> | undefined;
+const tauriEvents = () => {
+	events ??= import("@tauri-apps/api/event");
+	return events;
+};
+
 export interface NativeVoiceHandlers {
 	partial: (text: string) => void;
 	level: (level: number) => void;
@@ -45,7 +52,7 @@ export interface NativeVoiceHandlers {
 
 /** Listens to the recognizer's events; resolves with a function that stops listening. */
 export async function onNativeVoice(handlers: NativeVoiceHandlers): Promise<() => void> {
-	const { listen } = await import("@tauri-apps/api/event");
+	const { listen } = await tauriEvents();
 	const stops = await Promise.all([
 		listen<{ text?: unknown }>("voice://partial", (event) => {
 			if (typeof event.payload?.text === "string") handlers.partial(event.payload.text);
@@ -99,7 +106,7 @@ export const removeVoiceModel = () => invoke<void>("voice_model_remove");
 
 /** Listens to the model's download and install progress. */
 export async function onVoiceModel(handler: (event: VoiceModelEvent) => void): Promise<() => void> {
-	const { listen } = await import("@tauri-apps/api/event");
+	const { listen } = await tauriEvents();
 	return listen<VoiceModelEvent>("voice://model", (event) => {
 		if (event.payload && typeof event.payload.state === "string") handler(event.payload);
 	});

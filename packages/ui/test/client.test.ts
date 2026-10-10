@@ -1,7 +1,9 @@
 import type { ServerMessage } from "@gentle-dot/protocol";
+import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DotClient, tokenFromLocation } from "../src/client.ts";
 import type { ConnectionStatus } from "../src/store.ts";
+import { useDot } from "../src/useDot.ts";
 
 class FakeSocket {
 	static all: FakeSocket[] = [];
@@ -122,5 +124,34 @@ describe("tokenFromLocation", () => {
 			replace,
 		);
 		expect(again).toBe("abc");
+	});
+});
+
+describe("useDot.send", () => {
+	afterEach(() => vi.unstubAllGlobals());
+
+	it("reports whether the message was handed to an open connection", () => {
+		vi.stubGlobal("WebSocket", FakeSocket);
+		const info = { url: "ws://127.0.0.1:4317/ws", token: "secret" };
+		const { result } = renderHook(() => useDot(info));
+		const message = { type: "send", text: "hi", requestId: "r1" } as const;
+
+		let handed: boolean | undefined;
+		act(() => {
+			handed = result.current.send(message);
+		});
+		expect(handed).toBe(false);
+		expect(result.current.state.notices.at(-1)?.message).toBe("Not connected yet. Try again in a moment.");
+
+		const socket = FakeSocket.all[0];
+		act(() => {
+			socket?.open();
+			socket?.receive({ type: "ready", agentState: "idle" });
+		});
+		act(() => {
+			handed = result.current.send(message);
+		});
+		expect(handed).toBe(true);
+		expect(socket?.sent.at(-1)).toEqual(message);
 	});
 });

@@ -21,7 +21,11 @@ import type { Duplex } from "node:stream";
 export const APP_FD = 3;
 /** Longer than the app's own 120 s dialog timeout, which answers "declined" first. */
 export const APPROVAL_WAIT_MS = 130_000;
-/** A frame longer than this closes the channel; nothing legitimate comes close. */
+/**
+ * A frame longer than this closes the channel; nothing legitimate comes close. The app has the same
+ * rule, and a closed channel stops the daemon (S35.2), so neither side ever sends a longer one: an
+ * oversized request fails (an approval is refused) and an oversized answer becomes an error.
+ */
 const MAX_FRAME = 1024 * 1024;
 
 /** One argument of the action, in the order shown. */
@@ -105,13 +109,15 @@ export class AppChannel implements AppLink {
 	request(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
 		if (!this.open) return Promise.reject(new Error("The Gentle Dot app is not connected."));
 		const id = ++this.nextId;
+		const line = frameLine({ kind: "request", id, method, params });
+		if (!line) return Promise.reject(new Error(`The request ${method} is too large for the Gentle Dot app.`));
 		return new Promise((resolve, reject) => {
 			const timer = setTimeout(() => {
 				this.pending.delete(id);
 				reject(new Error(`The Gentle Dot app did not answer ${method} in time.`));
 			}, timeoutMs);
 			this.pending.set(id, { resolve, reject, timer });
-			this.write({ kind: "request", id, method, params });
+			if (this.open) this.stream.write(line);
 		});
 	}
 
@@ -186,12 +192,21 @@ export class AppChannel implements AppLink {
 	}
 
 	private write(frame: Frame): void {
-		if (this.open) this.stream.write(`${JSON.stringify(frame)}\n`);
+		const line =
+			frameLine(frame) ??
+			frameLine({ kind: "response", id: frame.id, error: "The answer is too large to send." });
+		if (this.open && line) this.stream.write(line);
 	}
 
 	private log(line: string): void {
 		this.options.log?.(line);
 	}
+}
+
+/** The frame as one line, or undefined when it is longer than {@link MAX_FRAME}. */
+function frameLine(frame: Frame): string | undefined {
+	const json = JSON.stringify(frame);
+	return Buffer.byteLength(json) > MAX_FRAME ? undefined : `${json}\n`;
 }
 
 /**

@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ChatSurface } from "../src/components/ChatSurface.tsx";
 import { Composer } from "../src/components/Composer.tsx";
 import { MessageList } from "../src/components/MessageList.tsx";
+import type { Send } from "../src/components/types.ts";
 import { type DotState, initialState, reduce } from "../src/store.ts";
 import { createUploader, formatSize, type Uploader, uploadBase } from "../src/uploads.ts";
 import { useAttachments } from "../src/useAttachments.ts";
@@ -33,7 +34,7 @@ function instantUploader() {
 	});
 }
 
-function ComposerWith({ upload, send }: { upload: Uploader; send: (m: ClientMessage) => void }) {
+function ComposerWith({ upload, send }: { upload: Uploader; send: Send }) {
 	const attachments = useAttachments(upload);
 	return <Composer busy={false} disabled={false} send={send} attachments={attachments} />;
 }
@@ -79,6 +80,41 @@ describe("attaching files in the composer", () => {
 		});
 		expect(screen.queryByRole("list", { name: "Files to send" })).toBeNull();
 		expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
+	});
+
+	it("Composer keeps the draft and attachments when send is refused", async () => {
+		const upload = instantUploader();
+		const send = vi.fn<(m: ClientMessage) => boolean>(() => false);
+		render(<ComposerWith upload={upload} send={send} />);
+		await userEvent.upload(attachInput(), [file("a.txt")]);
+		const box = screen.getByRole("textbox", { name: "Message" });
+		await userEvent.type(box, "read this{Enter}");
+		await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+		expect(box).toHaveValue("read this");
+		expect(chips().map((c) => c.textContent)).toEqual([expect.stringContaining("a.txt")]);
+		expect(screen.getByRole("alert", { name: "Not sent" })).toHaveTextContent("Not connected");
+
+		// Sending again reuses the uploaded file and clears once the message goes out.
+		send.mockReturnValue(true);
+		await userEvent.click(screen.getByRole("button", { name: "Send" }));
+		await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+		expect(upload).toHaveBeenCalledTimes(1);
+		expect(send.mock.calls[1]?.[0]).toMatchObject({ text: "read this", attachments: [{ name: "a.txt" }] });
+		expect(box).toHaveValue("");
+		expect(screen.queryByRole("list", { name: "Files to send" })).toBeNull();
+		expect(screen.queryByRole("alert", { name: "Not sent" })).toBeNull();
+	});
+
+	it("a sent message still clears the composer", async () => {
+		const send = vi.fn<(m: ClientMessage) => boolean>(() => true);
+		render(<ComposerWith upload={instantUploader()} send={send} />);
+		await userEvent.upload(attachInput(), [file("a.txt")]);
+		const box = screen.getByRole("textbox", { name: "Message" });
+		await userEvent.type(box, "read this{Enter}");
+		await waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+		expect(box).toHaveValue("");
+		expect(screen.queryByRole("list", { name: "Files to send" })).toBeNull();
+		expect(screen.queryByRole("alert", { name: "Not sent" })).toBeNull();
 	});
 
 	it("sends files without text", async () => {

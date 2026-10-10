@@ -29,6 +29,8 @@ export function Composer({
 	attachments,
 }: ComposerProps) {
 	const [text, setText] = useState("");
+	/** The last message could not go out; its text and files stay for another try (#21). */
+	const [refused, setRefused] = useState(false);
 	const box = useRef<HTMLTextAreaElement>(null);
 	const recording = voice?.phase === "recording";
 	const voiceStatus = voice?.phase === "transcribing" ? "Transcribing…" : voice?.note;
@@ -62,7 +64,12 @@ export function Composer({
 		// Files upload on send; a failed one keeps the message so sending again retries it.
 		const refs = files.length > 0 ? await attachments?.upload() : undefined;
 		if (files.length > 0 && !refs) return;
-		send({ type: "send", text: value, requestId: newRequestId(), ...(refs ? { attachments: refs } : {}) });
+		const message = { type: "send", text: value, requestId: newRequestId() } as const;
+		if (send(refs ? { ...message, attachments: refs } : message) === false) {
+			setRefused(true);
+			return;
+		}
+		setRefused(false);
 		attachments?.clear();
 		voice?.sent();
 		setText("");
@@ -86,6 +93,11 @@ export function Composer({
 
 	return (
 		<>
+			{refused ? (
+				<p className="voice-status" role="alert" aria-label="Not sent">
+					Not connected, so the message was not sent. It is kept here to send again.
+				</p>
+			) : null}
 			{voiceStatus ? (
 				<p className="voice-status" role="status" aria-label="Voice">
 					{voiceStatus}

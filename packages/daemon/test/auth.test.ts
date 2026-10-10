@@ -1,4 +1,4 @@
-import { statSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
@@ -260,6 +260,22 @@ describe("createModelAuthRuntime (Pi's runtime, offline)", () => {
 		} finally {
 			if (saved !== undefined) process.env.OPENAI_API_KEY = saved;
 		}
+	});
+
+	it("loads the engine's providers without writing a transpile cache anywhere (S35.1, #8, #28)", async () => {
+		// jiti's default cache goes to node_modules/.cache/jiti or the temp dir; in the packaged app the
+		// former is inside the signed bundle. Point the temp dir at an empty folder and look there.
+		const home = tempDir();
+		const tmp = tempDir();
+		const saved = process.env.TMPDIR;
+		process.env.TMPDIR = tmp;
+		try {
+			await createModelAuthRuntime(home, home);
+		} finally {
+			if (saved === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = saved;
+		}
+		expect(readdirSync(tmp)).toEqual([]);
 	});
 
 	it("lists NaN, the provider the engine's own extension registers, with its API key sign-in", async () => {

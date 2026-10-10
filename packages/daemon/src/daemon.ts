@@ -24,7 +24,13 @@ import {
 	policyEnv,
 } from "./connectors.ts";
 import { approvalRequest } from "./extensions/approval-guard.ts";
-import { ensureMemoryProject, ensurePrivateDir, isolatedAgentEnv, privateMemory } from "./isolation.ts";
+import {
+	claimEngineHome,
+	ensureMemoryProject,
+	ensurePrivateDir,
+	isolatedAgentEnv,
+	privateMemory,
+} from "./isolation.ts";
 import { MCP_PREFIX, McpProxy, type ProxiedConnector, type UpstreamCredentials } from "./mcp-proxy.ts";
 import { defaultImportPath, ProfileStore } from "./profiles.ts";
 import { type RotationLimits, rotationLimits } from "./rotation.ts";
@@ -64,7 +70,8 @@ export interface DaemonOptions {
 	connectorTransport?: (connector: ProxiedConnector, credentials: UpstreamCredentials) => McpTransport;
 	/**
 	 * The desktop app's end of its private channel (fd 3 when the app launched the daemon, S25.1).
-	 * Without it, connector changes and approvals fail closed.
+	 * Without it, connector changes and approvals fail closed. With it, the daemon stops when the
+	 * channel closes (S35.2): the app that launched it is gone.
 	 */
 	appChannel?: Duplex;
 	/** How long an approval waits for the app's answer; default 130 s (the app declines at 120 s). */
@@ -89,7 +96,10 @@ export interface DotDaemon {
 	url: string;
 	bridge: DotBridge;
 	supervisor: AgentSupervisor;
+	/** Stops the daemon; calling it again returns the same stop. */
 	close(): Promise<void>;
+	/** Settles once the daemon stopped, whether `close` was called or the app's channel closed. */
+	closed: Promise<void>;
 }
 
 const HELLO_TIMEOUT_MS = 5000;
@@ -133,6 +143,10 @@ export function startupMessage(url: string, dataDir: string, interactive: boolea
 export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	const log = options.log ?? (() => {});
 	const token = ensureToken(options.dataDir);
+	// Before anything is written there: the engine skips its first-run setup in a home it did not
+	// create (S35.3). Only the assistant's default home; a home the user chose is never marked.
+	if (options.agentHome && resolve(options.agentHome) === resolve(options.dataDir, "agent"))
+		claimEngineHome(options.agentHome, log);
 	mkdirSync(options.workspace, { recursive: true, mode: 0o700 });
 	ensureMemoryProject(options.workspace);
 	const folderArgs = options.preferredFolder
@@ -254,8 +268,17 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		...(Number.isInteger(historyPage) && historyPage > 0 ? { historyPage } : {}),
 	});
 
+	// connectors.json as read at start is checked against its signature before anything rewrites it,
+	// watches it, or starts the engine (S25.6).
+	const integrity = connectorStore
+		.checkIntegrity()
+		.catch((error: Error) => log(`could not check connectors.json: ${error.message}`));
 	if (app) {
-		app.handler = (method, params) => appRequest(method, params, bridge, connectors, app);
+		// Nothing the app asks changes connectors before connectors.json was checked (S25.6).
+		app.handler = async (method, params) => {
+			await integrity;
+			return appRequest(method, params, bridge, connectors, app);
+		};
 		// The computer helper belongs to the app that registered it (S24.7).
 		app.onClose(() => {
 			log("the desktop app's channel closed");
@@ -263,18 +286,10 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 			// Secrets read from the app are forgotten; connectors that need one fail closed until it is back.
 			connectorStore.lock();
 		});
-		// Secrets that files still hold move into the app's store, once.
-		void connectorStore
-			.migrate()
-			.catch((error: Error) => log(`connector secrets were not moved: ${error.message}`));
 	} else
 		log(
-			"no desktop app channel: connector changes and approvals are refused, and connectors that need a secret fail closed",
+			"no desktop app channel: connector changes and approvals are refused, and connectors that need a secret fail closed; to use them, stop this assistant and open the Gentle Dot app, which starts its own",
 		);
-
-	// The files as the daemon writes them (an older version kept a hash), then watched.
-	connectorStore.enforce(false);
-	connectorStore.watch();
 
 	const server = createServer((req, res) => {
 		const { pathname } = new URL(req.url ?? "/", "http://localhost");
@@ -306,7 +321,56 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	});
 	port = (server.address() as AddressInfo).port;
 
-	await supervisor.start().catch((error: Error) => log(`agent failed to start: ${error.message}; retrying`));
+	let stopped = () => {};
+	const closed = new Promise<void>((done) => {
+		stopped = done;
+	});
+	const shutdown = async () => {
+		// Not listening any more first, so an app relaunched meanwhile starts a daemon of its own.
+		const serverClosed = new Promise<void>((done) => server.close(() => done()));
+		app?.close();
+		for (const client of wss.clients) client.terminate();
+		wss.close();
+		// Stops waiting approvals and the connectors' servers (stdio ones are processes of the daemon).
+		await proxy.close();
+		await serverClosed;
+		await supervisor.stop();
+		connectorStore.close();
+		await memory?.stop();
+	};
+	let stopping: Promise<void> | undefined;
+	const close = (): Promise<void> => {
+		if (!stopping) {
+			stopping = shutdown();
+			stopping.then(stopped, (error: Error) => {
+				log(`the assistant did not stop cleanly: ${error.message}`);
+				stopped();
+			});
+		}
+		return stopping;
+	};
+	// The daemon lives as long as the app that launched it (S35.2): a daemon left behind with no
+	// channel would keep connectors locked, and a relaunched app could not get a channel to it.
+	app?.onClose(() => {
+		log("the desktop app's channel closed; stopping the assistant");
+		void close().catch(() => {});
+	});
+
+	// Listening first keeps the app's health check answered while its store is asked for the key.
+	await integrity;
+	// Secrets that files still hold move into the app's store, once.
+	if (app?.connected)
+		void connectorStore
+			.migrate()
+			.catch((error: Error) => log(`connector secrets were not moved: ${error.message}`));
+	// The files as the daemon writes them (an older version kept a hash), then watched.
+	if (!stopping) {
+		connectorStore.enforce(false);
+		connectorStore.watch();
+		await supervisor
+			.start()
+			.catch((error: Error) => log(`agent failed to start: ${error.message}; retrying`));
+	}
 
 	return {
 		port,
@@ -314,17 +378,8 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		url: `http://${options.host === "0.0.0.0" ? "127.0.0.1" : options.host}:${port}/#token=${token}`,
 		bridge,
 		supervisor,
-		async close() {
-			app?.close();
-			for (const client of wss.clients) client.terminate();
-			wss.close();
-			// Stops waiting approvals and the connectors' servers (stdio ones are processes of the daemon).
-			await proxy.close();
-			await new Promise<void>((done) => server.close(() => done()));
-			await supervisor.stop();
-			connectorStore.close();
-			await memory?.stop();
-		},
+		close,
+		closed,
 	};
 }
 

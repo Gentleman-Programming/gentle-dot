@@ -117,6 +117,8 @@ export class DotBridge {
 	/** Each window's id, for the app's commands on its behalf. */
 	private readonly clientIds = new Map<string, BridgeClient>();
 	private readonly asks = new Map<string, PendingAsk>();
+	/** Told to every window that connects during this run (a connectors file set aside at start). */
+	private readonly notices: ServerPayload[] = [];
 	private readonly runningTools = new Set<string>();
 	private readonly seenRequestIds: string[] = [];
 	private readonly sessionDir: string;
@@ -160,6 +162,7 @@ export class DotBridge {
 		if (options.connectors) {
 			options.connectors.onChanged = (restart) => this.afterConnectorsChange(restart);
 			options.connectors.onBlocked = () => this.connectorChangeBlocked();
+			options.connectors.onSetAside = (notice) => this.connectorsSetAside(notice);
 			options.connectors.imagesSupported = () => supervisor.modelImages;
 		}
 		this.state = this.deriveState();
@@ -208,6 +211,7 @@ export class DotBridge {
 		for (const draft of this.options.connectors?.drafts() ?? [])
 			this.deliver(client, { type: "connector_draft", draft });
 		if (this.interrupted) this.deliver(client, { type: "interrupted" });
+		for (const notice of this.notices) this.deliver(client, notice);
 		return () => {
 			this.clients.delete(client);
 			this.clientIds.delete(clientId);
@@ -705,6 +709,17 @@ export class DotBridge {
 		}
 		this.log(`the assistant drafted a connector: ${draft.name}`);
 		this.broadcast({ type: "connector_draft", draft });
+	}
+
+	/**
+	 * A `connectors.json` changed while the daemon was down was set aside (S25.6), usually before any
+	 * window is open: every window of this run is told once, when it connects.
+	 */
+	private connectorsSetAside(message: string): void {
+		const notice: ServerPayload = { type: "toast", level: "warning", message };
+		this.notices.push(notice);
+		this.broadcast(notice);
+		this.broadcast({ type: "connectors", connectors: this.requireConnectors().list() });
 	}
 
 	/** The connector files were changed outside the Connectors screen and put back. */

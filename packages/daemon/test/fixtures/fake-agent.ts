@@ -37,6 +37,7 @@
 //   FAKE_AGENT_START_DELAY_MS  answer the first get_state only after this delay
 //   FAKE_AGENT_DROP_CUSTOM  load session files without their custom messages (a format drift)
 //   FAKE_AGENT_PROMPTS_FILE  append every prompt command (message, images, streamingBehavior) as JSONL
+//   FAKE_AGENT_MARKER_FILE  write whether the `--home` folder held gentle-shell's `.gentle-shell-home` at launch
 // get_available_models lists MODELS; set_model and set_thinking_level change what
 // get_state reports, so tests can read the last values back. A model's `input` says whether it
 // accepts images, like the engine's models.
@@ -73,6 +74,12 @@ let thinkingLevel = "medium";
 const argv = process.argv.slice(2);
 if (process.env.FAKE_AGENT_ARGS_FILE) writeFileSync(process.env.FAKE_AGENT_ARGS_FILE, JSON.stringify(argv));
 if (process.env.FAKE_AGENT_CWD_FILE) writeFileSync(process.env.FAKE_AGENT_CWD_FILE, process.cwd());
+if (process.env.FAKE_AGENT_MARKER_FILE) {
+	const home = argv[argv.indexOf("--home") + 1];
+	const marked =
+		argv.includes("--home") && home !== undefined && existsSync(join(home, ".gentle-shell-home"));
+	writeFileSync(process.env.FAKE_AGENT_MARKER_FILE, JSON.stringify(marked));
+}
 if (process.env.FAKE_AGENT_ENV_FILE) {
 	writeFileSync(
 		process.env.FAKE_AGENT_ENV_FILE,

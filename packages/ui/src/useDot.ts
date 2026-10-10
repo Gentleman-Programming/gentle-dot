@@ -19,18 +19,19 @@ export function useDot(info: ConnectionInfo | undefined) {
 		return () => c.stop();
 	}, [info]);
 
-	const send = useCallback((message: ClientMessage) => {
-		if (!client.current?.send(message)) {
-			dispatch({
-				type: "server",
-				message: {
-					type: "error",
-					code: "offline",
-					message: "Not connected yet. Try again in a moment.",
-					seq: 0,
-				},
-			});
-		}
+	/** True once the message is handed to an open connection; false (with a notice) otherwise. */
+	const send = useCallback((message: ClientMessage): boolean => {
+		if (client.current?.send(message)) return true;
+		dispatch({
+			type: "server",
+			message: {
+				type: "error",
+				code: "offline",
+				message: "Not connected yet. Try again in a moment.",
+				seq: 0,
+			},
+		});
+		return false;
 	}, []);
 	const dismiss = useCallback((id: number) => dispatch({ type: "dismiss", id }), []);
 

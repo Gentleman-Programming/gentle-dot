@@ -163,6 +163,11 @@ export class AgentSupervisor {
 		const term = setTimeout(() => child.kill("SIGTERM"), this.options.stopTimeoutMs ?? 5000);
 		await closed;
 		clearTimeout(term);
+		// Stopped while the old process was closing: nothing is started again.
+		if (this.stopping) {
+			this.setState("stopped");
+			return;
+		}
 		this.setState("restarting");
 		await this.spawnAndInitialize();
 	}
