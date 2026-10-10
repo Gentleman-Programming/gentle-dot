@@ -1150,7 +1150,7 @@ export class DotBridge {
 		this.broadcast({
 			type: "activity",
 			messageId: this.assistantId,
-			activity: { id, ...describeTool(String(event.toolName ?? ""), event.args), status },
+			activity: { id, ...describeTool(String(event.toolName ?? ""), event.args, status), status },
 		});
 	}
 
