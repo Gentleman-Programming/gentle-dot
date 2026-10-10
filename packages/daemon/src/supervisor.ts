@@ -1,7 +1,8 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { encodeRecord, JsonlDecoder } from "./jsonl.ts";
+import { writePrivateFile } from "./private-file.ts";
 import type { OsUser } from "./vps.ts";
 
 /** A record the agent wrote to stdout that is not a command response. */
@@ -358,9 +359,7 @@ export class AgentSupervisor {
 
 	private persistSession(sessionFile: string): void {
 		mkdirSync(this.options.dataDir, { recursive: true });
-		const temp = `${this.stateFile}.${process.pid}.tmp`;
-		writeFileSync(temp, `${JSON.stringify({ sessionFile, chains: this.chains })}\n`, { mode: 0o600 });
-		renameSync(temp, this.stateFile);
+		writePrivateFile(this.stateFile, `${JSON.stringify({ sessionFile, chains: this.chains })}\n`);
 	}
 
 	private setState(state: SupervisorState): void {

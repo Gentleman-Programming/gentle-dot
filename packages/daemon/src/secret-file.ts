@@ -10,7 +10,8 @@
  * File: `{"version":1,"records":{"<id>":{"nonce":"<base64>","data":"<base64>","tag":"<base64>"}}}`.
  */
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import { writePrivateFile } from "./private-file.ts";
 import { type SecretSource, SecretsUnavailableError } from "./secret-source.ts";
 
 /** The daemon's environment variable with the key. */
@@ -148,8 +149,6 @@ export class FileSecretSource implements SecretSource {
 	}
 
 	private write(records: Record<string, SealedRecord>): void {
-		const temp = `${this.options.file}.${process.pid}.tmp`;
-		writeFileSync(temp, `${JSON.stringify({ version: 1, records })}\n`, { mode: 0o600 });
-		renameSync(temp, this.options.file);
+		writePrivateFile(this.options.file, `${JSON.stringify({ version: 1, records })}\n`);
 	}
 }

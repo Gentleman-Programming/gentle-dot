@@ -9,8 +9,9 @@
  * to a log. Forgotten PIN: remove the file on the server (docs/deploy-vps.md), then set a new one.
  */
 import { randomBytes, type ScryptOptions, scrypt, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { PIN_PATTERN, type PinStatus } from "@gentle-dot/protocol";
+import { writePrivateFile } from "./private-file.ts";
 
 export const PIN_FILE = "web-pin.json";
 /** Wrong tries in a row before the PIN locks. */
@@ -170,8 +171,6 @@ export class PinGate {
 	}
 
 	private save(saved: Saved): void {
-		const temp = `${this.file}.${process.pid}.tmp`;
-		writeFileSync(temp, `${JSON.stringify(saved)}\n`, { mode: 0o600 });
-		renameSync(temp, this.file);
+		writePrivateFile(this.file, `${JSON.stringify(saved)}\n`);
 	}
 }

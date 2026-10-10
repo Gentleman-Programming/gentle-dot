@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	type AgentState,
@@ -31,6 +32,7 @@ import {
 	pageHistory,
 	resolveConversation,
 } from "./conversations.ts";
+import { directAccess, type EngineAccess } from "./engine-access.ts";
 import { DRAFT_STATUS_KEY } from "./extensions/approval-guard.ts";
 import { describeTool, textOf } from "./presentation.ts";
 import {
@@ -75,8 +77,11 @@ export interface BridgeOptions {
 	pin?: PinGate;
 	/** How long a PIN approval waits for an answer. Default 130 s, like the app's. */
 	approvalWaitMs?: number;
-	/** Server mode (S25.8): gives a handoff session to the engine's user. */
-	handOver?: (paths: string[]) => void;
+	/**
+	 * How the engine's session and upload files are read and written; in server mode as the engine's
+	 * user (S25.8, B1), since the engine can plant links there. Default: as the daemon is.
+	 */
+	engineAccess?: EngineAccess;
 	/** How long switching conversations waits for a running answer to stop. Default 10 s. */
 	stopTimeoutMs?: number;
 	/** Optional parts of the app; by default one continuous chat. */
@@ -171,7 +176,7 @@ export class DotBridge {
 			limits: options.rotation ?? DEFAULT_ROTATION,
 			canRotate: () =>
 				supervisor.state === "ready" && !supervisor.busy && this.asks.size === 0 && this.sending === 0,
-			...(options.handOver ? { handOver: options.handOver } : {}),
+			...(options.engineAccess ? { access: options.engineAccess } : {}),
 			log: (line) => this.log(line),
 		});
 		supervisor.onEvent((event) => this.onAgentEvent(event));
@@ -401,7 +406,11 @@ export class DotBridge {
 				const busy = this.supervisor.busy;
 				const prompt =
 					files.length > 0
-						? composePrompt(message.text, files, { images: this.supervisor.modelImages })
+						? composePrompt(message.text, files, {
+								images: this.supervisor.modelImages,
+								// The stored file may have been swapped for a link since: read it as the engine.
+								read: (path) => this.engine(() => readFileSync(path)),
+							})
 						: { message: message.text };
 				this.sending += 1;
 				try {
@@ -471,7 +480,7 @@ export class DotBridge {
 				return;
 			case "open_conversation": {
 				if (!this.conversationsOn(client)) return;
-				const path = resolveConversation(this.sessionDir, message.conversationId);
+				const path = this.engine(() => resolveConversation(this.sessionDir, message.conversationId));
 				if (!path) {
 					this.deliver(client, {
 						type: "error",
@@ -623,7 +632,7 @@ export class DotBridge {
 				this.deliver(client, {
 					type: "earlier",
 					before: message.before,
-					...pageHistory(this.chain(), this.pageSize(), message.before),
+					...this.engine(() => pageHistory(this.chain(), this.pageSize(), message.before)),
 				});
 				return;
 		}
@@ -1129,7 +1138,7 @@ export class DotBridge {
 			// The engine writes a message to its session file right after announcing it;
 			// one round trip makes sure everything announced so far is on disk.
 			await this.supervisor.request({ type: "get_state" });
-			const page = pageHistory(this.chain(), this.pageSize());
+			const page = this.engine(() => pageHistory(this.chain(), this.pageSize()));
 			if (this.nextMessage === seen || attempt >= 2) return page;
 		}
 	}
@@ -1145,7 +1154,11 @@ export class DotBridge {
 	}
 
 	private conversationsPayload(): ServerPayload {
-		return { type: "conversations", conversations: listConversations(this.sessionDir), ...this.activeRef() };
+		return {
+			type: "conversations",
+			conversations: this.engine(() => listConversations(this.sessionDir)),
+			...this.activeRef(),
+		};
 	}
 
 	private conversationRef(): { conversationId?: string } {
@@ -1376,6 +1389,11 @@ export class DotBridge {
 
 	private deliver(client: BridgeClient, payload: ServerPayload): void {
 		client.send(payload);
+	}
+
+	/** Runs `fn` on the engine's files as the engine's user (server mode). */
+	private engine<T>(fn: () => T): T {
+		return (this.options.engineAccess ?? directAccess)(fn);
 	}
 
 	private log(line: string): void {

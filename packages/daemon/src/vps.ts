@@ -6,14 +6,17 @@
  * a third one (`GENTLE_DOT_CONNECTOR_USER`, default `dotmcp`). The data folder is the daemon's
  * (0711: the engine passes through it to its own folders but cannot list it); the access key,
  * `connectors.json`, the encrypted secrets, and the PIN hash stay the daemon's (0600), and the
- * engine's folders ({@link ENGINE_DIRS}) belong to the engine's user. Files the daemon writes into
- * those folders are handed over with `chown -R -P --from=<daemon> <engine>`: GNU chown walks with
- * directory descriptors and never follows a link, and `--from` touches only what the daemon itself
- * created.
+ * engine's folders ({@link ENGINE_DIRS}) belong to the engine's user. The daemon reaches them only
+ * as the engine's user (`engine-access.ts`), and signs in through a helper running as that user
+ * (`auth-helper.ts`), so what it makes there is the engine's. Files an older version left there as
+ * root are handed over once at start with `chown -R -P --from=<daemon> <engine>`: GNU chown walks
+ * with directory descriptors and never follows a link, and `--from` touches only the daemon's files.
  */
 import { spawnSync } from "node:child_process";
 import { chmodSync, lchownSync, lstatSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { AuthHelperCommand } from "./auth-helper.ts";
+import type { EngineAccess } from "./engine-access.ts";
 import { BAD_SECRETS_KEY, NO_SECRETS_KEY, parseSecretsKey, SECRETS_KEY_VAR } from "./secret-file.ts";
 
 export interface OsUser {
@@ -29,8 +32,15 @@ export interface VpsOptions {
 	/** The connector secrets key; undefined fails closed with `secretsKeyProblem`. */
 	secretsKey?: Buffer | undefined;
 	secretsKeyProblem?: string;
-	/** Gives paths the daemon wrote in the engine's folders to the engine's user; default {@link chownHandOver}. */
+	/**
+	 * Gives the files an older version left as root in the engine's folders to the engine's user, once
+	 * at start; default {@link chownHandOver}. From then on everything there is made as that user.
+	 */
 	handOver?: (paths: string[]) => void;
+	/** How the daemon reaches the engine's files; default `engineAccess(engine)` (tests replace it). */
+	access?: EngineAccess;
+	/** The sign-in helper's command line (`cli.ts --auth-helper`); without it, sign-in is off (B1). */
+	authHelper?: AuthHelperCommand;
 }
 
 /** The engine's own folders in the data folder (`<data>/<name>`). */

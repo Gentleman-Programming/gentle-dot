@@ -2,6 +2,7 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { inheritedAppSocket } from "./app-channel.ts";
+import { serveAuthHelper } from "./auth-helper.ts";
 import { loadConfig } from "./config.ts";
 import { APPROVAL_GUARD, bundledMcpCli } from "./connectors.ts";
 import { startDaemon, startupMessage } from "./daemon.ts";
@@ -10,6 +11,8 @@ import { SECRETS_KEY_VAR } from "./secret-file.ts";
 import { loadVpsOptions } from "./vps.ts";
 import { IDENTITY_SOURCE } from "./white-label.ts";
 
+/** This file (or the bundled `cli.mjs`), which the sign-in helper runs again. */
+const ENTRY = fileURLToPath(import.meta.url);
 const log = (line: string) => process.stderr.write(`${new Date().toISOString()} ${line}\n`);
 
 /**
@@ -55,7 +58,10 @@ async function main(): Promise<void> {
 		...(config.agentHome ? { agentHome: config.agentHome } : {}),
 		allowedOrigins: config.allowedOrigins,
 		...(appChannel ? { appChannel } : {}),
-		...(vps ? { vps } : {}),
+		// Sign-in runs in this same entry point as the engine's user (`--auth-helper`, B1).
+		...(vps
+			? { vps: { ...vps, authHelper: { command: process.execPath, args: [ENTRY, "--auth-helper"] } } }
+			: {}),
 		log,
 	});
 	process.stdout.write(`${startupMessage(daemon.url, config.dataDir, process.stdout.isTTY === true)}\n`);
@@ -76,9 +82,11 @@ async function main(): Promise<void> {
 	void daemon.closed.then(() => process.exit(0));
 }
 
-if (process.argv.includes("--self-check")) selfCheck();
-
-main().catch((error: Error) => {
-	log(`failed to start: ${error.message}`);
-	process.exit(1);
-});
+if (process.argv.includes("--auth-helper")) serveAuthHelper();
+else {
+	if (process.argv.includes("--self-check")) selfCheck();
+	main().catch((error: Error) => {
+		log(`failed to start: ${error.message}`);
+		process.exit(1);
+	});
+}

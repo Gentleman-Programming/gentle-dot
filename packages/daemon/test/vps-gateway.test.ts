@@ -52,6 +52,7 @@ async function setup(options: Setup = {}) {
 	const stdinFile = join(dataDir, "..", `${randomBytes(6).toString("hex")}-stdin.jsonl`);
 	const key = randomBytes(32);
 	const handedOver: string[][] = [];
+	const engineAccesses = { count: 0 };
 	const logs: string[] = [];
 	const notionCalls: string[] = [];
 	const notionUrl = await fakeNotion(notionCalls);
@@ -65,6 +66,11 @@ async function setup(options: Setup = {}) {
 					connector: own,
 					secretsKey: key,
 					handOver: (paths: string[]) => handedOver.push(paths),
+					// With the test's own user there is no one to switch to; count what goes through it.
+					access: <T>(fn: () => T): T => {
+						engineAccesses.count++;
+						return fn();
+					},
 					...options.vps,
 				};
 	const d = await startDaemon({
@@ -123,6 +129,7 @@ async function setup(options: Setup = {}) {
 		app,
 		logs,
 		handedOver,
+		engineAccesses,
 		notionCalls,
 		engineProcess,
 		stdin,
@@ -213,13 +220,13 @@ describe("server mode: the engine as another user (S25.8)", () => {
 		await waitFor(() => d.supervisor.state === "ready");
 		expect(engineProcess()).toMatchObject({ uid: own.uid });
 		// A uid this test process cannot take: the spawn itself is refused, so the uid is applied.
-		const other = await setup({ vps: { engine: { uid: own.uid + 1, gid: own.gid } } });
+		const other = await setup({ vps: { engine: { uid: own.uid + 1, gid: own.gid }, access: (fn) => fn() } });
 		await waitFor(() => other.logs.some((line) => /EPERM|agent failed to start/.test(line)));
 		expect(other.d.supervisor.state).not.toBe("ready");
 	});
 
-	it("keeps the daemon's files private and hands the engine's folders to the engine user", async () => {
-		const { d, dataDir, agentHome, handedOver, send, find } = await setup();
+	it("keeps the daemon's files private and reaches the engine's folders only as the engine user", async () => {
+		const { d, dataDir, handedOver, engineAccesses, send, find } = await setup();
 		await waitFor(() => d.supervisor.state === "ready");
 		// The engine may pass through the data folder to its own folders, but not list it.
 		expect(statSync(dataDir).mode & 0o777).toBe(0o711);
@@ -227,26 +234,24 @@ describe("server mode: the engine as another user (S25.8)", () => {
 		// The engine reads its identity prompt by name.
 		expect(statSync(join(dataDir, "identity.md")).mode & 0o777).toBe(0o644);
 		for (const dir of ENGINE_DIRS) expect(statSync(join(dataDir, dir)).isDirectory(), dir).toBe(true);
-		// At start every engine folder, and before every launch the ones the daemon writes into.
+		// Only at start, for files an older version left as root; from then on the engine's user makes them.
+		expect(handedOver).toHaveLength(1);
 		expect(handedOver[0]?.slice().sort()).toEqual(ENGINE_DIRS.map((dir) => join(dataDir, dir)).sort());
-		expect(
-			handedOver.some((paths) => paths.includes(agentHome) && paths.includes(join(dataDir, "sessions"))),
-		).toBe(true);
-		const launches = handedOver.length;
 		await d.supervisor.restart();
-		expect(handedOver.length).toBeGreaterThan(launches);
-		// An uploaded file is the engine's to read.
+		expect(handedOver).toHaveLength(1);
+		// An upload and a profile change reach the engine's folders only through the engine's user (B1).
+		let before = engineAccesses.count;
 		const upload = await fetch(`http://127.0.0.1:${d.port}/upload`, {
 			method: "POST",
 			headers: { authorization: `Bearer ${d.token}`, "x-file-name": "notes.txt" },
 			body: "hello",
 		});
 		expect(upload.status).toBe(200);
-		expect(handedOver.at(-1)).toEqual([join(dataDir, "workspace", "uploads")]);
-		// So is what a profile change writes into its store and the engine's home.
+		expect(engineAccesses.count).toBeGreaterThan(before);
+		before = engineAccesses.count;
 		send({ type: "profile_save", name: "work", roles: {} });
 		await find("profiles");
-		expect(handedOver.at(-1)).toEqual([join(dataDir, "gentle-ai"), agentHome]);
+		expect(engineAccesses.count).toBeGreaterThan(before);
 		// Nothing of the daemon's own is ever handed over.
 		const handed = handedOver.flat();
 		for (const name of [
