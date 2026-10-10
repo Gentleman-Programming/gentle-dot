@@ -95,6 +95,32 @@ fn panel_placement(places_windows: bool, full_screen: bool, rose_hidden: bool) -
     }
 }
 
+/// Whether a tray click toggles the panel directly instead of showing the
+/// menu. Only the KSNI backend delivers Click events on Linux, and it is
+/// opt-in (`ksni-tray` feature): AppIndicator delivers no clicks at all, and
+/// macOS keeps menu-on-left-click. Right click keeps the menu on every backend.
+///
+/// KSNI activation emits exactly one `Click { Left, Up }` with an empty rect
+/// (there is no icon geometry on the bus), so the handler toggles and never
+/// anchors the panel to the event coordinates. Press-down, middle, and right
+/// clicks are no-ops.
+fn tray_click_toggles_panel(
+    os: Os,
+    ksni_tray: bool,
+    button: tauri::tray::MouseButton,
+    button_state: tauri::tray::MouseButtonState,
+) -> bool {
+    os == Os::Linux
+        && ksni_tray
+        && button == tauri::tray::MouseButton::Left
+        && button_state == tauri::tray::MouseButtonState::Up
+}
+
+/// Whether this build delivers left-click tray activation.
+fn tray_left_click_toggles() -> bool {
+    cfg!(all(target_os = "linux", feature = "ksni-tray"))
+}
+
 fn rose_menu_label(hidden: bool) -> &'static str {
     if hidden {
         "Show the rose"
@@ -612,6 +638,30 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tau
         .tooltip("Gentle Dot")
         .menu(&menu)
         .show_menu_on_left_click(true)
+        .on_tray_icon_event(|tray, event| {
+            // Left-click activation exists only on the opt-in KSNI backend (Linux);
+            // everywhere else this is a no-op and the menu behavior is unchanged.
+            // The KSNI event carries an empty rect, so the panel keeps its existing
+            // placement instead of anchoring to the click coordinates.
+            if let tauri::tray::TrayIconEvent::Click {
+                button,
+                button_state,
+                ..
+            } = event
+            {
+                if tray_click_toggles_panel(
+                    Os::CURRENT,
+                    tray_left_click_toggles(),
+                    button,
+                    button_state,
+                ) {
+                    let app = tray.app_handle().clone();
+                    if let Err(error) = toggle_panel(app) {
+                        eprintln!("gentle-dot: cannot toggle the panel: {error}");
+                    }
+                }
+            }
+        })
         .on_menu_event(move |app, event| {
             let result = match event.id().as_ref() {
                 "open" => show_panel(app),
@@ -918,5 +968,76 @@ mod tests {
         assert!(!conversations_on(None));
         assert!(!conversations_on(Some("0")));
         assert!(!conversations_on(Some("true")));
+    }
+
+    #[test]
+    fn left_tray_click_toggles_only_on_linux_ksni_builds() {
+        use tauri::tray::{MouseButton, MouseButtonState};
+        // The KSNI backend (opt-in `ksni-tray` Linux feature) delivers exactly one
+        // `Click { Left, Up }` per activation; only that toggles, once.
+        assert!(tray_click_toggles_panel(
+            Os::Linux,
+            true,
+            MouseButton::Left,
+            MouseButtonState::Up
+        ));
+        // Press-down, middle, and right never toggle; right keeps the menu everywhere.
+        assert!(!tray_click_toggles_panel(
+            Os::Linux,
+            true,
+            MouseButton::Left,
+            MouseButtonState::Down
+        ));
+        assert!(!tray_click_toggles_panel(
+            Os::Linux,
+            true,
+            MouseButton::Middle,
+            MouseButtonState::Up
+        ));
+        assert!(!tray_click_toggles_panel(
+            Os::Linux,
+            true,
+            MouseButton::Middle,
+            MouseButtonState::Down
+        ));
+        assert!(!tray_click_toggles_panel(
+            Os::Linux,
+            true,
+            MouseButton::Right,
+            MouseButtonState::Up
+        ));
+        assert!(!tray_click_toggles_panel(
+            Os::Linux,
+            true,
+            MouseButton::Right,
+            MouseButtonState::Down
+        ));
+        // AppIndicator never delivers clicks; macOS keeps menu-on-left-click.
+        assert!(!tray_click_toggles_panel(
+            Os::Linux,
+            false,
+            MouseButton::Left,
+            MouseButtonState::Up
+        ));
+        assert!(!tray_click_toggles_panel(
+            Os::MacOs,
+            true,
+            MouseButton::Left,
+            MouseButtonState::Up
+        ));
+        assert!(!tray_click_toggles_panel(
+            Os::MacOs,
+            false,
+            MouseButton::Left,
+            MouseButtonState::Up
+        ));
+    }
+
+    #[test]
+    fn compiled_tray_activation_matches_this_build() {
+        assert_eq!(
+            tray_left_click_toggles(),
+            cfg!(all(target_os = "linux", feature = "ksni-tray"))
+        );
     }
 }

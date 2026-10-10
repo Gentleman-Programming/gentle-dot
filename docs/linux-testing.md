@@ -143,6 +143,8 @@ gnome-extensions enable ubuntu-appindicators@ubuntu.com
 - Hovering over the icon may show "Gentle Dot — Ready". Many Linux panels do not show tray tooltips, so this is not a failure.
 - While the assistant answers (step 11), the icon's outer petals turn dashed. When it waits for your answer, an amber dot appears on the icon.
 
+**Opt-in StatusNotifier build only** (default builds behave as above): with `ksni-tray` enabled, left-clicking the icon toggles the panel instead of opening the menu; right-click still opens the menu.
+
 ### 9. Toggle shortcut
 
 **GNOME:** open Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts → Add Shortcut:

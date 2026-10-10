@@ -12,6 +12,15 @@ crate-type = ["rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# Opt-in StatusNotifier (KSNI) tray backend on Linux, for desktops whose tray
+# speaks StatusNotifier but not AppIndicator. tray-icon 0.25.1 selects KSNI at
+# compile time whenever both backends are enabled, so this stays behind `ksni-tray`:
+# default builds keep the AppIndicator backend everywhere, and macOS is unaffected
+# (its backend does not depend on these features). Build with
+# `--features ksni-tray`; left click then toggles the panel, right click keeps the menu.
+[features]
+ksni-tray = ["dep:tray-icon"]
+
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-global-shortcut = "2"
@@ -58,6 +67,10 @@ core-foundation = "0.10"
 # dependency is already linked by tao on Linux.
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus-secret-service = "4.1"
+# Opt-in StatusNotifier tray backend, Linux only so default and macOS builds never
+# pull it. `ksni-tray` enables this target-scoped optional dependency; elsewhere
+# the feature has no backend effect and menu behavior is unchanged.
+tray-icon = { version = "=0.25.1", default-features = false, features = ["ksni"], optional = true }
 
 # Debug builds encode screenshots fast too (S24.8): `image` holds the JPEG encoder and `zune-*`
 # decode JPEGs (tests). The encoder is generic, so most of its code is compiled in this crate,
