@@ -84,21 +84,58 @@ pub fn process_started(_pid: u32) -> Option<u64> {
     None
 }
 
-/// Records the daemon just spawned as `pid` (private, 0600).
+/// Records the daemon just spawned as `pid` (private, 0600). A new file in the same folder renamed
+/// over the pid file: never written through a symlink there, and never seen half written.
 pub fn record_launch(data_dir: &Path, pid: u32) -> io::Result<()> {
     let started = process_started(pid).ok_or_else(|| io::Error::other("the assistant is not running"))?;
-    let mut file = OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(data_dir.join(PID_FILE))?;
-    file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    use std::io::Write;
-    writeln!(file, "{pid} {started}")
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let temp = data_dir.join(format!(".{PID_FILE}.{}.{nanos}", std::process::id()));
+    let written = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&temp)
+        .and_then(|mut file| {
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            use std::io::Write;
+            writeln!(file, "{pid} {started}")
+        })
+        .and_then(|()| fs::rename(&temp, data_dir.join(PID_FILE)));
+    if written.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    written
 }
 
-/// The daemon the pid file names, if it holds a launch.
+/// A pid file holds `<pid> <start time>`, far below this.
+const PID_FILE_MAX: u64 = 64;
+
+/// Whether a pid read from the pid file may name a daemon to signal: never this app, its parent,
+/// init, or the kernel.
+fn may_be_daemon(pid: u32) -> bool {
+    // SAFETY: getppid(2) has no preconditions.
+    let parent = u32::try_from(unsafe { libc::getppid() }).ok();
+    pid > 1 && pid != std::process::id() && Some(pid) != parent
+}
+
+/// The daemon the pid file names, if it holds a launch. Only a small regular file is read: a
+/// symlink, a FIFO, or anything else there is ignored (opened without following or blocking).
 pub fn recorded_launch(data_dir: &Path) -> Option<Launched> {
-    let text = fs::read_to_string(data_dir.join(PID_FILE)).ok()?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(data_dir.join(PID_FILE))
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.file_type().is_file() || meta.len() > PID_FILE_MAX {
+        return None;
+    }
+    let mut text = String::new();
+    io::Read::read_to_string(&mut io::Read::take(file, PID_FILE_MAX), &mut text).ok()?;
     let mut parts = text.split_whitespace();
     let launched = Launched { pid: parts.next()?.parse().ok()?, started: parts.next()?.parse().ok()? };
-    (parts.next().is_none() && launched.pid > 1).then_some(launched)
+    (parts.next().is_none() && may_be_daemon(launched.pid)).then_some(launched)
 }
 
 /// The recorded daemon, while that same process still runs (a reused pid has another start time).
@@ -119,6 +156,9 @@ fn stop_orphan(launch: Launched, grace: Duration) {
     let Ok(pid) = libc::pid_t::try_from(launch.pid) else {
         return;
     };
+    if !may_be_daemon(launch.pid) {
+        return;
+    }
     let same = || process_started(launch.pid) == Some(launch.started);
     for (signal, wait) in [(libc::SIGTERM, grace), (libc::SIGKILL, Duration::from_secs(2))] {
         if !same() {
@@ -346,6 +386,8 @@ pub struct Daemon {
     handler: Option<Arc<dyn Handler>>,
     /// Why the last start neither started nor attached ([`foreign_daemon_message`]).
     refused: Mutex<Option<String>>,
+    /// Told each time a start leaves a daemon the app may use answering.
+    ready: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Replaces [`launch_spec`] (tests).
     launch: Option<LaunchSpec>,
     /// Replaces the `/health` probe (tests).
@@ -363,6 +405,7 @@ impl Daemon {
             channel: Mutex::new(None),
             handler: None,
             refused: Mutex::new(None),
+            ready: None,
             launch: None,
             #[cfg(test)]
             health: None,
@@ -372,6 +415,13 @@ impl Daemon {
     /// Every daemon this app spawns gets a channel served by `handler`.
     pub fn with_channel(mut self, handler: Arc<dyn Handler>) -> Self {
         self.handler = Some(handler);
+        self
+    }
+
+    /// `ready` runs each time a start (at launch or from Restart assistant) leaves a daemon the app
+    /// may use answering, so a window that was refused can connect without a reopen.
+    pub fn on_ready(mut self, ready: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.ready = Some(ready);
         self
     }
 
@@ -441,8 +491,16 @@ impl Daemon {
     }
 
     /// Spawns the daemon, or waits for the one this app spawned; see [`start_plan`] for a daemon
-    /// already on the port. Blocking: call off the main thread.
+    /// already on the port. Tells [`Daemon::on_ready`] once it answers. Blocking: call off the main thread.
     pub fn ensure_running(&self, timeout: Duration) -> Result<(), String> {
+        self.start(timeout)?;
+        if let Some(ready) = &self.ready {
+            ready();
+        }
+        Ok(())
+    }
+
+    fn start(&self, timeout: Duration) -> Result<(), String> {
         let wants_channel = self.handler.is_some();
         let owns_child = self.owns_running();
         let orphan = if wants_channel && !owns_child { live_orphan(&self.data_dir) } else { None };
@@ -852,12 +910,141 @@ done"#;
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(live_orphan(&dir), None);
-        // Another live process under that number (here this test's own) is never taken for it.
-        let me = std::process::id();
-        fs::write(dir.join(PID_FILE), format!("{me} {}\n", process_started(me).unwrap() + 1)).unwrap();
+        // Another live process under that number (a later start time) is never taken for it.
+        let mut other = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let started = process_started(other.id()).unwrap();
+        fs::write(dir.join(PID_FILE), format!("{} {}\n", other.id(), started + 1)).unwrap();
         assert_eq!(live_orphan(&dir), None);
+        other.kill().unwrap();
+        other.wait().unwrap();
         fs::write(dir.join(PID_FILE), "not a launch\n").unwrap();
         assert_eq!(recorded_launch(&dir), None);
+    }
+
+    /// A pid file naming `pid` with its real start time, as `record_launch` would write it.
+    fn launch_line(pid: u32) -> String {
+        format!("{pid} {}\n", process_started(pid).expect("a live process"))
+    }
+
+    #[test]
+    fn the_pid_file_never_names_the_app_its_parent_or_the_system() {
+        let dir = scratch_dir("pid-self");
+        fs::create_dir_all(&dir).unwrap();
+        let me = std::process::id();
+        // SAFETY: getppid(2) has no preconditions.
+        let parent = u32::try_from(unsafe { libc::getppid() }).unwrap();
+        for pid in [me, parent] {
+            fs::write(dir.join(PID_FILE), launch_line(pid)).unwrap();
+            assert_eq!(recorded_launch(&dir), None, "pid {pid}");
+            assert_eq!(live_orphan(&dir), None, "pid {pid}");
+        }
+        for pid in [0, 1] {
+            fs::write(dir.join(PID_FILE), format!("{pid} 1\n")).unwrap();
+            assert_eq!(recorded_launch(&dir), None, "pid {pid}");
+        }
+    }
+
+    #[test]
+    fn a_pid_file_that_is_a_symlink_is_not_read_and_its_target_is_untouched() {
+        let dir = scratch_dir("pid-symlink-read");
+        fs::create_dir_all(&dir).unwrap();
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let target = dir.join("elsewhere");
+        let line = launch_line(child.id());
+        fs::write(&target, &line).unwrap();
+        std::os::unix::fs::symlink(&target, dir.join(PID_FILE)).unwrap();
+        assert_eq!(recorded_launch(&dir), None);
+        assert_eq!(live_orphan(&dir), None);
+        assert_eq!(fs::read_to_string(&target).unwrap(), line);
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn recording_a_launch_never_writes_through_a_symlink() {
+        let dir = scratch_dir("pid-symlink-write");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("elsewhere");
+        fs::write(&target, "keep me\n").unwrap();
+        std::os::unix::fs::symlink(&target, dir.join(PID_FILE)).unwrap();
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        record_launch(&dir, child.id()).unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep me\n");
+        let file = fs::symlink_metadata(dir.join(PID_FILE)).unwrap();
+        assert!(file.file_type().is_file(), "{:?}", file.file_type());
+        assert_eq!(file.permissions().mode() & 0o777, 0o600);
+        assert_eq!(recorded_launch(&dir).map(|launch| launch.pid), Some(child.id()));
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn recording_a_launch_replaces_the_pid_file_whole() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = scratch_dir("pid-atomic");
+        fs::create_dir_all(&dir).unwrap();
+        let mut first = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let mut second = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        record_launch(&dir, first.id()).unwrap();
+        let before = fs::metadata(dir.join(PID_FILE)).unwrap().ino();
+        record_launch(&dir, second.id()).unwrap();
+        // A new file renamed over the old one: a reader sees one launch or the other, never half.
+        assert_ne!(fs::metadata(dir.join(PID_FILE)).unwrap().ino(), before);
+        assert_eq!(fs::read_to_string(dir.join(PID_FILE)).unwrap(), launch_line(second.id()));
+        // Nothing else is left in the folder.
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        for child in [&mut first, &mut second] {
+            child.kill().unwrap();
+            child.wait().unwrap();
+        }
+    }
+
+    #[test]
+    fn a_pid_file_that_is_not_a_small_regular_file_is_not_read() {
+        let dir = scratch_dir("pid-odd");
+        fs::create_dir_all(&dir).unwrap();
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        // A real launch followed by padding past any launch's size.
+        fs::write(dir.join(PID_FILE), format!("{}{}", launch_line(child.id()), " ".repeat(4096))).unwrap();
+        assert_eq!(live_orphan(&dir), None);
+        fs::remove_file(dir.join(PID_FILE)).unwrap();
+        // A FIFO would block a plain open; it is refused at once.
+        let fifo = std::ffi::CString::new(dir.join(PID_FILE).as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: mkfifo(2) on a path we own, from a valid C string.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert_eq!(live_orphan(&dir), None);
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn a_refused_app_announces_its_assistant_once_a_restart_starts_it() {
+        let dir = scratch_dir("ready-after-restart");
+        // Another daemon answers on the port until the user stops it; then only this app's own does.
+        let foreign = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let health = {
+            let (dir, foreign) = (dir.clone(), foreign.clone());
+            Arc::new(move || foreign.load(std::sync::atomic::Ordering::SeqCst) || live_orphan(&dir).is_some())
+        };
+        let ready = Arc::new(Mutex::new(0usize));
+        let daemon = {
+            let ready = ready.clone();
+            Daemon::new(1, dir.clone(), None)
+                .with_channel(Arc::new(Opened::default()))
+                .with_launch(sh_spec(ECHO))
+                .with_health(health)
+                .on_ready(Arc::new(move || *ready.lock().unwrap() += 1))
+        };
+        assert_eq!(daemon.ensure_running(Duration::from_secs(5)), Err(foreign_daemon_message(1)));
+        assert_eq!(*ready.lock().unwrap(), 0);
+        // The user follows the refusal's exit: stops the other one, then "Restart assistant".
+        foreign.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(daemon.restart(Duration::from_secs(5)), RestartOutcome::Restarted);
+        assert_eq!(*ready.lock().unwrap(), 1);
+        // What the panel asks next now succeeds instead of repeating the refusal.
+        assert_eq!(daemon.wait_ready(Duration::from_millis(300)), Ok(()));
+        assert!(daemon.channel().is_some());
+        daemon.stop();
     }
 
     #[test]

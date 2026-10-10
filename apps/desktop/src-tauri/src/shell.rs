@@ -47,6 +47,10 @@ const EDGE_MARGIN: i32 = 12;
 const PANEL_GAP: i32 = 8;
 const DRAG_SETTLE: Duration = Duration::from_millis(300);
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(20);
+/// Sent to the Dot and the panel each time the assistant this app may use starts answering (at
+/// launch or after Restart assistant): a window that was refused, or whose `connection_info` gave up
+/// first, asks again and connects without a reopen (S35.2).
+const ASSISTANT_READY: &str = "dot://assistant-ready";
 
 struct Shell {
     config: DesktopConfig,
@@ -170,6 +174,8 @@ async fn connector_command(app: AppHandle, client_id: String, message: serde_jso
 
 /// Waits until the daemon this app launched answers `/health`, then returns its URLs and token.
 /// A daemon it did not launch is never used (S35.2): the answer is then the reason and its exit.
+/// Replacing an earlier app's daemon can take longer than this waits (up to 17 s before the spawn);
+/// the windows then connect on [`ASSISTANT_READY`].
 #[tauri::command]
 async fn connection_info(app: AppHandle) -> CommandResult<ConnectionInfo> {
     let shell = app.state::<Shell>();
@@ -783,8 +789,15 @@ pub fn run() {
             };
             app.manage(computer);
             let runtime_dir = daemon::runtime_dir(|key| std::env::var(key).ok(), app.path().resource_dir().ok());
+            let announcer = handle.clone();
             let daemon = Arc::new(
-                Daemon::new(config.port, config.data_dir.clone(), runtime_dir).with_channel(Arc::new(service)),
+                Daemon::new(config.port, config.data_dir.clone(), runtime_dir)
+                    .with_channel(Arc::new(service))
+                    .on_ready(Arc::new(move || {
+                        if let Err(error) = announcer.emit(ASSISTANT_READY, ()) {
+                            eprintln!("gentle-dot: cannot tell the windows the assistant is ready: {error}");
+                        }
+                    })),
             );
             let (starter, notifier) = (daemon.clone(), handle.clone());
             thread::spawn(move || {
@@ -911,6 +924,15 @@ mod tests {
                 .collect();
             assert_eq!(windows, ["panel"], "{permission}");
         }
+    }
+
+    #[test]
+    fn the_windows_listen_for_the_assistant_ready_event() {
+        let desktop = include_str!("../../../../packages/ui/src/desktop.ts");
+        let app = include_str!("../../../../packages/ui/src/App.tsx");
+        let quoted = format!("\"{ASSISTANT_READY}\"");
+        assert!(desktop.contains(&quoted), "desktop.ts does not accept {quoted}");
+        assert!(app.contains(&format!("onDesktopEvent({quoted}")), "App.tsx does not listen for {quoted}");
     }
 
     #[test]

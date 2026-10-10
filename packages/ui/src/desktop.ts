@@ -44,8 +44,12 @@ export async function startDragging(): Promise<void> {
 	await getCurrentWindow().startDragging();
 }
 
+/**
+ * `dot://assistant-ready`: the app's assistant just started answering (at launch or after Restart
+ * assistant), so a window it refused can ask `connection_info` again (S35.2).
+ */
 export async function onDesktopEvent(
-	name: "dot://new-conversation" | "dot://panel-shown",
+	name: "dot://new-conversation" | "dot://panel-shown" | "dot://assistant-ready",
 	handler: () => void,
 ) {
 	if (!inDesktop()) return () => {};

@@ -105,12 +105,33 @@ function Assistant({ surface }: { surface: Surface }) {
 
 	useEffect(() => {
 		if (inDesktop()) {
-			connectionInfo().then(setInfo, (error: unknown) => {
-				const reason = typeof error === "string" ? error : error instanceof Error ? error.message : "";
-				if (reason) setUnreachable(reason);
-				else setMissingToken(true);
-			});
-			return;
+			let live = true;
+			const connect = () =>
+				connectionInfo().then(
+					(next) => {
+						if (!live) return;
+						// The same assistant keeps its connection; only a new one replaces it.
+						setInfo((current) =>
+							current?.url === next.url && current.token === next.token ? current : next,
+						);
+						setUnreachable(undefined);
+						setMissingToken(false);
+					},
+					(error: unknown) => {
+						if (!live) return;
+						const reason = typeof error === "string" ? error : error instanceof Error ? error.message : "";
+						if (reason) setUnreachable(reason);
+						else setMissingToken(true);
+					},
+				);
+			// A refused or timed-out window recovers without a reopen: the app reports its assistant
+			// ready after Restart assistant, or after a start slower than `connection_info` waits (S35.2).
+			const ready = onDesktopEvent("dot://assistant-ready", () => void connect());
+			void connect();
+			return () => {
+				live = false;
+				void ready.then((unlisten) => unlisten());
+			};
 		}
 		const found = browserConnection();
 		if (found) setInfo(found);
