@@ -66,7 +66,8 @@ async function registerEngineProviders(runtime: {
 	registerNativeProvider(provider: never): void;
 }): Promise<void> {
 	const { createJiti } = await import("jiti");
-	const jiti = createJiti(import.meta.url);
+	// No transpile cache: in the packaged app the default one lands inside the signed bundle (S35.1).
+	const jiti = createJiti(import.meta.url, { fsCache: false });
 	const { createNanProviderConfig } = await jiti.import<{
 		createNanProviderConfig: () => { id: string };
 	}>("gentle-pi/lib/nan-provider.ts");
