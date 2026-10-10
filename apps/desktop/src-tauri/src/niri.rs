@@ -1,11 +1,280 @@
-//! Linux-only Niri pure window-selection/geometry helpers.
+//! Linux-only Niri pure window-selection/geometry helpers plus the bounded
+//! socket-transport scaffolding.
 //!
-//! This first Niri slice owns no socket, transport, action, or shell wiring:
-//! it selects the single own window by exact PID and title, decodes floating
-//! geometry, and associates compact spots with outputs. Transport, actions,
-//! and mode policy arrive in later slices.
+//! Selection and geometry stay pure: they select the single own window by
+//! exact PID and title, decode floating geometry, and associate compact
+//! spots with outputs. The transport below dials one request line over a
+//! nonblocking `AF_UNIX` socket and decodes one `{"Ok":Response} |
+//! {"Err":string}` reply line, with a single aggregate deadline covering
+//! connect, write, and read, and a 1 MiB reply cap. It has no production
+//! callers yet: tests use owned temporary fake sockets only, never a live
+//! compositor. Actions and mode policy arrive in later slices.
 
 use serde_json::Value;
+use std::io::{self, Read, Write};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+/// Single-line wire requests.
+pub const WINDOWS_REQUEST: &str = "\"Windows\"";
+pub const WORKSPACES_REQUEST: &str = "\"Workspaces\"";
+/// Cap for one reply line, newline included.
+pub const REPLY_CAP: usize = 1024 * 1024;
+
+fn invalid(message: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+fn timed_out() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, "niri: operation deadline exceeded")
+}
+
+/// Waits for `events` on `fd` until `end` (total deadline, never per-call
+/// reset); `EINTR` retries against the same deadline. Returns the ready mask:
+/// `POLLNVAL`/`POLLERR` fail bounded, while `POLLHUP` is returned so the
+/// caller can still drain a buffered final reply instead of dropping it.
+fn poll_ready(fd: libc::c_int, events: libc::c_short, end: Instant) -> io::Result<libc::c_short> {
+    loop {
+        let left = end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(timed_out());
+        }
+        let ms = left.as_millis().min(i32::MAX as u128) as libc::c_int;
+        let mut waiting = libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut waiting, 1, ms) };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if ready == 0 {
+            return Err(timed_out());
+        }
+        let hit = waiting.revents;
+        if hit & libc::POLLNVAL != 0 {
+            return Err(invalid("niri: invalid socket"));
+        }
+        if hit & libc::POLLERR != 0 {
+            return Err(invalid("niri: socket error"));
+        }
+        return Ok(hit);
+    }
+}
+
+fn set_nonblocking(stream: &UnixStream) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let fd = stream.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Non-blocking `AF_UNIX` connect bounded by the total deadline `end`.
+/// `unsafe` is confined here: the socket is created with `SOCK_NONBLOCK` /
+/// `SOCK_CLOEXEC` and wrapped at once, so every later path drops/closes it;
+/// `sun_path` length plus path-byte/NUL guards run before any raw pointer or
+/// `sockaddr` use. `std::UnixStream::connect` is not used: it blocks with no
+/// connect deadline.
+fn connect(path: &Path, end: Instant) -> io::Result<UnixStream> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    let bytes = path.as_os_str().as_bytes();
+    let kind = libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC;
+    let fd = unsafe { libc::socket(libc::AF_UNIX, kind, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Wrapped at once: every path below drops/closes the socket.
+    let stream = unsafe { UnixStream::from_raw_fd(fd) };
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    if bytes.is_empty()
+        || bytes.contains(&0)
+        || bytes.len() + 1 > std::mem::size_of_val(&addr.sun_path)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "niri: bad socket path",
+        ));
+    }
+    for (slot, byte) in addr.sun_path.iter_mut().zip(bytes.iter()) {
+        *slot = *byte as libc::c_char;
+    }
+    // Trailing NUL comes from zeroing; length covers family + bytes + NUL.
+    let len = (std::mem::size_of::<libc::sa_family_t>() + bytes.len() + 1) as libc::socklen_t;
+    let raw = stream.as_raw_fd();
+    if unsafe { libc::connect(raw, &addr as *const _ as *const libc::sockaddr, len) } != 0 {
+        let error = io::Error::last_os_error();
+        let progress = error.raw_os_error() == Some(libc::EINPROGRESS)
+            || error.kind() == io::ErrorKind::WouldBlock;
+        if !progress {
+            return Err(error);
+        }
+        poll_ready(raw, libc::POLLOUT, end)?;
+        let mut failed: libc::c_int = 0;
+        let mut option_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let option = unsafe {
+            libc::getsockopt(
+                raw,
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                &mut failed as *mut _ as *mut libc::c_void,
+                &mut option_len,
+            )
+        };
+        if option != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if failed != 0 {
+            return Err(io::Error::from_raw_os_error(failed));
+        }
+    }
+    Ok(stream)
+}
+
+fn write_all(stream: &mut UnixStream, buf: &[u8], end: Instant) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let fd = stream.as_raw_fd();
+    let mut done = 0;
+    while done < buf.len() {
+        // Checked per loop, not only in the poll timeout: a peer that keeps
+        // us writable must not stretch the write past the total budget.
+        if Instant::now() >= end {
+            return Err(timed_out());
+        }
+        poll_ready(fd, libc::POLLOUT, end)?;
+        match stream.write(&buf[done..]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "niri: socket closed",
+                ))
+            }
+            Ok(n) => done += n,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn read_line(stream: &mut UnixStream, end: Instant) -> io::Result<String> {
+    use std::os::unix::io::AsRawFd;
+    let fd = stream.as_raw_fd();
+    let mut buf = Vec::<u8>::new();
+    loop {
+        // Checked per loop, not only in the poll timeout: continuous data
+        // without a newline must not stretch the read past the total budget.
+        if Instant::now() >= end {
+            return Err(timed_out());
+        }
+        if let Some(end_of_line) = buf.iter().position(|byte| *byte == b'\n') {
+            buf.truncate(end_of_line);
+            if buf.len() > REPLY_CAP {
+                return Err(invalid("niri: reply too large"));
+            }
+            return String::from_utf8(buf).map_err(invalid);
+        }
+        if buf.len() > REPLY_CAP {
+            return Err(invalid("niri: reply too large"));
+        }
+        // A HUP mask still falls through to `read`: buffered bytes that
+        // complete the reply are kept, and only a newline-less EOF errors.
+        poll_ready(fd, libc::POLLIN, end)?;
+        let mut chunk = [0u8; 8192];
+        match stream.read(&mut chunk) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "niri: truncated reply",
+                ));
+            }
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// One request line over an already-connected socket, bounded by `timeout`
+/// total for write+read. Takes ownership so the socket closes on all paths;
+/// tests use this with a fake socket pair, never a live compositor.
+/// `pub` for the upcoming action slices; still no production callers.
+pub fn request_on(stream: UnixStream, request: &str, timeout: Duration) -> io::Result<Value> {
+    if request.len() > REPLY_CAP {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "niri: request too large",
+        ));
+    }
+    let end = Instant::now() + timeout;
+    set_nonblocking(&stream)?;
+    let mut stream = stream;
+    let mut line = String::with_capacity(request.len() + 1);
+    line.push_str(request.trim_end_matches('\n'));
+    line.push('\n');
+    write_all(&mut stream, line.as_bytes(), end)?;
+    decode_reply(&read_line(&mut stream, end)?)
+}
+
+/// Bounded client built from an explicit socket path and a total operation
+/// deadline (connect+write+read share it, never reset per call). A fresh
+/// connection serves every request; callers making several queries in one
+/// mode operation must budget that aggregate explicitly.
+pub struct Client {
+    path: PathBuf,
+    timeout: Duration,
+}
+
+impl Client {
+    pub fn new(path: &Path, timeout: Duration) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            timeout,
+        }
+    }
+
+    pub fn request(&self, request: &str) -> io::Result<Value> {
+        let end = Instant::now() + self.timeout;
+        let stream = connect(&self.path, end)?;
+        request_on(
+            stream,
+            request,
+            end.saturating_duration_since(Instant::now()),
+        )
+    }
+}
+
+/// Decodes one reply line, failing closed: wire `Err` and unexpected shapes
+/// are errors, never defaulted values.
+pub fn decode_reply(line: &str) -> io::Result<Value> {
+    let reply: Value = serde_json::from_str(line).map_err(invalid)?;
+    match &reply {
+        Value::Object(fields) => {
+            if let Some(ok) = fields.get("Ok") {
+                return Ok(ok.clone());
+            }
+            let detail = fields
+                .get("Err")
+                .and_then(Value::as_str)
+                .unwrap_or("request failed");
+            Err(invalid(format!("niri: {detail}")))
+        }
+        _ => Err(invalid("niri: unexpected reply shape")),
+    }
+}
 
 /// A window owned by this app: its Niri id, tiling/floating mode, size, the
 /// logical `tile_pos_in_workspace_view` (`None` may occur, e.g. during an
@@ -126,6 +395,8 @@ pub fn restore_delta(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::net::UnixListener;
+    use std::thread;
 
     fn win(id: u64, pid: u64, title: &str, floating: bool, pos: Value) -> Value {
         serde_json::json!({"id": id, "pid": pid, "title": title, "workspace_id": 7,
@@ -215,5 +486,154 @@ mod tests {
         assert_eq!(workspace_output(&workspaces, Some(8)), None);
         assert_eq!(workspace_output(&workspaces, Some(99)), None);
         assert_eq!(workspace_output(&workspaces, None), None);
+    }
+
+    #[test]
+    fn wire_errors_fail_closed() {
+        assert!(decode_reply(r#"{"Err":"no such window"}"#).is_err());
+        let ok = decode_reply(r#"{"Ok":{"Windows":[]}}"#).unwrap();
+        assert!(ok["Windows"].is_array());
+        assert!(decode_reply("not json").is_err());
+        assert!(decode_reply(r#"{"Wat":{}}"#).is_err());
+    }
+
+    /// Private fake-socket lifecycle: unique path per test (pid + name, so
+    /// parallel tests never share), removed before bind and on drop. This
+    /// temp socket is the sole allowed test artifact; nothing else is written.
+    struct TempSocket {
+        path: std::path::PathBuf,
+    }
+
+    impl TempSocket {
+        fn named(name: &str) -> Self {
+            let file = format!("niri-s1b-{}-{name}.sock", std::process::id());
+            let path = std::env::temp_dir().join(file);
+            let _ = std::fs::remove_file(&path);
+            Self { path }
+        }
+    }
+
+    impl Drop for TempSocket {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    fn reply_line(body: &[u8]) -> Vec<u8> {
+        body.iter().chain(b"\n".iter()).copied().collect()
+    }
+
+    /// Fake Niri over a socket pair: one reply for one request line. Socket
+    /// timeouts on both ends bound every test even if either side stalls.
+    fn fake_niri(reply: Vec<u8>, timeout: Duration) -> io::Result<Value> {
+        let (client, mut server) = UnixStream::pair()?;
+        server.set_read_timeout(Some(Duration::from_secs(2)))?;
+        server.set_write_timeout(Some(Duration::from_secs(2)))?;
+        let worker = thread::spawn(move || {
+            let mut byte = [0u8; 1];
+            loop {
+                match server.read(&mut byte) {
+                    Ok(0) => break,
+                    Ok(_) if byte[0] == b'\n' => break,
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            let _ = server.write_all(&reply);
+        });
+        let outcome = request_on(client, WINDOWS_REQUEST, timeout);
+        worker.join().unwrap();
+        outcome
+    }
+
+    #[test]
+    fn transport_round_trips_one_reply_line() {
+        let ok = fake_niri(
+            reply_line(br#"{"Ok":{"Windows":[]}}"#),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!(ok["Windows"].is_array());
+        assert!(fake_niri(reply_line(br#"{"Err":"boom"}"#), Duration::from_secs(2)).is_err());
+    }
+
+    #[test]
+    fn transport_rejects_truncated_and_oversized_replies() {
+        // Closed mid-line: a truncated reply, never a partial value.
+        assert!(fake_niri(b"{\"Ok\":".to_vec(), Duration::from_secs(2)).is_err());
+        // Past the 1 MiB cap with no newline: rejected even as the sender stalls on a full buffer.
+        assert!(fake_niri(vec![b'x'; REPLY_CAP + 16], Duration::from_secs(5)).is_err());
+    }
+
+    #[test]
+    fn transport_times_out_on_a_silent_socket() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let worker = thread::spawn(move || {
+            let mut byte = [0u8; 1];
+            while let Ok(n) = server.read(&mut byte) {
+                if n == 0 || byte[0] == b'\n' {
+                    break;
+                }
+            }
+            // Silent past the client deadline, then close so the join stays bounded.
+            thread::sleep(Duration::from_secs(1));
+        });
+        let error = request_on(client, WINDOWS_REQUEST, Duration::from_millis(200)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn connect_serves_a_request_over_a_real_listener() {
+        let socket = TempSocket::named("ok");
+        let listener = UnixListener::bind(&socket.path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let worker = thread::spawn(move || {
+            // Bounded accept: the join must not hang even if the client never dials.
+            let start = Instant::now();
+            loop {
+                match listener.accept() {
+                    Ok((mut peer, _)) => {
+                        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                        let mut byte = [0u8; 1];
+                        loop {
+                            match peer.read(&mut byte) {
+                                Ok(_) if byte[0] == b'\n' => break,
+                                Ok(_) => {}
+                                Err(_) => break,
+                            }
+                        }
+                        let _ = peer.write_all(&reply_line(br#"{"Ok":{"Windows":[]}}"#));
+                        break;
+                    }
+                    Err(_) if start.elapsed() < Duration::from_secs(5) => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let payload = Client::new(&socket.path, Duration::from_secs(2))
+            .request(WINDOWS_REQUEST)
+            .unwrap();
+        assert!(payload["Windows"].is_array());
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn connect_rejects_bad_or_missing_socket_paths() {
+        let missing = TempSocket::named("absent");
+        let dial = |path: &std::path::Path| {
+            Client::new(path, Duration::from_secs(2)).request(WINDOWS_REQUEST)
+        };
+        // Nothing listening: fast refusal through the real connect path, never a hang.
+        assert!(dial(&missing.path).is_err());
+        assert!(dial(std::path::Path::new("")).is_err());
+        assert!(dial(std::path::Path::new("niri-\0-sock")).is_err());
+        let long = format!("{}/{}", std::env::temp_dir().display(), "s".repeat(200));
+        assert!(dial(std::path::Path::new(&long)).is_err());
     }
 }
