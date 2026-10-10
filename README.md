@@ -9,6 +9,10 @@
 
 <p><strong>A personal assistant that lives on your desktop, remembers what matters, and can use your Mac for you.</strong></p>
 
+
+https://github.com/user-attachments/assets/0c0f4d2d-7e0e-4c35-961a-8816d95a390c
+
+
 <p>
 <img src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Web-D7A0B8?style=for-the-badge&labelColor=1A1218" alt="Platform">
 <img src="https://img.shields.io/badge/status-early%20preview-F095C8?style=for-the-badge&labelColor=1A1218" alt="Status: early preview">
