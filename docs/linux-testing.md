@@ -211,6 +211,14 @@ Turn on **Launch at login** in the tray menu, log out, and log back in.
 
 **Expected:** the rose appears after login. Turn the option off again afterwards.
 
+### 17. Connector secrets and approvals (optional, needs an account for one connector)
+
+Open **Connectors**, connect one that signs in with your account (for example Notion), and finish the sign-in. Then open **Passwords and Keys** (Seahorse; on KDE, KWalletManager) and look in the **Login** keyring.
+
+**Expected:** an item whose name starts with "Gentle Dot connector: connector/". Then ask the assistant to do something that sends, for example "create a Notion page called Gentle Dot test". A Gentle Dot dialog (not a card in the chat) asks "Allow Notion to …?" with the full action, and **Decline** is the default button. Choose **Decline**: nothing is created.
+
+The keyring keeps these items encrypted on disk, but while it is unlocked any program running as you can read them (see docs/install.md, Linux). If your session has no keyring, the connector does not run and `~/.gentle-dot/daemon.log` says `no Secret Service in this desktop session`; note that in the report.
+
 ## Reporting Wayland limitations
 
 Some things Wayland does not allow at all, and we already work around them: apps cannot place their own windows, stay on top by themselves, or register global shortcuts. If you notice something else that does not work the same way as on other systems, write in the report:
@@ -227,6 +235,7 @@ For a quick comparison on GNOME, you can start the app as a native Wayland clien
 | Symptom | Try |
 |---|---|
 | The panel or rose is blank, or the app prints `Failed to create GBM buffer` (often with NVIDIA) | Quit the app, then start it with `WEBKIT_DISABLE_DMABUF_RENDERER=1` before the app command, for example `WEBKIT_DISABLE_DMABUF_RENDERER=1 gentle-dot`. Note in the report whether it helped. |
+| A connector that needs a sign-in or token never runs, and `daemon.log` says `no Secret Service in this desktop session` | Your session has no keyring. Install `gnome-keyring` (or KWallet) and make sure it runs and is unlocked in your session, then quit Gentle Dot from the tray, open it again, and try the connector again. |
 | The rose stays dimmed | Look at `~/.gentle-dot/daemon.log` and attach it (see below). |
 | No tray icon on GNOME | Check that the AppIndicator extension is on: `gnome-extensions list --enabled` |
 | `gentle-dot: command not found` | Use the full path: `/usr/bin/gentle-dot` with the package, `~/.local/bin/gentle-dot` from source |
@@ -265,6 +274,7 @@ Source version:               (from source: output of git rev-parse --short HEAD
 | 14| Connectors                 |                                |       |
 | 15| Quit and relaunch          |                                |       |
 | 16| Launch at login (optional) |                                |       |
+| 17| Connector secrets          |                                |       |
 
 Wayland limitations noticed:
 

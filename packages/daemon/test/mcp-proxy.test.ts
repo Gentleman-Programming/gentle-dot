@@ -22,6 +22,7 @@ import {
 	type ProxiedConnector,
 	type UpstreamCredentials,
 } from "../src/mcp-proxy.ts";
+import { SecretsUnavailableError } from "../src/secret-source.ts";
 import { tempDir, waitFor } from "./helpers.ts";
 
 const FAKE_SERVER = fileURLToPath(new URL("./fixtures/fake-mcp-server.ts", import.meta.url));
@@ -377,6 +378,25 @@ describe("MCP proxy: upstream connections", () => {
 		expect(await client.callTool("search", {})).toMatchObject({ content: [{ text: "ran search" }] });
 		expect(upstream.state.connects).toBe(2);
 		expect(logs.join("\n")).not.toContain("Bearer");
+	});
+
+	it("tells the model why the secret store is unavailable and keeps the reason in the log", async () => {
+		const { open, upstream, logs } = await setup({
+			credentials: async () => {
+				throw new SecretsUnavailableError(
+					"The secret store is unavailable: no Secret Service in this desktop session (bus); install and unlock a keyring such as GNOME Keyring or KWallet",
+				);
+			},
+		});
+		const client = await open();
+		const failed = await rpcError(client.callTool("search", {}));
+		expect(failed.message).toBe(
+			"The secret store is unavailable: no Secret Service in this desktop session (bus); install and unlock a keyring such as GNOME Keyring or KWallet",
+		);
+		expect(upstream.state.connects).toBe(0);
+		expect(logs).toContain(
+			"connector notes cannot get its secrets: The secret store is unavailable: no Secret Service in this desktop session (bus); install and unlock a keyring such as GNOME Keyring or KWallet",
+		);
 	});
 
 	it("closes a connector's upstream when it is removed, turned off, or its server changed, and all of them on close", async () => {

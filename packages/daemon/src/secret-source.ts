@@ -12,6 +12,12 @@ import { APPROVAL_WAIT_MS, type AppChannel } from "./app-channel.ts";
 /** Why a connector that needs a secret cannot run: the secrets are only in the app's store. */
 export const NO_APP = "Open the Gentle Dot app to use this connector.";
 
+/**
+ * The app's answer when Linux has no usable Secret Service (`StoreError::Unavailable` in `secure_store/linux.rs`).
+ * Other platforms keep their earlier message.
+ */
+const NO_KEYRING = /^the secret store is unavailable: .*Secret Service/;
+
 /** The secret store is not reachable; `message` is safe to show. */
 export class SecretsUnavailableError extends Error {
 	constructor(message = NO_APP) {
@@ -81,7 +87,10 @@ export class AppSecretSource implements SecretSource {
 			return await channel.request(method, params, this.timeoutMs);
 		} catch (error) {
 			if (!channel.connected) throw new SecretsUnavailableError();
-			throw new Error(`The app's secure store refused it: ${(error as Error).message}`);
+			const message = (error as Error).message;
+			// The app's own words for a missing keyring on Linux, safe to show (S25.7).
+			if (NO_KEYRING.test(message)) throw new SecretsUnavailableError(`T${message.slice(1)}`);
+			throw new Error(`The app's secure store refused it: ${message}`);
 		}
 	}
 }
