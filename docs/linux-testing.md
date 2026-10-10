@@ -235,7 +235,7 @@ For a quick comparison on GNOME, you can start the app as a native Wayland clien
 | Symptom | Try |
 |---|---|
 | The panel or rose is blank, or the app prints `Failed to create GBM buffer` (often with NVIDIA) | Quit the app, then start it with `WEBKIT_DISABLE_DMABUF_RENDERER=1` before the app command, for example `WEBKIT_DISABLE_DMABUF_RENDERER=1 gentle-dot`. Note in the report whether it helped. |
-| A connector that needs a sign-in or token never runs, and `daemon.log` says `no Secret Service in this desktop session` | Your session has no keyring. Install `gnome-keyring` (or KWallet) and make sure it runs in your session, then try the connector again. |
+| A connector that needs a sign-in or token never runs, and `daemon.log` says `no Secret Service in this desktop session` | Your session has no keyring. Install `gnome-keyring` (or KWallet) and make sure it runs and is unlocked in your session, then quit Gentle Dot from the tray, open it again, and try the connector again. |
 | The rose stays dimmed | Look at `~/.gentle-dot/daemon.log` and attach it (see below). |
 | No tray icon on GNOME | Check that the AppIndicator extension is on: `gnome-extensions list --enabled` |
 | `gentle-dot: command not found` | Use the full path: `/usr/bin/gentle-dot` with the package, `~/.local/bin/gentle-dot` from source |

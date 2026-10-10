@@ -149,12 +149,16 @@ describe("the app's secret store over its channel", () => {
 		expect((unavailable as Error).message).toBe(
 			"The secret store is unavailable: no Secret Service in this desktop session (DBus error); install and unlock a keyring such as GNOME Keyring or KWallet",
 		);
-		app.failSecrets("the user denied access to the secret store");
-		const refused = await source.get("connector/x").catch((error: unknown) => error);
-		expect(refused).not.toBeInstanceOf(SecretsUnavailableError);
-		expect((refused as Error).message).toBe(
-			"The app's secure store refused it: the user denied access to the secret store",
-		);
+		for (const other of [
+			"the user denied access to the secret store",
+			// macOS: the same Rust variant, with its own words, keeps its earlier message (regression).
+			"the secret store is unavailable: the keychain is locked and cannot ask",
+		]) {
+			app.failSecrets(other);
+			const refused = await source.get("connector/x").catch((error: unknown) => error);
+			expect(refused).not.toBeInstanceOf(SecretsUnavailableError);
+			expect((refused as Error).message).toBe(`The app's secure store refused it: ${other}`);
+		}
 	});
 });
 

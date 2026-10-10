@@ -34,7 +34,7 @@ import {
 } from "@earendil-works/pi-mcp";
 import { McpOAuthAuthorizationRequiredError } from "@earendil-works/pi-mcp/oauth";
 import { type ConnectorMode, isReadOnlyTool } from "./extensions/approval-guard.ts";
-import { SecretsUnavailableError } from "./secret-source.ts";
+import { NO_APP, SecretsUnavailableError } from "./secret-source.ts";
 
 /** Where the engine reaches a connector: `/mcp/<id>`. */
 export const MCP_PREFIX = "/mcp/";
@@ -409,7 +409,11 @@ export class McpProxy {
 
 	private rpcError(connector: ProxiedConnector, error: unknown): { code: number; message: string } {
 		if (error instanceof ProxyError) return { code: error.code, message: error.message };
-		if (error instanceof SecretsUnavailableError) return { code: REFUSED, message: error.message };
+		if (error instanceof SecretsUnavailableError) {
+			if (error.message !== NO_APP)
+				this.log(`connector ${connector.id} cannot get its secrets: ${error.message}`);
+			return { code: REFUSED, message: error.message };
+		}
 		// The server's own answer, passed on as it came.
 		if (error instanceof McpError) return { code: error.code, message: error.message };
 		const upstream = this.upstreams.get(connector.id);
