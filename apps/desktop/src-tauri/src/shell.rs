@@ -723,10 +723,11 @@ fn register_shortcut(app: &AppHandle, shortcut: &str) -> Option<String> {
 fn handle_launch(app: &AppHandle, args: &[String]) {
     let result = match platform::launch_request(args) {
         LaunchRequest::Toggle => toggle_panel(app.clone()),
+        LaunchRequest::ToggleRose => set_rose_hidden(app.clone(), !rose_hidden_state(app)).map(|_| ()),
         LaunchRequest::Show => show_panel(app),
     };
     if let Err(error) = result {
-        eprintln!("gentle-dot: cannot show the panel: {error}");
+        eprintln!("gentle-dot: cannot handle launch request: {error}");
     }
 }
 
