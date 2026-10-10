@@ -39,17 +39,28 @@ fn is_hyprland(env: &impl Fn(&str) -> Option<String>) -> bool {
         || set(env, "XDG_CURRENT_DESKTOP").is_some_and(|desktop| desktop.to_lowercase().contains("hyprland"))
 }
 
+pub(crate) fn is_niri(env: &impl Fn(&str) -> Option<String>) -> bool {
+    if set(env, "NIRI_SOCKET").is_some() {
+        return true;
+    }
+    // XDG_CURRENT_DESKTOP is a colon-separated list; only an exact `niri` token
+    // counts, so desktops that merely contain those letters do not match.
+    set(env, "XDG_CURRENT_DESKTOP")
+        .is_some_and(|desktop| desktop.split(':').any(|entry| entry.trim().eq_ignore_ascii_case("niri")))
+}
+
 fn is_wayland(env: &impl Fn(&str) -> Option<String>) -> bool {
     set(env, "WAYLAND_DISPLAY").is_some() || set(env, "XDG_SESSION_TYPE").as_deref() == Some("wayland")
 }
 
 /// `Some("x11")` when the app should run under XWayland: a Wayland session that is not
-/// Hyprland (GNOME on Debian and Ubuntu), with XWayland available and no `GDK_BACKEND`
+/// Hyprland or Niri (GNOME on Debian and Ubuntu), with XWayland available and no `GDK_BACKEND`
 /// chosen by the user. Under X11 the app can place its windows, keep the Dot on top,
 /// and snap it to an edge; native Wayland allows none of that.
 pub fn forced_gdk_backend(env: impl Fn(&str) -> Option<String>) -> Option<&'static str> {
     let wanted = is_wayland(&env)
         && !is_hyprland(&env)
+        && !is_niri(&env)
         && set(&env, "DISPLAY").is_some()
         && set(&env, "GDK_BACKEND").is_none();
     wanted.then_some("x11")
@@ -153,6 +164,88 @@ mod tests {
         assert_eq!(forced_gdk_backend(env_of(no_x)), None);
         assert!(compositor_places_windows(env_of(no_x)));
     }
+
+    #[test]
+    fn niri_stays_native_wayland() {
+        // NIRI_SOCKET alone is enough, even without XDG_CURRENT_DESKTOP.
+        let socket: &[(&str, &str)] = &[
+            ("XDG_SESSION_TYPE", "wayland"),
+            ("WAYLAND_DISPLAY", "wayland-1"),
+            ("DISPLAY", ":0"),
+            ("NIRI_SOCKET", "/run/user/1000/niri.wayland-1.1234.sock"),
+        ];
+        assert_eq!(forced_gdk_backend(env_of(socket)), None);
+        assert!(compositor_places_windows(env_of(socket)));
+        // Or an exact `niri` token in the colon-separated desktop list.
+        for desktop in ["niri", "Niri", "NIRI", "gnome:niri", "niri:GNOME"] {
+            let token = vec![
+                ("XDG_SESSION_TYPE", "wayland"),
+                ("WAYLAND_DISPLAY", "wayland-1"),
+                ("DISPLAY", ":0"),
+                ("XDG_CURRENT_DESKTOP", desktop),
+            ];
+            let env = move |key: &str| token.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string());
+            assert_eq!(forced_gdk_backend(&env), None, "{desktop}");
+            assert!(compositor_places_windows(&env), "{desktop}");
+        }
+    }
+
+    #[test]
+    fn niri_detection_is_not_a_substring_match() {
+        // Tokens that merely contain `niri` are some other desktop: XWayland stays forced.
+        for desktop in ["niriway", "aniri", "niri-extra", "gnome:niri-extra"] {
+            let nearby = vec![
+                ("XDG_SESSION_TYPE", "wayland"),
+                ("WAYLAND_DISPLAY", "wayland-0"),
+                ("DISPLAY", ":0"),
+                ("XDG_CURRENT_DESKTOP", desktop),
+            ];
+            let env = move |key: &str| nearby.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string());
+            assert_eq!(forced_gdk_backend(&env), Some("x11"), "{desktop}");
+        }
+        // An empty NIRI_SOCKET means nothing, like any other empty variable.
+        let empty_socket: &[(&str, &str)] = &[
+            ("XDG_SESSION_TYPE", "wayland"),
+            ("WAYLAND_DISPLAY", "wayland-0"),
+            ("DISPLAY", ":0"),
+            ("XDG_CURRENT_DESKTOP", "ubuntu:GNOME"),
+            ("NIRI_SOCKET", ""),
+        ];
+        assert_eq!(forced_gdk_backend(env_of(empty_socket)), Some("x11"));
+    }
+
+    #[test]
+    fn an_explicit_gdk_backend_wins_on_niri() {
+        let x11_first: &[(&str, &str)] = &[
+            ("WAYLAND_DISPLAY", "wayland-1"),
+            ("DISPLAY", ":0"),
+            ("NIRI_SOCKET", "/run/user/1000/niri.sock"),
+            ("GDK_BACKEND", "x11,wayland"),
+        ];
+        assert_eq!(forced_gdk_backend(env_of(x11_first)), None);
+        assert!(!compositor_places_windows(env_of(x11_first)));
+    }
+
+    #[test]
+    fn niri_snippet_uses_stable_titles_and_toggle() {
+        assert!(NIRI_KDL.contains("^Gentle Dot$"), "{NIRI_KDL}");
+        assert!(NIRI_KDL.contains("^Gentle Dot Panel$"), "{NIRI_KDL}");
+        assert!(NIRI_KDL.contains("gentle-dot"), "{NIRI_KDL}");
+        assert!(NIRI_KDL.contains("--toggle"), "{NIRI_KDL}");
+        assert!(NIRI_KDL.contains("Mod+Alt+D"), "{NIRI_KDL}");
+        assert!(NIRI_KDL.contains("open-floating"), "{NIRI_KDL}");
+        // The snippet must not claim an unobserved app-id nor steal Mod+Space:
+        // only comments may mention them, never a rule or bind line.
+        for line in NIRI_KDL.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with("//") {
+                continue;
+            }
+            assert!(!line.contains("app-id"), "{line}");
+            assert!(!line.contains("Mod+Space"), "{line}");
+        }
+    }
+
+    const NIRI_KDL: &str = include_str!("../../../../scripts/linux/niri/gentle-dot.kdl");
 
     #[test]
     fn x11_sessions_and_macos_place_their_own_windows() {
