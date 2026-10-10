@@ -11,7 +11,7 @@ use crate::config::{self, ConnectionInfo, DesktopConfig, DEFAULT_SHORTCUT};
 use crate::daemon::{self, Daemon, RestartOutcome};
 use crate::geometry::{self, Rect};
 #[cfg(target_os = "linux")]
-use crate::niri::CompactSpot;
+use crate::niri::{CompactSpot, PanelWindow};
 use crate::platform::{self, LaunchRequest, Os, DOT_TITLE, PANEL_TITLE};
 use crate::position::{self, DotPosition};
 use crate::secure_store::{self, SecretStore};
@@ -20,6 +20,8 @@ use crate::status::{is_template, tray_status, TrayGlyph};
 use crate::voice::app as voice;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::AtomicU64;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -66,10 +68,20 @@ struct Shell {
     /// Separate from `full_screen`/`panel_spot`, which the native branch never reads or writes.
     #[cfg(target_os = "linux")]
     native_expanded: Mutex<bool>,
-    /// Remembered Niri compact spot (Linux only): in-session only. The restore
-    /// worker, epochs, and restore deltas that would consume it arrive in a later slice.
+    /// Remembered Niri compact spot (Linux only): in-session only, separate from the
+    /// expanded flag above. The hide hook captures it while compact and mapped; the
+    /// show/mode worker below consumes it through same-output deltas.
     #[cfg(target_os = "linux")]
     native_compact: Mutex<Option<CompactSpot>>,
+    /// Restore generation (Linux only): hide/show/mode bump it and the worker drops
+    /// older jobs. Atomic, so no lock ordering is needed.
+    #[cfg(target_os = "linux")]
+    native_epoch: AtomicU64,
+    /// Handoff to the single restore worker (Linux only): capacity-1 signal plus the
+    /// generation above. Taken on exit so the worker drops its handle clone at
+    /// shutdown instead of lingering.
+    #[cfg(target_os = "linux")]
+    native_restore: Mutex<Option<mpsc::SyncSender<()>>>,
     /// The shortcut that toggles the panel now; `None` while none is bound (native Wayland).
     shortcut: Mutex<Option<String>>,
 }
@@ -129,18 +141,142 @@ fn merge_compact_spot(current: Option<CompactSpot>, fresh: Option<CompactSpot>) 
     fresh.or(current)
 }
 
-/// Single capture decision for the hide and mode hooks (Linux only): the injected `capture`
-/// closure (which runs the bounded `niri` IPC) executes only while compact and visibly
-/// mapped; every other cell skips it, so hidden panels never overwrite compact memory even
-/// when IPC would answer. Epochs arrive in a later slice: callers pass only what they
-/// observed outside the native locks.
+/// Budgets for one restore job (Linux only): at most this total per job, one aggregate
+/// query/action pass at a time, worker-thread readiness polls between passes. No
+/// main-loop sleeps, no periodic enforcement, no config rewrites.
+#[cfg(target_os = "linux")]
+const NATIVE_RESTORE_JOB: Duration = Duration::from_millis(750);
+#[cfg(target_os = "linux")]
+const NATIVE_RESTORE_PASS: Duration = Duration::from_millis(250);
+#[cfg(target_os = "linux")]
+const NATIVE_RESTORE_POLL: Duration = Duration::from_millis(50);
+/// Idle heartbeat for the restore wait (Linux only).
+#[cfg(target_os = "linux")]
+const RESTORE_WAKE_TIMEOUT: Duration = Duration::from_millis(500);
+/// How many stale wakes one wait collapses at most (Linux only).
+#[cfg(target_os = "linux")]
+const RESTORE_DRAIN_CAP: usize = 4;
+
+/// Whether a queued restore job is still current (Linux only).
+#[cfg(target_os = "linux")]
+fn restore_job_fresh(job: u64, current: u64) -> bool {
+    job == current
+}
+
+/// Clips a readiness pause to the remaining job budget (Linux only), so restore jobs end
+/// at exactly `NATIVE_RESTORE_JOB`: an unclipped pause would overshoot the deadline.
+#[cfg(target_os = "linux")]
+fn clipped_poll(remaining: Duration) -> Duration {
+    remaining.min(NATIVE_RESTORE_POLL)
+}
+
+/// Drains at most `cap` stale wakes (Linux only), returning the count. Wakes carry no
+/// payload — the generation is shared — so collapsing bursts is always safe.
+#[cfg(target_os = "linux")]
+fn drain_stale_wakes(rx: &mpsc::Receiver<()>, cap: usize) -> usize {
+    let mut drained = 0;
+    while drained < cap {
+        if rx.try_recv().is_ok() {
+            drained += 1;
+        } else {
+            break;
+        }
+    }
+    drained
+}
+
+/// Queue outcome of one restore handoff (Linux only): `Sent` and `Coalesced` (full
+/// channel) both reach the single worker — coalescing converges on the latest generation
+/// after the wait drains — while `Disconnected` has no consumer.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreQueue {
+    Sent,
+    Coalesced,
+    Disconnected,
+}
+
+/// Wakes the single restore worker (Linux only): bumps the generation, then signals
+/// capacity-1. A full channel means a unit is already queued, and the waiter loads the
+/// generation after waking, so it always sees the latest.
+#[cfg(target_os = "linux")]
+fn restore_handoff(tx: &mpsc::SyncSender<()>, epoch: &AtomicU64) -> (u64, RestoreQueue) {
+    let next = epoch.fetch_add(1, Ordering::SeqCst) + 1;
+    let queue = match tx.try_send(()) {
+        Ok(()) => RestoreQueue::Sent,
+        Err(mpsc::TrySendError::Full(_)) => RestoreQueue::Coalesced,
+        Err(mpsc::TrySendError::Disconnected(_)) => RestoreQueue::Disconnected,
+    };
+    (next, queue)
+}
+
+/// Waits for restore work (Linux only): `None` only on disconnect, so the worker exits
+/// at shutdown instead of spinning.
+#[cfg(target_os = "linux")]
+fn restore_take(rx: &mpsc::Receiver<()>, epoch: &AtomicU64) -> Option<u64> {
+    loop {
+        match rx.recv_timeout(RESTORE_WAKE_TIMEOUT) {
+            Ok(()) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+        }
+    }
+    // Bounded collapse of payload-free wakes: the newest shared load below converges, so
+    // a hot producer can never spin this wait without bound.
+    drain_stale_wakes(rx, RESTORE_DRAIN_CAP);
+    Some(epoch.load(Ordering::SeqCst))
+}
+
+/// Plans the compact position restore (Linux only): exact window id plus same-output
+/// AdjustFixed delta for a settled floating panel, `None` where the worker waits
+/// (transient nulls) or stops. Never `SetFixed`, never raw coordinates.
+#[cfg(target_os = "linux")]
+fn plan_compact_restore(
+    saved: Option<&CompactSpot>,
+    panel: &PanelWindow,
+    output: Option<&str>,
+) -> Option<(u64, i32, i32)> {
+    let saved = saved?;
+    if !panel.floating || panel.size.0 <= 0 || panel.size.1 <= 0 {
+        return None;
+    }
+    let pos = panel.pos?;
+    let (dx, dy) = crate::niri::restore_delta(saved, Some(pos), output)?;
+    Some((panel.id, dx, dy))
+}
+
+/// Whether setup creates the native restore channel (Linux only): the worker exists
+/// exactly when the app does not place windows on Niri. Pure so tests cover the
+/// decision without a runtime.
+#[cfg(target_os = "linux")]
+fn native_restore_planned(places_windows: bool, is_niri: bool) -> bool {
+    !places_windows && is_niri
+}
+
+/// Snapshots panel visibility for native hide/mode paths (Linux only). MUST run before
+/// taking any native lock: Tauri getters proxy to the main thread and wait, while
+/// main-thread handlers take the mode lock — waiting under that lock deadlocks.
+/// Fail-closed and lock-free: `Err` reads as hidden.
+#[cfg(target_os = "linux")]
+fn snapshot_visible<E>(getter: impl FnOnce() -> Result<bool, E>) -> bool {
+    matches!(getter(), Ok(true))
+}
+
+/// Single capture decision for the hide and mode hooks (Linux only): the injected
+/// `capture` closure (which runs the bounded `niri` IPC) executes only while compact,
+/// visibly mapped, and on a stable generation. A negative snapshot always skips —
+/// independent of epoch — and any generation change also skips: a racing lifecycle may
+/// have remapped, so capture stays fail-closed on stale rather than inferring a positive
+/// it never observed. Callers derive all inputs outside native locks.
 #[cfg(target_os = "linux")]
 fn decide_native_capture(
     expanded: bool,
     visible: bool,
+    snapshot_epoch: u64,
+    current_epoch: u64,
     capture: impl FnOnce() -> Option<CompactSpot>,
 ) -> Option<CompactSpot> {
-    if !native_capture_gate(expanded, visible) {
+    if !native_capture_gate(expanded, visible) || snapshot_epoch != current_epoch {
         return None;
     }
     capture()
@@ -276,20 +412,26 @@ fn hide_panel(app: AppHandle) -> CommandResult {
     panel.hide().map_err(err)
 }
 
-/// Niri-native hide (Linux only): captures the compact spot while compact and mapped,
-/// then hides. Visibility snapshots before any native lock (Tauri getters proxy to the
-/// main thread, whose handlers take the mode lock); the capture IPC itself runs lock-free
-/// and the merge preserves memory on `None`/errors. Locks nest only mode-before-compact.
-/// No restore worker, epochs, or gate yet: those arrive in a later slice.
+/// Niri-native hide (Linux only): bumps the restore generation, captures the compact spot
+/// while compact and mapped, then hides — all with the visibility snapshot taken before
+/// any native lock (Tauri getters proxy to the main thread, whose handlers take the mode
+/// lock). The capture IPC runs lock-free and the merge preserves memory on `None`/errors.
+/// Locks nest only mode-before-compact. A concurrent show is detected via the generation
+/// instead of re-querying under lock.
 #[cfg(target_os = "linux")]
 fn hide_panel_niri(app: AppHandle, panel: &WebviewWindow) -> CommandResult {
     use std::path::PathBuf;
     let shell = app.state::<Shell>();
-    let visible = panel.is_visible().unwrap_or(false);
-    let expanded = *shell.native_expanded.lock().unwrap();
+    let snap_epoch = shell.native_epoch.load(Ordering::SeqCst);
+    let visible = snapshot_visible(|| panel.is_visible());
+    let expanded = shell.native_expanded.lock().unwrap();
+    // Compare before our own bump: any intervening lifecycle invalidates the snapshot,
+    // and the shared helper stays fail-closed on stale.
+    let current = shell.native_epoch.load(Ordering::SeqCst);
+    let _next = shell.native_epoch.fetch_add(1, Ordering::SeqCst) + 1;
     if let Some(socket) = std::env::var("NIRI_SOCKET").ok().filter(|path| !path.is_empty()) {
         let path = PathBuf::from(socket);
-        let fresh = decide_native_capture(expanded, visible, || {
+        let fresh = decide_native_capture(*expanded, visible, snap_epoch, current, || {
             let mut request =
                 |wire: &str, timeout: Duration| crate::niri::Client::new(&path, timeout).request(wire);
             crate::niri::capture_compact_spot(std::process::id(), &mut request).unwrap_or(None)
@@ -364,18 +506,21 @@ fn set_panel_fullscreen(app: AppHandle, on: bool) -> CommandResult<bool> {
 /// Niri-native expanded/compact switch (Linux only, position-independent): expanded is a
 /// normal managed tiling window, compact is floating. The mode lock is held only across
 /// the one bounded IPC call; visibility snapshots before it and the compact-spot capture
-/// before expanding runs lock-free. Missing/ambiguous windows or a missing socket are a
-/// bounded no-op returning the previous mode, never the legacy workarea frame, never
-/// `SetFixed`, never a focused-window fallback. Position restore arrives in a later slice.
+/// before expanding runs lock-free. Pending restore jobs are invalidated before
+/// transitioning; returning to compact queues the worker to move back to the remembered
+/// spot. Missing/ambiguous windows or a missing socket are a bounded no-op returning the
+/// previous mode, never the legacy workarea frame, never `SetFixed`, never a
+/// focused-window fallback.
 #[cfg(target_os = "linux")]
 fn set_panel_niri_mode(app: AppHandle, on: bool) -> CommandResult<bool> {
     use std::path::PathBuf;
-    let shell = app.state::<Shell>();
+    let snap_epoch = app.state::<Shell>().native_epoch.load(Ordering::SeqCst);
     // Snapshot the blocking getter before any native lock: getters wait on the main
     // thread, whose handlers take the mode lock. Missing windows read as hidden.
-    let visible = window(&app, PANEL)
-        .and_then(|panel| panel.is_visible().map_err(err))
-        .unwrap_or(false);
+    let visible = snapshot_visible(|| {
+        window(&app, PANEL).and_then(|panel| panel.is_visible().map_err(err))
+    });
+    let shell = app.state::<Shell>();
     let mut expanded = shell.native_expanded.lock().unwrap();
     // Socket-level half of the native gate, through the unit-tested predicate:
     // Niri-native without a usable socket is a bounded no-op returning the previous mode.
@@ -392,12 +537,19 @@ fn set_panel_niri_mode(app: AppHandle, on: bool) -> CommandResult<bool> {
     let Some(socket) = socket else {
         return Ok(*expanded);
     };
+    // Same-mode compact sends nothing and bumps nothing.
+    if !*expanded && !on {
+        return Ok(false);
+    }
+    // Invalidate pending restore jobs before transitioning.
+    let current = shell.native_epoch.load(Ordering::SeqCst);
+    let _next = shell.native_epoch.fetch_add(1, Ordering::SeqCst) + 1;
     // Capture the compact spot before leaving it. Hidden panels skip IPC fail-closed:
     // a hidden native window must not overwrite compact memory.
     if !*expanded {
         let path = PathBuf::from(&socket);
         let pid = std::process::id();
-        let fresh = decide_native_capture(*expanded, visible, || {
+        let fresh = decide_native_capture(*expanded, visible, snap_epoch, current, || {
             let mut capture =
                 |wire: &str, timeout: Duration| crate::niri::Client::new(&path, timeout).request(wire);
             crate::niri::capture_compact_spot(pid, &mut capture).unwrap_or(None)
@@ -405,10 +557,18 @@ fn set_panel_niri_mode(app: AppHandle, on: bool) -> CommandResult<bool> {
         let mut compact = shell.native_compact.lock().unwrap();
         *compact = merge_compact_spot(compact.take(), fresh);
     }
-    let path = PathBuf::from(socket);
+    let path = PathBuf::from(&socket);
     let mut request =
         |wire: &str, timeout: Duration| crate::niri::Client::new(&path, timeout).request(wire);
-    run_native_mode_change(&mut expanded, on, std::process::id(), &mut request).map_err(err)
+    let outcome = run_native_mode_change(&mut expanded, on, std::process::id(), &mut request).map_err(err);
+    // Returning to compact queues the worker to restore the remembered spot; expanding
+    // needs no restore. Queue failures are silent: the next show re-queues.
+    if matches!(outcome, Ok(false)) {
+        if let Some(tx) = shell.native_restore.lock().unwrap().as_ref() {
+            restore_handoff(tx, &shell.native_epoch);
+        }
+    }
+    outcome
 }
 
 /// Result of `shortcut_get`: the shortcut that opens the panel and the default one.
@@ -589,15 +749,181 @@ fn show_panel(app: &AppHandle) -> CommandResult {
     app.emit("dot://panel-shown", ()).map_err(err)
 }
 
-/// Niri-native show (Linux only): direct show/focus/emit. The compact restore worker
-/// that would consume the remembered spot arrives in a later slice; until then a show
-/// never moves the window, on any mode.
+/// Niri-native show (Linux only): direct show/focus/emit, then queue the single restore
+/// worker to move a compact panel back to its remembered spot. Reopening is
+/// anchor-then-move: the window first maps at the compositor's anchor and the worker
+/// moves it after; this slice makes no jump-free claim. Expanded shows and initial shows
+/// with no saved spot keep the anchor untouched. No sleeps, no config rewrites, no focus
+/// or layout changes beyond the restore delta.
 #[cfg(target_os = "linux")]
 fn show_panel_niri(app: &AppHandle) -> CommandResult {
     let panel = window(app, PANEL)?;
     panel.show().map_err(err)?;
     panel.set_focus().map_err(err)?;
-    app.emit("dot://panel-shown", ()).map_err(err)
+    app.emit("dot://panel-shown", ()).map_err(err)?;
+    let shell = app.state::<Shell>();
+    if let Some(tx) = shell.native_restore.lock().unwrap().as_ref() {
+        restore_handoff(tx, &shell.native_epoch);
+    }
+    Ok(())
+}
+
+/// Spawns the single native restore worker (Linux only): one thread per app instance,
+/// woken through the coalesced capacity-1 handoff. The channel is created before `manage`
+/// and this spawn runs only after it: the first wait reads Shell state, which panics
+/// before registration. The receiver disconnects when the exit handler takes the Shell
+/// sender, so this thread then returns instead of keeping shutdown alive.
+#[cfg(target_os = "linux")]
+fn spawn_restore_worker(app: AppHandle, rx: mpsc::Receiver<()>) {
+    thread::spawn(move || {
+        loop {
+            let job = {
+                let shell = app.state::<Shell>();
+                restore_take(&rx, &shell.native_epoch)
+            };
+            let Some(job) = job else {
+                return;
+            };
+            if let Err(error) = run_restore_job(&app, job) {
+                eprintln!("gentle-dot: native panel restore failed: {error}");
+            }
+        }
+    });
+}
+
+/// Runs one coalesced restore job (Linux only): at most `NATIVE_RESTORE_JOB` total, one
+/// aggregate pass per query/action round plus worker-thread-only readiness polls between
+/// rounds. Presence in the IPC list proves compositor-side mapping, so no `is_visible`
+/// guess is needed and no Tauri window calls run here. Anything stale, missing, moved, or
+/// unexpected stops fail-closed without fighting a drag; every mode/move action requires
+/// the `Handled` marker. The move arm sends once, then loops back to verify the settled
+/// IPC position before completing.
+#[cfg(target_os = "linux")]
+fn run_restore_job(app: &AppHandle, job: u64) -> CommandResult {
+    use std::path::PathBuf;
+    use std::time::Instant;
+    let start = Instant::now();
+    let shell = app.state::<Shell>();
+    let fresh = || restore_job_fresh(job, shell.native_epoch.load(Ordering::SeqCst));
+    let remaining = || NATIVE_RESTORE_JOB.saturating_sub(start.elapsed());
+    let pass = || remaining().min(NATIVE_RESTORE_PASS);
+    let socket = std::env::var("NIRI_SOCKET").ok().filter(|path| !path.is_empty());
+    let Some(socket) = socket else {
+        return Ok(());
+    };
+    let path = PathBuf::from(socket);
+    let pid = std::process::id();
+    let request =
+        |wire: &str, timeout: Duration| crate::niri::Client::new(&path, timeout).request(wire);
+    let desired = *shell.native_expanded.lock().unwrap();
+    let mut passes: usize = 0;
+    let mut moved = false;
+    loop {
+        passes += 1;
+        let _ = passes;
+        if !fresh() {
+            return Ok(());
+        }
+        if remaining().is_zero() {
+            return Ok(());
+        }
+        // Fresh resolve every pass; missing windows and query errors retry mapping
+        // readiness within budget, worker-thread polls only.
+        let windows = match request(crate::niri::WINDOWS_REQUEST, pass()) {
+            Ok(windows) => windows,
+            Err(_) => {
+                thread::sleep(clipped_poll(remaining()));
+                continue;
+            }
+        };
+        let Some(panel) = crate::niri::own_panel_window(&windows, pid) else {
+            thread::sleep(clipped_poll(remaining()));
+            continue;
+        };
+        if let Some(action) = crate::niri::reconcile_action(&panel, desired) {
+            // Final gate under the mode lock with the action: hide/mode hold the same
+            // lock across their bump, so stale moves cannot follow.
+            let _held = shell.native_expanded.lock().unwrap();
+            if !fresh() {
+                return Ok(());
+            }
+            match request(&action, pass()) {
+                Ok(reply) if crate::niri::is_handled(&reply) => {}
+                Ok(_) => return Err("niri: unexpected action response".to_owned()),
+                Err(error) => return Err(error.to_string()),
+            }
+            if !desired {
+                continue; // Refloated: re-query positions after configure below.
+            }
+        }
+        if desired {
+            // Managed geometry for the freshly resolved window: tiling alone keeps
+            // small sizes on clamped remaps. Same pass budget, no deadline reset.
+            let windows = match request(crate::niri::WINDOWS_REQUEST, pass()) {
+                Ok(windows) => windows,
+                Err(_) => {
+                    thread::sleep(clipped_poll(remaining()));
+                    continue;
+                }
+            };
+            let Some(current) = crate::niri::own_panel_window(&windows, pid) else {
+                thread::sleep(clipped_poll(remaining()));
+                continue;
+            };
+            for wire in crate::niri::action_managed_geometry(current.id) {
+                let _held = shell.native_expanded.lock().unwrap();
+                if !fresh() {
+                    return Ok(());
+                }
+                match request(&wire, pass()) {
+                    Ok(reply) if crate::niri::is_handled(&reply) => {}
+                    Ok(_) => return Err("niri: unexpected action response".to_owned()),
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
+            return Ok(());
+        }
+        let saved = shell.native_compact.lock().unwrap().clone();
+        let Some(saved) = saved else {
+            return Ok(()); // No saved spot: the initial anchor stays untouched.
+        };
+        let workspaces = match request(crate::niri::WORKSPACES_REQUEST, pass()) {
+            Ok(workspaces) => workspaces,
+            Err(_) => {
+                thread::sleep(clipped_poll(remaining()));
+                continue;
+            }
+        };
+        let output = crate::niri::workspace_output(&workspaces, panel.workspace);
+        match plan_compact_restore(Some(&saved), &panel, output.as_deref()) {
+            Some((_, 0, 0)) => return Ok(()), // Settled home: no move needed.
+            Some((id, dx, dy)) => {
+                if moved {
+                    // The move is accepted (`Handled`): an animation may still be in
+                    // flight, so re-query without re-moving. Never assume the wire
+                    // effect landed; the deadline above clips.
+                    thread::sleep(clipped_poll(remaining()));
+                    continue;
+                }
+                let _held = shell.native_expanded.lock().unwrap();
+                if !fresh() {
+                    return Ok(());
+                }
+                match request(&crate::niri::action_move_floating(id, dx, dy), pass()) {
+                    Ok(reply) if crate::niri::is_handled(&reply) => {}
+                    Ok(_) => return Err("niri: unexpected action response".to_owned()),
+                    Err(error) => return Err(error.to_string()),
+                }
+                // `Handled` only accepts the move: loop back and verify the settled
+                // IPC position before completing.
+                moved = true;
+                continue;
+            }
+            // Settled elsewhere: fail closed. Transient nulls retry above.
+            None if panel.pos.is_none() => thread::sleep(clipped_poll(remaining())),
+            None => return Ok(()),
+        }
+    }
 }
 
 /// Snaps the Dot to the nearest edge and persists the position.
@@ -965,6 +1291,20 @@ pub fn run() {
                 }
             });
             let rose_hidden = position::load_rose_hidden(&desktop_file(&config));
+            #[cfg(target_os = "linux")]
+            let (native_restore, native_receiver): (Option<mpsc::SyncSender<()>>, Option<mpsc::Receiver<()>>) =
+                if native_restore_planned(
+                    places_windows,
+                    platform::is_niri(&|key| std::env::var(key).ok()),
+                ) {
+                    // Channel only: the worker thread starts after `manage` below, so its
+                    // first state read cannot panic and no pre-registration wake is lost
+                    // (capacity-1 plus epoch).
+                    let (tx, rx) = mpsc::sync_channel::<()>(1);
+                    (Some(tx), Some(rx))
+                } else {
+                    (None, None)
+                };
             app.manage(Shell {
                 config: config.clone(),
                 daemon,
@@ -977,8 +1317,18 @@ pub fn run() {
                 native_expanded: Mutex::new(false),
                 #[cfg(target_os = "linux")]
                 native_compact: Mutex::new(None),
+                #[cfg(target_os = "linux")]
+                native_epoch: AtomicU64::new(0),
+                #[cfg(target_os = "linux")]
+                native_restore: Mutex::new(native_restore),
                 shortcut: Mutex::new(None),
             });
+            // State is registered: the worker's first state read is now safe, before any
+            // window, shortcut, or initial show can queue work.
+            #[cfg(target_os = "linux")]
+            if let Some(rx) = native_receiver {
+                spawn_restore_worker(handle.clone(), rx);
+            }
             let (voice_input, voice_model) = voice::start(&handle);
             app.manage(voice_input);
             app.manage(voice_model);
@@ -1017,6 +1367,10 @@ pub fn run() {
         .run(|app, event| {
             if let RunEvent::Exit = event {
                 app.state::<Shell>().daemon.stop();
+                // Disconnect the restore worker: its wait then ends instead of lingering
+                // on its handle clone past shutdown.
+                #[cfg(target_os = "linux")]
+                let _restore_taken = app.state::<Shell>().native_restore.lock().unwrap().take();
             }
         });
 }
@@ -1134,26 +1488,149 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn capture_decision_skips_ipc_unless_compact_and_visible() {
+    fn capture_decision_needs_stable_visible_compact() {
         use crate::niri::CompactSpot;
         let live = CompactSpot { output: "DP-1".to_owned(), x: 10.0, y: 20.0 };
-        // Visible compact runs the injected capture; hidden and expanded never do,
-        // even though the closure would answer.
-        let fresh = decide_native_capture(false, true, || Some(live.clone()));
+        // Stable visible compact runs the injected capture; every other cell skips it,
+        // even though the closure would answer. A racing lifecycle (snapshot != current)
+        // never infers a positive it never observed.
+        let fresh = decide_native_capture(false, true, 7, 7, || Some(live.clone()));
         assert_eq!(merge_compact_spot(None, fresh), Some(live.clone()));
-        for (expanded, visible) in [(false, false), (true, true), (true, false)] {
+        for (expanded, visible, snap, current) in
+            [(false, false, 7, 7), (false, true, 7, 8), (true, true, 7, 7), (true, false, 7, 8)]
+        {
             let mut calls = 0;
-            let fresh = decide_native_capture(expanded, visible, || {
+            let fresh = decide_native_capture(expanded, visible, snap, current, || {
                 calls += 1;
                 Some(live.clone())
             });
-            assert_eq!(calls, 0, "expanded={expanded} visible={visible}");
-            assert_eq!(fresh, None, "expanded={expanded} visible={visible}");
+            assert_eq!(calls, 0, "expanded={expanded} visible={visible} snap={snap} current={current}");
+            assert_eq!(fresh, None, "expanded={expanded} visible={visible} snap={snap} current={current}");
         }
-        // A hidden native panel keeps its remembered spot despite live IPC.
+        // A hidden native panel keeps its remembered spot despite live IPC, and a
+        // getter error snapshots to hidden through the real helper.
         let old = CompactSpot { output: "DP-1".to_owned(), x: 100.0, y: 200.0 };
-        let fresh = decide_native_capture(false, false, || Some(live.clone()));
+        let fresh = decide_native_capture(false, false, 7, 7, || Some(live.clone()));
+        assert_eq!(merge_compact_spot(Some(old.clone()), fresh), Some(old.clone()));
+        let seen = snapshot_visible(|| Err::<bool, String>("gone".to_owned()));
+        assert!(!seen);
+        let fresh = decide_native_capture(false, seen, 7, 7, || Some(live.clone()));
         assert_eq!(merge_compact_spot(Some(old.clone()), fresh), Some(old));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn restore_epochs_die_on_hide_or_mode_change() {
+        // Show queues generation 1; a hide/mode bump to 2 stales it before any action.
+        assert!(restore_job_fresh(1, 1));
+        assert!(!restore_job_fresh(1, 2));
+        assert!(!restore_job_fresh(2, 1));
+        // A second show re-queues fresh work under the newest generation.
+        assert!(restore_job_fresh(3, 3));
+        assert!(!restore_job_fresh(2, 3));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn restore_handoff_coalesces_to_the_latest_wake() {
+        use std::sync::atomic::AtomicU64;
+        let epoch = AtomicU64::new(0);
+        let (tx, rx) = mpsc::sync_channel::<()>(1);
+        // Three rapid shows while the worker is busy: capacity-1 holds one unit, but the
+        // waiter must see the latest generation, not miss one.
+        assert_eq!(restore_handoff(&tx, &epoch), (1, RestoreQueue::Sent));
+        assert_eq!(restore_handoff(&tx, &epoch), (2, RestoreQueue::Coalesced));
+        assert_eq!(restore_handoff(&tx, &epoch), (3, RestoreQueue::Coalesced));
+        assert_eq!(restore_take(&rx, &epoch), Some(3));
+        // A lone wake passes its own generation through.
+        assert_eq!(restore_handoff(&tx, &epoch), (4, RestoreQueue::Sent));
+        assert_eq!(restore_take(&rx, &epoch), Some(4));
+        // Disconnect (shutdown) ends the wait: the worker exits, never spins.
+        drop(tx);
+        assert_eq!(restore_take(&rx, &epoch), None);
+        // One job fits several bounded passes plus worker-only readiness polls.
+        assert!(NATIVE_RESTORE_JOB >= NATIVE_RESTORE_PASS);
+        assert!(NATIVE_RESTORE_POLL < NATIVE_RESTORE_PASS);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn native_restore_starts_only_where_state_is_registered() {
+        use std::sync::atomic::AtomicU64;
+        // The worker exists exactly for unplaced Niri: the setup decision is pure, so
+        // this table covers it without a runtime.
+        assert!(native_restore_planned(false, true));
+        assert!(!native_restore_planned(true, true));
+        assert!(!native_restore_planned(false, false));
+        assert!(!native_restore_planned(true, false));
+        // The pre-manage phase is state-free: a capacity-1 channel built before any
+        // registration round-trips a handoff through the worker wait, and disconnect
+        // ends it — so spawning the thread after `manage` can neither panic nor lose
+        // the first wake.
+        let epoch = AtomicU64::new(0);
+        let (tx, rx) = mpsc::sync_channel::<()>(1);
+        assert_eq!(restore_handoff(&tx, &epoch), (1, RestoreQueue::Sent));
+        assert_eq!(restore_take(&rx, &epoch), Some(1));
+        drop(tx);
+        assert_eq!(restore_take(&rx, &epoch), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn compact_restore_plans_deltas_only_for_settled_floating_panels() {
+        use crate::niri::{CompactSpot, PanelWindow};
+        let saved = CompactSpot { output: "DP-1".to_owned(), x: 100.0, y: 200.0 };
+        let floating = |pos: Option<(f64, f64)>| PanelWindow {
+            id: 11, floating: true, size: (420, 640), pos, workspace: Some(7),
+        };
+        // Same output: exact numeric id plus AdjustFixed delta, never SetFixed.
+        assert_eq!(
+            plan_compact_restore(Some(&saved), &floating(Some((90.0, 205.0))), Some("DP-1")),
+            Some((11, 10, -5))
+        );
+        // Already home: the caller skips the move request, still a plan.
+        assert_eq!(
+            plan_compact_restore(Some(&saved), &floating(Some((100.0, 200.0))), Some("DP-1")),
+            Some((11, 0, 0))
+        );
+        // No saved spot: the initial anchor is preserved, never forced.
+        assert_eq!(plan_compact_restore(None, &floating(Some((90.0, 205.0))), Some("DP-1")), None);
+        // Tiling, transient nulls, other outputs, and missing workspaces fail closed
+        // (nulls retry at the worker; outputs never fight a drag).
+        let tiled = PanelWindow { floating: false, ..floating(Some((90.0, 205.0))) };
+        assert_eq!(plan_compact_restore(Some(&saved), &tiled, Some("DP-1")), None);
+        assert_eq!(plan_compact_restore(Some(&saved), &floating(None), Some("DP-1")), None);
+        assert_eq!(
+            plan_compact_restore(Some(&saved), &floating(Some((90.0, 205.0))), Some("HDMI-1")),
+            None
+        );
+        assert_eq!(plan_compact_restore(Some(&saved), &floating(Some((90.0, 205.0))), None), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn clipped_poll_never_exceeds_remaining() {
+        assert_eq!(clipped_poll(Duration::from_millis(10)), Duration::from_millis(10));
+        assert_eq!(clipped_poll(Duration::from_secs(10)), NATIVE_RESTORE_POLL);
+        assert_eq!(clipped_poll(Duration::ZERO), Duration::ZERO);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn stale_wake_drain_is_bounded_and_latest_wins() {
+        use std::sync::atomic::AtomicU64;
+        // A burst collapses to the cap: the waiter converges on the newest shared
+        // generation, so a hot producer can never spin it without bound.
+        let (tx, rx) = mpsc::sync_channel::<()>(1);
+        tx.try_send(()).unwrap();
+        assert_eq!(drain_stale_wakes(&rx, RESTORE_DRAIN_CAP), 1);
+        assert_eq!(drain_stale_wakes(&rx, RESTORE_DRAIN_CAP), 0);
+        // ...then the newest generation still wins on a quiet channel.
+        let (tx, rx) = mpsc::sync_channel::<()>(1);
+        let epoch = AtomicU64::new(0);
+        assert_eq!(restore_handoff(&tx, &epoch), (1, RestoreQueue::Sent));
+        assert_eq!(restore_handoff(&tx, &epoch), (2, RestoreQueue::Coalesced));
+        assert_eq!(restore_take(&rx, &epoch), Some(2));
     }
 
     #[cfg(target_os = "linux")]
