@@ -254,8 +254,17 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		...(Number.isInteger(historyPage) && historyPage > 0 ? { historyPage } : {}),
 	});
 
+	// connectors.json as read at start is checked against its signature before anything rewrites it,
+	// watches it, or starts the engine (S25.6).
+	const integrity = connectorStore
+		.checkIntegrity()
+		.catch((error: Error) => log(`could not check connectors.json: ${error.message}`));
 	if (app) {
-		app.handler = (method, params) => appRequest(method, params, bridge, connectors, app);
+		// Nothing the app asks changes connectors before connectors.json was checked (S25.6).
+		app.handler = async (method, params) => {
+			await integrity;
+			return appRequest(method, params, bridge, connectors, app);
+		};
 		// The computer helper belongs to the app that registered it (S24.7).
 		app.onClose(() => {
 			log("the desktop app's channel closed");
@@ -263,18 +272,10 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 			// Secrets read from the app are forgotten; connectors that need one fail closed until it is back.
 			connectorStore.lock();
 		});
-		// Secrets that files still hold move into the app's store, once.
-		void connectorStore
-			.migrate()
-			.catch((error: Error) => log(`connector secrets were not moved: ${error.message}`));
 	} else
 		log(
 			"no desktop app channel: connector changes and approvals are refused, and connectors that need a secret fail closed",
 		);
-
-	// The files as the daemon writes them (an older version kept a hash), then watched.
-	connectorStore.enforce(false);
-	connectorStore.watch();
 
 	const server = createServer((req, res) => {
 		const { pathname } = new URL(req.url ?? "/", "http://localhost");
@@ -305,6 +306,17 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		server.listen(options.port, options.host, () => done());
 	});
 	port = (server.address() as AddressInfo).port;
+
+	// Listening first keeps the app's health check answered while its store is asked for the key.
+	await integrity;
+	// Secrets that files still hold move into the app's store, once.
+	if (app)
+		void connectorStore
+			.migrate()
+			.catch((error: Error) => log(`connector secrets were not moved: ${error.message}`));
+	// The files as the daemon writes them (an older version kept a hash), then watched.
+	connectorStore.enforce(false);
+	connectorStore.watch();
 
 	await supervisor.start().catch((error: Error) => log(`agent failed to start: ${error.message}; retrying`));
 

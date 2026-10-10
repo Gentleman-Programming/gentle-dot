@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+	chmodSync,
 	existsSync,
 	type FSWatcher,
 	lstatSync,
@@ -28,11 +29,24 @@ import type {
 import { MAX_CONNECTOR_DRAFTS } from "@gentle-dot/protocol";
 import { resolveRecord, resolveValue, storedSignIn } from "./connector-credentials.ts";
 import { type ScannedServer, scanClientConfigs, valueNotes } from "./connector-import.ts";
+import {
+	INTEGRITY_KEY_ID,
+	macMatches,
+	newIntegrityKey,
+	parseIntegrityKey,
+	recordMac,
+} from "./connector-integrity.ts";
 import { type OAuthSettings, type SignIn, SignInCancelledError, startSignIn } from "./connector-oauth.ts";
 import { type ConnectorPolicy, draftSecretProblem, POLICY_ENV } from "./extensions/approval-guard.ts";
 import type { ProxiedConnector, UpstreamCredentials } from "./mcp-proxy.ts";
 import { runtimeDir, runtimeModules } from "./runtime.ts";
 import { NO_APP, type SecretSource, SecretsUnavailableError } from "./secret-source.ts";
+
+export { INTEGRITY_KEY_ID } from "./connector-integrity.ts";
+
+/** What windows are told once after a changed `connectors.json` was set aside (S25.6). */
+export const SET_ASIDE_NOTICE =
+	"Connectors were changed while Gentle Dot was closed, so they were set aside. Review them in Connectors.";
 
 /** A value the user types in the app (a token, client credentials); kept only in the assistant's private state. */
 export interface SetupField {
@@ -621,7 +635,8 @@ export interface SignInTarget {
  * screen. The files (`connectors.json` and the engine's `mcp.json`) are written from memory; a change
  * made by anything else (the assistant has a shell) is put back, and a project `.pi/mcp.json` in the
  * workspace is removed. Checked on every file event, before every engine start, and after every
- * run. A change made while the daemon is not running is loaded at its next start (S25.6).
+ * run. Every write of `connectors.json` is signed (S25.6, {@link checkIntegrity}): with the app, a
+ * file changed while the daemon was not running is set aside at the next start instead of loaded.
  *
  * Secrets (S25.5) are never in a file: `connectors.json` holds `{"secretRef": "<id>"}` in their
  * place, the values live in the desktop app's secure store, and the daemon keeps the ones it read
@@ -643,7 +658,15 @@ export class ConnectorStore {
 	onReverted: () => void = () => {};
 	/** Called after every change to the state (the proxy closes what it no longer may use). */
 	onUpdated: () => void = () => {};
+	/** Called once when a changed `connectors.json` was set aside at start; `notice` is for the user. */
+	onSetAside: (notice: string) => void = () => {};
 	private saved: ConnectorsState;
+	/** `connectors.json` as it was read at start: its text, and the record when it was a JSON object. */
+	private loaded: { text: string; record?: Record<string, unknown> } | undefined;
+	/** The signing key from the app's store, once {@link checkIntegrity} read it; only in memory. */
+	private integrityKey: Buffer | undefined;
+	/** True once the record differs from what was read at start (a change, a move, a migration). */
+	private edited = false;
 	/** The desktop app's helper while a window has it registered; only in memory and `mcp.json`. */
 	private computer: ComputerEndpoint | undefined;
 	/** The daemon's proxy for the running engine; only in memory and `mcp.json`. */
@@ -675,7 +698,10 @@ export class ConnectorStore {
 		// A new install has nothing to move.
 		this.migrated =
 			version >= 2 || (version === 0 && ![this.authFile, this.legacyAuthFile].some((f) => existsSync(f)));
-		if (renamed) writePrivate(this.file, this.recordText());
+		if (renamed) {
+			this.edited = true;
+			writePrivate(this.file, this.recordText());
+		}
 	}
 
 	get agentHome(): string {
@@ -699,10 +725,68 @@ export class ConnectorStore {
 				refId(text) !== undefined ? text : this.seal(secretId, text),
 			);
 		this.saved = state;
+		this.edited = true;
 		mkdirSync(this.options.agentHome, { recursive: true, mode: 0o700 });
 		writePrivate(this.file, this.recordText());
 		writePrivate(this.mcpFile, this.engineMcpText());
 		this.onUpdated();
+	}
+
+	/**
+	 * Checks the signature of `connectors.json` as it was read at start (S25.6); the daemon awaits it
+	 * before it watches the files or starts the engine. With the app's store: the signing key is read,
+	 * or created on the first start with the app (and the current file signed: the first start after
+	 * T23e). A file that was signed before (it has a `mac`, or the key already existed) whose `mac` is
+	 * missing or wrong was changed while the daemon was down: it is moved to
+	 * `connectors.rejected-<UTC time>.json` (0600), the daemon starts with no connectors, and
+	 * {@link onSetAside} tells the user once; the secrets in the app's store are left alone. Without
+	 * the app (or when the key cannot be read) the file cannot be checked: it stays loaded as it is,
+	 * that is logged, and it is put back byte for byte, so its signature survives until a daemon the
+	 * app launches checks it.
+	 */
+	async checkIntegrity(): Promise<void> {
+		const source = this.options.secrets;
+		const present = this.loaded !== undefined;
+		const notVerified = (why: string) => {
+			if (present)
+				this.log(
+					`connectors.json was not verified: ${why}; it is used as it is, and connectors that need a secret stay locked without the app`,
+				);
+		};
+		if (!source?.available) {
+			notVerified("the desktop app is not connected");
+			return;
+		}
+		let stored: string | undefined;
+		try {
+			stored = await source.get(INTEGRITY_KEY_ID);
+		} catch (error) {
+			notVerified(`its key could not be read (${(error as Error).message})`);
+			return;
+		}
+		let key = parseIntegrityKey(stored);
+		if (!key) {
+			const created = newIntegrityKey();
+			try {
+				await this.verifiedPut(source, INTEGRITY_KEY_ID, created);
+			} catch (error) {
+				notVerified(`its key could not be stored (${(error as Error).message})`);
+				return;
+			}
+			key = Buffer.from(created, "hex");
+		}
+		this.integrityKey = key;
+		if (!this.loaded) return;
+		const record = this.loaded.record;
+		const signedBefore = stored !== undefined || (record !== undefined && "mac" in record);
+		if (!signedBefore) {
+			this.edited = true;
+			writePrivate(this.file, this.recordText());
+			this.log("signed connectors.json for the first time");
+			return;
+		}
+		if (record && macMatches(key, record)) return;
+		this.setAside();
 	}
 
 	/** Waits for the secrets {@link update} is still storing. */
@@ -889,8 +973,9 @@ export class ConnectorStore {
 	 * Moves the secrets files still hold into the app's store, once the app is there (S25.5): text
 	 * secrets in `connectors.json`, then the sign-ins of the old sign-in home and of the engine's old
 	 * `mcp-auth.json` (the daemon's own win). Each one is stored, read back, and compared before the
-	 * file loses it; when one fails, the files stay as they were and the next start tries again. A
-	 * file that is empty or cannot be read is skipped and does not stop the rest. Afterwards
+	 * file loses it; when one fails, the files stay as they were and the next start tries again. An
+	 * empty sign-in file is removed (logged); one that cannot be read or parsed is reported and left
+	 * as it is, the rest still move, and the move is not marked done until it can be read. Afterwards
 	 * `connectors.json` says so (`version: 2`), and sign-in files that appear later are reported once
 	 * and left alone, never imported. Nothing secret is logged.
 	 */
@@ -1135,16 +1220,20 @@ export class ConnectorStore {
 			const moved = this.pending.size;
 			for (const [id, secret] of this.pending) this.cache.set(id, secret);
 			this.pending.clear();
+			this.edited = true;
 			writePrivate(this.file, this.recordText());
 			this.log(`moved ${moved} connector secrets from connectors.json into the app's secure store`);
 		}
 		if (!this.migrated) {
 			let moved = 0;
 			let dropped = 0;
+			// A file that could not be read may hold secrets: the move is not done until it is.
+			let unread = false;
 			// The daemon's own sign-ins first: they win over the engine's older ones.
 			for (const file of [this.authFile, this.legacyAuthFile]) {
 				const states = this.readSignIns(file);
-				if (!states) continue;
+				if (states === "unread") unread = true;
+				if (!states || states === "unread") continue;
 				const refs: Record<string, string> = {};
 				try {
 					for (const [key, state] of Object.entries(states)) {
@@ -1171,18 +1260,20 @@ export class ConnectorStore {
 				this.applySignIns(refs);
 				unlinkSync(file);
 			}
-			if (existsSync(this.signinMcpFile)) unlinkSync(this.signinMcpFile);
-			try {
-				if (readdirSync(this.signinHome).length === 0) rmdirSync(this.signinHome);
-			} catch {}
-			this.migrated = true;
-			mkdirSync(this.options.dataDir, { recursive: true, mode: 0o700 });
-			writePrivate(this.file, this.recordText());
 			if (moved > 0) this.log(`moved ${moved} connector sign-ins into the app's secure store`);
 			if (dropped > 0)
 				this.log(
 					`dropped ${dropped} sign-in${dropped === 1 ? "" : "s"} for a connector that is no longer added`,
 				);
+			if (unread) return;
+			if (existsSync(this.signinMcpFile)) unlinkSync(this.signinMcpFile);
+			try {
+				if (readdirSync(this.signinHome).length === 0) rmdirSync(this.signinHome);
+			} catch {}
+			this.migrated = true;
+			this.edited = true;
+			mkdirSync(this.options.dataDir, { recursive: true, mode: 0o700 });
+			writePrivate(this.file, this.recordText());
 		}
 		this.reportPlanted();
 	}
@@ -1193,23 +1284,31 @@ export class ConnectorStore {
 		if ((await source.get(id)) !== secret) throw new Error("a secret did not read back the same");
 	}
 
-	/** The sign-ins of an old file, by key; undefined when there is none, it is empty, or it cannot be read. */
-	private readSignIns(file: string): Record<string, unknown> | undefined {
+	/**
+	 * The sign-ins of an old file, by key; undefined when there is none or it is empty (an empty one
+	 * holds nothing: it is removed, and that is logged). `"unread"` when it cannot be read or is not a
+	 * list of sign-ins: it may hold secrets, so it is left as it is, reported, and tried again later.
+	 */
+	private readSignIns(file: string): Record<string, unknown> | "unread" | undefined {
+		const unread = (why: string) => {
+			this.log(
+				`${file} ${why}; it may hold connector secrets and stays on disk as it is. The move into the app's secure store will be tried again at the next start; fix or remove the file`,
+			);
+			return "unread" as const;
+		};
 		let text: string;
 		try {
 			text = readFileSync(file, "utf8");
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT")
-				this.log(`could not read ${file}; it was left as it is`);
-			return undefined;
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+			return unread("could not be read");
 		}
 		if (text.trim() === "") {
 			unlinkSync(file);
+			this.log(`removed ${file}: it was empty and held no sign-ins`);
 			return undefined;
 		}
-		const states = signInStates(text);
-		if (!states) this.log(`${file} is not a list of sign-ins; it was left as it is`);
-		return states;
+		return signInStates(text) ?? unread("is not a list of sign-ins");
 	}
 
 	/** The added connector whose remote server an old sign-in key names (`mcp__<server>|<url>`). */
@@ -1245,6 +1344,36 @@ export class ConnectorStore {
 
 	private engineMcpText(): string {
 		return renderMcpJson(this.saved, this.computer, this.proxy);
+	}
+
+	/** Moves a changed `connectors.json` aside (private), and starts over with no connectors, signed. */
+	private setAside(): void {
+		const stamp = new Date().toISOString().replace(/[-:.]/g, "");
+		let target = join(this.options.dataDir, `connectors.rejected-${stamp}.json`);
+		for (let n = 2; existsSync(target); n++)
+			target = join(this.options.dataDir, `connectors.rejected-${stamp}-${n}.json`);
+		let moved = false;
+		try {
+			renameSync(this.file, target);
+			moved = true;
+			// A planted link is moved as a link; what it points to is never touched.
+			if (lstatSync(target).isFile()) chmodSync(target, 0o600);
+		} catch (error) {
+			this.log(`could not move connectors.json aside (${(error as Error).message}); it is replaced`);
+		}
+		this.saved = { connectors: {} };
+		this.pending.clear();
+		this.cache.clear();
+		// Nothing from the changed file is trusted: old sign-in files are reported, never imported.
+		this.migrated = true;
+		this.edited = true;
+		mkdirSync(this.options.dataDir, { recursive: true, mode: 0o700 });
+		writePrivate(this.file, this.recordText());
+		this.log(
+			`connectors.json was changed while Gentle Dot was closed (its signature does not match)${moved ? `; moved it to ${target}` : ""} and started with no connectors; the secrets in the app's secure store were not touched`,
+		);
+		this.onUpdated();
+		this.onSetAside(SET_ASIDE_NOTICE);
 	}
 
 	private log(line: string): void {
@@ -1289,17 +1418,25 @@ export class ConnectorStore {
 		return true;
 	}
 
-	/** `connectors.json`: each secret as `{"secretRef": "<id>"}`, or as the text it still was until it moves. */
+	/**
+	 * `connectors.json`: each secret as `{"secretRef": "<id>"}`, or as the text it still was until it
+	 * moves, and `mac`, its signature (S25.6). Without the key the daemon cannot sign: a signed record
+	 * as it was read is kept byte for byte while nothing changed it, so its signature is never lost.
+	 */
 	private recordText(): string {
-		const record = { version: this.migrated ? 2 : 1, connectors: this.saved.connectors };
-		return `${JSON.stringify(
-			record,
-			(_key, value: unknown) => {
-				const ref = typeof value === "string" ? refId(value) : undefined;
-				return ref === undefined ? value : (this.pending.get(ref) ?? { secretRef: ref });
-			},
-			2,
-		)}\n`;
+		const signedAtStart = this.loaded?.record !== undefined && "mac" in this.loaded.record;
+		if (!this.integrityKey && !this.edited && signedAtStart && this.loaded) return this.loaded.text;
+		const record = JSON.parse(
+			JSON.stringify(
+				{ version: this.migrated ? 2 : 1, connectors: this.saved.connectors },
+				(_key, value: unknown) => {
+					const ref = typeof value === "string" ? refId(value) : undefined;
+					return ref === undefined ? value : (this.pending.get(ref) ?? { secretRef: ref });
+				},
+			),
+		) as Record<string, unknown>;
+		const signed = this.integrityKey ? { ...record, mac: recordMac(this.integrityKey, record) } : record;
+		return `${JSON.stringify(signed, null, 2)}\n`;
 	}
 
 	/**
@@ -1309,7 +1446,12 @@ export class ConnectorStore {
 	private load(): { state: ConnectorsState; renamed: boolean; version: number } {
 		let saved: { version?: unknown; connectors?: Record<string, Record<string, unknown> | undefined> };
 		try {
-			saved = JSON.parse(readFileSync(this.file, "utf8"), (_key, value: unknown) => {
+			const text = readFileSync(this.file, "utf8");
+			this.loaded = { text };
+			const raw = JSON.parse(text) as unknown;
+			if (typeof raw === "object" && raw !== null && !Array.isArray(raw))
+				this.loaded.record = raw as Record<string, unknown>;
+			saved = JSON.parse(text, (_key, value: unknown) => {
 				const ref = (value as { secretRef?: unknown } | null)?.secretRef;
 				return typeof value === "object" && typeof ref === "string" && SECRET_ID.test(ref)
 					? secretRef(ref)
@@ -1547,6 +1689,8 @@ export class ConnectorManager {
 	onChanged: (restart: boolean) => void = () => {};
 	/** A change to the connector files made outside the Connectors screen was put back. */
 	onBlocked: () => void = () => {};
+	/** A `connectors.json` changed while the daemon was down was set aside; `notice` is for the user. */
+	onSetAside: (notice: string) => void = () => {};
 	/** Whether the current model accepts images; undefined when that is not known. */
 	imagesSupported: () => boolean | undefined = () => undefined;
 	private flow: Flow | undefined;
@@ -1561,6 +1705,7 @@ export class ConnectorManager {
 	constructor(options: ConnectorManagerOptions) {
 		this.options = options;
 		options.store.onReverted = () => this.onBlocked();
+		options.store.onSetAside = (notice) => this.onSetAside(notice);
 	}
 
 	/** Puts back connector files changed outside the Connectors screen (for example after a run). */
