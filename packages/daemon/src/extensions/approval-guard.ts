@@ -30,6 +30,8 @@
  * status update on the engine's own output (`ctx.ui.setStatus`), which only the daemon reads, and the
  * model hears only that the user will review it. The daemon shows the draft as a card and adds it
  * only after the user approves; secrets are typed in the app, never in the chat.
+ * Subagents of the engine load this guard too, through a file the daemon keeps in the engine's
+ * extensions folder (`child-guard.ts`), but get no `propose_connector`.
  * This file has no dependencies besides Node, so the engine loads it as is.
  */
 import { realpathSync, statSync } from "node:fs";
@@ -439,7 +441,8 @@ function fileId(path: string): string | undefined {
 	}
 }
 
-export default function approvalGuard(pi: ExtensionAPI): void {
+/** `subagent`: loaded into a subagent's child engine by the daemon's file for it (`child-guard.ts`). */
+export default function approvalGuard(pi: ExtensionAPI, options: { subagent?: boolean } = {}): void {
 	const parsed = parsePolicy(process.env[POLICY_ENV]);
 	const agentDir = process.env.PI_CODING_AGENT_DIR;
 	const fallback = agentDir
@@ -447,14 +450,17 @@ export default function approvalGuard(pi: ExtensionAPI): void {
 		: [];
 	const policy: ConnectorPolicy = parsed ?? { protectedPaths: fallback };
 
-	pi.registerTool({
-		...PROPOSE_TOOL,
-		promptGuidelines: [...PROPOSE_TOOL.promptGuidelines],
-		parameters: PROPOSE_TOOL.parameters as never,
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			return { content: [{ type: "text", text: proposeConnector(params, ctx) }], details: {} };
-		},
-	});
+	// A subagent's status updates go to its parent engine, never to the daemon, so its drafts could
+	// not reach the user: subagents get no propose_connector (S25.4).
+	if (!options.subagent)
+		pi.registerTool({
+			...PROPOSE_TOOL,
+			promptGuidelines: [...PROPOSE_TOOL.promptGuidelines],
+			parameters: PROPOSE_TOOL.parameters as never,
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+				return { content: [{ type: "text", text: proposeConnector(params, ctx) }], details: {} };
+			},
+		});
 
 	// Each model call carries only the last computer screenshot (S24.10).
 	pi.on("context", (event) => ({ messages: pruneScreenshots(event.messages) }));

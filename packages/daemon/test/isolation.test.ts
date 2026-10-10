@@ -86,11 +86,41 @@ describe("isolatedAgentEnv memory", () => {
 });
 
 describe("isolatedAgentEnv subagents", () => {
-	it("turns the engine's subagents off until S25, whatever the user's environment says", () => {
-		expect(isolatedAgentEnv({ HOME: tempDir() }, tempDir()).GENTLE_PI_AGENTS).toBe("0");
-		expect(isolatedAgentEnv({ HOME: tempDir(), GENTLE_PI_AGENTS: "1" }, tempDir()).GENTLE_PI_AGENTS).toBe(
-			"0",
+	it("turns the engine's subagents on, whatever the user's own Gentle Shell setting says (S25.4)", () => {
+		expect(isolatedAgentEnv({ HOME: tempDir() }, tempDir()).GENTLE_PI_AGENTS).toBe("1");
+		expect(isolatedAgentEnv({ HOME: tempDir(), GENTLE_PI_AGENTS: "0" }, tempDir()).GENTLE_PI_AGENTS).toBe(
+			"1",
 		);
+	});
+
+	it("keeps them off with GENTLE_DOT_SUBAGENTS=off (or 0, false)", () => {
+		for (const value of ["off", "0", "false", " OFF "])
+			expect(
+				isolatedAgentEnv({ HOME: tempDir(), GENTLE_DOT_SUBAGENTS: value }, tempDir()).GENTLE_PI_AGENTS,
+			).toBe("0");
+		expect(
+			isolatedAgentEnv({ HOME: tempDir(), GENTLE_DOT_SUBAGENTS: "on" }, tempDir()).GENTLE_PI_AGENTS,
+		).toBe("1");
+	});
+
+	it("never passes on a parent run's subagent markers or a command line for its children", () => {
+		const env = isolatedAgentEnv(
+			{
+				HOME: tempDir(),
+				GENTLE_PI_AGENTS_CHILD: "1",
+				GENTLE_PI_AGENTS_OWNED_IPC: "1-abc",
+				GENTLE_PI_AGENTS_PARENT_PERMISSION_FD: "3",
+				GENTLE_PI_AGENTS_PI: "/bin/sh -c other",
+			},
+			tempDir(),
+		);
+		for (const key of [
+			"GENTLE_PI_AGENTS_CHILD",
+			"GENTLE_PI_AGENTS_OWNED_IPC",
+			"GENTLE_PI_AGENTS_PARENT_PERMISSION_FD",
+			"GENTLE_PI_AGENTS_PI",
+		])
+			expect(env[key]).toBeUndefined();
 	});
 });
 

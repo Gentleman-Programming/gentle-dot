@@ -235,9 +235,9 @@ describe.skipIf(!enabled)("@real-agent connector probe", () => {
 			});
 			expect(summary.projectMcpJson).toBe(false);
 			expect(summary.toasts).toContain("A change to your connectors was blocked.");
-			// A1: subagents are off until S25 (their child engines do not load the approval guard).
+			// Subagents are back behind the proxy (S25.4, T23f; subagent-probe.test.ts checks their children).
 			expect(summary.toolsOffered).toContain("bash");
-			expect(summary.subagentTools).toEqual([]);
+			expect(summary.subagentTools).toContain("subagent_run");
 		} finally {
 			if (child.exitCode === null) child.kill("SIGTERM");
 			await exited;
