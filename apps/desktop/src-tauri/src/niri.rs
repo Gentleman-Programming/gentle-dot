@@ -1,14 +1,17 @@
-//! Linux-only Niri pure window-selection/geometry helpers plus the bounded
-//! socket-transport scaffolding.
+//! Linux-only Niri pure window-selection/geometry helpers, bounded
+//! socket-transport scaffolding, and pure action/mode policy.
 //!
 //! Selection and geometry stay pure: they select the single own window by
 //! exact PID and title, decode floating geometry, and associate compact
 //! spots with outputs. The transport below dials one request line over a
 //! nonblocking `AF_UNIX` socket and decodes one `{"Ok":Response} |
 //! {"Err":string}` reply line, with a single aggregate deadline covering
-//! connect, write, and read, and a 1 MiB reply cap. It has no production
-//! callers yet: tests use owned temporary fake sockets only, never a live
-//! compositor. Actions and mode policy arrive in later slices.
+//! connect, write, and read, and a 1 MiB reply cap. Action builders emit
+//! exact numeric-id wire JSON; the mode/capture/reconcile policy below
+//! resolves the own window and shares one aggregate budget per operation.
+//! It has no production callers yet: tests use owned temporary fake sockets
+//! and injected request closures only, never a live compositor. Shell
+//! wiring arrives in later slices.
 
 use serde_json::Value;
 use std::io::{self, Read, Write};
@@ -392,6 +395,139 @@ pub fn restore_delta(
     Some(((saved.x - x).round() as i32, (saved.y - y).round() as i32))
 }
 
+/// Mode builders take a known numeric id only. Tiling is the expanded normal
+/// mode, floating is compact. There is deliberately no `SetFixed` builder:
+/// raw snapshots already include the working-area offset, so absolute moves
+/// must go through `restore_delta` plus `action_move_floating`.
+pub fn action_tiling(id: u64) -> String {
+    format!("{{\"Action\":{{\"MoveWindowToTiling\":{{\"id\":{id}}}}}}}")
+}
+
+pub fn action_floating(id: u64) -> String {
+    format!("{{\"Action\":{{\"MoveWindowToFloating\":{{\"id\":{id}}}}}}}")
+}
+
+pub fn action_move_floating(id: u64, dx: i32, dy: i32) -> String {
+    format!("{{\"Action\":{{\"MoveFloatingWindow\":{{\"id\":{id},\"x\":{{\"AdjustFixed\":{dx}}},\"y\":{{\"AdjustFixed\":{dy}}}}}}}}}")
+}
+
+/// Full-column-width action for an exact window id (S5): `SetProportion` is a
+/// proportion of the working area (niri-ipc 26.4 `SizeChange`), so 100.0 fills
+/// the column. Numeric id only: never a focused-window fallback.
+pub fn action_set_window_width(id: u64) -> String {
+    format!("{{\"Action\":{{\"SetWindowWidth\":{{\"id\":{id},\"change\":{{\"SetProportion\":100.0}}}}}}}}")
+}
+
+/// Automatic-height action for an exact window id (S5): resets a fixed height
+/// back to automatic so the expanded window fills managed height.
+pub fn action_reset_window_height(id: u64) -> String {
+    format!("{{\"Action\":{{\"ResetWindowHeight\":{{\"id\":{id}}}}}}}")
+}
+
+/// Managed-geometry pair for an exact window id (S5b): full-column width plus
+/// automatic height, shared by the mode transition, the same-mode retry, and
+/// the worker remap path so the sequence is defined once. Numeric id only.
+pub fn action_managed_geometry(id: u64) -> [String; 2] {
+    [action_set_window_width(id), action_reset_window_height(id)]
+}
+
+/// Aggregate budget for one position-independent mode operation (S2a): the
+/// `Windows` lookup plus the single mode action share this total, never a
+/// fresh budget per request. Callers pass the remainder down per call.
+pub const NATIVE_MODE_BUDGET: Duration = Duration::from_millis(250);
+
+/// Position-independent native mode transition (S2a): tiling is the expanded
+/// normal mode, floating is compact. Resolves the exact own window by pid and
+/// production title, then issues exactly one mode action for its id. Returns
+/// the mode in effect: the requested one only after the action reply reports
+/// `Handled`. Missing/ambiguous windows are a bounded no-op returning the
+/// previous mode; wire errors and unexpected action payloads propagate with
+/// the mode untouched — except geometry below, which runs post-flip. A request
+/// matching the current mode sends no queries. No position capture or restore
+/// lives here (S2b); never a focused-window fallback, never `SetFixed`.
+///
+/// Managed geometry on expand (S5a): after the tiling reports `Handled`, the
+/// mode flips immediately then full-column width plus automatic height follow
+/// for the same id, all inside the one aggregate budget. A geometry failure
+/// therefore surfaces as an error WITH the mode already honestly expanded —
+/// never a false compact report after tiling succeeded. Compact stays a single
+/// floating action; callers own size/constraints around it.
+pub fn apply_native_mode(
+    expanded: &mut bool,
+    on: bool,
+    pid: u32,
+    request: &mut impl FnMut(&str, Duration) -> io::Result<Value>,
+) -> io::Result<bool> {
+    if *expanded == on {
+        return Ok(*expanded);
+    }
+    let start = Instant::now();
+    let windows = request(WINDOWS_REQUEST, NATIVE_MODE_BUDGET.saturating_sub(start.elapsed()))?;
+    let Some(panel) = own_panel_window(&windows, pid) else {
+        return Ok(*expanded);
+    };
+    let action = if on { action_tiling(panel.id) } else { action_floating(panel.id) };
+    let outcome = request(&action, NATIVE_MODE_BUDGET.saturating_sub(start.elapsed()))?;
+    if !is_handled(&outcome) {
+        return Err(invalid("niri: unexpected action response"));
+    }
+    *expanded = on;
+    if on {
+        for wire in action_managed_geometry(panel.id) {
+            let reply = request(&wire, NATIVE_MODE_BUDGET.saturating_sub(start.elapsed()))?;
+            if !is_handled(&reply) {
+                return Err(invalid("niri: unexpected action response"));
+            }
+        }
+    }
+    Ok(*expanded)
+}
+
+/// Whether a decoded mode-action reply reports success (S2b-1): Niri answers
+/// a handled action with the literal `"Handled"`. Any other `Ok` payload is
+/// not success and must leave the tracked mode untouched.
+pub fn is_handled(reply: &Value) -> bool {
+    reply.as_str() == Some("Handled")
+}
+
+/// Captures the own floating panel's compact spot (S2b-1) for the hide/expand
+/// hooks: resolves the unique pid+title window, then its workspace output.
+/// Shares one aggregate budget across both queries with the remainder passed
+/// down, never reset. `Ok(None)` — missing/ambiguous window, tiling panel,
+/// null position, invalid size, or unknown output — and `Err` both mean the
+/// caller preserves its remembered spot; nothing is invented (no fallbacks,
+/// no origin guess). Tiling panels return before the workspaces query; the
+/// S2b-2 shell guard additionally never calls this while expanded.
+pub fn capture_compact_spot(
+    pid: u32,
+    request: &mut impl FnMut(&str, Duration) -> io::Result<Value>,
+) -> io::Result<Option<CompactSpot>> {
+    let start = Instant::now();
+    let windows = request(WINDOWS_REQUEST, NATIVE_MODE_BUDGET.saturating_sub(start.elapsed()))?;
+    let Some(panel) = own_panel_window(&windows, pid) else {
+        return Ok(None);
+    };
+    if !panel.floating {
+        return Ok(None);
+    }
+    let workspaces = request(WORKSPACES_REQUEST, NATIVE_MODE_BUDGET.saturating_sub(start.elapsed()))?;
+    Ok(compact_spot(&panel, workspace_output(&workspaces, panel.workspace)))
+}
+
+/// Reconciles an observed panel layout with the desired mode (S2b-1),
+/// separate from the tracked-mode early return: a remapped window floats by
+/// rule even while the tracked mode still says expanded, so the exact new id
+/// must tile. Returns the single numeric-id action when actual and desired
+/// disagree, `None` when aligned. Never a focused-window fallback (the panel
+/// comes from the pid+title resolver), never `SetFixed`.
+pub fn reconcile_action(panel: &PanelWindow, desired_expanded: bool) -> Option<String> {
+    match (desired_expanded, panel.floating) {
+        (true, true) => Some(action_tiling(panel.id)),
+        (false, false) => Some(action_floating(panel.id)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -635,5 +771,346 @@ mod tests {
         assert!(dial(std::path::Path::new("niri-\0-sock")).is_err());
         let long = format!("{}/{}", std::env::temp_dir().display(), "s".repeat(200));
         assert!(dial(std::path::Path::new(&long)).is_err());
+    }
+
+    #[test]
+    fn action_builders_emit_exact_wire_json() {
+        assert_eq!(action_tiling(9), r#"{"Action":{"MoveWindowToTiling":{"id":9}}}"#);
+        assert_eq!(action_floating(9), r#"{"Action":{"MoveWindowToFloating":{"id":9}}}"#);
+        let moved = r#"{"Action":{"MoveFloatingWindow":{"id":9,"x":{"AdjustFixed":10},"y":{"AdjustFixed":-5}}}}"#;
+        assert_eq!(action_move_floating(9, 10, -5), moved);
+        // Ids stay numeric after a JSON round trip, never strings or nulls.
+        for action in [action_tiling(9), action_floating(9), action_move_floating(9, 0, 0)] {
+            let parsed: Value = serde_json::from_str(&action).unwrap();
+            let by_path = |pointer: &str| parsed.pointer(pointer).cloned();
+            let id = by_path("/Action/MoveWindowToTiling/id")
+                .or_else(|| by_path("/Action/MoveWindowToFloating/id"))
+                .or_else(|| by_path("/Action/MoveFloatingWindow/id"));
+            assert!(id.is_some_and(|id| id.is_u64()), "{action}");
+        }
+    }
+
+    #[test]
+    fn native_mode_expand_tiles_the_exact_own_window() {
+        let at = serde_json::json!([10.0, 20.0]);
+        let windows =
+            serde_json::json!({"Windows": [win(9, 100, crate::platform::PANEL_TITLE, true, at)]});
+        let mut calls: Vec<(String, Duration)> = Vec::new();
+        let mut request = |wire: &str, timeout: Duration| -> io::Result<Value> {
+            calls.push((wire.to_owned(), timeout));
+            if wire == WINDOWS_REQUEST {
+                Ok(windows.clone())
+            } else {
+                Ok(serde_json::json!("Handled"))
+            }
+        };
+        let mut expanded = false;
+        assert!(apply_native_mode(&mut expanded, true, 100, &mut request).unwrap());
+        assert!(expanded);
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls[0].0, WINDOWS_REQUEST);
+        assert_eq!(calls[1].0, action_tiling(9));
+        assert_eq!(calls[2].0, action_set_window_width(9));
+        assert_eq!(calls[3].0, action_reset_window_height(9));
+        // One aggregate budget across all four: each share never exceeds the last.
+        assert!(calls[0].1 <= NATIVE_MODE_BUDGET);
+        for window in calls.windows(2) {
+            assert!(window[1].1 <= window[0].1);
+        }
+    }
+
+    #[test]
+    fn native_mode_compact_floats_the_exact_own_window() {
+        let at = serde_json::json!([10.0, 20.0]);
+        let windows =
+            serde_json::json!({"Windows": [win(9, 100, crate::platform::PANEL_TITLE, false, at)]});
+        let mut calls: Vec<(String, Duration)> = Vec::new();
+        let mut request = |wire: &str, timeout: Duration| -> io::Result<Value> {
+            calls.push((wire.to_owned(), timeout));
+            if wire == WINDOWS_REQUEST {
+                Ok(windows.clone())
+            } else {
+                Ok(serde_json::json!("Handled"))
+            }
+        };
+        let mut expanded = true;
+        assert!(!apply_native_mode(&mut expanded, false, 100, &mut request).unwrap());
+        assert!(!expanded);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].0, action_floating(9));
+        assert!(calls[1].1 <= calls[0].1);
+    }
+
+    #[test]
+    fn native_mode_same_request_sends_no_queries() {
+        let mut calls = 0;
+        let mut request = |_: &str, _: Duration| -> io::Result<Value> {
+            calls += 1;
+            Ok(serde_json::json!({}))
+        };
+        let mut expanded = true;
+        assert!(apply_native_mode(&mut expanded, true, 100, &mut request).unwrap());
+        assert!(expanded);
+        let mut compact = false;
+        assert!(!apply_native_mode(&mut compact, false, 100, &mut request).unwrap());
+        assert!(!compact);
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn native_mode_missing_or_ambiguous_windows_are_bounded_no_ops() {
+        let at = serde_json::json!([10.0, 20.0]);
+        let title = crate::platform::PANEL_TITLE;
+        for windows in [
+            serde_json::json!({"Windows": []}),
+            serde_json::json!({"Windows": [win(9, 999, title, true, at.clone())]}),
+            serde_json::json!({"Windows": [
+                win(9, 100, title, true, at.clone()),
+                win(10, 100, title, false, Value::Null),
+            ]}),
+        ] {
+            let mut calls = 0;
+            let mut request = |wire: &str, _: Duration| -> io::Result<Value> {
+                calls += 1;
+                assert_eq!(wire, WINDOWS_REQUEST);
+                Ok(windows.clone())
+            };
+            let mut expanded = false;
+            assert!(!apply_native_mode(&mut expanded, true, 100, &mut request).unwrap());
+            assert!(!expanded);
+            // Only the lookup ran: no mode action follows an unresolvable window.
+            assert_eq!(calls, 1);
+        }
+    }
+
+    #[test]
+    fn native_mode_wire_errors_keep_the_previous_mode() {
+        let at = serde_json::json!([10.0, 20.0]);
+        let windows =
+            serde_json::json!({"Windows": [win(9, 100, crate::platform::PANEL_TITLE, true, at)]});
+        // A failing lookup never reports success and never flips the mode.
+        let mut failing = |_: &str, _: Duration| -> io::Result<Value> { Err(invalid("niri: boom")) };
+        let mut expanded = false;
+        assert!(apply_native_mode(&mut expanded, true, 100, &mut failing).is_err());
+        assert!(!expanded);
+        // A failing action also keeps the previous mode, never the requested one.
+        let mut calls = 0;
+        let mut action_fails = |wire: &str, _: Duration| -> io::Result<Value> {
+            calls += 1;
+            if wire == WINDOWS_REQUEST {
+                Ok(windows.clone())
+            } else {
+                Err(invalid("niri: boom"))
+            }
+        };
+        assert!(apply_native_mode(&mut expanded, true, 100, &mut action_fails).is_err());
+        assert!(!expanded);
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn capture_resolves_the_own_floating_spot_within_one_budget() {
+        let title = crate::platform::PANEL_TITLE;
+        let at = serde_json::json!([10.0, 20.0]);
+        let windows = serde_json::json!({"Windows": [win(9, 100, title, true, at)]});
+        let workspaces = serde_json::json!({"Workspaces": [{"id": 7, "output": "DP-1"}]});
+        let mut calls: Vec<(String, Duration)> = Vec::new();
+        let mut request = |wire: &str, timeout: Duration| -> io::Result<Value> {
+            calls.push((wire.to_owned(), timeout));
+            if wire == WINDOWS_REQUEST {
+                Ok(windows.clone())
+            } else {
+                Ok(workspaces.clone())
+            }
+        };
+        let spot = capture_compact_spot(100, &mut request).unwrap().unwrap();
+        assert_eq!(spot, CompactSpot { output: "DP-1".to_owned(), x: 10.0, y: 20.0 });
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, WINDOWS_REQUEST);
+        assert_eq!(calls[1].0, WORKSPACES_REQUEST);
+        // One aggregate budget: the second query shares the remainder, never a reset.
+        assert!(calls[0].1 <= NATIVE_MODE_BUDGET);
+        assert!(calls[1].1 <= calls[0].1);
+    }
+
+    #[test]
+    fn capture_skips_anything_the_caller_must_not_remember() {
+        let title = crate::platform::PANEL_TITLE;
+        let at = serde_json::json!([10.0, 20.0]);
+        let known = serde_json::json!({"Workspaces": [{"id": 7, "output": "DP-1"}]});
+        let unknown = serde_json::json!({"Workspaces": [{"id": 8, "output": "HDMI-1"}]});
+        let sided = serde_json::json!({"id": 9, "pid": 100, "title": title, "is_floating": true,
+            "layout": {"tile_pos_in_workspace_view": at.clone(), "window_size": [420, 640]}});
+        let origin = CompactSpot { output: "DP-1".to_owned(), x: 0.0, y: 0.0 };
+        let cases: Vec<(Value, Value, Option<CompactSpot>, usize)> = vec![
+            (serde_json::json!({"Windows": []}), known.clone(), None, 1),
+            (serde_json::json!({"Windows": [win(9, 999, title, true, at.clone())]}), known.clone(), None, 1),
+            (serde_json::json!({"Windows": [win(9, 100, title, true, at.clone()),
+                win(10, 100, title, false, Value::Null)]}), known.clone(), None, 1),
+            // Tiling (expanded) panels never reach the workspaces query; the
+            // S2b-2 shell guard owns that call-site rule, this is defense in depth.
+            (serde_json::json!({"Windows": [win(9, 100, title, false, at.clone())]}), known.clone(), None, 1),
+            // Floating but position-less (e.g. interactive move): skipped, never the origin.
+            (serde_json::json!({"Windows": [win(9, 100, title, true, Value::Null)]}), known.clone(), None, 2),
+            // Unknown output and missing workspace: no invented fallback.
+            (serde_json::json!({"Windows": [win(9, 100, title, true, at.clone())]}), unknown.clone(), None, 2),
+            (serde_json::json!({"Windows": [sided]}), known.clone(), None, 2),
+            // The origin is a genuine spot.
+            (serde_json::json!({"Windows": [win(9, 100, title, true, serde_json::json!([0.0, 0.0]))]}),
+                known.clone(), Some(origin), 2),
+        ];
+        for (windows, workspaces, expected, queries) in cases {
+            let mut calls = 0;
+            let mut request = |wire: &str, _: Duration| -> io::Result<Value> {
+                calls += 1;
+                if wire == WINDOWS_REQUEST {
+                    Ok(windows.clone())
+                } else {
+                    assert_eq!(wire, WORKSPACES_REQUEST);
+                    Ok(workspaces.clone())
+                }
+            };
+            assert_eq!(capture_compact_spot(100, &mut request).unwrap(), expected);
+            assert_eq!(calls, queries);
+        }
+        // A failing query propagates: the caller keeps its old spot on Err too.
+        let mut failing = |_: &str, _: Duration| -> io::Result<Value> { Err(invalid("niri: boom")) };
+        assert!(capture_compact_spot(100, &mut failing).is_err());
+    }
+
+    #[test]
+    fn reconcile_retiles_a_remapped_float_when_expanded_is_desired() {
+        // Tracked mode already says expanded, so apply_native_mode would
+        // early-return; the actual remapped window still floats by rule and
+        // needs its exact new id tiled. No state is faked: the action follows
+        // the observed layout, not the tracked bool.
+        let remapped =
+            PanelWindow { id: 11, floating: true, size: (420, 640), pos: None, workspace: Some(7) };
+        assert_eq!(reconcile_action(&remapped, true), Some(action_tiling(11)));
+    }
+
+    #[test]
+    fn reconcile_refloats_a_tiled_window_when_compact_is_desired() {
+        let tiled =
+            PanelWindow { id: 11, floating: false, size: (800, 600), pos: None, workspace: Some(7) };
+        assert_eq!(reconcile_action(&tiled, false), Some(action_floating(11)));
+    }
+
+    #[test]
+    fn reconcile_aligned_layouts_send_no_action() {
+        let expanded =
+            PanelWindow { id: 11, floating: false, size: (800, 600), pos: None, workspace: Some(7) };
+        assert_eq!(reconcile_action(&expanded, true), None);
+        let compact = PanelWindow {
+            id: 11, floating: true, size: (420, 640), pos: Some((10.0, 20.0)), workspace: Some(7),
+        };
+        assert_eq!(reconcile_action(&compact, false), None);
+    }
+
+    #[test]
+    fn action_responses_require_the_handled_marker() {
+        assert!(is_handled(&serde_json::json!("Handled")));
+        for unexpected in [serde_json::json!({}), serde_json::json!(null), serde_json::json!("OK")] {
+            assert!(!is_handled(&unexpected), "{unexpected}");
+        }
+    }
+
+    #[test]
+    fn mode_actions_reject_unexpected_ok_payloads() {
+        let at = serde_json::json!([10.0, 20.0]);
+        let windows =
+            serde_json::json!({"Windows": [win(9, 100, crate::platform::PANEL_TITLE, true, at)]});
+        let mut request = |wire: &str, _: Duration| -> io::Result<Value> {
+            if wire == WINDOWS_REQUEST {
+                Ok(windows.clone())
+            } else {
+                Ok(serde_json::json!({}))
+            }
+        };
+        let mut expanded = false;
+        let error = apply_native_mode(&mut expanded, true, 100, &mut request).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(!expanded);
+    }
+
+    #[test]
+    fn managed_geometry_builders_emit_exact_verified_wire_json() {
+        // Shapes verified against niri-ipc 26.4 (`SizeChange::SetProportion` is
+        // a proportion of the working area; action replies are `Handled`).
+        assert_eq!(
+            action_set_window_width(9),
+            r#"{"Action":{"SetWindowWidth":{"id":9,"change":{"SetProportion":100.0}}}}"#
+        );
+        assert_eq!(
+            action_reset_window_height(9),
+            r#"{"Action":{"ResetWindowHeight":{"id":9}}}"#
+        );
+        let width: Value = serde_json::from_str(&action_set_window_width(9)).unwrap();
+        assert_eq!(width.pointer("/Action/SetWindowWidth/id"), Some(&serde_json::json!(9)));
+        assert_eq!(
+            width.pointer("/Action/SetWindowWidth/change/SetProportion"),
+            Some(&serde_json::json!(100.0))
+        );
+    }
+
+    #[test]
+    fn managed_geometry_pair_bundles_width_then_height() {
+        let pair = action_managed_geometry(9);
+        assert_eq!(pair[0], action_set_window_width(9));
+        assert_eq!(pair[1], action_reset_window_height(9));
+    }
+
+    #[test]
+    fn native_expand_grows_managed_geometry_after_tiling() {
+        // S5: tiling a constraint-fixed window clamps small; the expand plan
+        // must follow the tile with full-column width plus automatic height —
+        // exact own id, one aggregate budget across all four requests.
+        let at = serde_json::json!([10.0, 20.0]);
+        let windows =
+            serde_json::json!({"Windows": [win(9, 100, crate::platform::PANEL_TITLE, true, at)]});
+        let mut calls: Vec<(String, Duration)> = Vec::new();
+        let mut request = |wire: &str, timeout: Duration| -> io::Result<Value> {
+            calls.push((wire.to_owned(), timeout));
+            if wire == WINDOWS_REQUEST {
+                Ok(windows.clone())
+            } else {
+                Ok(serde_json::json!("Handled"))
+            }
+        };
+        let mut expanded = false;
+        assert!(apply_native_mode(&mut expanded, true, 100, &mut request).unwrap());
+        assert!(expanded);
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls[1].0, action_tiling(9));
+        assert_eq!(calls[2].0, action_set_window_width(9));
+        assert_eq!(calls[3].0, action_reset_window_height(9));
+        for window in calls.windows(2) {
+            assert!(window[1].1 <= window[0].1);
+        }
+    }
+
+    #[test]
+    fn native_expand_geometry_failure_keeps_honest_expanded_mode() {
+        // Tiling succeeded (Handled) but managed geometry did not: the mode
+        // stays expanded — never a false compact report — while the error
+        // still surfaces instead of vanishing.
+        for failing in [action_set_window_width(9), action_reset_window_height(9)] {
+            let at = serde_json::json!([10.0, 20.0]);
+            let windows =
+                serde_json::json!({"Windows": [win(9, 100, crate::platform::PANEL_TITLE, true, at)]});
+            let mut request = |wire: &str, _: Duration| -> io::Result<Value> {
+                if wire == WINDOWS_REQUEST {
+                    Ok(windows.clone())
+                } else if wire == failing {
+                    Ok(serde_json::json!({"unexpected": "ok"}))
+                } else {
+                    Ok(serde_json::json!("Handled"))
+                }
+            };
+            let mut expanded = false;
+            let error = apply_native_mode(&mut expanded, true, 100, &mut request).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(expanded);
+        }
     }
 }
