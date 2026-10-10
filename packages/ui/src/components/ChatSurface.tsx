@@ -30,6 +30,7 @@ import {
 } from "./icons.tsx";
 import { MessageList } from "./MessageList.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
+import { describePinCommand, PinForm } from "./PinForm.tsx";
 import { ProfilesPanel } from "./ProfilesPanel.tsx";
 import { SettingsPanel } from "./SettingsPanel.tsx";
 import { newRequestId, type Send } from "./types.ts";
@@ -92,6 +93,11 @@ export function ChatSurface({
 	settings,
 }: ChatSurfaceProps) {
 	const [showSettings, setShowSettings] = useState(false);
+	/** A connector change waiting for the web PIN (S25.8). */
+	const [pinPending, setPinPending] = useState<ClientMessage>();
+	// On a server without the desktop app, connector changes go out with the web PIN instead.
+	const pin = state.pin;
+	const changeSend: Send | undefined = appSend ?? (pin ? setPinPending : undefined);
 	const openAccounts = () => {
 		setShowSettings(false);
 		send({ type: "auth_list" });
@@ -302,7 +308,7 @@ export function ChatSurface({
 					<ConnectorsPanel
 						connectors={state.connectors}
 						send={send}
-						{...(appSend ? { appSend } : {})}
+						{...(changeSend ? { appSend: changeSend } : {})}
 						dispatch={dispatch}
 						openUrl={openUrl}
 						{...(computer?.available ? { computer } : {})}
@@ -350,19 +356,52 @@ export function ChatSurface({
 					</div>
 				) : null}
 				{state.asks.map((ask) => (
-					<AskCard key={ask.requestId} ask={ask} send={send} />
+					<AskCard key={ask.requestId} ask={ask} send={send} {...(pin ? { pin } : {})} />
 				))}
 				{(state.connectors.drafts ?? []).map((draft) => (
 					<ConnectorDraftCard
 						key={draft.draftId}
 						draft={draft}
 						send={send}
-						{...(appSend ? { appSend } : {})}
+						{...(changeSend ? { appSend: changeSend } : {})}
 						// Its secrets are asked in the Connectors screen.
 						approved={() => dispatch({ type: "connector_started", connectorId: draft.name })}
 					/>
 				))}
 			</main>
+
+			{pinPending && pin ? (
+				<div
+					className="switch-confirm pin-dialog"
+					role="dialog"
+					aria-label={pin.set ? "Enter your PIN" : "Create a PIN"}
+				>
+					<p>{describePinCommand(pinPending, state.connectors.list)}</p>
+					<PinForm
+						pin={pin}
+						action="Continue"
+						onPin={(value, created) => {
+							if (created) send({ type: "pin_set", pin: value });
+							send({ type: "pin_command", pin: value, command: pinPending });
+							setPinPending(undefined);
+						}}
+					>
+						<button
+							type="button"
+							onClick={() => {
+								setPinPending(undefined);
+								// Nothing was sent: a sign-in that was starting stops, as when the app declines.
+								dispatch({
+									type: "server",
+									message: { type: "error", code: "declined", message: "Nothing was changed.", seq: 0 },
+								});
+							}}
+						>
+							Cancel
+						</button>
+					</PinForm>
+				</div>
+			) : null}
 
 			{pendingSwitch ? (
 				<div className="switch-confirm" role="alertdialog" aria-label="Stop and switch?">

@@ -2,12 +2,17 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { inheritedAppSocket } from "./app-channel.ts";
+import { serveAuthHelper } from "./auth-helper.ts";
 import { loadConfig } from "./config.ts";
 import { APPROVAL_GUARD, bundledMcpCli } from "./connectors.ts";
 import { startDaemon, startupMessage } from "./daemon.ts";
 import { resolveEngramBin, runtimeDir } from "./runtime.ts";
+import { SECRETS_KEY_VAR } from "./secret-file.ts";
+import { loadVpsOptions } from "./vps.ts";
 import { IDENTITY_SOURCE } from "./white-label.ts";
 
+/** This file (or the bundled `cli.mjs`), which the sign-in helper runs again. */
+const ENTRY = fileURLToPath(import.meta.url);
 const log = (line: string) => process.stderr.write(`${new Date().toISOString()} ${line}\n`);
 
 /**
@@ -37,6 +42,10 @@ async function main(): Promise<void> {
 	// The desktop app that launched the daemon hands over its private channel on fd 3 (S25.1); it is
 	// opened before anything is spawned, and refused if children would inherit it.
 	const appChannel = inheritedAppSocket({ log });
+	// Server mode only when GENTLE_DOT_VPS says so (S25.8). The secrets key is read once and removed
+	// from the process environment, so no child the daemon starts can inherit it.
+	const vps = loadVpsOptions(process.env, { uid: process.getuid?.() ?? -1 });
+	delete process.env[SECRETS_KEY_VAR];
 	const daemon = await startDaemon({
 		port: config.port,
 		host: config.host,
@@ -49,6 +58,10 @@ async function main(): Promise<void> {
 		...(config.agentHome ? { agentHome: config.agentHome } : {}),
 		allowedOrigins: config.allowedOrigins,
 		...(appChannel ? { appChannel } : {}),
+		// Sign-in runs in this same entry point as the engine's user (`--auth-helper`, B1).
+		...(vps
+			? { vps: { ...vps, authHelper: { command: process.execPath, args: [ENTRY, "--auth-helper"] } } }
+			: {}),
 		log,
 	});
 	process.stdout.write(`${startupMessage(daemon.url, config.dataDir, process.stdout.isTTY === true)}\n`);
@@ -69,9 +82,11 @@ async function main(): Promise<void> {
 	void daemon.closed.then(() => process.exit(0));
 }
 
-if (process.argv.includes("--self-check")) selfCheck();
-
-main().catch((error: Error) => {
-	log(`failed to start: ${error.message}`);
-	process.exit(1);
-});
+if (process.argv.includes("--auth-helper")) serveAuthHelper();
+else {
+	if (process.argv.includes("--self-check")) selfCheck();
+	main().catch((error: Error) => {
+		log(`failed to start: ${error.message}`);
+		process.exit(1);
+	});
+}

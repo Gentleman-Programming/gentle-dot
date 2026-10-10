@@ -1,5 +1,13 @@
 import { randomBytes } from "node:crypto";
-import { createWriteStream, existsSync, readFileSync, rmdirSync, rmSync, unlinkSync } from "node:fs";
+import {
+	createWriteStream,
+	existsSync,
+	openSync,
+	readFileSync,
+	rmdirSync,
+	rmSync,
+	unlinkSync,
+} from "node:fs";
 import { extname, join } from "node:path";
 import type { Readable } from "node:stream";
 import {
@@ -9,6 +17,7 @@ import {
 	type AttachmentRef,
 	type UploadedFile,
 } from "@gentle-dot/protocol";
+import { directAccess, type EngineAccess } from "./engine-access.ts";
 import { ensurePrivateDir } from "./isolation.ts";
 
 /** A stored file, with its absolute path. */
@@ -45,6 +54,11 @@ export interface UploadStoreOptions {
 	/** How long an upload that was never sent is kept. Default one hour. */
 	ttlMs?: number;
 	now?: () => number;
+	/**
+	 * How the store reaches the workspace; in server mode as the engine's user (S25.8, B1), so a
+	 * link the engine planted there leads nowhere it could not write itself.
+	 */
+	access?: EngineAccess;
 }
 
 const UNSENT_TTL_MS = 60 * 60 * 1000;
@@ -122,10 +136,12 @@ export class UploadStore {
 	private readonly limits: AttachmentLimits;
 	private readonly ttlMs: number;
 	private readonly now: () => number;
+	private readonly access: EngineAccess;
 	private readonly batches = new Map<string, Batch>();
 
 	constructor(options: UploadStoreOptions) {
 		this.root = join(options.workspace, "uploads");
+		this.access = options.access ?? directAccess;
 		this.limits = options.limits ?? ATTACHMENT_LIMITS;
 		this.ttlMs = options.ttlMs ?? UNSENT_TTL_MS;
 		this.now = options.now ?? Date.now;
@@ -139,7 +155,7 @@ export class UploadStore {
 		body: Readable,
 		request: { name: string; uploadId?: string; length?: number },
 	): Promise<UploadOutcome> {
-		this.prune();
+		this.access(() => this.prune());
 		const limits = this.limits;
 		if (request.length !== undefined && request.length > limits.fileBytes) return tooLarge(limits);
 		const uploadId = request.uploadId ?? `u_${randomBytes(16).toString("base64url")}`;
@@ -170,18 +186,35 @@ export class UploadStore {
 		if (request.length !== undefined && batch.bytes + request.length > limits.messageBytes) {
 			return messageTooLarge(limits);
 		}
-		const name = this.freeName(batch, sanitizeName(request.name));
+		const name = this.access(() => this.freeName(batch, sanitizeName(request.name)));
+		const path = join(batch.dir, name);
+		// The folders and the file are made here, synchronously; the bytes then go to the open file.
+		let fd: number;
+		try {
+			fd = this.access(() => {
+				ensurePrivateDir(this.root);
+				ensurePrivateDir(batch.dir);
+				return openSync(path, "wx", 0o600);
+			});
+		} catch {
+			if (!known) this.access(() => this.dropIfEmpty(uploadId, batch));
+			return {
+				ok: false,
+				status: 500,
+				code: "upload_failed",
+				message: "The file could not be saved. Try again.",
+			};
+		}
 		batch.writing.add(name);
 		this.batches.set(uploadId, batch);
-		ensurePrivateDir(this.root);
-		ensurePrivateDir(batch.dir);
-		const path = join(batch.dir, name);
-		const written = await this.write(body, path, batch);
+		const written = await this.write(body, fd, batch);
 		batch.writing.delete(name);
 		if (!written.ok) {
 			batch.bytes -= written.size;
-			removeQuietly(path);
-			this.dropIfEmpty(uploadId, batch);
+			this.access(() => {
+				removeQuietly(path);
+				this.dropIfEmpty(uploadId, batch);
+			});
 			return written.refusal;
 		}
 		const file: StoredFile = { name, size: written.size, mime: sniffMime(written.head), path };
@@ -223,12 +256,13 @@ export class UploadStore {
 
 	private write(
 		body: Readable,
-		path: string,
+		fd: number,
 		batch: Batch,
 	): Promise<{ ok: true; size: number; head: Buffer } | { ok: false; size: number; refusal: UploadRefusal }> {
 		const limits = this.limits;
 		return new Promise((resolve) => {
-			const out = createWriteStream(path, { flags: "wx", mode: 0o600 });
+			// An open file: nothing on the thread pool opens a path (see engine-access.ts).
+			const out = createWriteStream("", { fd, autoClose: true });
 			let size = 0;
 			let head = Buffer.alloc(0);
 			let ended = false;

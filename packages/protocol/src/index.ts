@@ -22,9 +22,10 @@ export interface Ask {
 	requestId: string;
 	/**
 	 * `app`: an approval the desktop app asks in a native dialog (S25.3). Windows only show that it
-	 * waits there; it cannot be answered with `ui_response`.
+	 * waits there; it cannot be answered with `ui_response`. `pin`: an approval on a server (S25.8),
+	 * allowed with `pin_approve` and the web PIN; `ui_response` with `confirmed: false` declines it.
 	 */
-	method: "select" | "confirm" | "input" | "editor" | "app";
+	method: "select" | "confirm" | "input" | "editor" | "app" | "pin";
 	title: string;
 	message?: string;
 	options?: string[];
@@ -78,6 +79,12 @@ export interface HistoryMessage {
 export interface Features {
 	/** Several conversations (list, new conversation); off means one continuous chat. */
 	conversations: boolean;
+}
+
+/** The web PIN on a server (S25.8): whether it was set, and whether wrong tries locked it for now. */
+export interface PinStatus {
+	set: boolean;
+	locked?: boolean;
 }
 
 /** What talking to the assistant can use through the daemon (an OpenAI API key, S30.2). */
@@ -375,7 +382,13 @@ export type ClientMessage =
 	| { type: "computer_unregister" }
 	/** A recording to turn into text: its audio type and the bytes in base64. */
 	| { type: "voice_transcribe"; requestId: string; mime: string; data: string }
-	| { type: "voice_speak"; requestId: string; text: string };
+	| { type: "voice_speak"; requestId: string; text: string }
+	/** Sets the web PIN on a server, once (S25.8). */
+	| { type: "pin_set"; pin: string }
+	/** One connector change from the web page on a server, with the PIN ({@link isPinCommand}). */
+	| { type: "pin_command"; pin: string; command: ClientMessage }
+	/** Allows a `pin` ask with the PIN. */
+	| { type: "pin_approve"; requestId: string; pin: string };
 
 export type ServerPayload =
 	| {
@@ -390,7 +403,10 @@ export type ServerPayload =
 			model?: string;
 			features?: Features;
 			voice?: VoiceCapability;
+			/** On a server without the desktop app (S25.8): connector changes and approvals need this PIN. */
+			pin?: PinStatus;
 	  }
+	| { type: "pin_status"; pin: PinStatus }
 	| { type: "agent_state"; state: AgentState }
 	| { type: "user_message"; messageId: string; text: string; attachments?: AttachmentInfo[] }
 	| { type: "message_delta"; messageId: string; delta: string }
@@ -483,6 +499,19 @@ export function isAppCommand(message: ClientMessage): boolean {
 	return (APP_COMMANDS as readonly string[]).includes(message.type);
 }
 
+/** Why a window on a server must give the PIN first (S25.8). */
+export const PIN_REQUIRED = "Enter your PIN to change connectors or allow this action.";
+
+/** What a web PIN may confirm on a server (S25.8): the app commands, except the desktop's computer helper. */
+export function isPinCommand(message: ClientMessage): boolean {
+	return (
+		isAppCommand(message) && message.type !== "computer_register" && message.type !== "computer_unregister"
+	);
+}
+
+/** A web PIN: 6 to 12 digits. */
+export const PIN_PATTERN = /^[0-9]{6,12}$/;
+
 /** Every daemon message carries a per-connection, monotonic `seq`. */
 export type ServerMessage = ServerPayload & { seq: number };
 
@@ -492,6 +521,7 @@ const MAX_TEXT = 100_000;
 const CONNECTOR_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const isConnectorId = (value: unknown): value is string => isString(value) && CONNECTOR_ID.test(value);
 const isShortString = (value: unknown): value is string => isString(value) && value.length <= 200;
+const isPin = (value: unknown): value is string => isString(value) && PIN_PATTERN.test(value);
 const MAX_IMPORTS = 200;
 const COMPUTER_URL = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/mcp$/;
 const VOICE_MIME =
@@ -658,6 +688,17 @@ export function parseClientMessage(raw: string): ClientMessage | undefined {
 				m.text.trim() !== "" &&
 				m.text.length <= MAX_VOICE_TEXT
 				? { type: "voice_speak", requestId: m.requestId, text: m.text }
+				: undefined;
+		case "pin_set":
+			return isPin(m.pin) ? { type: "pin_set", pin: m.pin } : undefined;
+		case "pin_command": {
+			if (!isPin(m.pin) || typeof m.command !== "object" || m.command === null) return undefined;
+			const command = parseClientMessage(JSON.stringify(m.command));
+			return command && isPinCommand(command) ? { type: "pin_command", pin: m.pin, command } : undefined;
+		}
+		case "pin_approve":
+			return isShortString(m.requestId) && isPin(m.pin)
+				? { type: "pin_approve", requestId: m.requestId, pin: m.pin }
 				: undefined;
 		case "computer_unregister":
 		case "connectors_list":

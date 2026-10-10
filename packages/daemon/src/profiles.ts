@@ -30,6 +30,7 @@ import {
 	THINKING_LEVELS,
 	type ThinkingLevel,
 } from "@gentle-dot/protocol";
+import { directAccess, type EngineAccess } from "./engine-access.ts";
 import { presentText } from "./white-label.ts";
 
 // The engine's profile store format (gentle-pi lib/agent-profiles.ts), reimplemented
@@ -209,29 +210,35 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * a `<file>.lock` directory, stale after 10 seconds), so the engine never
  * interleaves its own settings write with ours.
  */
-async function withFileLock<T>(path: string, fn: () => T): Promise<T> {
-	mkdirSync(dirname(path), { recursive: true });
+async function withFileLock<T>(path: string, fn: () => T, access: EngineAccess = directAccess): Promise<T> {
 	const lock = `${path}.lock`;
 	for (let attempt = 0; ; attempt++) {
-		try {
-			mkdirSync(lock);
-			break;
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-			let stale = false;
+		const taken = access(() => {
+			mkdirSync(dirname(path), { recursive: true });
 			try {
-				stale = Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS;
-			} catch {}
-			if (stale) rmSync(lock, { recursive: true, force: true });
-			else if (attempt >= LOCK_ATTEMPTS) throw new Error(`${path} stayed locked`);
-			else await sleep(LOCK_RETRY_MS);
+				mkdirSync(lock);
+				return true;
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+				let stale = false;
+				try {
+					stale = Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS;
+				} catch {}
+				if (stale) rmSync(lock, { recursive: true, force: true });
+				return false;
+			}
+		});
+		if (taken) break;
+		if (attempt >= LOCK_ATTEMPTS) throw new Error(`${path} stayed locked`);
+		await sleep(LOCK_RETRY_MS);
+	}
+	return access(() => {
+		try {
+			return fn();
+		} finally {
+			rmSync(lock, { recursive: true, force: true });
 		}
-	}
-	try {
-		return fn();
-	} finally {
-		rmSync(lock, { recursive: true, force: true });
-	}
+	});
 }
 
 export function splitModel(model: string): { provider: string; modelId: string } | undefined {
@@ -252,6 +259,8 @@ export interface ProfileStoreOptions {
 	agentHome: string;
 	/** Another setup's `profiles.json`, only ever read, for the one-time import. */
 	importPath: string;
+	/** How the store reaches its files and the engine's; in server mode as the engine's user (S25.8, B1). */
+	access?: EngineAccess;
 }
 
 export interface ImportResult {
@@ -272,6 +281,11 @@ export class ProfileStore {
 		this.options = options;
 	}
 
+	/** The store's files and the engine's are reached as the engine's user (the import source is not). */
+	private access<T>(fn: () => T): T {
+		return (this.options.access ?? directAccess)(fn);
+	}
+
 	private get storePath(): string {
 		return join(this.options.configHome, "profiles.json");
 	}
@@ -289,7 +303,7 @@ export class ProfileStore {
 	}
 
 	list(): { profiles: Profile[]; active?: string } {
-		const file = this.read();
+		const file = this.access(() => this.read());
 		const profiles = Object.entries(file.profiles)
 			.map(([name, roles]) => ({ name, roles }))
 			.sort((a, b) => a.name.localeCompare(b.name));
@@ -298,8 +312,10 @@ export class ProfileStore {
 
 	/** Roles the user can route, including any a saved profile routes without an agent file. */
 	roles(): ProfileRole[] {
-		const routed = Object.values(this.read().profiles).flatMap((roles) => Object.keys(roles));
-		return discoverRoles(this.options.agentHome, routed);
+		return this.access(() => {
+			const routed = Object.values(this.read().profiles).flatMap((roles) => Object.keys(roles));
+			return discoverRoles(this.options.agentHome, routed);
+		});
 	}
 
 	/** Creates or replaces a profile. */
@@ -367,25 +383,31 @@ export class ProfileStore {
 	 */
 	apply(name: string): Promise<RoleRoute | undefined> {
 		return this.enqueue(async () => {
-			const file = this.read();
-			const roles = requireExisting(file, name);
-			const paths = [this.storePath, this.modelsPath, this.subagentsPath, this.settingsPath];
-			const agents = ownAgentFiles(this.options.agentHome);
-			const saved = new Map([...paths, ...agents.map((agent) => agent.path)].map((p) => [p, snapshot(p)]));
+			const saved = new Map<string, Snapshot>();
 			try {
-				writeFileAtomic(this.storePath, serializeProfilesFile({ ...file, active: name }));
-				writeFileAtomic(this.modelsPath, jsonText(roles));
-				this.writeAgentRoutes(roles);
-				for (const agent of agents) {
-					const next = updateFrontmatterRouting(agent.text, roles[agent.name]);
-					if (next !== agent.text) writeFileAtomic(agent.path, next, agent.mode);
-				}
-				const orchestrator = roles[ORCHESTRATOR];
+				const orchestrator = this.access(() => {
+					const file = this.read();
+					const roles = requireExisting(file, name);
+					const paths = [this.storePath, this.modelsPath, this.subagentsPath, this.settingsPath];
+					const agents = ownAgentFiles(this.options.agentHome);
+					for (const path of [...paths, ...agents.map((agent) => agent.path)])
+						saved.set(path, snapshot(path));
+					writeFileAtomic(this.storePath, serializeProfilesFile({ ...file, active: name }));
+					writeFileAtomic(this.modelsPath, jsonText(roles));
+					this.writeAgentRoutes(roles);
+					for (const agent of agents) {
+						const next = updateFrontmatterRouting(agent.text, roles[agent.name]);
+						if (next !== agent.text) writeFileAtomic(agent.path, next, agent.mode);
+					}
+					return roles[ORCHESTRATOR];
+				});
 				if (!orchestrator?.model) return undefined;
 				await this.writeOrchestrator(orchestrator);
 				return { ...orchestrator };
 			} catch (error) {
-				for (const [path, before] of saved) restore(path, before);
+				this.access(() => {
+					for (const [path, before] of saved) restore(path, before);
+				});
 				throw error;
 			}
 		});
@@ -413,8 +435,15 @@ export class ProfileStore {
 	 */
 	import(providers: AuthProvider[] = []): Promise<ImportResult> {
 		return this.enqueue(() => {
+			// The other setup is the daemon's user's own, never the engine's: read as it is.
 			const source = this.importable() ? this.readSource() : undefined;
 			if (!source) throw new ProfileError("nothing_to_import");
+			return this.access(() => this.importInto(source, providers));
+		});
+	}
+
+	private importInto(source: ProfilesFile, providers: AuthProvider[]): ImportResult {
+		{
 			const file = this.read();
 			const imported: ImportResult["imported"] = [];
 			const used = new Set<string>();
@@ -434,7 +463,7 @@ export class ProfileStore {
 				.map((id) => providers.find((p) => p.id === id)?.name ?? id)
 				.sort();
 			return { imported, missingProviders };
-		});
+		}
 	}
 
 	private writeAgentRoutes(roles: ProfileRoles): void {
@@ -457,17 +486,21 @@ export class ProfileStore {
 	private writeOrchestrator(route: RoleRoute, clearThinking = true): Promise<void> {
 		const target = route.model ? splitModel(route.model) : undefined;
 		if (!target) throw new ProfileError("settings_invalid");
-		return withFileLock(this.settingsPath, () => {
-			const settings = readObject(this.settingsPath, "settings_invalid");
-			const next: Record<string, unknown> = {
-				...settings,
-				defaultProvider: target.provider,
-				defaultModel: target.modelId,
-			};
-			if (route.thinking) next.defaultThinkingLevel = route.thinking;
-			else if (clearThinking) delete next.defaultThinkingLevel;
-			writeFileAtomic(this.settingsPath, jsonText(next));
-		});
+		return withFileLock(
+			this.settingsPath,
+			() => {
+				const settings = readObject(this.settingsPath, "settings_invalid");
+				const next: Record<string, unknown> = {
+					...settings,
+					defaultProvider: target.provider,
+					defaultModel: target.modelId,
+				};
+				if (route.thinking) next.defaultThinkingLevel = route.thinking;
+				else if (clearThinking) delete next.defaultThinkingLevel;
+				writeFileAtomic(this.settingsPath, jsonText(next));
+			},
+			(fn) => this.access(fn),
+		);
 	}
 
 	private read(): ProfilesFile {
@@ -484,11 +517,13 @@ export class ProfileStore {
 	}
 
 	private mutate(change: (file: ProfilesFile) => void): Promise<void> {
-		return this.enqueue(() => {
-			const file = this.read();
-			change(file);
-			writeFileAtomic(this.storePath, serializeProfilesFile(file));
-		});
+		return this.enqueue(() =>
+			this.access(() => {
+				const file = this.read();
+				change(file);
+				writeFileAtomic(this.storePath, serializeProfilesFile(file));
+			}),
+		);
 	}
 
 	private enqueue<T>(task: () => T | Promise<T>): Promise<T> {

@@ -124,6 +124,19 @@ describe("isolatedAgentEnv subagents", () => {
 	});
 });
 
+describe("isolatedAgentEnv secrets key", () => {
+	it("never passes the server's secrets key to the engine, and keeps everything else (S25.8)", () => {
+		const env = isolatedAgentEnv(
+			{ HOME: tempDir(), GENTLE_DOT_SECRETS_KEY: "server-only-key", OPENAI_API_KEY: "sk-model", LANG: "C" },
+			tempDir(),
+		);
+		expect(env).not.toHaveProperty("GENTLE_DOT_SECRETS_KEY");
+		// The model keys and the rest of the environment are the engine's, as before.
+		expect(env.OPENAI_API_KEY).toBe("sk-model");
+		expect(env.LANG).toBe("C");
+	});
+});
+
 describe("isolatedAgentEnv temporary folder", () => {
 	it("gives the engine a private TMPDIR when none is set, so its caches never land in a shared /tmp", () => {
 		const dataDir = tempDir();

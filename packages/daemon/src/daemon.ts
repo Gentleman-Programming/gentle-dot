@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { extname, join, resolve, sep } from "node:path";
@@ -15,6 +15,7 @@ import {
 import { type WebSocket, WebSocketServer } from "ws";
 import { AppChannel } from "./app-channel.ts";
 import { AuthManager, type AuthRuntime, createModelAuthRuntime, resolveAgentHome } from "./auth.ts";
+import { AuthHelper } from "./auth-helper.ts";
 import { type BridgeClient, DotBridge } from "./bridge.ts";
 import {
 	APPROVAL_GUARD,
@@ -23,6 +24,7 @@ import {
 	ConnectorStore,
 	policyEnv,
 } from "./connectors.ts";
+import { directAccess, type EngineAccess, engineAccess } from "./engine-access.ts";
 import { approvalRequest } from "./extensions/approval-guard.ts";
 import {
 	claimEngineHome,
@@ -32,12 +34,16 @@ import {
 	privateMemory,
 } from "./isolation.ts";
 import { MCP_PREFIX, McpProxy, type ProxiedConnector, type UpstreamCredentials } from "./mcp-proxy.ts";
+import { writePrivateFile } from "./private-file.ts";
 import { defaultImportPath, ProfileStore } from "./profiles.ts";
 import { type RotationLimits, rotationLimits } from "./rotation.ts";
+import { FileSecretSource, SECRETS_FILE, SECRETS_KEY_VAR } from "./secret-file.ts";
 import { AppSecretSource } from "./secret-source.ts";
 import { AgentSupervisor } from "./supervisor.ts";
 import { UploadStore } from "./uploads.ts";
 import { VoiceService } from "./voice.ts";
+import { CONNECTOR_HOME, chownHandOver, prepareVpsLayout, type VpsOptions } from "./vps.ts";
+import { PIN_FILE, PinGate } from "./web-pin.ts";
 import { identityArgs } from "./white-label.ts";
 
 export interface DaemonOptions {
@@ -76,6 +82,11 @@ export interface DaemonOptions {
 	appChannel?: Duplex;
 	/** How long an approval waits for the app's answer; default 130 s (the app declines at 120 s). */
 	approvalWaitMs?: number;
+	/**
+	 * Server mode (S25.8, `GENTLE_DOT_VPS`): the engine runs as another user, connector secrets are
+	 * encrypted in a daemon file, and without the app the web page uses a PIN for privileged actions.
+	 */
+	vps?: VpsOptions;
 	/** Origins allowed to open the WebSocket, besides the daemon's own and the desktop app's. */
 	allowedOrigins?: string[];
 	backoffMs?: number[];
@@ -116,7 +127,7 @@ const CONTENT_TYPES: Record<string, string> = {
 
 /**
  * Reads the access token from `<dataDir>/token`, creating a random one when
- * absent. The data folder is kept at 0700 and the token at 0600.
+ * absent. The data folder is kept at 0700 (0711 in server mode, so the engine reaches its own folders by name) and the token at 0600.
  */
 export function ensureToken(dataDir: string): string {
 	ensurePrivateDir(dataDir);
@@ -127,7 +138,7 @@ export function ensureToken(dataDir: string): string {
 		if (existing.length >= 32) return existing;
 	}
 	const token = randomBytes(32).toString("base64url");
-	writeFileSync(file, `${token}\n`, { mode: 0o600 });
+	writePrivateFile(file, `${token}\n`);
 	return token;
 }
 
@@ -143,12 +154,17 @@ export function startupMessage(url: string, dataDir: string, interactive: boolea
 export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	const log = options.log ?? (() => {});
 	const token = ensureToken(options.dataDir);
+	const vps = options.vps;
+	// Server mode (S25.8): the daemon's files stay its own, the engine's folders become the engine's,
+	// and from here on the daemon reaches them only as the engine's user (B1, engine-access.ts).
+	if (vps) prepareVpsLayout(options.dataDir, vps.handOver ?? chownHandOver(vps.engine, log), vps.connector);
+	const access: EngineAccess = vps ? (vps.access ?? engineAccess(vps.engine)) : directAccess;
 	// Before anything is written there: the engine skips its first-run setup in a home it did not
 	// create (S35.3). Only the assistant's default home; a home the user chose is never marked.
 	if (options.agentHome && resolve(options.agentHome) === resolve(options.dataDir, "agent"))
-		claimEngineHome(options.agentHome, log);
-	mkdirSync(options.workspace, { recursive: true, mode: 0o700 });
-	ensureMemoryProject(options.workspace);
+		claimEngineHome(options.agentHome, log, access);
+	access(() => mkdirSync(options.workspace, { recursive: true, mode: 0o700 }));
+	ensureMemoryProject(options.workspace, access);
 	const folderArgs = options.preferredFolder
 		? [
 				"--append-system-prompt",
@@ -156,12 +172,14 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 			]
 		: [];
 	let agentEnv = { ...(options.agentEnv ?? process.env) };
+	// The server's secrets key is the daemon's only, whatever the engine is (S25.8).
+	delete agentEnv[SECRETS_KEY_VAR];
 	const homeArgs: string[] = [];
-	const memory = options.agentHome ? await privateMemory(agentEnv, options.dataDir, log) : undefined;
+	const memory = options.agentHome ? await privateMemory(agentEnv, options.dataDir, log, access) : undefined;
 	if (options.agentHome) {
 		homeArgs.push("--home", options.agentHome);
 		// The engine also writes under the home folder; it gets one of its own.
-		agentEnv = isolatedAgentEnv(agentEnv, options.dataDir);
+		agentEnv = isolatedAgentEnv(agentEnv, options.dataDir, access);
 		agentEnv.GENTLE_PI_CONFIG_HOME = join(options.dataDir, "gentle-ai");
 	}
 	const agentHome = options.agentHome ?? resolveAgentHome(process.env, options.dataDir);
@@ -180,8 +198,17 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		guardPath: APPROVAL_GUARD,
 		// The assistant's own engine: its subagents load the guard from its extensions folder (S25.4).
 		...(options.agentHome ? { childGuard: true } : {}),
+		...(vps ? { engineAccess: access } : {}),
 		env: agentEnv,
-		secrets: new AppSecretSource(app),
+		// On a server without the app, an encrypted file with a key from the daemon's environment (S25.8).
+		secrets:
+			vps && !app
+				? new FileSecretSource({
+						file: join(options.dataDir, SECRETS_FILE),
+						key: vps.secretsKey,
+						...(vps.secretsKeyProblem ? { problem: vps.secretsKeyProblem } : {}),
+					})
+				: new AppSecretSource(app),
 		log,
 	});
 	// The engine reaches every connector through the proxy (S25.4); its key changes with every launch.
@@ -199,6 +226,9 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		...(options.connectorTransport ? { transport: options.connectorTransport } : {}),
 		env: agentEnv,
 		cwd: options.workspace,
+		...(vps?.connector
+			? { stdio: { user: vps.connector, home: join(options.dataDir, CONNECTOR_HOME) } }
+			: {}),
 		log,
 	});
 	connectorStore.onUpdated = () => proxy.sync();
@@ -216,6 +246,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		cwd: options.workspace,
 		dataDir: options.dataDir,
 		env: agentEnv,
+		...(vps ? { user: vps.engine } : {}),
 		// mcp.json is read when a session starts: put back anything not approved, and hand the guard
 		// its policy from the daemon's memory, never from the files.
 		// The proxy's key changes with every launch (after the check, so a change is still reported).
@@ -235,14 +266,33 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		...(options.backoffMs ? { backoffMs: options.backoffMs } : {}),
 		log: (line) => log(`[agent] ${line}`),
 	});
+	// In server mode Pi's ModelRuntime runs in a helper as the engine's user, never as root (B1).
+	const authHelper =
+		vps?.authHelper && !options.authRuntime
+			? new AuthHelper({
+					...vps.authHelper,
+					user: vps.engine,
+					env: agentEnv,
+					agentHome,
+					cwd: options.workspace,
+					log,
+				})
+			: undefined;
 	const auth = new AuthManager({
-		runtime: options.authRuntime ?? (() => createModelAuthRuntime(agentHome, options.workspace)),
+		runtime:
+			options.authRuntime ??
+			(authHelper
+				? () => authHelper.runtime()
+				: vps
+					? () => Promise.reject(new Error("sign-in has no helper on this server"))
+					: () => createModelAuthRuntime(agentHome, options.workspace)),
 		log,
 	});
 	const profiles = new ProfileStore({
 		configHome: join(options.dataDir, "gentle-ai"),
 		agentHome,
 		importPath: options.profilesImportPath ?? defaultImportPath(process.env),
+		...(vps ? { access } : {}),
 	});
 	const connectors = new ConnectorManager({
 		store: connectorStore,
@@ -259,6 +309,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	});
 	const uploads = new UploadStore({
 		workspace: options.workspace,
+		...(vps ? { access } : {}),
 		...(options.uploadLimits ? { limits: options.uploadLimits } : {}),
 	});
 	const historyPage = options.historyPage ?? Number(process.env.GENTLE_DOT_HISTORY_PAGE);
@@ -271,6 +322,9 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		voice,
 		uploads,
 		...(app ? { app } : {}),
+		...(vps && !app ? { pin: new PinGate({ file: join(options.dataDir, PIN_FILE) }) } : {}),
+		...(options.approvalWaitMs ? { approvalWaitMs: options.approvalWaitMs } : {}),
+		...(vps ? { engineAccess: access } : {}),
 		features: { conversations: options.conversations ?? process.env.GENTLE_DOT_CONVERSATIONS === "1" },
 		rotation: options.rotation ?? rotationLimits(process.env),
 		...(Number.isInteger(historyPage) && historyPage > 0 ? { historyPage } : {}),
@@ -294,7 +348,11 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 			// Secrets read from the app are forgotten; connectors that need one fail closed until it is back.
 			connectorStore.lock();
 		});
-	} else
+	} else if (vps)
+		log(
+			`server mode: the engine runs as uid ${vps.engine.uid}; connector changes and approvals need the web PIN${vps.secretsKey ? "" : `; ${vps.secretsKeyProblem ?? "connector secrets are off"}`}`,
+		);
+	else
 		log(
 			"no desktop app channel: connector changes and approvals are refused, and connectors that need a secret fail closed; to use them, stop this assistant and open the Gentle Dot app, which starts its own",
 		);
@@ -344,6 +402,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		await serverClosed;
 		await supervisor.stop();
 		connectorStore.close();
+		authHelper?.close();
 		await memory?.stop();
 	};
 	let stopping: Promise<void> | undefined;
@@ -366,8 +425,8 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 
 	// Listening first keeps the app's health check answered while its store is asked for the key.
 	await integrity;
-	// Secrets that files still hold move into the app's store, once.
-	if (app?.connected)
+	// Secrets that files still hold move into the app's store, once; on a server, into its encrypted file.
+	if (app?.connected || (vps && !app && vps.secretsKey))
 		void connectorStore
 			.migrate()
 			.catch((error: Error) => log(`connector secrets were not moved: ${error.message}`));

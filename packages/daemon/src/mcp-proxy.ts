@@ -35,6 +35,7 @@ import {
 import { McpOAuthAuthorizationRequiredError } from "@earendil-works/pi-mcp/oauth";
 import { type ConnectorMode, isReadOnlyTool } from "./extensions/approval-guard.ts";
 import { NO_APP, SecretsUnavailableError } from "./secret-source.ts";
+import { type OsUser, stdioCommand } from "./vps.ts";
 
 /** Where the engine reaches a connector: `/mcp/<id>`. */
 export const MCP_PREFIX = "/mcp/";
@@ -84,6 +85,11 @@ export interface McpProxyOptions {
 	/** The environment stdio servers start from (the engine's own), and their working folder. */
 	env?: NodeJS.ProcessEnv;
 	cwd?: string;
+	/**
+	 * Server mode (S25.8): stdio servers run as this user, with this folder as their home and working
+	 * folder, out of reach of both the engine and the daemon's files.
+	 */
+	stdio?: { user: OsUser; home: string };
 	log?: (line: string) => void;
 }
 
@@ -391,12 +397,24 @@ export class McpProxy {
 				// Nothing listens for the server's own messages.
 				openGetStream: false,
 			});
-		const cwd = this.options.cwd ?? process.cwd();
+		const stdio = this.options.stdio;
+		const cwd = stdio?.home ?? this.options.cwd ?? process.cwd();
+		const launch = stdioCommand(stdio?.user, expandHome(server.command), (server.args ?? []).map(expandHome));
+		const home: Record<string, string> = stdio
+			? {
+					HOME: stdio.home,
+					XDG_CONFIG_HOME: join(stdio.home, ".config"),
+					XDG_DATA_HOME: join(stdio.home, ".local", "share"),
+					XDG_CACHE_HOME: join(stdio.home, ".cache"),
+					XDG_STATE_HOME: join(stdio.home, ".local", "state"),
+					TMPDIR: join(stdio.home, ".cache", "tmp"),
+				}
+			: {};
 		return new StdioTransport({
-			command: expandHome(server.command),
-			...(server.args ? { args: server.args.map(expandHome) } : {}),
+			command: launch.command,
+			...(launch.args.length > 0 ? { args: launch.args } : {}),
 			cwd: resolve(cwd, expandHome(server.cwd ?? ".")),
-			env: { ...stringEnv(this.options.env ?? process.env), ...credentials.env },
+			env: { ...stringEnv(this.options.env ?? process.env), ...home, ...credentials.env },
 			inheritEnv: false,
 			stderr: "pipe",
 		});

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readSessionMessages } from "./conversations.ts";
+import { directAccess, type EngineAccess } from "./engine-access.ts";
 import { textOf } from "./presentation.ts";
 import type { AgentSupervisor } from "./supervisor.ts";
 
@@ -92,11 +93,12 @@ export async function writeHandoffSession(
 	previousFile: string,
 	text: string,
 	cwd = process.cwd(),
+	access: EngineAccess = directAccess,
 ): Promise<string> {
 	const { uuidv7 } = await import("@earendil-works/pi-ai");
 	const id = uuidv7();
 	const timestamp = new Date().toISOString();
-	const previousCwd = entries(previousFile, '"session"')[0]?.cwd;
+	const previousCwd = access(() => entries(previousFile, '"session"'))[0]?.cwd;
 	const header = {
 		type: "session",
 		version: SESSION_VERSION,
@@ -115,7 +117,12 @@ export async function writeHandoffSession(
 		timestamp,
 	};
 	const file = join(dirname(previousFile), `${timestamp.replace(/[:.]/g, "-")}_${id}.jsonl`);
-	writeFileSync(file, `${JSON.stringify(header)}\n${JSON.stringify(handoff)}\n`, { flag: "wx", mode: 0o600 });
+	access(() =>
+		writeFileSync(file, `${JSON.stringify(header)}\n${JSON.stringify(handoff)}\n`, {
+			flag: "wx",
+			mode: 0o600,
+		}),
+	);
 	return file;
 }
 
@@ -125,6 +132,8 @@ export interface RotatorOptions {
 	canRotate: () => boolean;
 	/** The engine's working folder, for a previous session without one. */
 	cwd?: string;
+	/** How the engine's session files are reached; in server mode as the engine's user (S25.8, B1). */
+	access?: EngineAccess;
 	log?: (line: string) => void;
 }
 
@@ -149,10 +158,15 @@ export class SessionRotator {
 	async maybeRotate(): Promise<boolean> {
 		if (this.rotating || !this.options.canRotate()) return false;
 		const file = this.supervisor.sessionFile;
-		if (!file || !existsSync(file)) return false;
+		if (!file) return false;
+		const access = this.options.access ?? directAccess;
 		const { limits } = this.options;
-		const { size } = statSync(file);
-		if (size < limits.bytes && this.compactionsIn(file, size) < limits.compactions) return false;
+		const over = access(() => {
+			if (!existsSync(file)) return false;
+			const { size } = statSync(file);
+			return size >= limits.bytes || this.compactionsIn(file, size) >= limits.compactions;
+		});
+		if (!over) return false;
 		this.rotating = true;
 		try {
 			const state = (await this.supervisor.request({ type: "get_state" })).data as
@@ -172,7 +186,13 @@ export class SessionRotator {
 		const previous = [...this.supervisor.previousSessions, file];
 		let seed: string;
 		try {
-			seed = await writeHandoffSession(file, handoffText(file), this.options.cwd);
+			const access = this.options.access ?? directAccess;
+			seed = await writeHandoffSession(
+				file,
+				access(() => handoffText(file)),
+				this.options.cwd,
+				access,
+			);
 		} catch (error) {
 			this.log(`rotation skipped, the chat stays in ${file}: ${(error as Error).message}`);
 			return false;

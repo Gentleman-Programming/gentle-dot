@@ -38,6 +38,8 @@
 //   FAKE_AGENT_DROP_CUSTOM  load session files without their custom messages (a format drift)
 //   FAKE_AGENT_PROMPTS_FILE  append every prompt command (message, images, streamingBehavior) as JSONL
 //   FAKE_AGENT_MARKER_FILE  write whether the `--home` folder held gentle-shell's `.gentle-shell-home` at launch
+//   FAKE_AGENT_PROCESS_FILE  write the whole environment, argv, and the process's uid and gid as JSON
+//   FAKE_AGENT_STDIN_FILE  append every line the daemon writes to the agent's stdin
 // get_available_models lists MODELS; set_model and set_thinking_level change what
 // get_state reports, so tests can read the last values back. A model's `input` says whether it
 // accepts images, like the engine's models.
@@ -104,6 +106,12 @@ if (process.env.FAKE_AGENT_ENV_FILE) {
 				].map((key) => [key, process.env[key]]),
 			),
 		),
+	);
+}
+if (process.env.FAKE_AGENT_PROCESS_FILE) {
+	writeFileSync(
+		process.env.FAKE_AGENT_PROCESS_FILE,
+		JSON.stringify({ env: process.env, argv, uid: process.getuid?.(), gid: process.getgid?.() }),
 	);
 }
 const sessionDir = argValue("--session-dir") ?? join(process.cwd(), ".fake-sessions");
@@ -533,6 +541,8 @@ process.stdin.on("data", (chunk: string) => {
 	while (newline >= 0) {
 		const line = buffer.slice(0, newline).replace(/\r$/, "");
 		buffer = buffer.slice(newline + 1);
+		if (line && process.env.FAKE_AGENT_STDIN_FILE)
+			appendFileSync(process.env.FAKE_AGENT_STDIN_FILE, `${line}\n`);
 		if (line) handle(JSON.parse(line) as Rec);
 		newline = buffer.indexOf("\n");
 	}

@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { bundledGentleShell } from "./config.ts";
+import { directAccess, type EngineAccess } from "./engine-access.ts";
 import { resolveEngramBin, runtimeDir } from "./runtime.ts";
 
 /**
@@ -50,11 +51,17 @@ function engineVersion(): string | undefined {
  * checks only that the file exists). One already there is left as it is. Call it only for the
  * default `<data>/agent`: a home the user chose may be theirs, and is never marked.
  */
-export function claimEngineHome(agentHome: string, log: (line: string) => void = () => {}): void {
-	ensurePrivateDir(agentHome);
+export function claimEngineHome(
+	agentHome: string,
+	log: (line: string) => void = () => {},
+	access: EngineAccess = directAccess,
+): void {
 	const content = `${JSON.stringify({ createdBy: "gentle-shell", version: engineVersion() })}\n`;
 	try {
-		writeFileSync(join(agentHome, ENGINE_HOME_MARKER), content, { flag: "wx", mode: 0o600 });
+		access(() => {
+			ensurePrivateDir(agentHome);
+			writeFileSync(join(agentHome, ENGINE_HOME_MARKER), content, { flag: "wx", mode: 0o600 });
+		});
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "EEXIST")
 			log(`could not mark the engine's home as its own: ${(error as Error).message}`);
@@ -76,6 +83,9 @@ const SUBAGENT_VARIABLES = [
 	"GENTLE_PI_AGENTS_PI",
 ];
 
+/** What only the daemon may hold: the server's connector secrets key (S25.8). */
+const DAEMON_ONLY = ["GENTLE_DOT_SECRETS_KEY"];
+
 /** Subagents are on unless `GENTLE_DOT_SUBAGENTS` is `off`, `0`, or `false`. */
 export function subagentsEnabled(base: NodeJS.ProcessEnv): boolean {
 	const value = base.GENTLE_DOT_SUBAGENTS?.trim().toLowerCase();
@@ -92,12 +102,15 @@ export const PRIVATE_ENGRAM_PORT = "7438";
  * Names the memory project of `workspace` through Engram's per-folder setting
  * (`.engram/config.json`), which Engram reads before any other detection.
  */
-export function ensureMemoryProject(workspace: string): void {
-	ensurePrivateDir(join(workspace, ".engram"));
-	writeFileSync(
-		join(workspace, ".engram", "config.json"),
-		`${JSON.stringify({ project_name: MEMORY_PROJECT })}\n`,
-	);
+export function ensureMemoryProject(workspace: string, access: EngineAccess = directAccess): void {
+	const file = join(workspace, ".engram", "config.json");
+	access(() => {
+		ensurePrivateDir(join(workspace, ".engram"));
+		// Written next to it and renamed over it: a link planted at its place is replaced, never followed.
+		const temp = `${file}.${process.pid}.tmp`;
+		writeFileSync(temp, `${JSON.stringify({ project_name: MEMORY_PROJECT })}\n`);
+		renameSync(temp, file);
+	});
 }
 
 /**
@@ -112,6 +125,7 @@ export function ensureMemoryProject(workspace: string): void {
  * user's server. The user's own `ENGRAM_PORT` and `ENGRAM_URL` are kept.
  * `GENTLE_DOT_ENGRAM=private` instead runs a memory of its own under the
  * engine's home, on port 7438 (`GENTLE_DOT_ENGRAM_PORT` overrides it).
+ * The server's connector secrets key (`GENTLE_DOT_SECRETS_KEY`, S25.8) is never passed on.
  * Subagents are on (`GENTLE_PI_AGENTS=1`) unless `GENTLE_DOT_SUBAGENTS=off`: their child engines
  * reach connectors only through the daemon's proxy, like the engine itself (S25.4).
  *
@@ -122,9 +136,13 @@ export function ensureMemoryProject(workspace: string): void {
  * An installed app (`GENTLE_DOT_RUNTIME`) also names the Engram binary
  * (`ENGRAM_BIN`, see `resolveEngramBin`), since its PATH has no user folders.
  */
-export function isolatedAgentEnv(base: NodeJS.ProcessEnv, dataDir: string): NodeJS.ProcessEnv {
+export function isolatedAgentEnv(
+	base: NodeJS.ProcessEnv,
+	dataDir: string,
+	access: EngineAccess = directAccess,
+): NodeJS.ProcessEnv {
 	const home = join(dataDir, "home");
-	ensurePrivateDir(home);
+	access(() => ensurePrivateDir(home));
 	const realHome = base.HOME || homedir();
 	const env: NodeJS.ProcessEnv = {
 		...base,
@@ -134,10 +152,11 @@ export function isolatedAgentEnv(base: NodeJS.ProcessEnv, dataDir: string): Node
 		XDG_CACHE_HOME: join(home, ".cache"),
 		XDG_STATE_HOME: join(home, ".local", "state"),
 	};
-	for (const key of [...INHERITED_HOMES, ...SUBAGENT_VARIABLES]) delete env[key];
+	for (const key of [...INHERITED_HOMES, ...SUBAGENT_VARIABLES, ...DAEMON_ONLY]) delete env[key];
 	if (!base.TMPDIR) {
-		env.TMPDIR = join(home, ".cache", "tmp");
-		ensurePrivateDir(env.TMPDIR);
+		const tmp = join(home, ".cache", "tmp");
+		env.TMPDIR = tmp;
+		access(() => ensurePrivateDir(tmp));
 	}
 	const bin = bundledBinDir(base);
 	if (bin) {
@@ -172,6 +191,7 @@ export async function privateMemory(
 	base: NodeJS.ProcessEnv,
 	dataDir: string,
 	log: (line: string) => void,
+	access: EngineAccess = directAccess,
 ): Promise<{ stop(): Promise<void> } | undefined> {
 	if (base.GENTLE_DOT_ENGRAM !== "private") return undefined;
 	const port = base.GENTLE_DOT_ENGRAM_PORT || PRIVATE_ENGRAM_PORT;
@@ -182,7 +202,8 @@ export async function privateMemory(
 			if (pid === undefined) return;
 			let expected: string;
 			try {
-				expected = readFileSync(join(dataDir, "home", ".engram", ".instance-id"), "utf8").trim();
+				const file = join(dataDir, "home", ".engram", ".instance-id");
+				expected = access(() => readFileSync(file, "utf8")).trim();
 			} catch {
 				return;
 			}
