@@ -99,8 +99,11 @@ What differs from macOS (decided in `src/platform.rs`, unit-tested on both syste
 | Global shortcut | `Alt+Space` from the app | A desktop custom shortcut running `gentle-dot --toggle` (XWayland only sees keys while an X11 window has focus, and `Alt+Space` is GNOME's window menu) | A Hyprland `bind` running `gentle-dot --toggle` (the app does not register one) |
 | Panel background | `HudWindow` vibrancy | Opaque: the panel URL carries `effects=none` | Same as GNOME |
 | Tray glyphs | Template images | `icons/tray/linux/` (needs the AppIndicator GNOME extension; Ubuntu ships it on) | Same, shown by Waybar |
+| Tray click | Left click shows the menu; Open shows the panel | Same (AppIndicator delivers no click events, so left click always shows the menu) | Same by default; with the opt-in `ksni-tray` feature (StatusNotifier backend) left click toggles the panel and right click keeps the menu |
 
 `gentle-dot --toggle` reaches the running app through `tauri-plugin-single-instance` (D-Bus on Linux), which toggles the panel; any other second launch shows it. Started with `--toggle` while not running, the app opens the panel once it is up.
+
+On desktops whose tray speaks StatusNotifier but not AppIndicator, build with the opt-in `ksni-tray` cargo feature: tray-icon 0.25.1 then uses its KSNI backend (it always wins when both backends are compiled in, so this stays opt-in and default builds keep AppIndicator). Left click toggles the panel through the existing toggle path; right click keeps the menu. The KSNI activation event carries no icon geometry, so the panel keeps its existing placement instead of anchoring to the click coordinates.
 
 macOS-only calls (`accept_first_mouse`, the `HudWindow` effect, the accessory activation policy) are behind `cfg(target_os = "macos")`; the template flag follows `status::is_template`. The `macos-private-api` feature and `macOSPrivateApi: true` stay on every platform: tauri-build checks the `tauri` features in `Cargo.toml` against the merged `tauri.conf.json`, every `tauri` dependency entry including target-specific ones, so splitting them per target fails the build. They only change macOS code; the Linux build in a Debian container compiles with them. `Info.plist` (`LSUIElement`) is read only by the macOS bundle.
 
