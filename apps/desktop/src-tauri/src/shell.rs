@@ -10,6 +10,8 @@ use crate::computer::session::Reason;
 use crate::config::{self, ConnectionInfo, DesktopConfig, DEFAULT_SHORTCUT};
 use crate::daemon::{self, Daemon, RestartOutcome};
 use crate::geometry::{self, Rect};
+#[cfg(target_os = "linux")]
+use crate::niri::CompactSpot;
 use crate::platform::{self, LaunchRequest, Os, DOT_TITLE, PANEL_TITLE};
 use crate::position::{self, DotPosition};
 use crate::secure_store::{self, SecretStore};
@@ -60,6 +62,14 @@ struct Shell {
     panel_spot: Mutex<Option<(i32, i32)>>,
     /// While the panel fills the screen (S26.2): its frame before, to restore.
     full_screen: Mutex<Option<Rect>>,
+    /// Niri-native expanded state (Linux only): tiling is expanded, floating is compact.
+    /// Separate from `full_screen`/`panel_spot`, which the native branch never reads or writes.
+    #[cfg(target_os = "linux")]
+    native_expanded: Mutex<bool>,
+    /// Remembered Niri compact spot (Linux only): in-session only. The restore
+    /// worker, epochs, and restore deltas that would consume it arrive in a later slice.
+    #[cfg(target_os = "linux")]
+    native_compact: Mutex<Option<CompactSpot>>,
     /// The shortcut that toggles the panel now; `None` while none is bound (native Wayland).
     shortcut: Mutex<Option<String>>,
 }
@@ -93,6 +103,64 @@ fn panel_placement(places_windows: bool, full_screen: bool, rose_hidden: bool) -
     } else {
         Placement::BesideDot
     }
+}
+
+/// Whether `set_panel_fullscreen` takes the Niri-native branch (Linux only): the app
+/// does not place its own windows (honoring an explicit `GDK_BACKEND=x11` choice via
+/// `places_windows`), the session is Niri, and a socket path is present. Pure so tests
+/// never touch the environment. Niri-native without a socket is a bounded no-op at the
+/// call site, never the legacy fake-fullscreen frame.
+#[cfg(target_os = "linux")]
+fn native_niri_mode(places_windows: bool, is_niri: bool, socket_present: bool) -> bool {
+    !places_windows && is_niri && socket_present
+}
+
+/// Whether the hide and mode hooks capture the compact spot (Linux only): compact and
+/// visibly mapped only, so expanded geometry can never overwrite it.
+#[cfg(target_os = "linux")]
+fn native_capture_gate(expanded: bool, visible: bool) -> bool {
+    !expanded && visible
+}
+
+/// Folds a fresh capture into memory (Linux only): `Some` wins while `None`/errors
+/// preserve; the hide and expand hooks share exactly this merge.
+#[cfg(target_os = "linux")]
+fn merge_compact_spot(current: Option<CompactSpot>, fresh: Option<CompactSpot>) -> Option<CompactSpot> {
+    fresh.or(current)
+}
+
+/// Single capture decision for the hide and mode hooks (Linux only): the injected `capture`
+/// closure (which runs the bounded `niri` IPC) executes only while compact and visibly
+/// mapped; every other cell skips it, so hidden panels never overwrite compact memory even
+/// when IPC would answer. Epochs arrive in a later slice: callers pass only what they
+/// observed outside the native locks.
+#[cfg(target_os = "linux")]
+fn decide_native_capture(
+    expanded: bool,
+    visible: bool,
+    capture: impl FnOnce() -> Option<CompactSpot>,
+) -> Option<CompactSpot> {
+    if !native_capture_gate(expanded, visible) {
+        return None;
+    }
+    capture()
+}
+
+/// Position-independent native mode transition (Linux only): a thin shell seam over
+/// `niri::apply_native_mode`, so shell tests inject fake request closures and never touch
+/// a live compositor. Tiling is the expanded normal mode, floating is compact; one
+/// aggregate 250 ms budget covers the lookup plus actions. Missing/ambiguous windows are
+/// a bounded no-op returning the previous mode; wire errors propagate with the mode
+/// untouched (except post-flip managed geometry, which the helper reports honestly
+/// expanded). A request matching the current mode sends no queries.
+#[cfg(target_os = "linux")]
+fn run_native_mode_change(
+    expanded: &mut bool,
+    on: bool,
+    pid: u32,
+    request: &mut impl FnMut(&str, Duration) -> std::io::Result<serde_json::Value>,
+) -> std::io::Result<bool> {
+    crate::niri::apply_native_mode(expanded, on, pid, request)
 }
 
 fn rose_menu_label(hidden: bool) -> &'static str {
@@ -196,10 +264,38 @@ fn toggle_panel(app: AppHandle) -> CommandResult {
 fn hide_panel(app: AppHandle) -> CommandResult {
     let panel = window(&app, PANEL)?;
     let shell = app.state::<Shell>();
+    #[cfg(target_os = "linux")]
+    if !shell.places_windows && platform::is_niri(&|key| std::env::var(key).ok()) {
+        return hide_panel_niri(app, &panel);
+    }
     if shell.full_screen.lock().unwrap().is_none() {
         if let Ok(rect) = rect_of(&panel) {
             *shell.panel_spot.lock().unwrap() = Some((rect.x, rect.y));
         }
+    }
+    panel.hide().map_err(err)
+}
+
+/// Niri-native hide (Linux only): captures the compact spot while compact and mapped,
+/// then hides. Visibility snapshots before any native lock (Tauri getters proxy to the
+/// main thread, whose handlers take the mode lock); the capture IPC itself runs lock-free
+/// and the merge preserves memory on `None`/errors. Locks nest only mode-before-compact.
+/// No restore worker, epochs, or gate yet: those arrive in a later slice.
+#[cfg(target_os = "linux")]
+fn hide_panel_niri(app: AppHandle, panel: &WebviewWindow) -> CommandResult {
+    use std::path::PathBuf;
+    let shell = app.state::<Shell>();
+    let visible = panel.is_visible().unwrap_or(false);
+    let expanded = *shell.native_expanded.lock().unwrap();
+    if let Some(socket) = std::env::var("NIRI_SOCKET").ok().filter(|path| !path.is_empty()) {
+        let path = PathBuf::from(socket);
+        let fresh = decide_native_capture(expanded, visible, || {
+            let mut request =
+                |wire: &str, timeout: Duration| crate::niri::Client::new(&path, timeout).request(wire);
+            crate::niri::capture_compact_spot(std::process::id(), &mut request).unwrap_or(None)
+        });
+        let mut compact = shell.native_compact.lock().unwrap();
+        *compact = merge_compact_spot(compact.take(), fresh);
     }
     panel.hide().map_err(err)
 }
@@ -232,6 +328,14 @@ fn set_rose_hidden(app: AppHandle, hidden: bool) -> CommandResult<bool> {
 /// It stays an accessory window, never a separate macOS fullscreen Space. Returns the new state.
 #[tauri::command]
 fn set_panel_fullscreen(app: AppHandle, on: bool) -> CommandResult<bool> {
+    // Niri-native sessions never take the legacy workarea frame below, with or
+    // without a usable socket; the native branch fails bounded instead.
+    #[cfg(target_os = "linux")]
+    if !app.state::<Shell>().places_windows
+        && platform::is_niri(&|key| std::env::var(key).ok())
+    {
+        return set_panel_niri_mode(app, on);
+    }
     let panel = window(&app, PANEL)?;
     let shell = app.state::<Shell>();
     let mut full_screen = shell.full_screen.lock().unwrap();
@@ -255,6 +359,56 @@ fn set_panel_fullscreen(app: AppHandle, on: bool) -> CommandResult<bool> {
         _ => {}
     }
     Ok(full_screen.is_some())
+}
+
+/// Niri-native expanded/compact switch (Linux only, position-independent): expanded is a
+/// normal managed tiling window, compact is floating. The mode lock is held only across
+/// the one bounded IPC call; visibility snapshots before it and the compact-spot capture
+/// before expanding runs lock-free. Missing/ambiguous windows or a missing socket are a
+/// bounded no-op returning the previous mode, never the legacy workarea frame, never
+/// `SetFixed`, never a focused-window fallback. Position restore arrives in a later slice.
+#[cfg(target_os = "linux")]
+fn set_panel_niri_mode(app: AppHandle, on: bool) -> CommandResult<bool> {
+    use std::path::PathBuf;
+    let shell = app.state::<Shell>();
+    // Snapshot the blocking getter before any native lock: getters wait on the main
+    // thread, whose handlers take the mode lock. Missing windows read as hidden.
+    let visible = window(&app, PANEL)
+        .and_then(|panel| panel.is_visible().map_err(err))
+        .unwrap_or(false);
+    let mut expanded = shell.native_expanded.lock().unwrap();
+    // Socket-level half of the native gate, through the unit-tested predicate:
+    // Niri-native without a usable socket is a bounded no-op returning the previous mode.
+    let socket = std::env::var("NIRI_SOCKET").ok().filter(|path| !path.is_empty());
+    if !native_niri_mode(
+        shell.places_windows,
+        platform::is_niri(&|key| std::env::var(key).ok()),
+        socket.is_some(),
+    ) {
+        return Ok(*expanded);
+    }
+    // The predicate held, so a usable socket is present; re-bind it for the client
+    // below, staying a bounded no-op on any drift instead of panicking.
+    let Some(socket) = socket else {
+        return Ok(*expanded);
+    };
+    // Capture the compact spot before leaving it. Hidden panels skip IPC fail-closed:
+    // a hidden native window must not overwrite compact memory.
+    if !*expanded {
+        let path = PathBuf::from(&socket);
+        let pid = std::process::id();
+        let fresh = decide_native_capture(*expanded, visible, || {
+            let mut capture =
+                |wire: &str, timeout: Duration| crate::niri::Client::new(&path, timeout).request(wire);
+            crate::niri::capture_compact_spot(pid, &mut capture).unwrap_or(None)
+        });
+        let mut compact = shell.native_compact.lock().unwrap();
+        *compact = merge_compact_spot(compact.take(), fresh);
+    }
+    let path = PathBuf::from(socket);
+    let mut request =
+        |wire: &str, timeout: Duration| crate::niri::Client::new(&path, timeout).request(wire);
+    run_native_mode_change(&mut expanded, on, std::process::id(), &mut request).map_err(err)
 }
 
 /// Result of `shortcut_get`: the shortcut that opens the panel and the default one.
@@ -424,7 +578,22 @@ fn place_panel_next_to_dot(app: &AppHandle) -> CommandResult {
 }
 
 fn show_panel(app: &AppHandle) -> CommandResult {
+    #[cfg(target_os = "linux")]
+    if !app.state::<Shell>().places_windows && platform::is_niri(&|key| std::env::var(key).ok()) {
+        return show_panel_niri(app);
+    }
     place_panel(app)?;
+    let panel = window(app, PANEL)?;
+    panel.show().map_err(err)?;
+    panel.set_focus().map_err(err)?;
+    app.emit("dot://panel-shown", ()).map_err(err)
+}
+
+/// Niri-native show (Linux only): direct show/focus/emit. The compact restore worker
+/// that would consume the remembered spot arrives in a later slice; until then a show
+/// never moves the window, on any mode.
+#[cfg(target_os = "linux")]
+fn show_panel_niri(app: &AppHandle) -> CommandResult {
     let panel = window(app, PANEL)?;
     panel.show().map_err(err)?;
     panel.set_focus().map_err(err)?;
@@ -804,6 +973,10 @@ pub fn run() {
                 rose_hidden: AtomicBool::new(rose_hidden),
                 panel_spot: Mutex::new(None),
                 full_screen: Mutex::new(None),
+                #[cfg(target_os = "linux")]
+                native_expanded: Mutex::new(false),
+                #[cfg(target_os = "linux")]
+                native_compact: Mutex::new(None),
                 shortcut: Mutex::new(None),
             });
             let (voice_input, voice_model) = voice::start(&handle);
@@ -918,5 +1091,160 @@ mod tests {
         assert!(!conversations_on(None));
         assert!(!conversations_on(Some("0")));
         assert!(!conversations_on(Some("true")));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn native_mode_runs_only_on_niri_without_app_placement_and_a_socket() {
+        // The only native slice: Niri compositor, app does not place, socket present.
+        assert!(native_niri_mode(false, true, true));
+        // An explicit GDK x11 choice on Niri keeps app placement: legacy branch.
+        assert!(!native_niri_mode(true, true, true));
+        // Other compositors and a missing socket stay legacy (socket-less Niri is a
+        // bounded no-op, never the fake-fullscreen workarea frame).
+        assert!(!native_niri_mode(false, false, true));
+        assert!(!native_niri_mode(false, true, false));
+        assert!(!native_niri_mode(true, false, false));
+        assert!(!native_niri_mode(true, false, true));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn native_capture_runs_only_while_compact_and_visible() {
+        assert!(native_capture_gate(false, true));
+        // Expanded departures never capture (no expanded geometry overwrite);
+        // hidden panels never capture even while compact.
+        assert!(!native_capture_gate(true, true));
+        assert!(!native_capture_gate(false, false));
+        assert!(!native_capture_gate(true, false));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn native_compact_spot_survives_expanded_hides_and_failures() {
+        use crate::niri::CompactSpot;
+        let spot = CompactSpot { output: "DP-1".to_owned(), x: 100.0, y: 200.0 };
+        let newer = CompactSpot { output: "DP-1".to_owned(), x: 110.0, y: 210.0 };
+        // Fresh captures win; None/Err (failures, nulls, expanded hides) keep memory.
+        assert_eq!(merge_compact_spot(None, Some(spot.clone())), Some(spot.clone()));
+        assert_eq!(merge_compact_spot(Some(spot.clone()), None), Some(spot.clone()));
+        assert_eq!(merge_compact_spot(Some(spot.clone()), Some(newer.clone())), Some(newer));
+        assert_eq!(merge_compact_spot(None, None), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn capture_decision_skips_ipc_unless_compact_and_visible() {
+        use crate::niri::CompactSpot;
+        let live = CompactSpot { output: "DP-1".to_owned(), x: 10.0, y: 20.0 };
+        // Visible compact runs the injected capture; hidden and expanded never do,
+        // even though the closure would answer.
+        let fresh = decide_native_capture(false, true, || Some(live.clone()));
+        assert_eq!(merge_compact_spot(None, fresh), Some(live.clone()));
+        for (expanded, visible) in [(false, false), (true, true), (true, false)] {
+            let mut calls = 0;
+            let fresh = decide_native_capture(expanded, visible, || {
+                calls += 1;
+                Some(live.clone())
+            });
+            assert_eq!(calls, 0, "expanded={expanded} visible={visible}");
+            assert_eq!(fresh, None, "expanded={expanded} visible={visible}");
+        }
+        // A hidden native panel keeps its remembered spot despite live IPC.
+        let old = CompactSpot { output: "DP-1".to_owned(), x: 100.0, y: 200.0 };
+        let fresh = decide_native_capture(false, false, || Some(live.clone()));
+        assert_eq!(merge_compact_spot(Some(old.clone()), fresh), Some(old));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn mode_window(id: u64, pid: u32, floating: bool) -> serde_json::Value {
+        serde_json::json!({"id": id, "pid": pid, "title": crate::platform::PANEL_TITLE,
+            "workspace_id": 7, "is_floating": floating,
+            "layout": {"tile_pos_in_workspace_view": [10.0, 20.0], "window_size": [420, 640]}})
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn native_mode_change_tiles_and_floats_the_exact_own_window() {
+        use std::time::Duration;
+        // Compact -> expanded: Windows lookup, tiling action, then managed geometry
+        // (full-column width plus automatic height) inside one aggregate budget.
+        let windows = serde_json::json!({"Windows": [mode_window(9, 100, true)]});
+        let mut calls: Vec<(String, Duration)> = Vec::new();
+        let mut request = |wire: &str, timeout: Duration| -> std::io::Result<serde_json::Value> {
+            calls.push((wire.to_owned(), timeout));
+            if wire == crate::niri::WINDOWS_REQUEST {
+                Ok(windows.clone())
+            } else {
+                Ok(serde_json::json!("Handled"))
+            }
+        };
+        let mut expanded = false;
+        assert!(run_native_mode_change(&mut expanded, true, 100, &mut request).unwrap());
+        assert!(expanded);
+        assert_eq!(calls.len(), 4);
+        assert_eq!(calls[1].0, crate::niri::action_tiling(9));
+        for window in calls.windows(2) {
+            assert!(window[1].1 <= window[0].1);
+        }
+        // Expanded -> compact: lookup plus the single floating action.
+        let windows = serde_json::json!({"Windows": [mode_window(9, 100, false)]});
+        let mut calls: Vec<String> = Vec::new();
+        let mut request = |wire: &str, _: Duration| -> std::io::Result<serde_json::Value> {
+            calls.push(wire.to_owned());
+            if wire == crate::niri::WINDOWS_REQUEST {
+                Ok(windows.clone())
+            } else {
+                Ok(serde_json::json!("Handled"))
+            }
+        };
+        assert!(!run_native_mode_change(&mut expanded, false, 100, &mut request).unwrap());
+        assert!(!expanded);
+        assert_eq!(calls, [crate::niri::WINDOWS_REQUEST.to_owned(), crate::niri::action_floating(9)]);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn native_mode_change_same_request_sends_no_queries() {
+        use std::time::Duration;
+        let mut calls = 0;
+        let mut request = |_: &str, _: Duration| -> std::io::Result<serde_json::Value> {
+            calls += 1;
+            Ok(serde_json::json!({}))
+        };
+        let mut expanded = true;
+        assert!(run_native_mode_change(&mut expanded, true, 100, &mut request).unwrap());
+        let mut compact = false;
+        assert!(!run_native_mode_change(&mut compact, false, 100, &mut request).unwrap());
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn native_mode_change_missing_windows_and_wire_errors_keep_the_mode() {
+        use std::time::Duration;
+        // Missing/ambiguous windows are a bounded no-op: only the lookup ran.
+        for windows in [
+            serde_json::json!({"Windows": []}),
+            serde_json::json!({"Windows": [mode_window(9, 999, true)]}),
+        ] {
+            let mut calls = 0;
+            let mut request = |wire: &str, _: Duration| -> std::io::Result<serde_json::Value> {
+                calls += 1;
+                assert_eq!(wire, crate::niri::WINDOWS_REQUEST);
+                Ok(windows.clone())
+            };
+            let mut expanded = false;
+            assert!(!run_native_mode_change(&mut expanded, true, 100, &mut request).unwrap());
+            assert!(!expanded);
+            assert_eq!(calls, 1);
+        }
+        // A failing lookup or action propagates with the previous mode untouched.
+        let mut failing = |_: &str, _: Duration| -> std::io::Result<serde_json::Value> {
+            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "niri: silent"))
+        };
+        let mut expanded = false;
+        assert!(run_native_mode_change(&mut expanded, true, 100, &mut failing).is_err());
+        assert!(!expanded);
     }
 }
