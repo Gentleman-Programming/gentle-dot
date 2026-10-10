@@ -311,13 +311,14 @@ export class UploadStore {
 		}
 	}
 
-	/** Removes message folders that were never sent. */
+	/** Removes expired unsent files, preserving sent files that share their folder. */
 	private prune(): void {
 		const cutoff = this.now() - this.ttlMs;
 		for (const [uploadId, batch] of this.batches) {
 			if (batch.createdAt > cutoff || batch.writing.size > 0) continue;
-			this.batches.delete(uploadId);
-			rmSync(batch.dir, { recursive: true, force: true });
+			for (const file of batch.files.values()) rmSync(file.path, { force: true });
+			batch.files.clear();
+			this.dropIfEmpty(uploadId, batch);
 		}
 	}
 }
