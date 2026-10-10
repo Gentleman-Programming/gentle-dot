@@ -63,6 +63,8 @@ export function App() {
 function Assistant({ surface }: { surface: Surface }) {
 	const [info, setInfo] = useState<ConnectionInfo | undefined>(undefined);
 	const [missingToken, setMissingToken] = useState(false);
+	/** Why the desktop app could not reach its assistant, in the app's own words (S35.2). */
+	const [unreachable, setUnreachable] = useState<string>();
 	const [focusKey, setFocusKey] = useState(0);
 	const { state, send, dismiss, dispatch } = useDot(info);
 	// Files go to the daemon over HTTP, with the same access key as the WebSocket (S31.2).
@@ -103,7 +105,11 @@ function Assistant({ surface }: { surface: Surface }) {
 
 	useEffect(() => {
 		if (inDesktop()) {
-			connectionInfo().then(setInfo, () => setMissingToken(true));
+			connectionInfo().then(setInfo, (error: unknown) => {
+				const reason = typeof error === "string" ? error : error instanceof Error ? error.message : "";
+				if (reason) setUnreachable(reason);
+				else setMissingToken(true);
+			});
 			return;
 		}
 		const found = browserConnection();
@@ -162,11 +168,12 @@ function Assistant({ surface }: { surface: Surface }) {
 			/>
 		);
 	}
-	if (missingToken) {
+	if (unreachable !== undefined || missingToken) {
 		return (
 			<div className="chat chat-web">
 				<div className="status" role="status">
-					This page needs your access key. Open it from the Gentle Dot menu (Open in browser).
+					{unreachable ??
+						"This page needs your access key. Open it from the Gentle Dot menu (Open in browser)."}
 				</div>
 			</div>
 		);

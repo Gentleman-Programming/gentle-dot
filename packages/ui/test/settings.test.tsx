@@ -137,6 +137,21 @@ describe("recording a key combination", () => {
 	});
 });
 
+describe("when the app cannot reach its assistant (S35.2)", () => {
+	it("the panel shows the app's own reason, not the browser's access-key note", async () => {
+		const reason =
+			"Another Gentle Dot assistant is already running on port 4317. Stop it, then choose Restart assistant.";
+		const fallback = h.invoke.getMockImplementation();
+		h.invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+			if (command === "connection_info") throw reason;
+			return fallback?.(command, args);
+		});
+		await renderApp("?surface=panel");
+		expect(await screen.findByRole("status")).toHaveTextContent(reason);
+		expect(screen.queryByText(/needs your access key/)).toBeNull();
+	});
+});
+
 describe("the Settings screen (S33.1)", () => {
 	it("opens from a gear in the desktop panel header", async () => {
 		const settings = await openSettings();
