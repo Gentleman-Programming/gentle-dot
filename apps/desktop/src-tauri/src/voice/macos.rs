@@ -123,9 +123,24 @@ impl Microphone for MacMicrophone {
             return Err(VoiceError::Failed(format!("The microphone could not start: {}", describe(&error))));
         }
 
-        // A device change (headset unplugged, input switched) stops the engine.
-        let interrupted = RcBlock::new(move |_note: NonNull<NSNotification>| {
-            sink.failed(&VoiceError::Interrupted.to_string());
+        // A device change (headset unplugged, input switched) stops the engine; the engine also
+        // posts this for its own reconfiguration while still running, which is not an
+        // interruption (`configuration_change`, #10). The engine is read from the notification
+        // rather than captured: Apple warns against releasing it inside this handler. Only a
+        // real Mac exercises this path; a route change that stops the engine still ends the
+        // recording (no transparent restart).
+        let interrupted = RcBlock::new(move |note: NonNull<NSNotification>| {
+            // SAFETY: the notification is valid for the call; its object is the observed engine.
+            let note = unsafe { note.as_ref() };
+            let engine = note.object();
+            // SAFETY: reading a flag off the engine, on the thread that posted the notification.
+            let running = engine
+                .as_deref()
+                .and_then(|object| object.downcast_ref::<AVAudioEngine>())
+                .is_some_and(|engine| unsafe { engine.isRunning() });
+            if let Some(error) = super::configuration_change(running) {
+                sink.failed(&error.to_string());
+            }
         });
         let engine_object: &AnyObject = &engine;
         // SAFETY: a framework constant name, observed for this engine only; the block posts

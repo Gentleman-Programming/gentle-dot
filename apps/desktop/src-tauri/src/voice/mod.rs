@@ -166,6 +166,19 @@ impl From<VoiceError> for String {
     }
 }
 
+/// What an `AVAudioEngineConfigurationChangeNotification` means for the recording (macOS),
+/// given whether the engine that posted it is still running.
+///
+/// AVAudioEngine stops itself and posts the notification when the input hardware's sample rate
+/// or channel count changes (a headset unplugged, the input switched), so a stopped engine has
+/// lost the capture. It also posts it for its own reconfiguration a few hundred milliseconds
+/// after starting, still running and with the tap delivering audio in an unchanged format
+/// (#10); treating that as an interruption ended every recording right after it began.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn configuration_change(engine_running: bool) -> Option<VoiceError> {
+    (!engine_running).then_some(VoiceError::Interrupted)
+}
+
 /// The capture in the device's own format (on macOS, the input node's `AVAudioPCMBuffer`),
 /// valid for one call. Opaque to the machine: only the recognition that asks for it downcasts
 /// it, so it must come from the microphone that recognition was made for.
@@ -250,6 +263,16 @@ mod tests {
             serde_json::to_value(VoiceStatus::unavailable(UNSUPPORTED)).unwrap(),
             serde_json::json!({"available": false, "reason": "Voice input is available on macOS and Linux."})
         );
+    }
+
+    #[test]
+    fn a_configuration_change_with_the_engine_running_is_not_an_interruption() {
+        assert_eq!(configuration_change(true), None);
+    }
+
+    #[test]
+    fn a_configuration_change_that_stopped_the_engine_is_an_interruption() {
+        assert_eq!(configuration_change(false), Some(VoiceError::Interrupted));
     }
 
     #[test]
