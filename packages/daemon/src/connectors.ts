@@ -47,6 +47,12 @@ export { INTEGRITY_KEY_ID } from "./connector-integrity.ts";
 /** What windows are told once after a changed `connectors.json` was set aside (S25.6). */
 export const SET_ASIDE_NOTICE =
 	"Connectors were changed while Gentle Dot was closed, so they were set aside. Review them in Connectors.";
+/** The app is there but the integrity key could not be read or stored: nothing that needs a secret runs (A1, L120). */
+export const INTEGRITY_UNCHECKED =
+	"Gentle Dot could not check your connectors, so the ones that need a secret stay locked. Restart Gentle Dot to try again.";
+/** A signed `connectors.json` was deleted while Gentle Dot was closed (A3, L120). */
+export const MISSING_NOTICE =
+	"Your connectors file was removed while Gentle Dot was closed. Add your connectors again in Connectors.";
 
 /** A value the user types in the app (a token, client credentials); kept only in the assistant's private state. */
 export interface SetupField {
@@ -663,6 +669,8 @@ export class ConnectorStore {
 	private saved: ConnectorsState;
 	/** `connectors.json` as it was read at start: its text, and the record when it was a JSON object. */
 	private loaded: { text: string; record?: Record<string, unknown> } | undefined;
+	/** Set when the app is there but the file could not be checked: secrets stay locked until a start can (A1). */
+	private unchecked = false;
 	/** The signing key from the app's store, once {@link checkIntegrity} read it; only in memory. */
 	private integrityKey: Buffer | undefined;
 	/** True once the record differs from what was read at start (a change, a move, a migration). */
@@ -757,11 +765,18 @@ export class ConnectorStore {
 			notVerified("the desktop app is not connected");
 			return;
 		}
+		// With the app there, a check that cannot run fails closed: the file stays as it is and no
+		// secret is read until a start that can check it (A1).
+		const cannot = (why: string) => {
+			this.unchecked = true;
+			this.log(`connectors.json could not be checked: ${why}; connectors that need a secret stay locked`);
+			this.onSetAside(INTEGRITY_UNCHECKED);
+		};
 		let stored: string | undefined;
 		try {
 			stored = await source.get(INTEGRITY_KEY_ID);
 		} catch (error) {
-			notVerified(`its key could not be read (${(error as Error).message})`);
+			cannot(`its key could not be read (${(error as Error).message})`);
 			return;
 		}
 		let key = parseIntegrityKey(stored);
@@ -770,13 +785,20 @@ export class ConnectorStore {
 			try {
 				await this.verifiedPut(source, INTEGRITY_KEY_ID, created);
 			} catch (error) {
-				notVerified(`its key could not be stored (${(error as Error).message})`);
+				cannot(`its key could not be stored (${(error as Error).message})`);
 				return;
 			}
 			key = Buffer.from(created, "hex");
 		}
 		this.integrityKey = key;
-		if (!this.loaded) return;
+		if (!this.loaded) {
+			// A file that was signed before is gone: say so instead of starting empty in silence (A3).
+			if (stored !== undefined) {
+				this.log("connectors.json was signed before and is missing; starting with no connectors");
+				this.onSetAside(MISSING_NOTICE);
+			}
+			return;
+		}
 		const record = this.loaded.record;
 		const signedBefore = stored !== undefined || (record !== undefined && "mac" in record);
 		if (!signedBefore) {
@@ -1098,6 +1120,7 @@ export class ConnectorStore {
 	}
 
 	private secrets(): SecretSource {
+		if (this.unchecked) throw new SecretsUnavailableError(INTEGRITY_UNCHECKED);
 		const source = this.options.secrets;
 		if (!source?.available) throw new SecretsUnavailableError();
 		return source;

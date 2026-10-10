@@ -3,7 +3,7 @@
 // daemon starts with no connectors, and the user is told once; the first start after T23e signs the
 // current file; without the app the file is loaded unverified, and a write never breaks a signature.
 import { createHmac } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ServerMessage, ServerPayload } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
@@ -13,6 +13,8 @@ import {
 	ConnectorStore,
 	type CustomConnector,
 	INTEGRITY_KEY_ID,
+	INTEGRITY_UNCHECKED,
+	MISSING_NOTICE,
 	SET_ASIDE_NOTICE,
 	secretRef,
 } from "../src/connectors.ts";
@@ -256,6 +258,35 @@ describe("a file changed while the daemon was down is set aside", () => {
 		expect(restarted.state().connectors).toEqual({});
 		await expect(restarted.credentials("evil")).rejects.toThrow();
 		expect(reads.filter((id) => id.startsWith("connector/"))).toEqual([]);
+	});
+});
+
+describe("when the check itself cannot run (A1, A3, L120)", () => {
+	it("a key the app cannot read keeps the file as it is and every connector with a secret locked", async () => {
+		const { dataDir, source } = await signedInstall();
+		const before = readFileSync(join(dataDir, "connectors.json"), "utf8");
+		const get = source.get.bind(source);
+		source.get = async (id: string) => {
+			if (id === INTEGRITY_KEY_ID) throw new Error("keychain unavailable");
+			return get(id);
+		};
+		const { store, notices } = await started(dataDir, source);
+		await expect(store.credentials("discord")).rejects.toThrow(INTEGRITY_UNCHECKED);
+		expect(notices).toEqual([INTEGRITY_UNCHECKED]);
+		expect(readFileSync(join(dataDir, "connectors.json"), "utf8")).toBe(before);
+		// The next start that can read the key checks it and unlocks.
+		source.get = get;
+		store.close();
+		const { store: next } = await started(dataDir, source);
+		expect((await next.credentials("discord")).env).toEqual({ DISCORD_TOKEN: TOKEN });
+	});
+
+	it("a signed file deleted while Gentle Dot was closed is reported once", async () => {
+		const { dataDir, source } = await signedInstall();
+		rmSync(join(dataDir, "connectors.json"));
+		const { store, notices } = await started(dataDir, source);
+		expect(notices).toEqual([MISSING_NOTICE]);
+		expect(store.state().connectors).toEqual({});
 	});
 });
 
