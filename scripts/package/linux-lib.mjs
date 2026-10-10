@@ -23,6 +23,7 @@ export const PACKAGE_USAGE =
 	"usage: package-linux --arch <arm64|amd64> [--out <dir>] [--engram-version <x.y.z>] [--no-arch-package]";
 export const CHECK_USAGE =
 	"usage: linux-check --arch <arm64|amd64> [--distro <debian|ubuntu|arch>[,…]] [--out <dir>]";
+export const CARGO_CHECK_USAGE = "usage: linux-cargo-check --arch <arm64|amd64>";
 
 /** Reads `--name value` pairs and bare switches; throws with `usage` on anything unexpected. */
 function readFlags(argv, valued, switches, usage) {
@@ -85,6 +86,13 @@ export function parseCheckArgs(argv) {
 	return { arch: options.arch, out: options.out, distros };
 }
 
+/** `linux-cargo-check` options: the architecture. */
+export function parseCargoCheckArgs(argv) {
+	const options = readFlags(argv, { "--arch": "arch" }, {}, CARGO_CHECK_USAGE);
+	checkArch(options.arch, CARGO_CHECK_USAGE);
+	return options;
+}
+
 export function debFileName(version, arch) {
 	return `gentle-dot_${version}_${ARCHES[arch].deb}.deb`;
 }
@@ -104,6 +112,11 @@ export function builderImage(arch) {
 
 export const ARCH_BUILDER_IMAGE = "gentle-dot-arch-builder:latest";
 
+/** The package builder plus a session D-Bus and GNOME Keyring, for `linux-cargo-check`. */
+export function checkImage(arch) {
+	return `gentle-dot-linux-check:${arch}`;
+}
+
 /** Named volumes that keep downloads and compiled crates between builds, and where they mount. */
 export function cacheVolumes(arch) {
 	return [
@@ -111,6 +124,18 @@ export function cacheVolumes(arch) {
 		{ name: `gentle-dot-linux-${arch}-target`, target: "/work/apps/desktop/src-tauri/target" },
 		{ name: `gentle-dot-linux-${arch}-cache`, target: "/work/.cache" },
 		{ name: `gentle-dot-linux-${arch}-pnpm`, target: "/pnpm-store" },
+	];
+}
+
+/**
+ * The volumes `linux-cargo-check` mounts: the package build's downloads, and compiled test crates in
+ * a target volume of their own (debug builds, kept apart from the release builds of the packages).
+ */
+export function cargoCheckVolumes(arch) {
+	const downloads = ["/usr/local/cargo/registry", "/pnpm-store"];
+	return [
+		...cacheVolumes(arch).filter(({ target }) => downloads.includes(target)),
+		{ name: `gentle-dot-linux-${arch}-check-target`, target: "/work/apps/desktop/src-tauri/target" },
 	];
 }
 

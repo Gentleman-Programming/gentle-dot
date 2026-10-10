@@ -27,6 +27,8 @@ export function fakeApp(answers: Answer[] = [], otherwise: Answer = "decline") {
 	/** The app's Keychain, by secret id; `secretCalls` records the methods and ids only. */
 	const secrets = new Map<string, string>();
 	const secretCalls: string[] = [];
+	/** When set, every secret call is answered with this error, as the app's store would refuse it. */
+	let secretError: string | undefined;
 	const queue = [...answers];
 	const pending = new Map<number, { resolve(v: unknown): void; reject(e: Error): void }>();
 	const held: number[] = [];
@@ -50,6 +52,10 @@ export function fakeApp(answers: Answer[] = [], otherwise: Answer = "decline") {
 				const params = (frame.params ?? {}) as { id?: string; secret?: string };
 				secretCalls.push(params.id === undefined ? frame.method : `${frame.method} ${params.id}`);
 				const id = params.id ?? "";
+				if (secretError !== undefined) {
+					write({ kind: "response", id: frame.id, error: secretError });
+					continue;
+				}
 				let result: unknown = { ids: [...secrets.keys()].sort() };
 				if (frame.method === "secret_get") result = secrets.has(id) ? { secret: secrets.get(id) } : null;
 				else if (frame.method === "secret_put") {
@@ -81,6 +87,9 @@ export function fakeApp(answers: Answer[] = [], otherwise: Answer = "decline") {
 		asked,
 		secrets,
 		secretCalls,
+		failSecrets: (error: string | undefined) => {
+			secretError = error;
+		},
 		/** Answers the oldest held approval, as a user clicking in the dialog later. */
 		release: (approved: boolean) => {
 			const id = held.shift();

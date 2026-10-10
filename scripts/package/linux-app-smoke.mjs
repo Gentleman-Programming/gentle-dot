@@ -2,9 +2,19 @@
 // Launches an installed Gentle Dot binary under Xvfb on a clean HOME, as a desktop session would,
 // and waits until the daemon the app spawned reports idle on a free port:
 // `node scripts/package/linux-app-smoke.mjs --binary /usr/bin/gentle-dot [--runtime <dir>] [--timeout <s>]`.
+// Also checks the app channel (S25.1, S25.7): the daemon holds the app's socket on fd 3, the log
+// shows no refusal, and no other process (the engine, Engram, their children) holds that socket.
 // Runs inside a Linux container (docker/linux-package/check-package.sh); needs xvfb-run and lsof.
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, openSync, readFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+	readlinkSync,
+} from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,19 +36,69 @@ function freePort() {
 	});
 }
 
-/** The command line of the process listening on `port`, when `lsof` can tell. */
-function listener(port) {
+/** The pid of the process listening on `port`, when `lsof` can tell. */
+function listenerPid(port) {
 	try {
-		const pid = execFileSync("lsof", ["-t", "-n", "-P", `-iTCP:${port}`, "-sTCP:LISTEN"], {
+		return execFileSync("lsof", ["-t", "-n", "-P", `-iTCP:${port}`, "-sTCP:LISTEN"], {
 			encoding: "utf8",
 			env: { PATH: SYSTEM_PATH },
 		})
 			.trim()
 			.split("\n")[0];
+	} catch {
+		return undefined;
+	}
+}
+
+/** The command line of the process listening on `port`, when `lsof` can tell. */
+function listener(port) {
+	const pid = listenerPid(port);
+	if (!pid) return undefined;
+	try {
 		return execFileSync("ps", ["-o", "command=", "-p", pid], { encoding: "utf8" }).trim();
 	} catch {
 		return undefined;
 	}
+}
+
+const pids = () => readdirSync("/proc").filter((name) => /^\d+$/.test(name));
+const tryRead = (read) => {
+	try {
+		return read();
+	} catch {
+		return undefined;
+	}
+};
+
+/**
+ * The app channel as the daemon `pid` holds it: fd 3 is a socket, and which other processes hold
+ * that same socket (none should), with the daemon's descendants for scale.
+ */
+function channelCheck(pid) {
+	const socket = tryRead(() => readlinkSync(`/proc/${pid}/fd/3`));
+	if (!socket?.startsWith("socket:"))
+		return { ok: false, detail: `the daemon's fd 3 is ${socket ?? "closed"}` };
+	const parents = new Map();
+	for (const other of pids()) {
+		const stat = tryRead(() => readFileSync(`/proc/${other}/stat`, "utf8"));
+		if (stat) parents.set(other, stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+	}
+	const descends = (other) => {
+		for (let at = parents.get(other); at && at !== "0"; at = parents.get(at)) if (at === pid) return true;
+		return false;
+	};
+	const descendants = [...parents.keys()].filter(descends);
+	const holders = [];
+	for (const other of pids()) {
+		if (other === pid) continue;
+		for (const fd of tryRead(() => readdirSync(`/proc/${other}/fd`)) ?? [])
+			if (tryRead(() => readlinkSync(`/proc/${other}/fd/${fd}`)) === socket)
+				holders.push(`pid ${other} fd ${fd}`);
+	}
+	return {
+		ok: holders.length === 0,
+		detail: `daemon fd 3 is ${socket}; ${descendants.length} descendant processes; other holders: ${holders.join(", ") || "none"}`,
+	};
 }
 
 async function health(port) {
@@ -108,6 +168,9 @@ async function main() {
 	if (runtime) say(`daemon launched from the packaged runtime: ${fromRuntime}`);
 	const engram = listener(engramPort);
 	say(`engram on ${engramPort}: ${engram ?? "not listening"}`);
+	const daemonPid = listenerPid(port);
+	const channel = daemonPid ? channelCheck(daemonPid) : { ok: false, detail: "no daemon" };
+	say(`app channel: ${channel.detail}`);
 
 	if (!exited) {
 		process.kill(-app.pid, "SIGTERM");
@@ -120,15 +183,18 @@ async function main() {
 		`after stop: daemon ${daemonLeft ? "still listening" : "stopped"}, engram ${engramLeft ? "still listening" : "stopped"}`,
 	);
 	const daemonLog = join(dataDir, "daemon.log");
+	let refused = false;
 	if (existsSync(daemonLog)) {
 		const lines = readFileSync(daemonLog, "utf8").trim().split("\n");
 		say(`daemon.log: ${lines.length} lines, last: ${lines.at(-1)}`);
+		refused = lines.some((line) => line.includes("the app's channel was refused"));
+		say(`daemon.log: the app's channel was ${refused ? "REFUSED" : "not refused"}`);
 	}
 	const appLines = readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean);
 	say(`app output: ${appLines.length} lines`);
 	for (const line of appLines.slice(-8)) say(`  ${line}`);
 
-	const ok = state === "idle" && fromRuntime && !daemonLeft && !engramLeft;
+	const ok = state === "idle" && fromRuntime && !daemonLeft && !engramLeft && channel.ok && !refused;
 	say(ok ? "app smoke: ok" : "app smoke: FAILED");
 	process.exit(ok ? 0 : 1);
 }

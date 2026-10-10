@@ -23,7 +23,12 @@ import WebSocket from "ws";
 import { AppChannel } from "../src/app-channel.ts";
 import { ConnectorManager, ConnectorStore, type CustomConnector } from "../src/connectors.ts";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
-import { AppSecretSource, MemorySecretSource, NO_APP } from "../src/secret-source.ts";
+import {
+	AppSecretSource,
+	MemorySecretSource,
+	NO_APP,
+	SecretsUnavailableError,
+} from "../src/secret-source.ts";
 import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { fakeOAuth } from "./fake-oauth.ts";
@@ -129,6 +134,27 @@ describe("the app's secret store over its channel", () => {
 		await expect(source.put("connector/x", "s")).rejects.toThrow(NO_APP);
 		await expect(new AppSecretSource(undefined).list()).rejects.toThrow(NO_APP);
 		expect(NO_APP).toBe("Open the Gentle Dot app to use this connector.");
+	});
+
+	it("passes on why the app's secret store is unavailable, so the assistant can say it (S25.7)", async () => {
+		const app = fakeApp();
+		const channel = new AppChannel(app.daemonEnd);
+		closers.push(async () => channel.close());
+		const source = new AppSecretSource(channel);
+		const why =
+			"the secret store is unavailable: no Secret Service in this desktop session (DBus error); install and unlock a keyring such as GNOME Keyring or KWallet";
+		app.failSecrets(why);
+		const unavailable = await source.get("connector/x").catch((error: unknown) => error);
+		expect(unavailable).toBeInstanceOf(SecretsUnavailableError);
+		expect((unavailable as Error).message).toBe(
+			"The secret store is unavailable: no Secret Service in this desktop session (DBus error); install and unlock a keyring such as GNOME Keyring or KWallet",
+		);
+		app.failSecrets("the user denied access to the secret store");
+		const refused = await source.get("connector/x").catch((error: unknown) => error);
+		expect(refused).not.toBeInstanceOf(SecretsUnavailableError);
+		expect((refused as Error).message).toBe(
+			"The app's secure store refused it: the user denied access to the secret store",
+		);
 	});
 });
 

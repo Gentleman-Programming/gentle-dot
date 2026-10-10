@@ -316,6 +316,11 @@ fn spawn_daemon(spec: &LaunchSpec, log: File, channel: Option<BorrowedFd<'_>>) -
     Ok(Box::new(child))
 }
 
+/// As on macOS, the daemon gets stdio and `channel` on fd 3 and no other descriptor of the app:
+/// everything from fd 3 up (fd 4 up with a channel) is marked close-on-exec in the child, so a
+/// descriptor some library of the app opened without close-on-exec never reaches the daemon. Node
+/// then marks fd 3 close-on-exec at its own startup (libuv's `uv_disable_stdio_inheritance`), so
+/// the daemon's children never get it either (`app-channel.ts` `childInherits` checks that).
 #[cfg(not(target_os = "macos"))]
 fn spawn_daemon(spec: &LaunchSpec, log: File, channel: Option<BorrowedFd<'_>>) -> io::Result<Box<dyn ChildProcess>> {
     use std::os::fd::AsRawFd;
@@ -328,20 +333,50 @@ fn spawn_daemon(spec: &LaunchSpec, log: File, channel: Option<BorrowedFd<'_>>) -
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log);
-    if let Some(fd) = channel.map(|fd| fd.as_raw_fd()) {
-        // SAFETY: runs in the child between fork and exec and only calls dup2, which is
-        // async-signal-safe. `fd` is above APP_FD (channel_pair), so dup2 makes a new fd 3
-        // without close-on-exec, while the original closes at exec.
-        unsafe {
-            command.pre_exec(move || {
+    let channel = channel.map(|fd| fd.as_raw_fd());
+    // SAFETY: runs in the child between fork and exec and only makes system calls (dup2, fcntl,
+    // close_range, getrlimit), which are async-signal-safe; nothing allocates. `fd` is above
+    // APP_FD (channel_pair), so dup2 makes a new fd 3 without close-on-exec, while the original
+    // closes at exec.
+    unsafe {
+        command.pre_exec(move || {
+            if let Some(fd) = channel {
                 if libc::dup2(fd, APP_FD) == -1 {
                     return Err(io::Error::last_os_error());
                 }
-                Ok(())
-            });
-        }
+            }
+            let first = if channel.is_some() { APP_FD + 1 } else { APP_FD };
+            cloexec_from(first);
+            Ok(())
+        });
     }
     Ok(Box::new(command.spawn()?))
+}
+
+/// Marks every descriptor from `first` up close-on-exec. Called between fork and exec: system
+/// calls only.
+#[cfg(not(target_os = "macos"))]
+fn cloexec_from(first: libc::c_int) {
+    #[cfg(target_os = "linux")]
+    if let Ok(low) = libc::c_uint::try_from(first) {
+        // SAFETY: close_range(2) with CLOSE_RANGE_CLOEXEC (Linux 5.11) only changes descriptor flags.
+        if unsafe { libc::syscall(libc::SYS_close_range, low, libc::c_uint::MAX, libc::CLOSE_RANGE_CLOEXEC) } == 0 {
+            return;
+        }
+    }
+    // An older kernel: every descriptor up to the limit, one by one.
+    // SAFETY: an all-zero rlimit is valid, and getrlimit writes only into it.
+    let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid out-pointer.
+    let top = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
+        libc::c_int::try_from(limit.rlim_cur.min(1 << 20)).unwrap_or(1 << 20)
+    } else {
+        1 << 16
+    };
+    for fd in first..top {
+        // SAFETY: F_SETFD on a descriptor number; one that is not open fails with EBADF, harmlessly.
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
 }
 
 /// Sends SIGTERM, waits up to `grace` for a clean exit, then kills.
@@ -787,7 +822,6 @@ IFS= read -r line <&3; printf '%s %s\\n' \"$kind\" \"$line\" >&3";
         assert!(daemon_end.as_raw_fd() > APP_FD, "{}", daemon_end.as_raw_fd());
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn without_a_channel_fd_3_is_closed_in_the_daemon() {
         let dir = scratch_dir("channel-none");
@@ -795,6 +829,65 @@ IFS= read -r line <&3; printf '%s %s\\n' \"$kind\" \"$line\" >&3";
         let mut child = spawn_daemon(&sh_spec(script), open_private_log(&dir).unwrap(), None).unwrap();
         assert!(child.wait().unwrap().success());
         assert_eq!(fs::read_to_string(dir.join("daemon.log")).unwrap(), "none\n");
+    }
+
+    #[test]
+    fn no_other_descriptor_of_the_app_reaches_the_daemon() {
+        let dir = scratch_dir("channel-only");
+        let log = open_private_log(&dir).unwrap();
+        // A descriptor some library opened without close-on-exec (F_DUPFD leaves the flag clear).
+        // SAFETY: duplicating a descriptor we own; the copy is owned by `stray`.
+        let stray = unsafe { OwnedFd::from_raw_fd(libc::fcntl(log.as_raw_fd(), libc::F_DUPFD, 60)) };
+        assert!(stray.as_raw_fd() >= 60);
+        let (_app, daemon_end) = channel_pair().unwrap();
+        let script = format!(
+            "if [ -S /dev/fd/3 ]; then echo channel; fi; if [ -e /dev/fd/{} ]; then echo leaked; else echo closed; fi",
+            stray.as_raw_fd()
+        );
+        let mut child = spawn_daemon(&sh_spec(&script), log, Some(daemon_end.as_fd())).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(fs::read_to_string(dir.join("daemon.log")).unwrap(), "channel\nclosed\n");
+    }
+
+    /// The real thing on this platform: the app's spawn hands fd 3 to Node running the daemon's
+    /// stand-in (packages/daemon/test/fixtures/app-channel-child.ts), which opens the channel the way
+    /// the daemon does and reports what the children it spawns see on fd 3. Needs Node 24 on PATH
+    /// (or `GENTLE_DOT_TEST_NODE`): `cargo test a_node_daemon -- --ignored`.
+    #[test]
+    #[ignore = "needs Node 24 and the repository's daemon sources"]
+    fn a_node_daemon_keeps_the_channel_from_its_children() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = scratch_dir("channel-node");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packages/daemon/test/fixtures/app-channel-child.ts");
+        let node = std::env::var("GENTLE_DOT_TEST_NODE").unwrap_or_else(|_| "node".into());
+        let path = std::env::var("PATH").unwrap_or_default();
+        let spec = LaunchSpec {
+            program: node,
+            args: vec![fixture.to_string_lossy().into_owned()],
+            envs: vec![("PATH".into(), path)],
+        };
+        let (app, daemon_end) = channel_pair().unwrap();
+        let own = File::from(daemon_end.try_clone().unwrap()).metadata().unwrap();
+        // Node shows `dev` signed (macOS's dev_t is an i32 and a socket's is -1).
+        let identity = format!("{}:{}", own.dev() as i64, own.ino());
+        let mut child = spawn_daemon(&spec, open_private_log(&dir).unwrap(), Some(daemon_end.as_fd())).unwrap();
+        drop(daemon_end);
+        app.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        let mut line = String::new();
+        BufReader::new(&app).read_line(&mut line).unwrap();
+        let log = || fs::read_to_string(dir.join("daemon.log")).unwrap_or_default();
+        let frame: serde_json::Value = serde_json::from_str(&line).unwrap_or_else(|_| panic!("no report: {line:?} {}", log()));
+        assert_eq!(frame["method"], "report", "{frame} {}", log());
+        (&app).write_all(format!("{{\"kind\":\"response\",\"id\":{},\"result\":{{}}}}\n", frame["id"]).as_bytes()).unwrap();
+        assert!(child.wait().unwrap().success(), "{}", log());
+        let report = &frame["params"];
+        // The daemon holds the socket this app handed over; none of its children does.
+        assert_eq!(report["identity"], identity.as_str(), "{report}");
+        assert_ne!(report["fromSpawn"], identity.as_str(), "{report}");
+        assert_ne!(report["fromSpawnSync"], identity.as_str(), "{report}");
+        assert_eq!(report["fromShell"], "none", "{report}");
+        // And the daemon's startup probe would have seen a leak, had there been one.
+        assert_eq!(report["detectsALeak"], true, "{report}");
     }
 
     #[derive(Default)]

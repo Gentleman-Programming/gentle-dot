@@ -4,10 +4,13 @@ import {
 	archPackageFileName,
 	builderImage,
 	cacheVolumes,
+	cargoCheckVolumes,
+	checkImage,
 	debFileName,
 	fillPkgbuild,
 	formatDuration,
 	packageFileFor,
+	parseCargoCheckArgs,
 	parseCheckArgs,
 	parsePackageArgs,
 } from "../linux-lib.mjs";
@@ -79,6 +82,26 @@ describe("artifact names", () => {
 			"gentle-dot-linux-arm64-pnpm",
 		]);
 		expect(volumes.every((volume) => volume.target.startsWith("/"))).toBe(true);
+	});
+
+	it("check the crate in an image and a target volume of their own, sharing the downloads", () => {
+		expect(checkImage("arm64")).toBe("gentle-dot-linux-check:arm64");
+		expect(cargoCheckVolumes("arm64")).toEqual([
+			{ name: "gentle-dot-linux-arm64-cargo", target: "/usr/local/cargo/registry" },
+			{ name: "gentle-dot-linux-arm64-pnpm", target: "/pnpm-store" },
+			{ name: "gentle-dot-linux-arm64-check-target", target: "/work/apps/desktop/src-tauri/target" },
+		]);
+	});
+});
+
+describe("parseCargoCheckArgs", () => {
+	it("takes an architecture and nothing else", () => {
+		expect(parseCargoCheckArgs(["--", "--arch", "arm64"])).toEqual({ arch: "arm64" });
+		expect(() => parseCargoCheckArgs([])).toThrow(/Missing --arch/);
+		expect(() => parseCargoCheckArgs(["--arch", "riscv"])).toThrow(/Unknown architecture/);
+		expect(() => parseCargoCheckArgs(["--arch", "arm64", "--distro", "debian"])).toThrow(
+			/Unexpected argument/,
+		);
 	});
 });
 

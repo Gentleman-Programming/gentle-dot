@@ -59,6 +59,10 @@ core-foundation = "0.10"
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus-secret-service = "4.1"
 
+# The store's tests build D-Bus errors (the same `dbus` that dbus-secret-service uses).
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+dbus = "0.9"
+
 # Debug builds encode screenshots fast too (S24.8): `image` holds the JPEG encoder and `zune-*`
 # decode JPEGs (tests). The encoder is generic, so most of its code is compiled in this crate,
 # which gets opt-level 1 as well (measured on a 1280 × 800 encode: 200 ms unoptimized, 126 ms

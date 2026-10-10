@@ -1,0 +1,15 @@
+# The Linux checks of the desktop crate (S25.7): the package builder's toolchain plus a session
+# D-Bus and GNOME Keyring, so the Secret Service store runs against a real provider. The repository
+# is mounted read-only at /src and `cargo-check.sh` works on a copy. Driven by
+# scripts/package/linux-cargo-check.mjs:
+#   docker build --platform linux/arm64 --build-arg BUILDER=gentle-dot-linux-builder:arm64 \
+#     -f docker/linux-package/Dockerfile.check -t gentle-dot-linux-check:arm64 docker/linux-package
+ARG BUILDER=gentle-dot-linux-builder:arm64
+FROM ${BUILDER}
+
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends dbus dbus-bin gnome-keyring libsecret-tools \
+	&& rm -rf /var/lib/apt/lists/*
+
+# The builder installs Rust with the minimal profile.
+RUN rustup component add clippy
