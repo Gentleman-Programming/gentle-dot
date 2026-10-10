@@ -2,6 +2,10 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { AuthEvent, AuthMethod, AuthPrompt, AuthProvider, ServerPayload } from "@gentle-dot/protocol";
+import {
+	createCommandCodeAnthropicProviderConfig,
+	createCommandCodeProviderConfig,
+} from "./extensions/command-code.ts";
 import { presentText } from "./white-label.ts";
 
 type PromptRequest = {
@@ -58,9 +62,11 @@ export function resolveAgentHome(env: NodeJS.ProcessEnv, dataDir: string): strin
 }
 
 /**
- * Providers the engine adds through its own extensions, so the Accounts screen can sign in to them
- * too: today NaN (gentle-pi's `nan-provider`). gentle-pi ships them as TypeScript inside
- * node_modules, which Node will not strip, so they load through jiti as the engine loads them.
+ * Providers beyond Pi's built-ins, so the Accounts screen can sign in to them and the model picker
+ * lists them: NaN (gentle-pi's `nan-provider`) and Command Code (this daemon's own extension, S34).
+ * gentle-pi ships NaN as TypeScript inside node_modules, which Node will not strip, so it loads
+ * through jiti as the engine loads it; Command Code is this repo's own module, imported directly.
+ * The engine gets the same providers, either from gentle-pi or with `-e` (see daemon.ts).
  */
 async function registerEngineProviders(runtime: {
 	registerNativeProvider(provider: never): void;
@@ -72,6 +78,8 @@ async function registerEngineProviders(runtime: {
 	}>("gentle-pi/lib/nan-provider.ts");
 	// A provider object, as `pi.registerProvider(config)` passes it, is a native provider.
 	runtime.registerNativeProvider(createNanProviderConfig() as never);
+	runtime.registerNativeProvider(createCommandCodeProviderConfig() as never);
+	runtime.registerNativeProvider(createCommandCodeAnthropicProviderConfig() as never);
 }
 
 /** Pi's ModelRuntime on the assistant's home: same auth.json format and file locking as Gentle Shell. */
