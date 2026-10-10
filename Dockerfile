@@ -24,16 +24,23 @@ RUN apt-get update \
 	# The engine's first-run setup needs `pi` on PATH; match the version the daemon bundles.
 	&& PI_VERSION="$(node -p "require('/app/packages/daemon/node_modules/@earendil-works/pi-coding-agent/package.json').version")" \
 	&& npm install -g "@earendil-works/pi-coding-agent@${PI_VERSION}" \
+	# Server mode (S25.8): the daemon runs as root, the engine as dot, stdio connector servers as dotmcp.
 	&& useradd --create-home dot \
-	# gentle-pi installs its gentle-ai binary with mode 0700 during the build (as root); the engine runs as dot.
-	&& chown -R dot:dot /app
+	&& useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin dotmcp \
+	# The daemon's code stays root's: readable and runnable by all, writable by no one else.
+	# gentle-pi installs its gentle-ai binary with mode 0700 during the build; a+rX lets the engine run it.
+	&& chown -R root:root /app \
+	&& chmod -R a+rX,go-w /app
 COPY --from=engram /go/bin/engram /usr/local/bin/engram
 COPY docker/entrypoint.sh /usr/local/bin/gentle-dot-entrypoint
-USER dot
 WORKDIR /home/dot
 ENV GENTLE_DOT_HOST=0.0.0.0 \
 	GENTLE_DOT_PORT=4317 \
-	GENTLE_DOT_DATA_DIR=/home/dot/.gentle-dot
+	GENTLE_DOT_DATA_DIR=/home/dot/.gentle-dot \
+	GENTLE_DOT_VPS=1 \
+	GENTLE_DOT_ENGINE_USER=dot \
+	GENTLE_DOT_CONNECTOR_USER=dotmcp \
+	GENTLE_DOT_ENGRAM_DATA_DIR=/home/dot/.engram
 EXPOSE 4317
 HEALTHCHECK --interval=30s --timeout=5s CMD node -e "fetch('http://127.0.0.1:4317/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
 ENTRYPOINT ["tini", "--", "gentle-dot-entrypoint"]

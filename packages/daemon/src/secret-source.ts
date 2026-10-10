@@ -5,7 +5,8 @@
  * the app's private channel (`secret_get`, `secret_put`, `secret_delete`, `secret_list`). The daemon
  * keeps them in memory only and never writes them to a file or a log. Without the app (a daemon it
  * only attached to, one started from a terminal, the web) there is no source, and connectors that
- * need a secret fail closed with {@link NO_APP}; there is no file fallback.
+ * need a secret fail closed with {@link NO_APP}; there is no file fallback. A server in server mode
+ * (S25.8) has its own source instead: an encrypted file (`secret-file.ts`).
  */
 import { APPROVAL_WAIT_MS, type AppChannel } from "./app-channel.ts";
 
@@ -29,6 +30,8 @@ export class SecretsUnavailableError extends Error {
 export interface SecretSource {
 	/** False while there is no app to ask; every call then rejects with {@link SecretsUnavailableError}. */
 	readonly available: boolean;
+	/** Why it is not available, when the source knows better than {@link NO_APP}; safe to show. */
+	readonly unavailable?: string | undefined;
 	/** The secret under `id`, or undefined when there is none. */
 	get(id: string): Promise<string | undefined>;
 	/** Stores `secret` under `id`, replacing any previous one. */

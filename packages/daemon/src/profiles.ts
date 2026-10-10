@@ -252,6 +252,8 @@ export interface ProfileStoreOptions {
 	agentHome: string;
 	/** Another setup's `profiles.json`, only ever read, for the one-time import. */
 	importPath: string;
+	/** Server mode (S25.8): gives what a write left in the engine's folders to the engine's user. */
+	handOver?: (paths: string[]) => void;
 }
 
 export interface ImportResult {
@@ -492,7 +494,15 @@ export class ProfileStore {
 	}
 
 	private enqueue<T>(task: () => T | Promise<T>): Promise<T> {
-		const run = this.queue.then(task, task);
+		const { handOver, configHome, agentHome } = this.options;
+		const write = async () => {
+			try {
+				return await task();
+			} finally {
+				handOver?.([configHome, agentHome]);
+			}
+		};
+		const run = this.queue.then(write, write);
 		this.queue = run.catch(() => {});
 		return run;
 	}

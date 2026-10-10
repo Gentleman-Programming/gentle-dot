@@ -10,6 +10,21 @@ services:
       GENTLE_DOT_ALLOWED_ORIGINS: '["https://${DOT_DOMAIN}"]'
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Encrypts connector secrets at rest; only the daemon sees it (docs/deploy-vps.md, step 3).
+      GENTLE_DOT_SECRETS_KEY: ${GENTLE_DOT_SECRETS_KEY:-}
+    # The daemon runs as root in the container only to start the engine (dot) and connector servers
+    # (dotmcp) as their own users; it keeps nothing else (docs/deploy-vps.md, "What runs as whom").
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID # start the engine and connector servers as their users
+      - SETGID # with their own group and no supplementary groups
+      - CHOWN # hand the files the daemon writes for the engine to the engine's user
+      - FOWNER # keep the engine's folders private (chmod on folders the engine owns)
+      - DAC_OVERRIDE # read and write the engine's folders (sessions, uploads, settings)
+      - KILL # stop the engine and connector servers, which run as other users
     volumes:
       - dot-home:/home/dot
     ports:

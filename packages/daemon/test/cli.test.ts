@@ -38,6 +38,37 @@ describe("gentle-dot command", () => {
 		expect(statSync(dataDir).mode & 0o777).toBe(0o700);
 	});
 
+	it.skipIf((process.getuid?.() ?? 0) === 0)(
+		"refuses server mode it cannot keep: GENTLE_DOT_VPS as a user that is not root (S25.8)",
+		async () => {
+			const dataDir = join(tempDir(), "data");
+			const child = spawn(process.execPath, [CLI], {
+				env: {
+					...process.env,
+					GENTLE_DOT_VPS: "1",
+					GENTLE_DOT_DATA_DIR: dataDir,
+					GENTLE_DOT_PORT: "0",
+					GENTLE_DOT_AGENT_BIN: process.execPath,
+					GENTLE_DOT_AGENT_ARGS: JSON.stringify([FAKE_AGENT]),
+				},
+				stdio: ["ignore", "pipe", "pipe"],
+			});
+			let output = "";
+			for (const stream of [child.stdout, child.stderr])
+				stream.on("data", (chunk: Buffer) => {
+					output += chunk.toString();
+				});
+			const code = await Promise.race([
+				new Promise((resolve) => child.on("close", resolve)),
+				new Promise((resolve) => setTimeout(() => resolve("still running"), 10_000)),
+			]);
+			if (code === "still running") child.kill("SIGTERM");
+			expect(code).toBe(1);
+			expect(output).toMatch(/failed to start: Server mode .* root/);
+			expect(output).not.toContain("Gentle Dot is running");
+		},
+	);
+
 	it("a daemon launched with the app's channel exits when the app goes (S35.2, #22)", async () => {
 		const dataDir = join(tempDir(), "data");
 		const { app, daemon } = await socketPair();

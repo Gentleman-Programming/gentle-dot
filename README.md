@@ -97,7 +97,7 @@ Attach files with the paperclip, drag and drop, or paste. Images go straight to 
 | **Self-contained installers** | A macOS DMG and Linux `.deb` and Arch packages carry their own Node, engine, and Engram |
 | **Stable signing** | A self-signed identity keeps macOS permissions across updates |
 | **Isolated engine** | The assistant runs its own engine and home folder; it never touches your own agent setup |
-| **Web and server** | The same interface in the browser, and a Docker setup for your own VPS behind HTTPS |
+| **Web and server** | The same interface in the browser, and a Docker setup for your own VPS behind HTTPS, where the assistant runs as its own user, connector secrets are encrypted, and connector changes need your PIN |
 | **White label** | Built on [Gentle Shell](https://github.com/Gentleman-Programming/gentle-pi), presented as Gentle Dot |
 
 <div align="right"><a href="#top">Back to top</a></div>

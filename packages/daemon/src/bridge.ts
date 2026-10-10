@@ -9,17 +9,19 @@ import {
 	type ConnectorInfo,
 	type Features,
 	isAppCommand,
+	isPinCommand,
 	isThinkingLevel,
 	type MessageQueue,
 	type ModelGroup,
 	type ModelRef,
+	PIN_REQUIRED,
 	parseClientMessage,
 	parseQueue,
 	type RoleRoute,
 	type ServerPayload,
 	type VoiceCapability,
 } from "@gentle-dot/protocol";
-import type { AppApproval, AppLink } from "./app-channel.ts";
+import { APPROVAL_WAIT_MS, type AppApproval, type AppLink } from "./app-channel.ts";
 import type { AuthManager } from "./auth.ts";
 import type { ConnectorManager, ConnectorRefusal } from "./connectors.ts";
 import {
@@ -44,6 +46,7 @@ import { DEFAULT_ROTATION, type RotationLimits, SessionRotator } from "./rotatio
 import type { AgentRecord, AgentSupervisor, SupervisorEvent } from "./supervisor.ts";
 import { composePrompt, type StoredFile, splitAttachments, type UploadStore } from "./uploads.ts";
 import type { VoiceService } from "./voice.ts";
+import type { PinGate } from "./web-pin.ts";
 import { isBlockedInput, presentText, shouldShowToast } from "./white-label.ts";
 
 export interface BridgeClient {
@@ -65,6 +68,15 @@ export interface BridgeOptions {
 	 * connector changes and the only place approvals are answered. Without it they fail closed.
 	 */
 	app?: AppLink;
+	/**
+	 * A server without the desktop app (S25.8): the web page makes connector changes and allows
+	 * sending actions with this PIN instead. Never set together with `app`.
+	 */
+	pin?: PinGate;
+	/** How long a PIN approval waits for an answer. Default 130 s, like the app's. */
+	approvalWaitMs?: number;
+	/** Server mode (S25.8): gives a handoff session to the engine's user. */
+	handOver?: (paths: string[]) => void;
 	/** How long switching conversations waits for a running answer to stop. Default 10 s. */
 	stopTimeoutMs?: number;
 	/** Optional parts of the app; by default one continuous chat. */
@@ -117,6 +129,10 @@ export class DotBridge {
 	/** Each window's id, for the app's commands on its behalf. */
 	private readonly clientIds = new Map<string, BridgeClient>();
 	private readonly asks = new Map<string, PendingAsk>();
+	/** The answer each open PIN approval waits for, by request id (S25.8). */
+	private readonly pinWaiters = new Map<string, (allowed: boolean) => void>();
+	/** Connector changes a window confirmed with the PIN: their own confirmation is not asked again. */
+	private readonly pinConfirmed = new WeakSet<ClientMessage>();
 	/** Told to every window that connects during this run (a connectors file set aside at start). */
 	private readonly notices: ServerPayload[] = [];
 	private readonly runningTools = new Set<string>();
@@ -155,6 +171,7 @@ export class DotBridge {
 			limits: options.rotation ?? DEFAULT_ROTATION,
 			canRotate: () =>
 				supervisor.state === "ready" && !supervisor.busy && this.asks.size === 0 && this.sending === 0,
+			...(options.handOver ? { handOver: options.handOver } : {}),
 			log: (line) => this.log(line),
 		});
 		supervisor.onEvent((event) => this.onAgentEvent(event));
@@ -179,6 +196,7 @@ export class DotBridge {
 	 */
 	askInApp(request: AppApproval, signal?: AbortSignal): Promise<boolean> {
 		const app = this.options.app;
+		if (!app?.connected && this.options.pin) return this.askWithPin(request, signal);
 		if (!app?.connected) return Promise.reject(new Error(APP_REQUIRED));
 		const requestId = `app-${randomUUID()}`;
 		const ask: Ask = {
@@ -193,6 +211,83 @@ export class DotBridge {
 		return app.approve(request, signal).finally(() => this.resolveAsk(requestId));
 	}
 
+	/**
+	 * On a server (S25.8): every window shows the approval with its full preview, and it is allowed
+	 * only with the PIN (`pin_approve`). Declining, no answer in time, `signal`, or the run ending
+	 * resolve false.
+	 */
+	private askWithPin(request: AppApproval, signal?: AbortSignal): Promise<boolean> {
+		if (signal?.aborted) return Promise.resolve(false);
+		const requestId = `pin-${randomUUID()}`;
+		const preview = request.preview.map(
+			({ name, value }) => `${name}: ${typeof value === "string" ? value : JSON.stringify(value)}`,
+		);
+		const ask: Ask = {
+			requestId,
+			method: "pin",
+			title: presentText(request.title ?? `Allow ${request.connector} to ${request.action}?`),
+			message: presentText(
+				[
+					request.summary ?? `The assistant wants to ${request.action} in ${request.connector}.`,
+					...preview,
+				].join("\n\n"),
+			),
+		};
+		return new Promise<boolean>((resolve) => {
+			const timer = setTimeout(
+				() => this.resolveAsk(requestId),
+				this.options.approvalWaitMs ?? APPROVAL_WAIT_MS,
+			);
+			this.pinWaiters.set(requestId, resolve);
+			signal?.addEventListener("abort", () => this.resolveAsk(requestId), { once: true });
+			this.asks.set(requestId, { ask, timer });
+			this.broadcast({ type: "ask", ask });
+			this.refreshState();
+		});
+	}
+
+	/** A window's PIN message on a server (S25.8); without server mode they open nothing. */
+	private async pinMessage(
+		client: BridgeClient,
+		message: Extract<ClientMessage, { type: "pin_set" | "pin_command" | "pin_approve" }>,
+	): Promise<void> {
+		const pin = this.options.pin;
+		if (!pin || this.options.app?.connected) {
+			this.deliver(client, { type: "error", code: "app_required", message: APP_REQUIRED });
+			return;
+		}
+		if (message.type === "pin_set") {
+			const outcome = await pin.set(message.pin);
+			if (outcome.ok) this.broadcast({ type: "pin_status", pin: pin.status() });
+			else this.deliver(client, { type: "error", code: outcome.code, message: outcome.message });
+			return;
+		}
+		if (message.type === "pin_approve" && this.asks.get(message.requestId)?.ask.method !== "pin") {
+			this.deliver(client, {
+				type: "error",
+				code: "ask_not_found",
+				message: "That question is no longer open.",
+			});
+			return;
+		}
+		const outcome = await pin.verify(message.pin);
+		if (!outcome.ok) {
+			this.deliver(client, { type: "error", code: outcome.code, message: outcome.message });
+			if (outcome.code === "pin_locked") this.broadcast({ type: "pin_status", pin: pin.status() });
+			return;
+		}
+		if (message.type === "pin_approve") {
+			const waiter = this.pinWaiters.get(message.requestId);
+			this.pinWaiters.delete(message.requestId);
+			waiter?.(true);
+			this.resolveAsk(message.requestId);
+			return;
+		}
+		if (!isPinCommand(message.command)) return;
+		this.pinConfirmed.add(message.command);
+		await this.run(client, message.command);
+	}
+
 	attach(client: BridgeClient): () => void {
 		this.clients.add(client);
 		const clientId = randomBytes(18).toString("base64url");
@@ -205,6 +300,7 @@ export class DotBridge {
 			...(this.supervisor.model ? { model: this.supervisor.model } : {}),
 			features: this.features,
 			...(this.options.voice ? { voice: this.options.voice.capability() } : {}),
+			...(this.options.pin && !this.options.app?.connected ? { pin: this.options.pin.status() } : {}),
 		});
 		if (this.queued()) this.deliver(client, { type: "queue", ...this.queue });
 		for (const { ask } of this.asks.values()) this.deliver(client, { type: "ask", ask });
@@ -222,8 +318,15 @@ export class DotBridge {
 
 	/** A window's message. Connector changes come only from the desktop app (S25.2). */
 	async handle(client: BridgeClient, message: ClientMessage): Promise<void> {
+		if (message.type === "pin_set" || message.type === "pin_command" || message.type === "pin_approve") {
+			await this.pinMessage(client, message);
+			return;
+		}
 		if (isAppCommand(message)) {
-			this.deliver(client, { type: "error", code: "app_required", message: APP_REQUIRED });
+			// On a server the PIN stands in for the app (S25.8); the computer helper is the desktop's only.
+			if (this.options.pin && !this.options.app?.connected && isPinCommand(message))
+				this.deliver(client, { type: "error", code: "pin_required", message: PIN_REQUIRED });
+			else this.deliver(client, { type: "error", code: "app_required", message: APP_REQUIRED });
 			return;
 		}
 		await this.run(client, message);
@@ -336,6 +439,12 @@ export class DotBridge {
 				const { requestId } = message;
 				if (pending.ask.method === "app") {
 					this.deliver(client, { type: "error", code: "app_required", message: WAITING_IN_APP });
+					return;
+				}
+				// Allowing needs the PIN (`pin_approve`); declining narrows nothing, so any window may.
+				if (pending.ask.method === "pin") {
+					if (message.confirmed === false || message.cancelled) this.resolveAsk(requestId);
+					else this.deliver(client, { type: "error", code: "pin_required", message: PIN_REQUIRED });
 					return;
 				}
 				const answer: Record<string, unknown> = {};
@@ -462,7 +571,7 @@ export class DotBridge {
 				const emit = (payload: ServerPayload) => this.deliver(client, payload);
 				const { draftId, approve } = message;
 				const draft = this.options.connectors?.drafts().find((d) => d.draftId === draftId);
-				if (approve && draft && !(await this.confirmChange(client, draftApproval(draft)))) return;
+				if (approve && draft && !(await this.confirmChange(client, draftApproval(draft), message))) return;
 				const refused = this.requireConnectors().decideDraft(client, draftId, approve, emit);
 				if (refused) this.deliver(client, { type: "error", ...refused });
 				else this.broadcast({ type: "connector_draft_resolved", draftId, approved: approve });
@@ -481,7 +590,10 @@ export class DotBridge {
 				const connectors = this.requireConnectors();
 				// The confirmed plan is what gets imported, whatever a later scan finds.
 				const plan = connectors.importPlan(message.ids);
-				if (plan.choices.length > 0 && !(await this.confirmChange(client, importApproval(plan.choices))))
+				if (
+					plan.choices.length > 0 &&
+					!(await this.confirmChange(client, importApproval(plan.choices), message))
+				)
 					return;
 				this.deliver(client, {
 					type: "connector_imported",
@@ -658,7 +770,7 @@ export class DotBridge {
 		const connectors = this.requireConnectors();
 		const emit = (payload: ServerPayload) => this.deliver(client, payload);
 		const widening = wideningApproval(connectors.list(), message);
-		if (widening && !(await this.confirmChange(client, widening))) return;
+		if (widening && !(await this.confirmChange(client, widening, message))) return;
 		let refused: ConnectorRefusal | undefined;
 		switch (message.type) {
 			case "connector_connect":
@@ -687,7 +799,13 @@ export class DotBridge {
 	 * A change that widens what the assistant can reach, confirmed in the app's native dialog even
 	 * though the app sent it (S25.3). False, with a note for the window, when it was not allowed.
 	 */
-	private async confirmChange(client: BridgeClient, request: AppApproval): Promise<boolean> {
+	private async confirmChange(
+		client: BridgeClient,
+		request: AppApproval,
+		message: ClientMessage,
+	): Promise<boolean> {
+		// The PIN the user typed for this very change confirms it (S25.8).
+		if (this.pinConfirmed.has(message)) return true;
 		const allowed = await this.askInApp(request).catch(() => undefined);
 		if (allowed === undefined) {
 			this.deliver(client, { type: "error", code: "app_required", message: APP_REQUIRED });
@@ -1211,6 +1329,9 @@ export class DotBridge {
 		if (!entry) return;
 		clearTimeout(entry.timer);
 		this.asks.delete(requestId);
+		// A PIN approval still waiting is refused: declined, timed out, or the run ended.
+		this.pinWaiters.get(requestId)?.(false);
+		this.pinWaiters.delete(requestId);
 		this.broadcast({ type: "ask_resolved", requestId });
 		this.refreshState();
 	}

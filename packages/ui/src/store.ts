@@ -15,6 +15,7 @@ import type {
 	ModelGroup,
 	ModelOption,
 	ModelRef,
+	PinStatus,
 	Profile,
 	ProfilePick,
 	ProfileRole,
@@ -81,7 +82,7 @@ export interface ModelsState {
 /** Errors about the picker's choice show in the picker, not as a notice. */
 const MODEL_ERRORS = new Set(["model_unavailable", "thinking_unavailable", "model_switch_failed"]);
 /** A connector change that did not happen: the app declined it, or there is no app to make it. */
-const CONNECTOR_REFUSALS = new Set(["declined", "app_required"]);
+const CONNECTOR_REFUSALS = new Set(["declined", "app_required", "pin_required", "pin_wrong", "pin_locked"]);
 
 /** The daemon's answer to a voice request, matched by `requestId`. */
 export type VoiceReply = Extract<
@@ -136,6 +137,8 @@ export interface DotState {
 	voice: VoiceCapability;
 	/** The latest answers to voice requests, newest last. */
 	voiceReplies: VoiceReply[];
+	/** On a server without the desktop app (S25.8): connector changes and approvals need the web PIN. */
+	pin?: PinStatus;
 }
 
 export type DotAction =
@@ -223,9 +226,11 @@ export function reduce(state: DotState, action: DotAction): DotState {
 
 function reduceServer(state: DotState, message: ServerMessage): DotState {
 	switch (message.type) {
-		case "ready":
+		case "ready": {
+			const { pin: _pin, ...rest } = state;
 			return {
-				...state,
+				...rest,
+				...(message.pin ? { pin: message.pin } : {}),
 				agentState: message.agentState,
 				...(message.clientId ? { clientId: message.clientId } : {}),
 				// The daemon sends the queue right after ready when one exists.
@@ -237,6 +242,9 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 				// The daemon sends the drafts still waiting right after ready.
 				connectors: { ...state.connectors, drafts: [] },
 			};
+		}
+		case "pin_status":
+			return { ...state, pin: message.pin };
 		case "agent_state":
 			return { ...state, agentState: message.state };
 		case "user_message":

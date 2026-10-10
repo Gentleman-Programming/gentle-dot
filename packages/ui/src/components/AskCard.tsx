@@ -1,8 +1,10 @@
-import type { Ask } from "@gentle-dot/protocol";
+import type { Ask, PinStatus } from "@gentle-dot/protocol";
 import { useEffect, useRef, useState } from "react";
+import { PinForm } from "./PinForm.tsx";
 import type { Send } from "./types.ts";
 
-export function AskCard({ ask, send }: { ask: Ask; send: Send }) {
+/** `pin`: the web PIN on a server (S25.8), for approvals allowed with it. */
+export function AskCard({ ask, send, pin }: { ask: Ask; send: Send; pin?: PinStatus }) {
 	const [value, setValue] = useState(ask.prefill ?? "");
 	const card = useRef<HTMLElement>(null);
 	// A question that arrives below a long conversation must be seen.
@@ -19,6 +21,34 @@ export function AskCard({ ask, send }: { ask: Ask; send: Send }) {
 				<p className="eyebrow">Needs your answer</p>
 				<p className="ask-title">{ask.title}</p>
 				{ask.message ? <p className="connector-note">{ask.message}</p> : null}
+			</section>
+		);
+	}
+
+	// On a server, an approval is allowed with the web PIN (S25.8); declining needs none.
+	if (ask.method === "pin") {
+		return (
+			<section ref={card} className="ask-card" aria-label="The assistant needs your answer">
+				<p className="eyebrow">Needs your answer</p>
+				<p className="ask-title">{ask.title}</p>
+				{ask.message ? (
+					// biome-ignore lint/a11y/noNoninteractiveTabindex: a scrollable region must be reachable by keyboard.
+					<section className="ask-message" aria-label="Details" tabIndex={0}>
+						{ask.message}
+					</section>
+				) : null}
+				<PinForm
+					pin={pin ?? { set: true }}
+					action="Allow"
+					onPin={(value, created) => {
+						if (created) send({ type: "pin_set", pin: value });
+						send({ type: "pin_approve", requestId: ask.requestId, pin: value });
+					}}
+				>
+					<button type="button" onClick={() => answer({ confirmed: false })}>
+						Deny
+					</button>
+				</PinForm>
 			</section>
 		);
 	}

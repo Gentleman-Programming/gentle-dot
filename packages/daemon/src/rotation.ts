@@ -125,6 +125,8 @@ export interface RotatorOptions {
 	canRotate: () => boolean;
 	/** The engine's working folder, for a previous session without one. */
 	cwd?: string;
+	/** Server mode (S25.8): gives the handoff session to the engine's user, which opens and extends it. */
+	handOver?: (paths: string[]) => void;
 	log?: (line: string) => void;
 }
 
@@ -173,6 +175,7 @@ export class SessionRotator {
 		let seed: string;
 		try {
 			seed = await writeHandoffSession(file, handoffText(file), this.options.cwd);
+			this.options.handOver?.([seed]);
 		} catch (error) {
 			this.log(`rotation skipped, the chat stays in ${file}: ${(error as Error).message}`);
 			return false;

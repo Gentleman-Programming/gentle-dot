@@ -45,6 +45,8 @@ export interface UploadStoreOptions {
 	/** How long an upload that was never sent is kept. Default one hour. */
 	ttlMs?: number;
 	now?: () => number;
+	/** Server mode (S25.8): gives the stored files to the engine's user, which reads them. */
+	handOver?: (paths: string[]) => void;
 }
 
 const UNSENT_TTL_MS = 60 * 60 * 1000;
@@ -122,10 +124,12 @@ export class UploadStore {
 	private readonly limits: AttachmentLimits;
 	private readonly ttlMs: number;
 	private readonly now: () => number;
+	private readonly handOver: ((paths: string[]) => void) | undefined;
 	private readonly batches = new Map<string, Batch>();
 
 	constructor(options: UploadStoreOptions) {
 		this.root = join(options.workspace, "uploads");
+		this.handOver = options.handOver;
 		this.limits = options.limits ?? ATTACHMENT_LIMITS;
 		this.ttlMs = options.ttlMs ?? UNSENT_TTL_MS;
 		this.now = options.now ?? Date.now;
@@ -186,6 +190,7 @@ export class UploadStore {
 		}
 		const file: StoredFile = { name, size: written.size, mime: sniffMime(written.head), path };
 		batch.files.set(name, file);
+		this.handOver?.([this.root]);
 		return {
 			ok: true,
 			file: { uploadId, name, size: file.size, mime: file.mime, path: `uploads/${uploadId}/${name}` },

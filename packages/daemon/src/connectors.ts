@@ -1138,7 +1138,7 @@ export class ConnectorStore {
 	private secrets(): SecretSource {
 		if (this.unchecked) throw new SecretsUnavailableError(INTEGRITY_UNCHECKED);
 		const source = this.options.secrets;
-		if (!source?.available) throw new SecretsUnavailableError();
+		if (!source?.available) throw new SecretsUnavailableError(source?.unavailable);
 		return source;
 	}
 
@@ -1225,7 +1225,7 @@ export class ConnectorStore {
 		const name = specOf(id, saved)?.name ?? id;
 		const locked =
 			waiting || !this.options.secrets?.available
-				? NO_APP
+				? (this.options.secrets?.unavailable ?? NO_APP)
 				: `A secret ${name} needs is missing from the app's secure store. Ask the user to set up ${name} again in Connectors.`;
 		return { open, locked };
 	}

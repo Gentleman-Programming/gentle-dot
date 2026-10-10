@@ -34,10 +34,13 @@ import {
 import { MCP_PREFIX, McpProxy, type ProxiedConnector, type UpstreamCredentials } from "./mcp-proxy.ts";
 import { defaultImportPath, ProfileStore } from "./profiles.ts";
 import { type RotationLimits, rotationLimits } from "./rotation.ts";
+import { FileSecretSource, SECRETS_FILE, SECRETS_KEY_VAR } from "./secret-file.ts";
 import { AppSecretSource } from "./secret-source.ts";
 import { AgentSupervisor } from "./supervisor.ts";
 import { UploadStore } from "./uploads.ts";
 import { VoiceService } from "./voice.ts";
+import { CONNECTOR_HOME, chownHandOver, prepareVpsLayout, type VpsOptions } from "./vps.ts";
+import { PIN_FILE, PinGate } from "./web-pin.ts";
 import { identityArgs } from "./white-label.ts";
 
 export interface DaemonOptions {
@@ -76,6 +79,11 @@ export interface DaemonOptions {
 	appChannel?: Duplex;
 	/** How long an approval waits for the app's answer; default 130 s (the app declines at 120 s). */
 	approvalWaitMs?: number;
+	/**
+	 * Server mode (S25.8, `GENTLE_DOT_VPS`): the engine runs as another user, connector secrets are
+	 * encrypted in a daemon file, and without the app the web page uses a PIN for privileged actions.
+	 */
+	vps?: VpsOptions;
 	/** Origins allowed to open the WebSocket, besides the daemon's own and the desktop app's. */
 	allowedOrigins?: string[];
 	backoffMs?: number[];
@@ -156,6 +164,10 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 			]
 		: [];
 	let agentEnv = { ...(options.agentEnv ?? process.env) };
+	// The server's secrets key is the daemon's only, whatever the engine is (S25.8).
+	delete agentEnv[SECRETS_KEY_VAR];
+	const vps = options.vps;
+	const handOver = vps ? (vps.handOver ?? chownHandOver(vps.engine, log)) : undefined;
 	const homeArgs: string[] = [];
 	const memory = options.agentHome ? await privateMemory(agentEnv, options.dataDir, log) : undefined;
 	if (options.agentHome) {
@@ -181,7 +193,15 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		// The assistant's own engine: its subagents load the guard from its extensions folder (S25.4).
 		...(options.agentHome ? { childGuard: true } : {}),
 		env: agentEnv,
-		secrets: new AppSecretSource(app),
+		// On a server without the app, an encrypted file with a key from the daemon's environment (S25.8).
+		secrets:
+			vps && !app
+				? new FileSecretSource({
+						file: join(options.dataDir, SECRETS_FILE),
+						key: vps.secretsKey,
+						...(vps.secretsKeyProblem ? { problem: vps.secretsKeyProblem } : {}),
+					})
+				: new AppSecretSource(app),
 		log,
 	});
 	// The engine reaches every connector through the proxy (S25.4); its key changes with every launch.
@@ -199,6 +219,9 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		...(options.connectorTransport ? { transport: options.connectorTransport } : {}),
 		env: agentEnv,
 		cwd: options.workspace,
+		...(vps?.connector
+			? { stdio: { user: vps.connector, home: join(options.dataDir, CONNECTOR_HOME) } }
+			: {}),
 		log,
 	});
 	connectorStore.onUpdated = () => proxy.sync();
@@ -216,6 +239,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		cwd: options.workspace,
 		dataDir: options.dataDir,
 		env: agentEnv,
+		...(vps ? { user: vps.engine } : {}),
 		// mcp.json is read when a session starts: put back anything not approved, and hand the guard
 		// its policy from the daemon's memory, never from the files.
 		// The proxy's key changes with every launch (after the check, so a change is still reported).
@@ -228,6 +252,13 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 				log("subagents are off for this engine start: their approval guard is not in place");
 				env.GENTLE_PI_AGENTS = "0";
 			}
+			// What the daemon wrote for this launch (mcp.json, sign-ins, settings) becomes the engine's.
+			handOver?.([
+				agentHome,
+				join(options.dataDir, "gentle-ai"),
+				join(options.dataDir, "home"),
+				join(options.dataDir, "sessions"),
+			]);
 			return env;
 		},
 		// The first start in a new home installs the engine's companion packages.
@@ -243,6 +274,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		configHome: join(options.dataDir, "gentle-ai"),
 		agentHome,
 		importPath: options.profilesImportPath ?? defaultImportPath(process.env),
+		...(handOver ? { handOver } : {}),
 	});
 	const connectors = new ConnectorManager({
 		store: connectorStore,
@@ -259,6 +291,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	});
 	const uploads = new UploadStore({
 		workspace: options.workspace,
+		...(handOver ? { handOver } : {}),
 		...(options.uploadLimits ? { limits: options.uploadLimits } : {}),
 	});
 	const historyPage = options.historyPage ?? Number(process.env.GENTLE_DOT_HISTORY_PAGE);
@@ -271,6 +304,9 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		voice,
 		uploads,
 		...(app ? { app } : {}),
+		...(vps && !app ? { pin: new PinGate({ file: join(options.dataDir, PIN_FILE) }) } : {}),
+		...(options.approvalWaitMs ? { approvalWaitMs: options.approvalWaitMs } : {}),
+		...(handOver ? { handOver } : {}),
 		features: { conversations: options.conversations ?? process.env.GENTLE_DOT_CONVERSATIONS === "1" },
 		rotation: options.rotation ?? rotationLimits(process.env),
 		...(Number.isInteger(historyPage) && historyPage > 0 ? { historyPage } : {}),
@@ -294,7 +330,11 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 			// Secrets read from the app are forgotten; connectors that need one fail closed until it is back.
 			connectorStore.lock();
 		});
-	} else
+	} else if (vps)
+		log(
+			`server mode: the engine runs as uid ${vps.engine.uid}; connector changes and approvals need the web PIN${vps.secretsKey ? "" : `; ${vps.secretsKeyProblem ?? "connector secrets are off"}`}`,
+		);
+	else
 		log(
 			"no desktop app channel: connector changes and approvals are refused, and connectors that need a secret fail closed; to use them, stop this assistant and open the Gentle Dot app, which starts its own",
 		);
@@ -364,10 +404,12 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		void close().catch(() => {});
 	});
 
+	// Server mode: the daemon's files stay its own, the engine's folders become the engine's (S25.8).
+	if (vps && handOver) prepareVpsLayout(options.dataDir, handOver, vps.connector);
 	// Listening first keeps the app's health check answered while its store is asked for the key.
 	await integrity;
-	// Secrets that files still hold move into the app's store, once.
-	if (app?.connected)
+	// Secrets that files still hold move into the app's store, once; on a server, into its encrypted file.
+	if (app?.connected || (vps && !app && vps.secretsKey))
 		void connectorStore
 			.migrate()
 			.catch((error: Error) => log(`connector secrets were not moved: ${error.message}`));
