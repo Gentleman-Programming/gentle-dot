@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 import { extname, join, resolve, sep } from "node:path";
 import type { Duplex } from "node:stream";
+import { fileURLToPath } from "node:url";
 import type { McpTransport } from "@earendil-works/pi-mcp";
 import {
 	type AttachmentLimits,
@@ -33,6 +34,9 @@ import { AgentSupervisor } from "./supervisor.ts";
 import { UploadStore } from "./uploads.ts";
 import { VoiceService } from "./voice.ts";
 import { identityArgs } from "./white-label.ts";
+
+/** The Command Code provider extension the daemon loads into the engine (S34). */
+const COMMAND_CODE_EXTENSION = fileURLToPath(new URL("./extensions/command-code.ts", import.meta.url));
 
 export interface DaemonOptions {
 	port: number;
@@ -186,8 +190,10 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		log,
 	});
 	connectorStore.onUpdated = () => proxy.sync();
-	// The assistant's own engine loads the approval guard for connector actions.
+	// The assistant's own engine loads the approval guard for connector actions, and the
+	// Command Code provider extension so the picker offers it (S34).
 	const guardArgs = options.agentHome ? ["-e", APPROVAL_GUARD] : [];
+	const providerArgs = options.agentHome ? ["-e", COMMAND_CODE_EXTENSION] : [];
 	const supervisor = new AgentSupervisor({
 		command: options.agentCommand,
 		args: [...(options.agentArgs ?? []), ...homeArgs],
@@ -195,6 +201,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 			...identityArgs(options.dataDir),
 			...folderArgs,
 			...guardArgs,
+			...providerArgs,
 			...(options.agentExtraArgs ?? []),
 		],
 		cwd: options.workspace,

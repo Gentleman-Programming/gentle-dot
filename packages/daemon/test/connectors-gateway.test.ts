@@ -224,6 +224,7 @@ describe("connectors over the protocol", () => {
 		const { agentArgs, agentEnv } = await setup({ home: true });
 		const args = agentArgs();
 		expect(args[args.indexOf("-e") + 1]).toBe(GUARD);
+		expect(args.some((arg) => arg.endsWith(join("extensions", "command-code.ts")))).toBe(true);
 		expect(JSON.parse(agentEnv().GENTLE_DOT_CONNECTOR_POLICY ?? "{}")).toMatchObject({
 			connectors: {},
 			protectedPaths: expect.arrayContaining([GUARD]),
