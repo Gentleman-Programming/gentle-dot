@@ -10,6 +10,7 @@ import {
 	type NativeVoiceStatus,
 	nativeVoiceStatus,
 	onNativeVoice,
+	onVoiceModel,
 	startNativeVoice,
 	startRefusal,
 	stopNativeVoice,
@@ -368,6 +369,22 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 			void off.then((stopListening) => stopListening());
 		};
 	}, [desktop, finish]);
+
+	// Installing or removing the local model changes what the recognizer can do (#25).
+	useEffect(() => {
+		if (!desktop) return;
+		let live = true;
+		const off = onVoiceModel((event) => {
+			if (event.state !== "installed" && event.state !== "removed") return;
+			void nativeVoiceStatus().then((status) => {
+				if (live) setNative(status);
+			});
+		}).catch(() => () => {});
+		return () => {
+			live = false;
+			void off.then((stopListening) => stopListening());
+		};
+	}, [desktop]);
 
 	// Answers to voice requests.
 	useEffect(() => {

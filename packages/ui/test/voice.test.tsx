@@ -99,7 +99,9 @@ function Harness({ initial }: { initial: DotState }) {
 		<ChatSurface
 			variant="panel"
 			state={state}
-			send={(m) => sent.push(m)}
+			send={(m) => {
+				sent.push(m);
+			}}
 			dismiss={() => {}}
 			dispatch={dispatch}
 		/>
@@ -292,6 +294,30 @@ describe("talking on the desktop", () => {
 			expect(sentOf("send")).toEqual([{ type: "send", text: "hola mundo", requestId: expect.any(String) }]),
 		);
 		expect(invoked("voice_stop")).toHaveLength(1);
+	});
+
+	it("useVoice re-checks voice status when the local model is installed or removed", async () => {
+		const noModel = { available: false, reason: "Download the local voice model in Connectors." };
+		let status: unknown = noModel;
+		h.tauri = true;
+		h.invoke = vi.fn(async (command: string) => (command === "voice_status" ? status : undefined));
+		render(<Harness initial={withVoice(false)} />);
+		await waitFor(() => expect(invoked("voice_status")).toHaveLength(1));
+		await waitFor(() => expect(h.listeners.has("voice://model")).toBe(true));
+		expect(talk()).toBeDisabled();
+
+		// Progress alone does not change what the engine can do.
+		emit("voice://model", { state: "downloading", received: 1, total: 2 });
+		expect(invoked("voice_status")).toHaveLength(1);
+
+		status = { available: true };
+		emit("voice://model", { state: "installed" });
+		await waitFor(() => expect(talk()).toBeEnabled());
+
+		status = noModel;
+		emit("voice://model", { state: "removed" });
+		await waitFor(() => expect(talk()).toBeDisabled());
+		expect(invoked("voice_status")).toHaveLength(3);
 	});
 
 	it("listens in the language chosen in Settings instead of the system's", async () => {
