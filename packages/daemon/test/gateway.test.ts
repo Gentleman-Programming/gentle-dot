@@ -536,6 +536,8 @@ describe("own instance", () => {
 			ENGRAM_URL: "http://127.0.0.1:7437",
 			// The approval guard's policy: no connector is on yet.
 			GENTLE_DOT_CONNECTOR_POLICY: expect.stringContaining('"connectors":{}'),
+			// Subagents on, behind the proxy and with the guard (S25.4).
+			GENTLE_PI_AGENTS: "1",
 		});
 		expect(statSync(home).mode & 0o777).toBe(0o700);
 		expect(existsSync(join(dataDir, "workspace"))).toBe(true);

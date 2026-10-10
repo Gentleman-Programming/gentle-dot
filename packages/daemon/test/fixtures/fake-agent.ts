@@ -100,6 +100,7 @@ if (process.env.FAKE_AGENT_ENV_FILE) {
 					"ENGRAM_URL",
 					"ENGRAM_DATA_DIR",
 					"GENTLE_DOT_CONNECTOR_POLICY",
+					"GENTLE_PI_AGENTS",
 				].map((key) => [key, process.env[key]]),
 			),
 		),

@@ -178,6 +178,8 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		agentHome,
 		workspace: options.workspace,
 		guardPath: APPROVAL_GUARD,
+		// The assistant's own engine: its subagents load the guard from its extensions folder (S25.4).
+		...(options.agentHome ? { childGuard: true } : {}),
 		env: agentEnv,
 		secrets: new AppSecretSource(app),
 		log,
@@ -217,10 +219,16 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		// mcp.json is read when a session starts: put back anything not approved, and hand the guard
 		// its policy from the daemon's memory, never from the files.
 		// The proxy's key changes with every launch (after the check, so a change is still reported).
+		// Subagents start only with the guard in place for them; otherwise this launch has none.
 		prepareSpawn: () => {
 			connectors.enforce();
 			connectorStore.setProxy({ url: `http://127.0.0.1:${port}/mcp`, key: proxy.rotateKey() });
-			return policyEnv(connectorStore);
+			const env = policyEnv(connectorStore);
+			if (options.agentHome && agentEnv.GENTLE_PI_AGENTS !== "0" && !connectorStore.childGuardReady()) {
+				log("subagents are off for this engine start: their approval guard is not in place");
+				env.GENTLE_PI_AGENTS = "0";
+			}
+			return env;
 		},
 		// The first start in a new home installs the engine's companion packages.
 		...(options.agentHome ? { startTimeoutMs: 180_000 } : {}),

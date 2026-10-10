@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { McpOAuthState } from "@earendil-works/pi-mcp/oauth";
 import type {
@@ -27,6 +27,7 @@ import type {
 	ServerPayload,
 } from "@gentle-dot/protocol";
 import { MAX_CONNECTOR_DRAFTS } from "@gentle-dot/protocol";
+import { childGuardFile, childGuardText } from "./child-guard.ts";
 import { resolveRecord, resolveValue, storedSignIn } from "./connector-credentials.ts";
 import { type ScannedServer, scanClientConfigs, valueNotes } from "./connector-import.ts";
 import {
@@ -625,6 +626,11 @@ export interface ConnectorStoreOptions {
 	workspace?: string;
 	/** The approval guard's own file, protected like the connector files. */
 	guardPath?: string;
+	/**
+	 * Keeps the file that loads the guard (`guardPath`) into the engine's subagents in the engine's
+	 * extensions folder, written and put back like `mcp.json` and protected like the guard (S25.4).
+	 */
+	childGuard?: boolean;
 	log?: (line: string) => void;
 }
 
@@ -691,12 +697,20 @@ export class ConnectorStore {
 	/** Sign-in files that appeared after the move and were reported. */
 	private readonly reported = new Set<string>();
 	private watchers: FSWatcher[] = [];
+	/** Set once a child guard that cannot be written was reported, so the checks every second stay quiet. */
+	private childGuardReported = false;
 	private readonly options: ConnectorStoreOptions;
+	/** The file that loads the guard into the engine's subagents, when the store keeps one. */
+	readonly childGuard: { file: string; text: string } | undefined;
 
 	constructor(options: ConnectorStoreOptions) {
 		this.options = options;
 		this.file = join(options.dataDir, "connectors.json");
 		this.mcpFile = join(options.agentHome, "mcp.json");
+		this.childGuard =
+			options.childGuard && options.guardPath
+				? { file: childGuardFile(options.agentHome), text: childGuardText(options.guardPath) }
+				: undefined;
 		this.signinHome = join(options.dataDir, "connector-signin");
 		this.signinMcpFile = join(this.signinHome, "mcp.json");
 		this.authFile = join(this.signinHome, "mcp-auth.json");
@@ -1027,6 +1041,7 @@ export class ConnectorStore {
 			writePrivate(file, text);
 			changed.push(file);
 		}
+		if (this.enforceChildGuard()) changed.push(this.childGuard?.file ?? "");
 		if (this.removeProjectConfig()) changed.push("the workspace's .pi/mcp.json");
 		this.reportPlanted();
 		if (changed.length === 0 || !report) return changed.length > 0;
@@ -1103,6 +1118,7 @@ export class ConnectorStore {
 				this.file,
 				join(this.options.dataDir, "token"),
 				...(this.options.guardPath ? [this.options.guardPath] : []),
+				...(this.childGuard ? [this.childGuard.file] : []),
 			],
 			...(this.computer ? { builtin: [COMPUTER_ID] } : {}),
 		};
@@ -1419,6 +1435,48 @@ export class ConnectorStore {
 			});
 			this.projectWatcher = watcher;
 		} catch {}
+	}
+
+	/** True when the engine's subagents will load the guard: its file is in place, in a real folder. */
+	childGuardReady(): boolean {
+		if (!this.childGuard) return false;
+		const { file, text } = this.childGuard;
+		return (
+			isFolder(dirname(file)) && lstatOrUndefined(file)?.isFile() === true && readOrUndefined(file) === text
+		);
+	}
+
+	/**
+	 * Writes the child guard's file when it differs or is missing; true when it did. An extensions
+	 * folder that is a link loses the link, never what it points to. When the folder or the file's
+	 * place holds something else, or it cannot be written, that is reported once and left alone, and
+	 * the engine starts with subagents off ({@link childGuardReady}); the other connector files are
+	 * still checked.
+	 */
+	private enforceChildGuard(): boolean {
+		if (!this.childGuard || this.childGuardReady()) return false;
+		const { file, text } = this.childGuard;
+		const folder = dirname(file);
+		const cannot = (why?: unknown) => {
+			if (!this.childGuardReported)
+				this.options.log?.(
+					`the subagents' approval guard cannot be written to ${file}${why instanceof Error ? `: ${why.message}` : ""}`,
+				);
+			this.childGuardReported = true;
+			return false;
+		};
+		try {
+			if (lstatOrUndefined(folder)?.isSymbolicLink()) unlinkSync(folder);
+			const inFolder = lstatOrUndefined(folder);
+			const inPlace = inFolder && lstatOrUndefined(file);
+			if ((inFolder && !inFolder.isDirectory()) || inPlace?.isDirectory()) return cannot();
+			mkdirSync(folder, { recursive: true, mode: 0o700 });
+			writePrivate(file, text);
+		} catch (error) {
+			return cannot(error);
+		}
+		this.childGuardReported = false;
+		return true;
 	}
 
 	/** Removes `<workspace>/.pi/mcp.json`; a `.pi` that is a link loses the link, never what it points to. */

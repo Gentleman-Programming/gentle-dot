@@ -64,6 +64,24 @@ export function claimEngineHome(agentHome: string, log: (line: string) => void =
 /** Variables that could point the engine back at the user's own setup. */
 const INHERITED_HOMES = ["PI_CODING_AGENT_DIR", "GENTLE_PI_AGENT_HOME", "GENTLE_SHELL_CONFIG"];
 
+/**
+ * What a subagent run sets for its child engines (gentle-pi `lib/agents-runner.ts`), and the command
+ * line those children would run instead of the engine. The assistant's engine is never a child, and
+ * its children run the same engine as it does.
+ */
+const SUBAGENT_VARIABLES = [
+	"GENTLE_PI_AGENTS_CHILD",
+	"GENTLE_PI_AGENTS_OWNED_IPC",
+	"GENTLE_PI_AGENTS_PARENT_PERMISSION_FD",
+	"GENTLE_PI_AGENTS_PI",
+];
+
+/** Subagents are on unless `GENTLE_DOT_SUBAGENTS` is `off`, `0`, or `false`. */
+export function subagentsEnabled(base: NodeJS.ProcessEnv): boolean {
+	const value = base.GENTLE_DOT_SUBAGENTS?.trim().toLowerCase();
+	return !(value === "off" || value === "0" || value === "false");
+}
+
 /** The memory project every memory the assistant saves or searches belongs to. */
 export const MEMORY_PROJECT = "gentle-dot";
 
@@ -94,7 +112,8 @@ export function ensureMemoryProject(workspace: string): void {
  * user's server. The user's own `ENGRAM_PORT` and `ENGRAM_URL` are kept.
  * `GENTLE_DOT_ENGRAM=private` instead runs a memory of its own under the
  * engine's home, on port 7438 (`GENTLE_DOT_ENGRAM_PORT` overrides it).
- * Subagents are off (`GENTLE_PI_AGENTS=0`) until S25.
+ * Subagents are on (`GENTLE_PI_AGENTS=1`) unless `GENTLE_DOT_SUBAGENTS=off`: their child engines
+ * reach connectors only through the daemon's proxy, like the engine itself (S25.4).
  *
  * Without a `TMPDIR` (the installed app's launch on Linux), the engine gets a
  * private one under its home: it caches compiled extensions in the temporary
@@ -115,7 +134,7 @@ export function isolatedAgentEnv(base: NodeJS.ProcessEnv, dataDir: string): Node
 		XDG_CACHE_HOME: join(home, ".cache"),
 		XDG_STATE_HOME: join(home, ".local", "state"),
 	};
-	for (const key of INHERITED_HOMES) delete env[key];
+	for (const key of [...INHERITED_HOMES, ...SUBAGENT_VARIABLES]) delete env[key];
 	if (!base.TMPDIR) {
 		env.TMPDIR = join(home, ".cache", "tmp");
 		ensurePrivateDir(env.TMPDIR);
@@ -125,9 +144,8 @@ export function isolatedAgentEnv(base: NodeJS.ProcessEnv, dataDir: string): Node
 		const rest = (base.PATH ?? "").split(delimiter).filter((part) => part && part !== bin);
 		env.PATH = [bin, ...rest].join(delimiter);
 	}
-	// Subagent child engines do not load the approval guard, so subagents stay off until the
-	// daemon enforces connectors itself (S25).
-	env.GENTLE_PI_AGENTS = "0";
+	// The user's own Gentle Shell setting is not the assistant's.
+	env.GENTLE_PI_AGENTS = subagentsEnabled(base) ? "1" : "0";
 	if (base.GENTLE_DOT_ENGRAM === "private") {
 		env.ENGRAM_PORT = base.GENTLE_DOT_ENGRAM_PORT || PRIVATE_ENGRAM_PORT;
 		delete env.ENGRAM_URL;
