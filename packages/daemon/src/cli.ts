@@ -65,6 +65,8 @@ async function main(): Promise<void> {
 	};
 	process.on("SIGINT", () => shutdown("SIGINT"));
 	process.on("SIGTERM", () => shutdown("SIGTERM"));
+	// A daemon the app launched stops itself when the app's channel closes (S35.2); so does the process.
+	void daemon.closed.then(() => process.exit(0));
 }
 
 if (process.argv.includes("--self-check")) selfCheck();

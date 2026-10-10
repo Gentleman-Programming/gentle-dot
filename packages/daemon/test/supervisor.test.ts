@@ -132,6 +132,17 @@ describe("AgentSupervisor", () => {
 		expect(events.some((e) => e.type === "interrupted")).toBe(false);
 	});
 
+	it("a stop during a restart starts nothing again (S35.2: the app quitting does both)", async () => {
+		const { supervisor } = track(fakeSupervisor());
+		await supervisor.start();
+		const restarting = supervisor.restart();
+		await supervisor.stop();
+		await restarting;
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		expect(supervisor.state).toBe("stopped");
+		expect(supervisor.pid).toBeUndefined();
+	});
+
 	it("stops cleanly and reports the stopped state", async () => {
 		const { supervisor } = track(fakeSupervisor());
 		await supervisor.start();

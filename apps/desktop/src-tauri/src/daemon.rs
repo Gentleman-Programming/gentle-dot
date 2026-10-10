@@ -1,5 +1,12 @@
-//! Attaches to a running daemon or spawns one, and stops what it spawned. A daemon it spawns gets
-//! its end of the app's private channel on fd 3 (S25.1, `app_channel`); one it attached to gets none.
+//! Spawns the daemon, and stops what it spawned. A daemon it spawns gets its end of the app's
+//! private channel on fd 3 (S25.1, `app_channel`) and stops by itself when that channel closes, so it
+//! lives as long as this app, crashes included (S35.2).
+//!
+//! An app with a channel never attaches to a daemon it did not launch: that daemon has no channel,
+//! so connectors would stay locked with no way out. When a healthy daemon holds the port at start,
+//! the app stops it only if it can prove it launched it (`<data>/daemon.pid`, written at every spawn,
+//! names the pid and the process start time); otherwise it refuses with
+//! [`foreign_daemon_message`], which names the exit. An app without a channel attaches as before.
 
 pub use crate::app_channel::APP_FD;
 use crate::app_channel::{AppChannel, Handler};
@@ -20,6 +27,139 @@ pub const DEV_ALLOWED_ORIGINS: &str = r#"["http://127.0.0.1:5173","http://localh
 
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(300);
 const STOP_GRACE: Duration = Duration::from_secs(5);
+/// The daemon stops its engine and memory first; a recorded orphan gets longer than a child.
+const ORPHAN_GRACE: Duration = Duration::from_secs(10);
+/// How long the port may take to be free after a recorded orphan stopped.
+const PORT_RELEASE: Duration = Duration::from_secs(5);
+/// `<data>/daemon.pid`: `<pid> <start time>` of the daemon this app launched last.
+pub const PID_FILE: &str = "daemon.pid";
+
+/// Why the app neither starts nor uses the assistant: one it did not launch holds the port.
+pub fn foreign_daemon_message(port: u16) -> String {
+    format!(
+        "Another Gentle Dot assistant is already running on port {port}, and this app did not start it \
+(for example `pnpm dev`, or one left running by an older version of the app). Gentle Dot only uses an \
+assistant it started itself, so connectors stay safe. Stop the other one (press Ctrl+C where `pnpm dev` \
+runs, or quit the process listening on port {port}), then choose \"Restart assistant\" in the Gentle Dot menu."
+    )
+}
+
+/// A daemon this app launched, as the pid file records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Launched {
+    pub pid: u32,
+    /// When the process started, in the platform's own units; tells it from a later process with the same pid.
+    pub started: u64,
+}
+
+/// When `pid` started, while it is a live process (not a zombie); `None` once it is gone.
+#[cfg(target_os = "macos")]
+pub fn process_started(pid: u32) -> Option<u64> {
+    let pid = libc::c_int::try_from(pid).ok()?;
+    // SAFETY: an all-zero proc_bsdinfo is valid, and proc_pidinfo writes at most its size.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    // SAFETY: the buffer is a proc_bsdinfo of `size` bytes, as PROC_PIDTBSDINFO expects.
+    let written = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&mut info as *mut libc::proc_bsdinfo).cast(), size) };
+    if written != size || info.pbi_status == libc::SZOMB {
+        return None;
+    }
+    Some(info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
+}
+
+/// When `pid` started (clock ticks after boot, `/proc/<pid>/stat`), while it is live; `None` once gone.
+#[cfg(target_os = "linux")]
+pub fn process_started(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The name may hold spaces and parentheses; the fields after it do not.
+    let fields: Vec<&str> = stat.get(stat.rfind(')')? + 1..)?.split_whitespace().collect();
+    if fields.first() == Some(&"Z") {
+        return None;
+    }
+    fields.get(19)?.parse().ok()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn process_started(_pid: u32) -> Option<u64> {
+    None
+}
+
+/// Records the daemon just spawned as `pid` (private, 0600).
+pub fn record_launch(data_dir: &Path, pid: u32) -> io::Result<()> {
+    let started = process_started(pid).ok_or_else(|| io::Error::other("the assistant is not running"))?;
+    let mut file = OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(data_dir.join(PID_FILE))?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    use std::io::Write;
+    writeln!(file, "{pid} {started}")
+}
+
+/// The daemon the pid file names, if it holds a launch.
+pub fn recorded_launch(data_dir: &Path) -> Option<Launched> {
+    let text = fs::read_to_string(data_dir.join(PID_FILE)).ok()?;
+    let mut parts = text.split_whitespace();
+    let launched = Launched { pid: parts.next()?.parse().ok()?, started: parts.next()?.parse().ok()? };
+    (parts.next().is_none() && launched.pid > 1).then_some(launched)
+}
+
+/// The recorded daemon, while that same process still runs (a reused pid has another start time).
+pub fn live_orphan(data_dir: &Path) -> Option<Launched> {
+    recorded_launch(data_dir).filter(|launch| process_started(launch.pid) == Some(launch.started))
+}
+
+/// Removes the pid file when it names `pid`.
+fn forget_launch(data_dir: &Path, pid: u32) {
+    if recorded_launch(data_dir).is_some_and(|launch| launch.pid == pid) {
+        let _ = fs::remove_file(data_dir.join(PID_FILE));
+    }
+}
+
+/// SIGTERM to a recorded daemon that is not this app's child, then SIGKILL after `grace`.
+/// Only the process the record names: a pid now used by another process is left alone.
+fn stop_orphan(launch: Launched, grace: Duration) {
+    let Ok(pid) = libc::pid_t::try_from(launch.pid) else {
+        return;
+    };
+    let same = || process_started(launch.pid) == Some(launch.started);
+    for (signal, wait) in [(libc::SIGTERM, grace), (libc::SIGKILL, Duration::from_secs(2))] {
+        if !same() {
+            return;
+        }
+        // SAFETY: plain kill(2) on the process the record names, checked just above.
+        unsafe { libc::kill(pid, signal) };
+        let deadline = Instant::now() + wait;
+        while same() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+/// What [`Daemon::ensure_running`] does, from what it finds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartPlan {
+    /// Use the daemon that answers (an app without a channel loses nothing by attaching).
+    Attach,
+    /// Start a daemon, or wait for the one this app already started.
+    Spawn,
+    /// Stop the daemon an earlier app launched (the pid file proves it), then start one.
+    ReplaceOrphan,
+    /// A daemon this app cannot account for holds the port: neither attach nor stop it.
+    Refuse,
+}
+
+pub fn start_plan(healthy: bool, owns_child: bool, wants_channel: bool, orphan: bool) -> StartPlan {
+    if !wants_channel {
+        return if healthy { StartPlan::Attach } else { StartPlan::Spawn };
+    }
+    if owns_child {
+        StartPlan::Spawn
+    } else if orphan {
+        StartPlan::ReplaceOrphan
+    } else if healthy {
+        StartPlan::Refuse
+    } else {
+        StartPlan::Spawn
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchSpec {
@@ -204,13 +344,29 @@ pub struct Daemon {
     channel: Mutex<Option<Arc<AppChannel>>>,
     /// Serves the daemon's requests; without it no channel is made.
     handler: Option<Arc<dyn Handler>>,
+    /// Why the last start neither started nor attached ([`foreign_daemon_message`]).
+    refused: Mutex<Option<String>>,
     /// Replaces [`launch_spec`] (tests).
     launch: Option<LaunchSpec>,
+    /// Replaces the `/health` probe (tests).
+    #[cfg(test)]
+    health: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl Daemon {
     pub fn new(port: u16, data_dir: PathBuf, runtime_dir: Option<PathBuf>) -> Self {
-        Self { port, data_dir, runtime_dir, child: Mutex::new(None), channel: Mutex::new(None), handler: None, launch: None }
+        Self {
+            port,
+            data_dir,
+            runtime_dir,
+            child: Mutex::new(None),
+            channel: Mutex::new(None),
+            handler: None,
+            refused: Mutex::new(None),
+            launch: None,
+            #[cfg(test)]
+            health: None,
+        }
     }
 
     /// Every daemon this app spawns gets a channel served by `handler`.
@@ -225,6 +381,12 @@ impl Daemon {
         self
     }
 
+    #[cfg(test)]
+    fn with_health(mut self, health: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
+        self.health = Some(health);
+        self
+    }
+
     /// The channel to the daemon, only while one this app spawned runs and the channel is open.
     pub fn channel(&self) -> Option<Arc<AppChannel>> {
         if !self.owns_running() {
@@ -234,7 +396,34 @@ impl Daemon {
     }
 
     pub fn is_healthy(&self) -> bool {
+        #[cfg(test)]
+        if let Some(health) = &self.health {
+            return health();
+        }
         check_health(self.port, HEALTH_TIMEOUT)
+    }
+
+    /// Why the last start refused the daemon on the port, if it did.
+    pub fn refusal(&self) -> Option<String> {
+        self.refused.lock().unwrap().clone()
+    }
+
+    /// Waits until the daemon the app may use answers: one it launched when it wants a channel, any
+    /// otherwise. Fails at once with the refusal when the port is held by a daemon it did not launch.
+    pub fn wait_ready(&self, timeout: Duration) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(reason) = self.refusal() {
+                return Err(reason);
+            }
+            if (self.handler.is_none() || self.owns_running()) && self.is_healthy() {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("the assistant did not answer on port {} (see daemon.log)", self.port));
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
     }
 
     /// Polls `/health` until it answers or `timeout` elapses.
@@ -251,17 +440,40 @@ impl Daemon {
         }
     }
 
-    /// Attaches to a healthy daemon, or spawns one. Blocking: call off the main thread.
+    /// Spawns the daemon, or waits for the one this app spawned; see [`start_plan`] for a daemon
+    /// already on the port. Blocking: call off the main thread.
     pub fn ensure_running(&self, timeout: Duration) -> Result<(), String> {
-        if self.is_healthy() {
-            return Ok(());
+        let wants_channel = self.handler.is_some();
+        let owns_child = self.owns_running();
+        let orphan = if wants_channel && !owns_child { live_orphan(&self.data_dir) } else { None };
+        *self.refused.lock().unwrap() = None;
+        match start_plan(self.is_healthy(), owns_child, wants_channel, orphan.is_some()) {
+            StartPlan::Attach => return Ok(()),
+            StartPlan::Refuse => {
+                let reason = foreign_daemon_message(self.port);
+                *self.refused.lock().unwrap() = Some(reason.clone());
+                return Err(reason);
+            }
+            StartPlan::ReplaceOrphan => {
+                if let Some(orphan) = orphan {
+                    eprintln!("gentle-dot: stopping the assistant an earlier Gentle Dot left running (pid {})", orphan.pid);
+                    stop_orphan(orphan, ORPHAN_GRACE);
+                    forget_launch(&self.data_dir, orphan.pid);
+                }
+                let deadline = Instant::now() + PORT_RELEASE;
+                while self.is_healthy() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(100));
+                }
+                if self.is_healthy() {
+                    let reason = foreign_daemon_message(self.port);
+                    *self.refused.lock().unwrap() = Some(reason.clone());
+                    return Err(reason);
+                }
+            }
+            StartPlan::Spawn => {}
         }
         self.spawn()?;
-        if self.wait_healthy(timeout) {
-            Ok(())
-        } else {
-            Err(format!("the assistant did not answer on port {} (see daemon.log)", self.port))
-        }
+        self.wait_ready(timeout)
     }
 
     fn spawn(&self) -> Result<(), String> {
@@ -284,6 +496,10 @@ impl Daemon {
             daemon_end.as_fd()
         });
         let child = spawn_daemon(&spec, log, channel_end).map_err(|e| format!("cannot start {}: {e}", spec.program))?;
+        // A relaunched app can then tell this daemon from one it did not launch (S35.2).
+        if let Err(error) = record_launch(&self.data_dir, child.id()) {
+            eprintln!("gentle-dot: cannot record the assistant's pid: {error}");
+        }
         *slot = Some(child);
         // The daemon's end now lives only in the daemon.
         if let (Some((app_end, _)), Some(handler)) = (pair, &self.handler) {
@@ -309,6 +525,7 @@ impl Daemon {
         let child = self.child.lock().unwrap().take();
         if let Some(mut child) = child {
             stop_child(child.as_mut(), STOP_GRACE);
+            forget_launch(&self.data_dir, child.id());
         }
         if let Some(channel) = self.channel.lock().unwrap().take() {
             channel.close();
@@ -317,12 +534,13 @@ impl Daemon {
 
     /// Blocking: call off the main thread.
     pub fn restart(&self, timeout: Duration) -> RestartOutcome {
-        if !self.owns_running() && self.is_healthy() {
+        if self.handler.is_none() && !self.owns_running() && self.is_healthy() {
             return RestartOutcome::External;
         }
         self.stop();
         match self.ensure_running(timeout) {
             Ok(()) => RestartOutcome::Restarted,
+            Err(_) if self.refusal().is_some() => RestartOutcome::External,
             Err(message) => RestartOutcome::Failed(message),
         }
     }
@@ -557,8 +775,9 @@ done"#;
         assert!(!channel.is_open());
     }
 
-    #[test]
-    fn a_daemon_the_app_only_attached_to_gets_no_channel() {
+    /// A stand-in for a daemon this app did not launch (`pnpm dev`, or one an older app left): it
+    /// answers `/health` on a port of its own.
+    fn foreign_daemon() -> u16 {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         thread::spawn(move || {
@@ -568,13 +787,116 @@ done"#;
                 let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
             }
         });
+        port
+    }
+
+    #[test]
+    fn the_start_plan_attaches_only_where_no_channel_is_lost() {
+        use StartPlan::*;
+        // (healthy, owns its child, wants a channel, a live orphan it launched) -> plan
+        let cases = [
+            ((false, false, true, false), Spawn),
+            ((true, true, true, false), Spawn),
+            ((true, false, true, false), Refuse),
+            ((true, false, true, true), ReplaceOrphan),
+            ((false, false, true, true), ReplaceOrphan),
+            ((true, true, true, true), Spawn),
+            ((true, false, false, false), Attach),
+            ((true, false, false, true), Attach),
+            ((false, false, false, false), Spawn),
+        ];
+        for ((healthy, owns, wants, orphan), plan) in cases {
+            assert_eq!(start_plan(healthy, owns, wants, orphan), plan, "{healthy} {owns} {wants} {orphan}");
+        }
+    }
+
+    #[test]
+    fn an_app_that_wants_a_channel_never_attaches_to_a_daemon_it_did_not_launch() {
+        let port = foreign_daemon();
         let handler = Arc::new(Opened::default());
-        let daemon = Daemon::new(port, scratch_dir("channel-attached"), None)
-            .with_channel(handler.clone())
-            .with_launch(sh_spec(ECHO));
-        daemon.ensure_running(Duration::from_secs(5)).unwrap();
+        let dir = scratch_dir("channel-foreign");
+        let daemon = Daemon::new(port, dir.clone(), None).with_channel(handler.clone()).with_launch(sh_spec(ECHO));
+        let refused = daemon.ensure_running(Duration::from_secs(5)).unwrap_err();
+        assert_eq!(refused, foreign_daemon_message(port));
+        // The message names the way out.
+        assert!(refused.contains("pnpm dev") && refused.contains("Restart assistant"), "{refused}");
+        assert!(!daemon.owns_running());
         assert!(daemon.channel().is_none());
         assert_eq!(*handler.0.lock().unwrap(), 0);
+        // The panel gets the same reason instead of a connection to the other daemon.
+        assert_eq!(daemon.wait_ready(Duration::from_millis(300)), Err(foreign_daemon_message(port)));
+        assert_eq!(daemon.restart(Duration::from_secs(2)), RestartOutcome::External);
+        assert!(!dir.join(PID_FILE).exists());
+    }
+
+    #[test]
+    fn an_app_without_a_channel_still_attaches_to_a_running_daemon() {
+        let port = foreign_daemon();
+        let daemon = Daemon::new(port, scratch_dir("attach-no-channel"), None).with_launch(sh_spec(ECHO));
+        daemon.ensure_running(Duration::from_secs(5)).unwrap();
+        assert!(!daemon.owns_running());
+        assert_eq!(daemon.wait_ready(Duration::from_millis(300)), Ok(()));
+    }
+
+    #[test]
+    fn the_pid_file_names_only_the_process_it_recorded() {
+        let dir = scratch_dir("pid-file");
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(recorded_launch(&dir), None);
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        record_launch(&dir, child.id()).unwrap();
+        assert_eq!(mode_of(&dir.join(PID_FILE)), 0o600);
+        let recorded = recorded_launch(&dir).expect("a recorded launch");
+        assert_eq!(recorded.pid, child.id());
+        assert_eq!(live_orphan(&dir), Some(recorded));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(live_orphan(&dir), None);
+        // Another live process under that number (here this test's own) is never taken for it.
+        let me = std::process::id();
+        fs::write(dir.join(PID_FILE), format!("{me} {}\n", process_started(me).unwrap() + 1)).unwrap();
+        assert_eq!(live_orphan(&dir), None);
+        fs::write(dir.join(PID_FILE), "not a launch\n").unwrap();
+        assert_eq!(recorded_launch(&dir), None);
+    }
+
+    #[test]
+    fn a_relaunched_app_after_a_crashed_one_gets_a_channel() {
+        let dir = scratch_dir("relaunch");
+        // The port answers while the daemon named in the pid file runs.
+        let health = {
+            let dir = dir.clone();
+            Arc::new(move || recorded_launch(&dir).is_some_and(|launch| process_started(launch.pid) == Some(launch.started)))
+        };
+        // An earlier app launched a daemon that outlived it without its channel (an older daemon).
+        let orphan_script = "exec 3<&-; exec /bin/sleep 30";
+        let crashed = Daemon::new(1, dir.clone(), None)
+            .with_channel(Arc::new(Opened::default()))
+            .with_launch(sh_spec(orphan_script))
+            .with_health(health.clone());
+        crashed.spawn().unwrap();
+        let orphan = recorded_launch(&dir).expect("the launch is recorded");
+        // The app is gone; the orphan is reparented and reaped by init (here, by this thread).
+        let mut child = crashed.child.lock().unwrap().take().unwrap();
+        drop(crashed);
+        let reaper = thread::spawn(move || child.wait());
+
+        let handler = Arc::new(Opened::default());
+        let relaunched = Daemon::new(1, dir.clone(), None)
+            .with_channel(handler.clone())
+            .with_launch(sh_spec(ECHO))
+            .with_health(health);
+        relaunched.ensure_running(Duration::from_secs(10)).unwrap();
+        assert!(reaper.join().unwrap().is_ok());
+        assert_eq!(process_started(orphan.pid), None);
+        let channel = relaunched.channel().expect("a channel to the new daemon");
+        assert_eq!(*handler.0.lock().unwrap(), 1);
+        let answer = channel.request("ping", serde_json::json!({}), Duration::from_secs(5)).unwrap();
+        assert_eq!(answer, serde_json::json!({"echo": 1}));
+        let recorded = recorded_launch(&dir).expect("the new launch is recorded");
+        assert_ne!(recorded.pid, orphan.pid);
+        relaunched.stop();
+        assert!(!dir.join(PID_FILE).exists());
     }
 
     #[test]

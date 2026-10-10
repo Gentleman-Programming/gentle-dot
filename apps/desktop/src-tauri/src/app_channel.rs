@@ -36,8 +36,12 @@ pub const APP_FD: i32 = 3;
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(150);
 /// Registering the computer helper waits for the daemon to start reading the channel.
 pub const REGISTER_TIMEOUT: Duration = Duration::from_secs(60);
-/// A frame longer than this closes the channel.
+/// A frame longer than this closes the channel. The daemon has the same rule, and a closed channel
+/// stops the daemon (S35.2), so neither side ever sends a longer one: an oversized request fails
+/// here without being written, and an oversized answer goes out as an error instead.
 const MAX_FRAME: u64 = 1024 * 1024;
+/// Why a frame was not sent.
+const TOO_LARGE: &str = "too large to send to the assistant";
 
 /// What the panel may ask the daemon through the app (S25.2): connector changes, approving a draft
 /// (declining one any window may), and importing. The computer helper is registered by the app.
@@ -179,6 +183,9 @@ impl AppChannel {
         self.pending().insert(id, reply);
         if let Err(error) = self.write(&Frame::Request { id, method: method.into(), params }) {
             self.pending().remove(&id);
+            if error.kind() == io::ErrorKind::InvalidInput {
+                return Err(format!("This request is {TOO_LARGE}."));
+            }
             return Err(format!("The assistant could not be reached: {error}"));
         }
         let result = answer.recv_timeout(timeout);
@@ -209,8 +216,12 @@ impl AppChannel {
         self.pending.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Writes one frame; one longer than [`MAX_FRAME`] is refused (`InvalidInput`) and nothing is written.
     fn write(&self, frame: &Frame) -> io::Result<()> {
         let mut line = serde_json::to_vec(frame).map_err(io::Error::other)?;
+        if line.len() as u64 > MAX_FRAME {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, TOO_LARGE));
+        }
         line.push(b'\n');
         self.writer.lock().unwrap_or_else(PoisonError::into_inner).write_all(&line)
     }
@@ -270,7 +281,10 @@ impl AppChannel {
             }
             other => Frame::Response { id, result: None, error: Some(format!("Unknown request: {other}")) },
         };
-        let _ = self.write(&frame);
+        if self.write(&frame).is_err_and(|error| error.kind() == io::ErrorKind::InvalidInput) {
+            let refused = Frame::Response { id, result: None, error: Some(format!("The answer is {TOO_LARGE}.")) };
+            let _ = self.write(&refused);
+        }
     }
 }
 
@@ -540,6 +554,40 @@ mod tests {
         }
         assert!(!channel.is_open());
         assert!(channel.command("w", json!({"type": "connector_disconnect", "connectorId": "notion"})).is_err());
+    }
+
+    #[test]
+    fn a_frame_the_daemon_would_refuse_is_never_sent_and_the_channel_stays_open() {
+        // The daemon closes the channel on a frame over 1 MiB, and then stops (S35.2).
+        let (channel, mut daemon) = pair(Arc::new(Recorder::default()));
+        let huge = json!({"type": "connector_setup", "connectorId": "slack", "pad": "x".repeat(1024 * 1024)});
+        let refused = channel.command("w", huge).unwrap_err();
+        assert!(refused.contains("too large"), "{refused}");
+        assert!(channel.is_open());
+        let waiting = std::thread::spawn({
+            let channel = channel.clone();
+            move || channel.request("computer_unregister", json!({}), Duration::from_secs(5))
+        });
+        // The first frame the daemon reads is the small request, not a piece of the large one.
+        let Frame::Request { id, method, .. } = daemon.next() else { panic!("expected a request") };
+        assert_eq!(method, "computer_unregister");
+        daemon.send(&Frame::Response { id, result: Some(json!({})), error: None });
+        assert_eq!(waiting.join().unwrap(), Ok(json!({})));
+    }
+
+    #[test]
+    fn an_answer_too_large_for_the_daemon_becomes_an_error() {
+        let handler = Arc::new(WithStore::default());
+        let id = "connector/big/value/token";
+        handler.store.put(id, &Secret::new("x".repeat(1024 * 1024).as_str())).unwrap();
+        let (channel, mut daemon) = pair(handler);
+        let Frame::Response { id: answered, result, error } = ask(&mut daemon, 7, "secret_get", json!({"id": id})) else {
+            panic!("expected a response")
+        };
+        assert_eq!(answered, 7);
+        assert_eq!(result, None);
+        assert!(error.as_deref().is_some_and(|e| e.contains("too large")), "{error:?}");
+        assert!(channel.is_open());
     }
 
     #[test]

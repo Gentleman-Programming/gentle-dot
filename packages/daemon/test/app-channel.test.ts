@@ -272,10 +272,11 @@ describe("the desktop app's channel (S25.2, S25.3)", () => {
 		await expect(
 			app.request("computer_register", { url: "http://evil.example/mcp", token: KEY }),
 		).rejects.toThrow();
-		const pid = d.supervisor.pid;
+		// The app quitting also stops the daemon it launched (S35.2).
 		app.close();
-		await waitFor(() => !servers().computer);
-		await waitFor(() => d.supervisor.pid !== pid && d.supervisor.state === "ready");
+		await d.closed;
+		expect(servers().computer).toBeUndefined();
+		expect(d.supervisor.state).toBe("stopped");
 	});
 });
 

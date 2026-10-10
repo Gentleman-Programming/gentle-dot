@@ -168,15 +168,14 @@ async fn connector_command(app: AppHandle, client_id: String, message: serde_jso
     .map_err(err)?
 }
 
-/// Waits until the daemon answers `/health`, then returns its URLs and token.
+/// Waits until the daemon this app launched answers `/health`, then returns its URLs and token.
+/// A daemon it did not launch is never used (S35.2): the answer is then the reason and its exit.
 #[tauri::command]
 async fn connection_info(app: AppHandle) -> CommandResult<ConnectionInfo> {
     let shell = app.state::<Shell>();
     let (config, daemon) = (shell.config.clone(), shell.daemon.clone());
     tauri::async_runtime::spawn_blocking(move || {
-        if !daemon.wait_healthy(DAEMON_START_TIMEOUT) {
-            return Err(format!("the assistant is not answering on port {}", config.port));
-        }
+        daemon.wait_ready(DAEMON_START_TIMEOUT)?;
         read_connection_info(&config)
     })
     .await
@@ -671,14 +670,12 @@ fn toggle_autostart(app: &AppHandle, menu: &Menu<tauri::Wry>) -> CommandResult {
 }
 
 fn restart_daemon(app: AppHandle) {
-    let daemon = app.state::<Shell>().daemon.clone();
+    let (daemon, port) = (app.state::<Shell>().daemon.clone(), app.state::<Shell>().config.port);
     thread::spawn(move || match daemon.restart(DAEMON_START_TIMEOUT) {
         RestartOutcome::Restarted => {}
-        RestartOutcome::External => show_message(
-            &app,
-            MessageDialogKind::Info,
-            "The assistant was started outside Gentle Dot, so it cannot be restarted from here. Restart it where it was started.",
-        ),
+        RestartOutcome::External => {
+            show_message(&app, MessageDialogKind::Warning, &daemon::foreign_daemon_message(port))
+        }
         RestartOutcome::Failed(error) => {
             show_message(&app, MessageDialogKind::Error, &format!("The assistant could not restart: {error}"))
         }
@@ -789,10 +786,14 @@ pub fn run() {
             let daemon = Arc::new(
                 Daemon::new(config.port, config.data_dir.clone(), runtime_dir).with_channel(Arc::new(service)),
             );
-            let starter = daemon.clone();
+            let (starter, notifier) = (daemon.clone(), handle.clone());
             thread::spawn(move || {
                 if let Err(error) = starter.ensure_running(DAEMON_START_TIMEOUT) {
                     eprintln!("gentle-dot: {error}");
+                    // Another daemon holds the port (S35.2): say so, with the way out, instead of using it.
+                    if starter.refusal().is_some() {
+                        show_message(&notifier, MessageDialogKind::Warning, &error);
+                    }
                 }
             });
             let rose_hidden = position::load_rose_hidden(&desktop_file(&config));

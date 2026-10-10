@@ -2,7 +2,8 @@ import { execFile } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
+import { bundledGentleShell } from "./config.ts";
 import { resolveEngramBin, runtimeDir } from "./runtime.ts";
 
 /**
@@ -25,6 +26,39 @@ function bundledBinDir(base: NodeJS.ProcessEnv): string | undefined {
 export function ensurePrivateDir(path: string): void {
 	mkdirSync(path, { recursive: true, mode: 0o700 });
 	chmodSync(path, 0o700);
+}
+
+/** The file gentle-shell writes into a home it created (gentle-pi `bin/gentle-shell.mjs`). */
+export const ENGINE_HOME_MARKER = ".gentle-shell-home";
+
+/** The bundled gentle-pi's version, which gentle-shell names in its marker; informational only. */
+function engineVersion(): string | undefined {
+	try {
+		const manifest = join(dirname(bundledGentleShell()), "..", "package.json");
+		return (JSON.parse(readFileSync(manifest, "utf8")) as { version?: string }).version;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Marks the assistant's own engine home as gentle-shell's (S35.3, #13). gentle-shell runs its
+ * first-run setup (the companion packages) only in a home it created: one that did not exist, or
+ * that holds its marker. The daemon writes `auth.json` and `mcp.json` there before the engine's
+ * first start, so without the marker the engine took the home for someone else's and never set
+ * it up. The marker has gentle-shell's own format (`{"createdBy":"gentle-shell","version":…}`; it
+ * checks only that the file exists). One already there is left as it is. Call it only for the
+ * default `<data>/agent`: a home the user chose may be theirs, and is never marked.
+ */
+export function claimEngineHome(agentHome: string, log: (line: string) => void = () => {}): void {
+	ensurePrivateDir(agentHome);
+	const content = `${JSON.stringify({ createdBy: "gentle-shell", version: engineVersion() })}\n`;
+	try {
+		writeFileSync(join(agentHome, ENGINE_HOME_MARKER), content, { flag: "wx", mode: 0o600 });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST")
+			log(`could not mark the engine's home as its own: ${(error as Error).message}`);
+	}
 }
 
 /** Variables that could point the engine back at the user's own setup. */

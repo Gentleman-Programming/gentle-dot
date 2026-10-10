@@ -7,11 +7,10 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { McpClient, type McpError, StreamableHttpTransport, type Tool } from "@earendil-works/pi-mcp";
-import { APP_REQUIRED, type ServerMessage } from "@gentle-dot/protocol";
+import type { ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
-import { NO_APP } from "../src/secret-source.ts";
 import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { oauthOptions } from "./fake-oauth.ts";
@@ -238,8 +237,8 @@ describe("connectors through the daemon's proxy (regression, S25.4)", () => {
 		expect(stale.status).toBe(401);
 	});
 
-	it("refuses a sending action when the app quits while asking, and when there is no app", async () => {
-		const { d, notion, app, send, raw, messages, engineClient } = await setup();
+	it("refuses a sending action when the app quits while asking, and then stops (S35.2)", async () => {
+		const { d, notion, app, send, messages, engineClient } = await setup();
 		// Connecting restarts the engine, and so does the mode change; each restart rotates the proxy
 		// key, so wait for both before reading the key the engine would use.
 		const beforeConnect = d.supervisor.pid;
@@ -262,13 +261,12 @@ describe("connectors through the daemon's proxy (regression, S25.4)", () => {
 			messages.find((m) => m.type === "ask" && m.ask.title === "Allow Notion to create pages?"),
 		);
 		app.close();
-		expect((await pending)?.message).toMatch(/did not allow/);
+		// Refused by the app being gone, or cancelled by the daemon stopping: either way nothing is sent.
+		expect((await pending)?.message).toMatch(/did not allow|Nothing was sent/);
 
-		// Without the app its sign-in is gone from memory too: it fails closed before anything is asked.
-		expect((await failure(client.callTool("notion-create-pages", { title: "y" })))?.message).toBe(NO_APP);
+		// The daemon the app launched stops with it: nothing reaches the server afterwards either.
+		await d.closed;
+		expect(await failure(client.callTool("notion-create-pages", { title: "y" }))).toBeDefined();
 		expect(notion.calls()).toEqual([]);
-		// And a window cannot turn it back on or change it without the app.
-		raw({ type: "connector_mode", connectorId: "notion", mode: "read_only" });
-		await waitFor(() => messages.find((m) => m.type === "error" && m.message === APP_REQUIRED));
 	});
 });

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
+import { createServer, type Socket, connect as unixConnect } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -36,4 +37,50 @@ describe("gentle-dot command", () => {
 		expect(output).toContain(`the access key is in ${join(dataDir, "token")}`);
 		expect(statSync(dataDir).mode & 0o777).toBe(0o700);
 	});
+
+	it("a daemon launched with the app's channel exits when the app goes (S35.2, #22)", async () => {
+		const dataDir = join(tempDir(), "data");
+		const { app, daemon } = await socketPair();
+		const child = spawn(process.execPath, [CLI], {
+			env: {
+				...process.env,
+				GENTLE_DOT_DATA_DIR: dataDir,
+				GENTLE_DOT_PORT: "0",
+				GENTLE_DOT_AGENT_BIN: process.execPath,
+				GENTLE_DOT_AGENT_ARGS: JSON.stringify([FAKE_AGENT]),
+			},
+			stdio: ["ignore", "pipe", "pipe", daemon],
+		});
+		daemon.destroy();
+		let output = "";
+		const collect = (chunk: Buffer) => {
+			output += chunk.toString();
+		};
+		child.stdout?.on("data", collect);
+		child.stderr?.on("data", collect);
+		const exited = new Promise<number | null>((resolve) => child.on("close", (code) => resolve(code)));
+		try {
+			// The daemon is up once it asks the app for something (the connectors' integrity key).
+			await new Promise((resolve) => app.once("data", resolve));
+			// The app quits, crashes, or is killed: the kernel closes its end of the pair.
+			app.destroy();
+			expect(await exited).toBe(0);
+		} finally {
+			child.kill("SIGKILL");
+		}
+		expect(output).toContain("the desktop app's channel closed; stopping the assistant");
+	});
 });
+
+/** A connected pair of Unix sockets (Node has no socketpair): the app's end and the daemon's. */
+async function socketPair(): Promise<{ app: Socket; daemon: Socket }> {
+	const path = join(tempDir(), "pair.sock");
+	const server = createServer();
+	await new Promise<void>((done) => server.listen(path, done));
+	const accepted = new Promise<Socket>((resolve) => server.once("connection", resolve));
+	const daemon = unixConnect(path);
+	await new Promise((resolve) => daemon.once("connect", resolve));
+	const app = await accepted;
+	server.close();
+	return { app, daemon };
+}

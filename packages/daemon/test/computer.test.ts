@@ -228,7 +228,7 @@ describe("computer control registration (S24.7)", () => {
 	});
 
 	it("stays while windows come and go, and goes away when the app does", async () => {
-		const { servers, send, ws, app, connect: other } = await setup();
+		const { d, servers, send, ws, app, connect: other } = await setup();
 		const second = await other();
 		send({ type: "computer_register", url: HELPER, token: KEY });
 		await waitFor(() => servers().computer);
@@ -236,11 +236,12 @@ describe("computer control registration (S24.7)", () => {
 		ws.close();
 		await settle();
 		expect(servers().computer).toBeDefined();
+		expect(computerOf(await second.list())).toBeDefined();
 
+		// The app quitting also stops the daemon it launched (S35.2); the helper is gone from the files.
 		app.close();
-		await waitFor(() => !servers().computer);
-		await second.find("connectors", (m) => computerOf(m.connectors) === undefined);
-		expect(computerOf(await second.list())).toBeUndefined();
+		await d.closed;
+		expect(servers().computer).toBeUndefined();
 	});
 
 	it("cannot be changed or removed through the connector messages, and a saved connector with its name is renamed", async () => {
