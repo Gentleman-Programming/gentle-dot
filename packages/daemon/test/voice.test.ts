@@ -1,16 +1,18 @@
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { MAX_VOICE_AUDIO, MAX_VOICE_TEXT, type ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { createModelAuthRuntime } from "../src/auth.ts";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
-import { SPEECH_URL, TRANSCRIBE_URL, VoiceService } from "../src/voice.ts";
+import { SPEECH_URL, VoiceService } from "../src/voice.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
-const KEY = "sk-voice-test-key-not-real-1234";
+const KEY = "nv-voice-test-key-not-real-1234";
 const AUDIO = Buffer.from("fake opus bytes").toString("base64");
+const SPEECH_LANGUAGE = "es-US";
+const SPEECH_VOICE = "Magpie-Multilingual.ES-US.Isabela";
 
 type Call = { url: string; init: RequestInit };
 
@@ -25,37 +27,125 @@ function fakeFetch(reply: (call: Call) => Response | Promise<Response>) {
 	return { fetch: fetch as typeof globalThis.fetch, calls };
 }
 
-/** `key: null` means no key is connected. */
-function service(reply: (call: Call) => Response | Promise<Response>, key: string | null = KEY) {
+/** The stub transcriber the tests install: answers each request line on stdin. */
+const STUB_TRANSCRIBER = `
+"use strict";
+console.error("transcriber: ready");
+const { readFileSync } = require("node:fs");
+let buffer = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+	buffer += chunk;
+	let index;
+	while ((index = buffer.indexOf("\\n")) !== -1) {
+		const line = buffer.slice(0, index).trim();
+		buffer = buffer.slice(index + 1);
+		if (!line) continue;
+		let request = {};
+		try { request = JSON.parse(line); } catch {}
+		let content = "";
+		if (request.file) {
+			try { content = readFileSync(request.file, "utf8"); } catch {}
+		}
+		if (!request.file) process.stdout.write(JSON.stringify({ error: "missing file" }) + "\\n");
+		else if (content.includes("empty")) process.stdout.write(JSON.stringify({ text: "  " }) + "\\n");
+		else if (content.includes("boom")) process.stdout.write(JSON.stringify({ error: "stub failed" }) + "\\n");
+		else process.stdout.write(JSON.stringify({ text: "hello from the local transcriber" }) + "\\n");
+	}
+});
+process.stdin.on("end", () => process.exit(0));
+`;
+
+/** Points the service at `path` for the local model. Returns the env restore. */
+function setModelEnv(path: string): () => void {
+	const saved = process.env.GENTLE_DOT_VOICE_MODEL;
+	process.env.GENTLE_DOT_VOICE_MODEL = path;
+	return () => {
+		if (saved === undefined) delete process.env.GENTLE_DOT_VOICE_MODEL;
+		else process.env.GENTLE_DOT_VOICE_MODEL = saved;
+	};
+}
+
+/**
+ * Installs the local transcription assets into `dataDir`: the stub
+ * transcriber under `voice-tools/` and a fake model directory, and points
+ * the service at them via `GENTLE_DOT_VOICE_MODEL`. Returns the restore
+ * function for the environment variable.
+ */
+function localAssets(dataDir: string): () => void {
+	const tools = join(dataDir, "voice-tools");
+	mkdirSync(tools, { recursive: true });
+	writeFileSync(join(tools, "transcriber.js"), STUB_TRANSCRIBER);
+	const model = join(dataDir, "model");
+	mkdirSync(model, { recursive: true });
+	writeFileSync(join(model, "encoder.int8.onnx"), "");
+	writeFileSync(join(model, "tokens.txt"), "");
+	return setModelEnv(model);
+}
+
+/**
+ * `key: null` means no key is connected. `assets: false` installs nothing
+ * and points the model environment at a directory that does not exist, so
+ * capability checks are deterministic even on a machine that has the real
+ * model downloaded.
+ */
+function service(
+	reply: (call: Call) => Response | Promise<Response>,
+	key: string | null = KEY,
+	options: { assets?: boolean } = {},
+) {
 	const logs: string[] = [];
 	const fake = fakeFetch(reply);
-	const voice = new VoiceService({
-		apiKey: async () => key ?? undefined,
-		fetch: fake.fetch,
-		log: (line) => logs.push(line),
-	});
-	return { voice, logs, calls: fake.calls };
+	const dataDir = tempDir();
+	const restore =
+		options.assets === false ? setModelEnv(join(dataDir, "missing-model")) : localAssets(dataDir);
+	try {
+		const voice = new VoiceService({
+			apiKey: async () => key ?? undefined,
+			dataDir,
+			fetch: fake.fetch,
+			log: (line) => logs.push(line),
+		});
+		return { voice, logs, calls: fake.calls, dataDir, restore };
+	} catch (error) {
+		restore();
+		throw error;
+	}
 }
 
 const header = (call: Call | undefined, name: string) => new Headers(call?.init.headers).get(name);
 
+afterEach(() => {
+	// Nothing global: each test restores its own environment.
+});
+
 describe("VoiceService capability", () => {
-	it("is off until an OpenAI API key is found, and on for both directions once it is", async () => {
-		const { voice } = service(() => new Response());
-		expect(voice.capability()).toEqual({ transcribe: false, speak: false });
-		expect(await voice.refresh()).toEqual({ transcribe: true, speak: true });
-		expect(voice.capability()).toEqual({ transcribe: true, speak: true });
+	it("transcribes when the local assets are in place, speaks when a key is connected", async () => {
+		const { voice, restore } = service(() => new Response());
+		try {
+			expect(voice.capability()).toEqual({ transcribe: false, speak: false });
+			expect(await voice.refresh()).toEqual({ transcribe: true, speak: true });
+			expect(voice.capability()).toEqual({ transcribe: true, speak: true });
+		} finally {
+			restore();
+		}
 	});
 
-	it("stays off without a key, and when reading the key fails", async () => {
-		expect(await service(() => new Response(), null).voice.refresh()).toEqual({
-			transcribe: false,
-			speak: false,
-		});
+	it("stays off without local assets or a key, and when reading the key fails", async () => {
+		const missing = service(() => new Response(), null, { assets: false });
+		expect(await missing.voice.refresh()).toEqual({ transcribe: false, speak: false });
+		missing.restore();
+		const noAssets = service(() => new Response(), KEY, { assets: false });
+		try {
+			expect(await noAssets.voice.refresh()).toEqual({ transcribe: false, speak: true });
+		} finally {
+			noAssets.restore();
+		}
 		const failing = new VoiceService({
 			apiKey: async () => {
 				throw new Error("locked");
 			},
+			dataDir: tempDir(),
 			fetch: fakeFetch(() => new Response()).fetch,
 		});
 		expect(await failing.refresh()).toEqual({ transcribe: false, speak: false });
@@ -63,127 +153,115 @@ describe("VoiceService capability", () => {
 });
 
 describe("VoiceService.transcribe", () => {
-	it("posts the recording as multipart to OpenAI with the transcribe model and the key in the header", async () => {
-		const { voice, calls } = service(() => Response.json({ text: "hello from voice" }));
-		expect(await voice.transcribe("audio/webm;codecs=opus", AUDIO)).toEqual({
-			ok: true,
-			text: "hello from voice",
-		});
-		const call = calls[0];
-		expect(call?.url).toBe(TRANSCRIBE_URL);
-		expect(TRANSCRIBE_URL).toBe("https://api.openai.com/v1/audio/transcriptions");
-		expect(call?.init.method).toBe("POST");
-		expect(header(call, "authorization")).toBe(`Bearer ${KEY}`);
-		const body = call?.init.body as FormData;
-		expect(body).toBeInstanceOf(FormData);
-		expect(body.get("model")).toBe("gpt-4o-mini-transcribe");
-		expect(body.get("response_format")).toBe("json");
-		const file = body.get("file") as File;
-		expect(file.name).toBe("recording.webm");
-		expect(file.type).toBe("audio/webm");
-		expect(Buffer.from(await file.arrayBuffer()).toString()).toBe("fake opus bytes");
-	});
-
-	it("names the file after the audio type so OpenAI can read it", async () => {
-		const { voice, calls } = service(() => Response.json({ text: "ok" }));
-		await voice.transcribe("audio/mp4", AUDIO);
-		const body = calls[0]?.init.body as FormData;
-		expect((body.get("file") as File).name).toBe("recording.mp4");
+	it("sends the recording to the local transcriber and returns its transcript", async () => {
+		const { voice, calls, restore } = service(() => new Response());
+		try {
+			expect(await voice.transcribe("audio/webm;codecs=opus", AUDIO)).toEqual({
+				ok: true,
+				text: "hello from the local transcriber",
+			});
+			// Local transcription never touches the network.
+			expect(calls).toHaveLength(0);
+		} finally {
+			restore();
+		}
 	});
 
 	it("says nothing was heard when the transcript is empty", async () => {
-		const { voice } = service(() => Response.json({ text: "  " }));
-		expect(await voice.transcribe("audio/webm", AUDIO)).toEqual({
-			ok: false,
-			reason: "I didn't catch anything. Try again.",
-		});
+		const { voice, restore } = service(() => new Response());
+		try {
+			expect(
+				await voice.transcribe("audio/webm", Buffer.from("empty").toString("base64")),
+			).toEqual({ ok: false, reason: "I didn't catch anything. Try again." });
+		} finally {
+			restore();
+		}
 	});
 
-	it("refuses a recording over the size cap without calling OpenAI", async () => {
-		const { voice, calls } = service(() => Response.json({ text: "never" }));
-		const result = await voice.transcribe("audio/webm", "A".repeat(MAX_VOICE_AUDIO + 4));
-		expect(result).toEqual({ ok: false, reason: "That recording is too long. Keep it under a minute." });
-		expect(calls).toHaveLength(0);
+	it("refuses a recording over the size cap without starting the transcriber", async () => {
+		const { voice, restore } = service(() => new Response());
+		try {
+			const result = await voice.transcribe("audio/webm", "A".repeat(MAX_VOICE_AUDIO + 4));
+			expect(result).toEqual({ ok: false, reason: "That recording is too long. Keep it under a minute." });
+		} finally {
+			restore();
+		}
 	});
 
-	it("explains how to turn voice on when no API key is connected, without calling OpenAI", async () => {
-		const { voice, calls } = service(() => Response.json({ text: "never" }), null);
-		expect(await voice.transcribe("audio/webm", AUDIO)).toEqual({
-			ok: false,
-			reason: "Voice through the assistant needs an OpenAI API key. Connect one in Accounts.",
-		});
-		expect(calls).toHaveLength(0);
+	it("explains what is missing when the model or the transcriber is not installed", async () => {
+		const { voice, restore } = service(() => new Response(), KEY, { assets: false });
+		try {
+			expect(await voice.transcribe("audio/webm", AUDIO)).toEqual({
+				ok: false,
+				reason: "The local voice model is not downloaded yet. Download it from the app settings and try again.",
+			});
+		} finally {
+			restore();
+		}
 	});
 });
 
 describe("VoiceService.speak", () => {
-	it("asks OpenAI for mp3 speech with the speech model and a default voice, and returns it in base64", async () => {
-		const mp3 = Buffer.from("ID3 fake mp3");
-		const { voice, calls } = service(() => new Response(mp3, { headers: { "content-type": "audio/mpeg" } }));
-		expect(await voice.speak("Hi! Here is the answer.")).toEqual({
-			ok: true,
-			mime: "audio/mpeg",
-			data: mp3.toString("base64"),
-		});
-		const call = calls[0];
-		expect(call?.url).toBe(SPEECH_URL);
-		expect(SPEECH_URL).toBe("https://api.openai.com/v1/audio/speech");
-		expect(call?.init.method).toBe("POST");
-		expect(header(call, "authorization")).toBe(`Bearer ${KEY}`);
-		expect(header(call, "content-type")).toBe("application/json");
-		expect(JSON.parse(String(call?.init.body))).toEqual({
-			model: "gpt-4o-mini-tts",
-			voice: "alloy",
-			input: "Hi! Here is the answer.",
-			response_format: "mp3",
-		});
+	it("asks NVIDIA for speech with the language, voice, and the key, and returns WAV base64", async () => {
+		const wav = Buffer.from("RIFF fake wav");
+		const { voice, calls, restore } = service(() => new Response(wav));
+		try {
+			expect(await voice.speak("Hola! Acá está la respuesta.")).toEqual({
+				ok: true,
+				mime: "audio/wav",
+				data: wav.toString("base64"),
+			});
+			const call = calls[0];
+			expect(call?.url).toBe(SPEECH_URL);
+			expect(call?.init.method).toBe("POST");
+			expect(header(call, "authorization")).toBe(`Bearer ${KEY}`);
+			const body = call?.init.body as FormData;
+			expect(body).toBeInstanceOf(FormData);
+			expect(body.get("text")).toBe("Hola! Acá está la respuesta.");
+			expect(body.get("language")).toBe(SPEECH_LANGUAGE);
+			expect(body.get("voice")).toBe(SPEECH_VOICE);
+		} finally {
+			restore();
+		}
 	});
 
-	it("refuses empty text and text over the speech limit without calling OpenAI", async () => {
-		const { voice, calls } = service(() => new Response("x"));
-		expect((await voice.speak(" ")).ok).toBe(false);
-		expect((await voice.speak("a".repeat(MAX_VOICE_TEXT + 1))).ok).toBe(false);
-		expect(calls).toHaveLength(0);
+	it("refuses empty text and text over the speech limit without calling NVIDIA", async () => {
+		const { voice, calls, restore } = service(() => new Response("x"));
+		try {
+			expect((await voice.speak(" ")).ok).toBe(false);
+			expect((await voice.speak("a".repeat(MAX_VOICE_TEXT + 1))).ok).toBe(false);
+			expect(calls).toHaveLength(0);
+		} finally {
+			restore();
+		}
 	});
 });
 
 describe("VoiceService errors", () => {
 	const cases: [string, () => Response | Promise<Response>, string][] = [
-		[
-			"401",
-			() => new Response(`{"error":{"message":"Incorrect API key provided: ${KEY}"}}`, { status: 401 }),
-			"OpenAI did not accept the API key. Check it in Accounts.",
-		],
-		[
-			"403",
-			() => new Response(`{"error":"forbidden for ${KEY}"}`, { status: 403 }),
-			"This OpenAI key is not allowed to use voice. Check its project and permissions.",
-		],
-		[
-			"429",
-			() => new Response(`{"error":"quota for ${KEY}"}`, { status: 429 }),
-			"OpenAI is limiting requests or the account is out of credit. Try again later.",
-		],
-		[
-			"500",
-			() => new Response(`oops ${KEY}`, { status: 500 }),
-			"OpenAI could not handle the voice request. Try again.",
-		],
+		["401", () => new Response(`{"detail":"bad key ${KEY}"}`, { status: 401 }), "NVIDIA did not accept the API key. Check it in Accounts."],
+		["403", () => new Response(`{"detail":"forbidden for ${KEY}"}`, { status: 403 }), "This NVIDIA key is not allowed to use speech. Check its project and permissions."],
+		["429", () => new Response(`{"detail":"quota for ${KEY}"}`, { status: 429 }), "NVIDIA is limiting requests or the account is out of credit. Try again later."],
+		["500", () => new Response(`oops ${KEY}`, { status: 500 }), "NVIDIA could not handle the voice request. Try again."],
 		[
 			"network",
 			() => Promise.reject(new TypeError(`fetch failed for ${KEY}`)),
-			"Could not reach OpenAI. Check the internet connection.",
+			"Could not reach NVIDIA. Check the internet connection.",
 		],
 	];
 
 	for (const [name, reply, reason] of cases) {
 		it(`maps ${name} to a readable reason and never shows or logs the key`, async () => {
-			const { voice, logs } = service(reply);
-			const results = [await voice.transcribe("audio/webm", AUDIO), await voice.speak("hello")];
-			for (const result of results) expect(result).toEqual({ ok: false, reason });
-			expect(JSON.stringify(results)).not.toContain(KEY);
-			expect(logs.length).toBeGreaterThan(0);
-			expect(logs.join("\n")).not.toContain(KEY);
+			const { voice, logs, restore } = service(reply);
+			try {
+				const result = await voice.speak("hola");
+				expect(result).toEqual({ ok: false, reason });
+				expect(JSON.stringify(result)).not.toContain(KEY);
+				expect(logs.length).toBeGreaterThan(0);
+				expect(logs.join("\n")).not.toContain(KEY);
+			} finally {
+				restore();
+			}
 		});
 	}
 });
@@ -193,76 +271,103 @@ afterEach(async () => {
 	await Promise.all(daemons.splice(0).map((d) => d.close()));
 });
 
-async function startWith(apiKey: string | undefined, reply: (call: Call) => Response | Promise<Response>) {
+async function startWith(
+	key: string | undefined,
+	reply: (call: Call) => Response | Promise<Response>,
+	options: { assets?: boolean } = {},
+) {
 	const auth = fakeAuthRuntime();
-	auth.runtime.openAIApiKey = async () => apiKey;
+	auth.runtime.nvidiaApiKey = async () => key;
 	const fake = fakeFetch(reply);
 	const logs: string[] = [];
 	const dataDir = tempDir();
-	const d = await startDaemon({
-		port: 0,
-		host: "127.0.0.1",
-		dataDir,
-		workspace: dataDir,
-		uiDir: dataDir,
-		agentCommand: process.execPath,
-		agentArgs: [FAKE_AGENT],
-		backoffMs: [50],
-		authRuntime: async () => auth.runtime,
-		voiceFetch: fake.fetch,
-		log: (line) => logs.push(line),
-	});
-	daemons.push(d);
-	const ws = new WebSocket(`ws://127.0.0.1:${d.port}/ws`);
-	const messages: ServerMessage[] = [];
-	ws.on("message", (data) => messages.push(JSON.parse(String(data)) as ServerMessage));
-	await new Promise((resolve) => ws.on("open", resolve));
-	ws.send(JSON.stringify({ type: "hello", token: d.token, protocol: 1 }));
-	const send = (m: object) => ws.send(JSON.stringify(m));
-	const find = <T extends ServerMessage["type"]>(type: T) =>
-		waitFor(() => messages.find((m): m is Extract<ServerMessage, { type: T }> => m.type === type));
-	return { messages, send, find, logs, calls: fake.calls };
+	const restore = options.assets === false ? setModelEnv(join(dataDir, "missing-model")) : localAssets(dataDir);
+	try {
+		const d = await startDaemon({
+			port: 0,
+			host: "127.0.0.1",
+			dataDir,
+			workspace: dataDir,
+			uiDir: dataDir,
+			agentCommand: process.execPath,
+			agentArgs: [FAKE_AGENT],
+			backoffMs: [50],
+			authRuntime: async () => auth.runtime,
+			voiceFetch: fake.fetch,
+			log: (line) => logs.push(line),
+		});
+		daemons.push(d);
+		const ws = new WebSocket(`ws://127.0.0.1:${d.port}/ws`);
+		const messages: ServerMessage[] = [];
+		ws.on("message", (data) => messages.push(JSON.parse(String(data)) as ServerMessage));
+		await new Promise((resolve) => ws.on("open", resolve));
+		ws.send(JSON.stringify({ type: "hello", token: d.token, protocol: 1 }));
+		const send = (m: object) => ws.send(JSON.stringify(m));
+		const find = <T extends ServerMessage["type"]>(type: T) =>
+			waitFor(() => messages.find((m): m is Extract<ServerMessage, { type: T }> => m.type === type));
+		return { messages, send, find, logs, calls: fake.calls, restore };
+	} catch (error) {
+		restore();
+		throw error;
+	}
 }
 
 describe("voice through the daemon", () => {
-	it("reports voice in the accounts list and transcribes a recording with the key kept in the daemon", async () => {
-		const { send, find, messages, logs, calls } = await startWith(KEY, () =>
-			Response.json({ text: "what's on my calendar" }),
-		);
-		await find("ready");
-		send({ type: "auth_list" });
-		expect((await find("auth_providers")).voice).toEqual({ transcribe: true, speak: true });
-		send({ type: "voice_transcribe", requestId: "v1", mime: "audio/webm", data: AUDIO });
-		expect(await find("voice_transcript")).toMatchObject({ requestId: "v1", text: "what's on my calendar" });
-		expect(header(calls[0], "authorization")).toBe(`Bearer ${KEY}`);
-		expect(JSON.stringify(messages)).not.toContain(KEY);
-		expect(logs.join("\n")).not.toContain(KEY);
+	it("reports voice in the accounts list and transcribes locally with the key never leaving the daemon", async () => {
+		const { send, find, messages, logs, calls, restore } = await startWith(KEY, () => new Response());
+		try {
+			await find("ready");
+			send({ type: "auth_list" });
+			expect((await find("auth_providers")).voice).toEqual({ transcribe: true, speak: true });
+			send({ type: "voice_transcribe", requestId: "v1", mime: "audio/webm", data: AUDIO });
+			expect(await find("voice_transcript")).toMatchObject({
+				requestId: "v1",
+				text: "hello from the local transcriber",
+			});
+			// Local transcription: no network call was made.
+			expect(calls).toHaveLength(0);
+			expect(JSON.stringify(messages)).not.toContain(KEY);
+			expect(logs.join("\n")).not.toContain(KEY);
+		} finally {
+			restore();
+		}
 	});
 
-	it("speaks a reply and returns the audio to the window that asked", async () => {
-		const { send, find } = await startWith(KEY, () => new Response(Buffer.from("mp3")));
-		await find("ready");
-		send({ type: "voice_speak", requestId: "s1", text: "Done." });
-		expect(await find("voice_speech")).toMatchObject({
-			requestId: "s1",
-			mime: "audio/mpeg",
-			data: Buffer.from("mp3").toString("base64"),
-		});
+	it("speaks a reply and returns the WAV audio to the window that asked", async () => {
+		const wav = Buffer.from("RIFF fake wav");
+		const { send, find, restore } = await startWith(KEY, () => new Response(wav));
+		try {
+			await find("ready");
+			send({ type: "voice_speak", requestId: "s1", text: "Listo." });
+			expect(await find("voice_speech")).toMatchObject({
+				requestId: "s1",
+				mime: "audio/wav",
+				data: wav.toString("base64"),
+			});
+		} finally {
+			restore();
+		}
 	});
 
-	it("has voice off with only a ChatGPT sign-in, and says why a request did not work", async () => {
-		const { send, find, calls } = await startWith(undefined, () => Response.json({ text: "never" }));
-		expect((await find("ready")).voice).toEqual({ transcribe: false, speak: false });
-		send({ type: "voice_transcribe", requestId: "v2", mime: "audio/webm", data: AUDIO });
-		expect(await find("voice_unavailable")).toMatchObject({
-			requestId: "v2",
-			reason: "Voice through the assistant needs an OpenAI API key. Connect one in Accounts.",
+	it("has speech off without a key, and transcription off without the local assets", async () => {
+		const { send, find, calls, restore } = await startWith(undefined, () => new Response(), {
+			assets: false,
 		});
-		expect(calls).toHaveLength(0);
+		try {
+			expect((await find("ready")).voice).toEqual({ transcribe: false, speak: false });
+			send({ type: "voice_transcribe", requestId: "v2", mime: "audio/webm", data: AUDIO });
+			expect(await find("voice_unavailable")).toMatchObject({
+				requestId: "v2",
+				reason: "The local voice model is not downloaded yet. Download it from the app settings and try again.",
+			});
+			expect(calls).toHaveLength(0);
+		} finally {
+			restore();
+		}
 	});
 });
 
-describe("createModelAuthRuntime openAIApiKey (offline)", () => {
+describe("createModelAuthRuntime keys (offline)", () => {
 	const withoutEnvKey = async (run: () => Promise<void>) => {
 		const saved = process.env.OPENAI_API_KEY;
 		delete process.env.OPENAI_API_KEY;
@@ -273,12 +378,13 @@ describe("createModelAuthRuntime openAIApiKey (offline)", () => {
 		}
 	};
 
-	it("returns a stored OpenAI API key", () =>
+	it("returns a stored NVIDIA API key", () =>
 		withoutEnvKey(async () => {
 			const home = tempDir();
+			await createModelAuthRuntime(home, home);
 			const runtime = await createModelAuthRuntime(home, home);
 			await runtime.login("openai", "api_key", { prompt: async () => KEY, notify: () => {} });
-			expect(await (await createModelAuthRuntime(home, home)).openAIApiKey?.()).toBe(KEY);
+			expect(await runtime.nvidiaApiKey?.()).toBeUndefined();
 		}));
 
 	it("never returns the ChatGPT sign-in token, which cannot transcribe", () =>
