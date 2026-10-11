@@ -86,3 +86,10 @@ opt-level = 3
 
 [profile.dev.package.sha2]
 opt-level = 3
+
+# Release builds do not strip build dependencies (#53). With Xcode 27, a macOS 12+ deployment
+# target (Tauri sets 12.3), and Rust older than 1.99, stripping the proc-macro dylibs leaves
+# them misaligned ("mis-aligned LINKEDIT string pool"), so macOS 27's dyld refuses to load them
+# and every derive fails with E0463. They run only during the build and never ship in the app.
+[profile.release.build-override]
+strip = false
