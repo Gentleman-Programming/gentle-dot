@@ -710,15 +710,40 @@ fn toggle_on_press(app: &AppHandle, _: &Shortcut, event: ShortcutEvent) {
     }
 }
 
-/// Binds the configured shortcut, or the default one when it is unavailable. Returns the bound one.
+/// Fallback shortcuts to try when the primary is taken (in order of preference).
+const FALLBACK_SHORTCUTS: &[&str] = &[
+    "Super+Space",    // Most launchers use this, but often free on clean installs
+    "Ctrl+Space",     // Common for IME, but worth trying
+    "Alt+Shift+Space", // Rarely used
+    "Super+Shift+Space", // Even rarer
+    "F1",             // Function keys are usually free
+    "F2",
+    "F3",
+    "F4",
+    "F5",
+];
+
+/// Binds the configured shortcut, trying fallbacks if taken. Returns the bound one.
 fn register_shortcut(app: &AppHandle, shortcut: &str) -> Option<String> {
+    // Try the requested shortcut first
     match app.global_shortcut().on_shortcut(shortcut, toggle_on_press) {
         Ok(()) => return Some(shortcut.to_string()),
-        Err(error) => eprintln!("gentle-dot: shortcut `{shortcut}` is unavailable ({error}); using {DEFAULT_SHORTCUT}"),
+        Err(error) => eprintln!("gentle-dot: shortcut `{shortcut}` is unavailable ({error}); trying fallbacks..."),
     }
-    if shortcut != DEFAULT_SHORTCUT && app.global_shortcut().on_shortcut(DEFAULT_SHORTCUT, toggle_on_press).is_ok() {
-        return Some(DEFAULT_SHORTCUT.to_string());
+    // Try each fallback in order
+    for &fallback in FALLBACK_SHORTCUTS {
+        if fallback == shortcut {
+            continue; // Skip if it's the same as requested
+        }
+        match app.global_shortcut().on_shortcut(fallback, toggle_on_press) {
+            Ok(()) => {
+                eprintln!("gentle-dot: using fallback shortcut `{fallback}`");
+                return Some(fallback.to_string());
+            }
+            Err(error) => eprintln!("gentle-dot: fallback `{fallback}` unavailable: {error}"),
+        }
     }
+    eprintln!("gentle-dot: no shortcut available; panel must be opened via tray or `gentle-dot --toggle`");
     None
 }
 
@@ -830,8 +855,15 @@ pub fn run() {
             build_tray(&handle, &config, rose_hidden)?;
             if places_windows {
                 let bound = register_shortcut(&handle, &config.shortcut);
-                if let Some(bound) = &bound {
+                // If a fallback was used, persist it so it survives restarts
+                if let Some(ref bound) = bound {
                     label_tray_open(&handle, bound);
+                    if bound != &config.shortcut {
+                        let config_file = config.data_dir.join("config.json");
+                        if let Err(e) = config::save_shortcut(&config_file, bound) {
+                            eprintln!("gentle-dot: failed to save fallback shortcut: {e}");
+                        }
+                    }
                 }
                 *app.state::<Shell>().shortcut.lock().unwrap() = bound;
                 let snap = app.state::<Shell>().snap.clone();
