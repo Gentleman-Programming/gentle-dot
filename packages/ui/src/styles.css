@@ -1910,6 +1910,18 @@ html[data-surface="glow"] body {
 
 	.chat-header h1 {
 		font-size: 15px;
+		/* Long assistant names and model chip names must not push the header wide. */
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.chip-name {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
 	/* Touch targets: the header buttons and the send button reach 40px on a phone. */
