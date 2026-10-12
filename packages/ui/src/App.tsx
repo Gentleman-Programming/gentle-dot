@@ -37,8 +37,10 @@ export function windowEffects(search: string): "native" | "none" {
 }
 
 function browserConnection(): ConnectionInfo | undefined {
-	const token = tokenFromLocation(window.location, window.sessionStorage, (url) =>
-		window.history.replaceState(null, "", url),
+	const token = tokenFromLocation(
+		window.location,
+		{ session: window.sessionStorage, persistent: window.localStorage },
+		(url) => window.history.replaceState(null, "", url),
 	);
 	if (!token) return undefined;
 	const daemon = import.meta.env.VITE_DAEMON_ORIGIN as string | undefined;

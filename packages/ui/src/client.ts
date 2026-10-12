@@ -103,19 +103,20 @@ interface StorageLike {
 
 /**
  * The browser receives the token once in the URL fragment (`#token=…`), keeps it
- * in session storage, and removes it from the address bar.
+ * in session storage and persistent storage, and removes it from the address bar.
  */
 export function tokenFromLocation(
 	location: LocationLike,
-	storage: StorageLike,
+	storages: { session: StorageLike; persistent: StorageLike },
 	replaceUrl: (url: string) => void,
 ): string | undefined {
 	const match = /(?:^#|&)token=([^&]+)/.exec(location.hash);
 	if (match?.[1]) {
 		const token = decodeURIComponent(match[1]);
-		storage.setItem(TOKEN_KEY, token);
+		storages.session.setItem(TOKEN_KEY, token);
+		storages.persistent.setItem(TOKEN_KEY, token);
 		replaceUrl(`${location.pathname}${location.search}`);
 		return token;
 	}
-	return storage.getItem(TOKEN_KEY) ?? undefined;
+	return storages.session.getItem(TOKEN_KEY) ?? storages.persistent.getItem(TOKEN_KEY) ?? undefined;
 }
