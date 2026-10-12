@@ -1930,12 +1930,7 @@ html[data-surface="glow"] body {
 	}
 
 	/* iOS zooms the page when an input focuses with a font under 16px. */
-	.composer textarea,
-	.composer input,
-	.chat-header input,
-	textarea,
-	input,
-	select {
+	:where(.composer textarea, .composer input, .chat-header input, textarea, input, select) {
 		font-size: 16px;
 	}
 
