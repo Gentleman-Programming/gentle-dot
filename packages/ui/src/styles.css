@@ -544,6 +544,40 @@ html[data-effects="none"] .chat-panel {
 	border-right: 1px solid var(--line);
 }
 
+.access-key-form {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	margin: 0 auto;
+	padding: 0 16px 24px;
+	max-width: 360px;
+	width: 100%;
+}
+
+.access-key-form input {
+	padding: 10px 12px;
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--line);
+	background: var(--surface);
+	color: var(--text);
+	outline: none;
+}
+
+.access-key-form input:focus {
+	border-color: var(--accent-line);
+	box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.access-key-form button {
+	padding: 10px 16px;
+	border-radius: var(--radius-sm);
+}
+
+.access-key-form button:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+
 .chat-header {
 	position: relative;
 	z-index: 3;

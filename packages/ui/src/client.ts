@@ -16,6 +16,15 @@ interface ClientHandlers {
 const BACKOFF_MS = [500, 1000, 2000, 5000];
 const TOKEN_KEY = "gentle-dot-token";
 
+/**
+ * Stores an access key typed by hand (a phone, or an installed PWA, which keeps its own storage on
+ * iOS) in both storages, the same way a URL token lands (see {@link tokenFromLocation}).
+ */
+export function saveToken(token: string, storages: { session: StorageLike; persistent: StorageLike }): void {
+	storages.session.setItem(TOKEN_KEY, token);
+	storages.persistent.setItem(TOKEN_KEY, token);
+}
+
 /** One WebSocket session with the daemon: hello, reconnect with backoff, and history refresh. */
 export class DotClient {
 	private socket: WebSocket | undefined;
