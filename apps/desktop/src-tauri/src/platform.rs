@@ -68,6 +68,16 @@ pub fn compositor_places_windows(env: impl Fn(&str) -> Option<String>) -> bool {
     }
 }
 
+/// Whether WebKitGTK's DMA-BUF renderer must be disabled for this launch: it enables the
+/// linux-drm-syncobj explicit-sync protocol but commits without an acquire point, and strict
+/// compositors (Hyprland) close the connection with a protocol error (`Error 71` at startup;
+/// WebKitGTK bug 280210). Native Wayland clients only, and only when the user has not chosen.
+pub fn webkit_renderer_env(env: impl Fn(&str) -> Option<String>) -> Option<&'static str> {
+    let wanted = compositor_places_windows(&env)
+        && set(&env, "WEBKIT_DISABLE_DMABUF_RENDERER").is_none();
+    wanted.then_some("1")
+}
+
 /// What a launch asks for: `--toggle` toggles the panel (bind it to a desktop shortcut);
 /// any other launch shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +171,32 @@ mod tests {
         assert!(!compositor_places_windows(env_of(x11)));
         assert_eq!(forced_gdk_backend(env_of(&[])), None);
         assert!(!compositor_places_windows(env_of(&[])));
+    }
+
+    #[test]
+    fn native_wayland_disables_the_dmabuf_renderer() {
+        let hyprland: &[(&str, &str)] = &[
+            ("XDG_SESSION_TYPE", "wayland"),
+            ("WAYLAND_DISPLAY", "wayland-1"),
+            ("HYPRLAND_INSTANCE_SIGNATURE", "abc"),
+        ];
+        assert_eq!(webkit_renderer_env(env_of(hyprland)), Some("1"));
+        // The user's own choice is respected.
+        let chosen: &[(&str, &str)] =
+            &[("WAYLAND_DISPLAY", "wayland-0"), ("WEBKIT_DISABLE_DMABUF_RENDERER", "0")];
+        assert_eq!(webkit_renderer_env(env_of(chosen)), None);
+    }
+
+    #[test]
+    fn only_native_wayland_clients_get_the_dmabuf_renderer_off() {
+        // XWayland (as `forced_gdk_backend` forces on GNOME): no Wayland renderer involved.
+        let xwayland: &[(&str, &str)] =
+            &[("XDG_SESSION_TYPE", "wayland"), ("WAYLAND_DISPLAY", "wayland-0"), ("GDK_BACKEND", "x11")];
+        assert_eq!(webkit_renderer_env(env_of(xwayland)), None);
+        // Non-Wayland sessions.
+        let x11: &[(&str, &str)] = &[("XDG_SESSION_TYPE", "x11"), ("DISPLAY", ":0")];
+        assert_eq!(webkit_renderer_env(env_of(x11)), None);
+        assert_eq!(webkit_renderer_env(env_of(&[])), None);
     }
 
     #[test]
