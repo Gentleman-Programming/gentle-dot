@@ -24,6 +24,7 @@
 		"@types/react-dom": "^19.3.0",
 		"@vitejs/plugin-react": "^6.1.2",
 		"jsdom": "^30.1.2",
-		"vite": "^8.3.3"
+		"vite": "^8.3.3",
+		"vite-plugin-pwa": "^2.0.0"
 	}
 }
