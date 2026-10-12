@@ -1928,4 +1928,25 @@ html[data-surface="glow"] body {
 		margin-bottom: max(8px, env(safe-area-inset-bottom));
 		padding: 5px 5px 5px 12px;
 	}
+
+	/* iOS zooms the page when an input focuses with a font under 16px. */
+	.composer textarea,
+	.composer input,
+	.chat-header input,
+	textarea,
+	input,
+	select {
+		font-size: 16px;
+	}
+
+	/* No double-tap zoom delay on controls, and no grey flash on tap. */
+	button,
+	a,
+	.composer {
+		touch-action: manipulation;
+	}
+
+	* {
+		-webkit-tap-highlight-color: transparent;
+	}
 }
