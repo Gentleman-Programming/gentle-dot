@@ -1,6 +1,6 @@
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vitest/config";
 import { VitePWA } from "vite-plugin-pwa";
+import { defineConfig } from "vitest/config";
 
 // The PWA pieces only matter for the served build; the test run skips the plugin entirely.
 const plugins = [react()];

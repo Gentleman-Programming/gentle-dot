@@ -86,6 +86,42 @@ describe("DotClient", () => {
 		expect(FakeSocket.all).toHaveLength(2);
 	});
 
+	it("reconnects immediately when the page becomes visible again (phone wakes up)", () => {
+		const { client } = makeClient();
+		client.start();
+		FakeSocket.all[0]?.open();
+		FakeSocket.all[0]?.drop();
+		const before = FakeSocket.all.length;
+		// The backoff timer is pending (500 ms); visibility fires first.
+		document.dispatchEvent(new Event("visibilitychange"));
+		expect(FakeSocket.all.length).toBe(before + 1);
+		// The pending backoff timer must not schedule a second connection.
+		vi.advanceTimersByTime(5_000);
+		expect(FakeSocket.all.length).toBe(before + 1);
+	});
+
+	it("reconnects immediately when the network comes back online", () => {
+		const { client } = makeClient();
+		client.start();
+		FakeSocket.all[0]?.open();
+		FakeSocket.all[0]?.drop();
+		const before = FakeSocket.all.length;
+		window.dispatchEvent(new Event("online"));
+		expect(FakeSocket.all.length).toBe(before + 1);
+		vi.advanceTimersByTime(5_000);
+		expect(FakeSocket.all.length).toBe(before + 1);
+	});
+
+	it("does not open a second socket on visibility when the connection is open", () => {
+		const { client } = makeClient();
+		client.start();
+		FakeSocket.all[0]?.open();
+		FakeSocket.all[0]?.receive({ type: "ready", agentState: "idle" });
+		const before = FakeSocket.all.length;
+		document.dispatchEvent(new Event("visibilitychange"));
+		expect(FakeSocket.all.length).toBe(before);
+	});
+
 	it("stops retrying when the token is rejected", () => {
 		const { client, statuses } = makeClient();
 		client.start();

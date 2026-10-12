@@ -34,12 +34,29 @@ export class DotClient {
 	start(): void {
 		this.stopped = false;
 		this.connect();
+		this.wakeListeners = wakeTriggers(() => this.wake());
 	}
 
 	stop(): void {
 		this.stopped = true;
+		this.wakeListeners?.();
+		this.wakeListeners = undefined;
 		clearTimeout(this.retryTimer);
 		this.socket?.close();
+	}
+
+	/**
+	 * A phone suspends the socket in the background; when the page returns or the
+	 * network comes back, reconnect now instead of waiting out the backoff. Only a
+	 * dropped connection with a pending retry wakes: an open socket or a client
+	 * waiting on authorization must stay as they are.
+	 */
+	private wake(): void {
+		if (this.stopped || this.ready || this.retryTimer === undefined) return;
+		clearTimeout(this.retryTimer);
+		this.retryTimer = undefined;
+		this.attempts = 0;
+		this.connect();
 	}
 
 	send(message: ClientMessage): boolean {
@@ -49,6 +66,10 @@ export class DotClient {
 	}
 
 	private connect(): void {
+		// The scheduled retry is consumed by this attempt; a fired timer id must not
+		// linger and make a later wake think a retry is still pending.
+		clearTimeout(this.retryTimer);
+		this.retryTimer = undefined;
 		const Impl = this.handlers.WebSocketImpl ?? WebSocket;
 		const socket = new Impl(this.info.url);
 		this.socket = socket;
@@ -99,6 +120,16 @@ interface LocationLike {
 interface StorageLike {
 	getItem(key: string): string | null;
 	setItem(key: string, value: string): void;
+}
+
+/** Registers the page-level triggers that should wake a dropped connection; returns the cleanup. */
+function wakeTriggers(wake: () => void): () => void {
+	document.addEventListener("visibilitychange", wake);
+	window.addEventListener("online", wake);
+	return () => {
+		document.removeEventListener("visibilitychange", wake);
+		window.removeEventListener("online", wake);
+	};
 }
 
 /**
