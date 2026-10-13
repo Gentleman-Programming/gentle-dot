@@ -1,4 +1,4 @@
-import type { Provider, ProviderStreams } from "@earendil-works/pi-ai";
+import type { Provider, ProviderStreams, RefreshModelsContext } from "@earendil-works/pi-ai";
 import * as piAi from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -10,7 +10,11 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
  * OpenAI chat-completions API, `commandcode-anthropic` speaks Anthropic's messages API.
  * They need different base URLs, because each SDK appends its own path
  * (`/chat/completions` and `/v1/messages`).
- * The catalog mirrors the Command Code setup the user already uses in OpenCode.
+ *
+ * The catalog is read from the gateway's `/models` endpoint and filtered by the
+ * endpoint each provider speaks (`supported_endpoints`). The list below is the
+ * offline fallback: it is used until the first refresh, and kept when the gateway
+ * cannot be reached.
  *
  * This file is copied raw into the installed runtime (`runtime-build.ts`) and the
  * engine loads it with `-e`, so it must stay self-contained: no imports from
@@ -42,8 +46,8 @@ interface CatalogModel {
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
 /**
- * The OpenAI-compatible catalog. Limits come from the Command Code setup; a model
- * with no published cost keeps the zero rates above.
+ * The OpenAI-compatible fallback catalog. Limits come from the Command Code setup; a
+ * model with no published cost keeps the zero rates above.
  */
 const COMMAND_CODE_MODELS: readonly CatalogModel[] = [
 	{
@@ -724,7 +728,7 @@ const COMMAND_CODE_MODELS: readonly CatalogModel[] = [
 ];
 
 /**
- * The Anthropic-messages catalog: the Claude models behind the same Command Code key.
+ * The Anthropic-messages fallback catalog: the Claude models behind the same key.
  */
 const COMMAND_CODE_ANTHROPIC_MODELS: readonly CatalogModel[] = [
 	{
@@ -819,20 +823,132 @@ const COMMAND_CODE_ANTHROPIC_MODELS: readonly CatalogModel[] = [
 	},
 ];
 
-/** Catalog entries as models of `provider`, with the provider's base URL and API. */
-function commandCodeModels<A extends CommandCodeApi>(
-	provider: string,
-	api: A,
-	baseUrl: string,
-	models: readonly CatalogModel[],
-) {
-	return models.map((model) => ({
-		...model,
-		cost: { ...ZERO_COST, ...model.cost },
-		provider,
-		baseUrl,
-		api,
-	}));
+/** Endpoint that tells the two providers apart in the gateway's model list. */
+const OPENAI_ENDPOINT = "/chat/completions";
+const ANTHROPIC_ENDPOINT = "/messages";
+const MODELS_URL = `${COMMAND_CODE_BASE_URL}/models`;
+const MODELS_TIMEOUT_MS = 5_000;
+/** Applied to gateway models with no fallback entry, and the floor for a missing window. */
+const DEFAULT_MAX_TOKENS = 32_768;
+const DEFAULT_CONTEXT_WINDOW = 200_000;
+
+export interface CommandCodeProviderOptions {
+	fetchImpl?: typeof fetch;
+	timeoutMs?: number;
+}
+
+function cloneModel(model: CatalogModel): CatalogModel {
+	return { ...model, input: [...model.input], cost: { ...model.cost } };
+}
+
+function cloneCatalog(models: readonly CatalogModel[]): CatalogModel[] {
+	return models.map(cloneModel);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The gateway's live catalog, filtered to the endpoint this provider speaks. Returns
+ * undefined on any unusable response, so the fallback catalog stays in place. Values
+ * the gateway does not publish (output limit, cost) come from the matching fallback.
+ */
+async function fetchGatewayModels(options: {
+	endpoint: string;
+	fallback: readonly CatalogModel[];
+	apiKey?: string;
+	signal: AbortSignal;
+	fetchImpl: typeof fetch;
+	timeoutMs: number;
+}): Promise<CatalogModel[] | undefined> {
+	const { endpoint, fallback, apiKey, signal, fetchImpl, timeoutMs } = options;
+	if (signal.aborted) return undefined;
+
+	const controller = new AbortController();
+	const abort = () => controller.abort(signal.reason);
+	if (signal.aborted) abort();
+	else signal.addEventListener("abort", abort, { once: true });
+	const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+	try {
+		const headers: Record<string, string> = { Accept: "application/json" };
+		if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+		const response = await fetchImpl(MODELS_URL, {
+			method: "GET",
+			headers,
+			signal: controller.signal,
+			redirect: "error",
+			cache: "no-store",
+		});
+		if (!response.ok) return undefined;
+
+		const payload: unknown = await response.json();
+		if (!isRecord(payload) || !Array.isArray(payload.data)) return undefined;
+
+		const known = new Map(fallback.map((model) => [model.id, model]));
+		const models: CatalogModel[] = [];
+		for (const row of payload.data) {
+			if (!isRecord(row) || typeof row.id !== "string" || !row.id) continue;
+			const endpoints = Array.isArray(row.supported_endpoints)
+				? row.supported_endpoints.filter((value): value is string => typeof value === "string")
+				: [];
+			if (!endpoints.includes(endpoint)) continue;
+			const base = known.get(row.id);
+			const window =
+				typeof row.context_length === "number" && row.context_length > 0
+					? row.context_length
+					: (base?.contextWindow ?? DEFAULT_CONTEXT_WINDOW);
+			models.push({
+				id: row.id,
+				name: typeof row.name === "string" && row.name ? row.name : (base?.name ?? row.id),
+				input: base ? [...base.input] : ["text"],
+				reasoning: base?.reasoning ?? false,
+				contextWindow: window,
+				maxTokens: base?.maxTokens ?? DEFAULT_MAX_TOKENS,
+				cost: base ? { ...base.cost } : { ...ZERO_COST },
+			});
+		}
+		return models;
+	} catch {
+		// Discovery is best-effort. Never log request or response data: it may carry credentials.
+		return undefined;
+	} finally {
+		clearTimeout(timeout);
+		signal.removeEventListener("abort", abort);
+	}
+}
+
+/** The live catalog for one provider: the fallback until a refresh publishes the gateway's. */
+function createCatalog(
+	endpoint: string,
+	fallback: readonly CatalogModel[],
+	options: CommandCodeProviderOptions,
+): { getModels(): CatalogModel[]; refreshModels(context: RefreshModelsContext): Promise<void> } {
+	let catalog = cloneCatalog(fallback);
+	const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+	return {
+		getModels: () => cloneCatalog(catalog),
+		refreshModels: async (context) => {
+			if (context.signal.aborted) return;
+			const apiKey = context.credential?.type === "api_key" ? context.credential.key : undefined;
+			if (!context.allowNetwork || typeof fetchImpl !== "function") return;
+			const models = await fetchGatewayModels({
+				endpoint,
+				fallback,
+				apiKey,
+				signal: context.signal,
+				fetchImpl,
+				timeoutMs: options.timeoutMs ?? MODELS_TIMEOUT_MS,
+			});
+			if (!models || context.signal.aborted) return;
+			await context.publish({
+				update: () => {
+					if (!context.signal.aborted) catalog = models;
+				},
+			});
+		},
+	};
 }
 
 /** One API key login for both providers: a stored credential, or COMMANDCODE_API_KEY. */
@@ -878,44 +994,62 @@ function commandCodeStreams(api: CommandCodeApi): ProviderStreams {
 	});
 }
 
-export function createCommandCodeProviderConfig(): Provider<"openai-completions"> {
-	const streams = commandCodeStreams("openai-completions");
+function makeCommandCodeProvider<A extends CommandCodeApi>(
+	id: string,
+	name: string,
+	api: A,
+	baseUrl: string,
+	endpoint: string,
+	fallback: readonly CatalogModel[],
+	options: CommandCodeProviderOptions,
+): Provider<A> {
+	const streams = commandCodeStreams(api);
+	const catalog = createCatalog(endpoint, fallback, options);
 	return {
-		id: COMMAND_CODE_PROVIDER_ID,
-		name: "Command Code",
-		baseUrl: COMMAND_CODE_BASE_URL,
+		id,
+		name,
+		baseUrl,
 		auth: commandCodeAuth(),
 		getModels: () =>
-			commandCodeModels(
-				COMMAND_CODE_PROVIDER_ID,
-				"openai-completions",
-				COMMAND_CODE_BASE_URL,
-				COMMAND_CODE_MODELS,
-			),
-		refreshModels: async () => {},
+			catalog.getModels().map((model) => ({
+				...model,
+				cost: { ...ZERO_COST, ...model.cost },
+				provider: id,
+				baseUrl,
+				api,
+			})),
+		refreshModels: (context) => catalog.refreshModels(context),
 		stream: streams.stream,
 		streamSimple: streams.streamSimple,
 	};
 }
 
-export function createCommandCodeAnthropicProviderConfig(): Provider<"anthropic-messages"> {
-	const streams = commandCodeStreams("anthropic-messages");
-	return {
-		id: COMMAND_CODE_ANTHROPIC_PROVIDER_ID,
-		name: "Command Code (Anthropic)",
-		baseUrl: COMMAND_CODE_ANTHROPIC_BASE_URL,
-		auth: commandCodeAuth(),
-		getModels: () =>
-			commandCodeModels(
-				COMMAND_CODE_ANTHROPIC_PROVIDER_ID,
-				"anthropic-messages",
-				COMMAND_CODE_ANTHROPIC_BASE_URL,
-				COMMAND_CODE_ANTHROPIC_MODELS,
-			),
-		refreshModels: async () => {},
-		stream: streams.stream,
-		streamSimple: streams.streamSimple,
-	};
+export function createCommandCodeProviderConfig(
+	options: CommandCodeProviderOptions = {},
+): Provider<"openai-completions"> {
+	return makeCommandCodeProvider(
+		COMMAND_CODE_PROVIDER_ID,
+		"Command Code",
+		"openai-completions",
+		COMMAND_CODE_BASE_URL,
+		OPENAI_ENDPOINT,
+		COMMAND_CODE_MODELS,
+		options,
+	);
+}
+
+export function createCommandCodeAnthropicProviderConfig(
+	options: CommandCodeProviderOptions = {},
+): Provider<"anthropic-messages"> {
+	return makeCommandCodeProvider(
+		COMMAND_CODE_ANTHROPIC_PROVIDER_ID,
+		"Command Code (Anthropic)",
+		"anthropic-messages",
+		COMMAND_CODE_ANTHROPIC_BASE_URL,
+		ANTHROPIC_ENDPOINT,
+		COMMAND_CODE_ANTHROPIC_MODELS,
+		options,
+	);
 }
 
 /** The engine loads this file with `-e`, so it registers both providers on load. */

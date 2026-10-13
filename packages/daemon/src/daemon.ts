@@ -203,6 +203,8 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		// The assistant's own engine: its subagents load the guard from its extensions folder (S25.4).
 		...(options.agentHome ? { childGuard: true } : {}),
 		...(vps ? { engineAccess: access } : {}),
+		// The Command Code provider extension, loaded with `-e` (S34): protected like the guard.
+		extensionPaths: [COMMAND_CODE_EXTENSION],
 		env: agentEnv,
 		// On a server without the app, an encrypted file with a key from the daemon's environment (S25.8).
 		secrets:

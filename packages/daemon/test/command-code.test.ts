@@ -1,5 +1,6 @@
 import { statSync } from "node:fs";
 import { join } from "node:path";
+import type { RefreshModelsContext } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { createModelAuthRuntime } from "../src/auth.ts";
 import {
@@ -13,6 +14,27 @@ import {
 	registerCommandCodeProviders,
 } from "../src/extensions/command-code.ts";
 import { tempDir } from "./helpers.ts";
+
+/** A stand-in for the gateway's `GET /models`, with the fields the real one publishes. */
+function fakeGateway(data: unknown, status = 200): typeof fetch {
+	return (async () =>
+		new Response(JSON.stringify({ object: "list", data }), {
+			status,
+			headers: { "content-type": "application/json" },
+		})) as unknown as typeof fetch;
+}
+
+/** A `RefreshModelsContext` bare enough to drive one refresh, publishing inline. */
+function refreshContext(allowNetwork = true): RefreshModelsContext {
+	return {
+		allowNetwork,
+		signal: new AbortController().signal,
+		publish: async (publication) => {
+			publication.update?.();
+			return true;
+		},
+	};
+}
 
 describe("Command Code catalog", () => {
 	it("lists the OpenAI-compatible models through the shared gateway", () => {
@@ -46,6 +68,66 @@ describe("Command Code catalog", () => {
 			COMMAND_CODE_PROVIDER_ID,
 			COMMAND_CODE_ANTHROPIC_PROVIDER_ID,
 		]);
+	});
+});
+
+describe("Command Code gateway catalog", () => {
+	it("filters the gateway's models by the endpoint each provider speaks", async () => {
+		const fetchImpl = fakeGateway([
+			{
+				id: "deepseek/deepseek-v4.1-flash",
+				name: "DeepSeek V4.1 Flash",
+				context_length: 1_000_000,
+				supported_endpoints: ["/chat/completions", "/responses"],
+			},
+			{
+				id: "claude-sonnet-5-5",
+				name: "Claude Sonnet 5.5",
+				context_length: 1_000_000,
+				supported_endpoints: ["/messages"],
+			},
+			{
+				id: "brand-new-model",
+				name: "Brand New",
+				context_length: 500_000,
+				supported_endpoints: ["/chat/completions"],
+			},
+		]);
+		const openai = createCommandCodeProviderConfig({ fetchImpl });
+		const anthropic = createCommandCodeAnthropicProviderConfig({ fetchImpl });
+		await openai.refreshModels?.(refreshContext());
+		await anthropic.refreshModels?.(refreshContext());
+
+		const openaiIds = openai.getModels().map((model) => model.id);
+		expect(openaiIds).toContain("brand-new-model");
+		expect(openaiIds).not.toContain("claude-sonnet-5-5");
+		// The fallback still supplies what the gateway does not publish (the output limit).
+		expect(openai.getModels().find((model) => model.id === "deepseek/deepseek-v4.1-flash")?.maxTokens).toBe(
+			32_768,
+		);
+
+		expect(anthropic.getModels().map((model) => model.id)).toEqual(["claude-sonnet-5-5"]);
+	});
+
+	it("keeps the fallback catalog when the gateway is unreachable", async () => {
+		const fetchImpl = (async () => {
+			throw new Error("offline");
+		}) as unknown as typeof fetch;
+		const provider = createCommandCodeProviderConfig({ fetchImpl });
+		const before = provider.getModels().length;
+		await provider.refreshModels?.(refreshContext());
+		expect(provider.getModels().length).toBe(before);
+	});
+
+	it("does not reach the gateway when the runtime is offline", async () => {
+		let called = false;
+		const fetchImpl = (async () => {
+			called = true;
+			return new Response("{}");
+		}) as unknown as typeof fetch;
+		const provider = createCommandCodeProviderConfig({ fetchImpl });
+		await provider.refreshModels?.(refreshContext(false));
+		expect(called).toBe(false);
 	});
 });
 
