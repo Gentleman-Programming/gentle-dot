@@ -86,6 +86,42 @@ describe("DotClient", () => {
 		expect(FakeSocket.all).toHaveLength(2);
 	});
 
+	it("reconnects immediately when the page becomes visible again (phone wakes up)", () => {
+		const { client } = makeClient();
+		client.start();
+		FakeSocket.all[0]?.open();
+		FakeSocket.all[0]?.drop();
+		const before = FakeSocket.all.length;
+		// The backoff timer is pending (500 ms); visibility fires first.
+		document.dispatchEvent(new Event("visibilitychange"));
+		expect(FakeSocket.all.length).toBe(before + 1);
+		// The pending backoff timer must not schedule a second connection.
+		vi.advanceTimersByTime(5_000);
+		expect(FakeSocket.all.length).toBe(before + 1);
+	});
+
+	it("reconnects immediately when the network comes back online", () => {
+		const { client } = makeClient();
+		client.start();
+		FakeSocket.all[0]?.open();
+		FakeSocket.all[0]?.drop();
+		const before = FakeSocket.all.length;
+		window.dispatchEvent(new Event("online"));
+		expect(FakeSocket.all.length).toBe(before + 1);
+		vi.advanceTimersByTime(5_000);
+		expect(FakeSocket.all.length).toBe(before + 1);
+	});
+
+	it("does not open a second socket on visibility when the connection is open", () => {
+		const { client } = makeClient();
+		client.start();
+		FakeSocket.all[0]?.open();
+		FakeSocket.all[0]?.receive({ type: "ready", agentState: "idle" });
+		const before = FakeSocket.all.length;
+		document.dispatchEvent(new Event("visibilitychange"));
+		expect(FakeSocket.all.length).toBe(before);
+	});
+
 	it("stops retrying when the token is rejected", () => {
 		const { client, statuses } = makeClient();
 		client.start();
@@ -107,23 +143,69 @@ describe("DotClient", () => {
 });
 
 describe("tokenFromLocation", () => {
+	function fakeStorages() {
+		const session = new Map<string, string>();
+		const persistent = new Map<string, string>();
+		const storage = (map: Map<string, string>) => ({
+			getItem: (k: string) => map.get(k) ?? null,
+			setItem: (k: string, v: string) => map.set(k, v),
+		});
+		return { session: storage(session), persistent: storage(persistent) };
+	}
+
 	it("reads the token from the fragment, stores it, and removes it from the address", () => {
-		const storage = new Map<string, string>();
+		const { session, persistent } = fakeStorages();
 		const replace = vi.fn();
 		const token = tokenFromLocation(
 			{ hash: "#token=abc", pathname: "/", search: "" },
-			{ getItem: (k) => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, v) },
+			{ session, persistent },
 			replace,
 		);
 		expect(token).toBe("abc");
-		expect(storage.get("gentle-dot-token")).toBe("abc");
+		expect(session.getItem("gentle-dot-token")).toBe("abc");
+		expect(persistent.getItem("gentle-dot-token")).toBe("abc");
 		expect(replace).toHaveBeenCalledWith("/");
+	});
+
+	it("falls back to persistent storage when the session lost it", () => {
+		const { session, persistent } = fakeStorages();
+		persistent.setItem("gentle-dot-token", "abc");
 		const again = tokenFromLocation(
 			{ hash: "", pathname: "/", search: "" },
-			{ getItem: (k) => storage.get(k) ?? null, setItem: (k, v) => storage.set(k, v) },
-			replace,
+			{ session, persistent },
+			vi.fn(),
 		);
 		expect(again).toBe("abc");
+	});
+
+	it("a fresh URL token wins over the stored one", () => {
+		const { session, persistent } = fakeStorages();
+		persistent.setItem("gentle-dot-token", "old");
+		const token = tokenFromLocation(
+			{ hash: "#token=new", pathname: "/", search: "" },
+			{ session, persistent },
+			vi.fn(),
+		);
+		expect(token).toBe("new");
+		expect(persistent.getItem("gentle-dot-token")).toBe("new");
+	});
+
+	it("keeps the session token when persistent storage is empty", () => {
+		const { session, persistent } = fakeStorages();
+		session.setItem("gentle-dot-token", "abc");
+		const token = tokenFromLocation(
+			{ hash: "", pathname: "/", search: "" },
+			{ session, persistent },
+			vi.fn(),
+		);
+		expect(token).toBe("abc");
+	});
+
+	it("returns undefined with neither a fragment nor a stored token", () => {
+		const { session, persistent } = fakeStorages();
+		expect(
+			tokenFromLocation({ hash: "", pathname: "/", search: "" }, { session, persistent }, vi.fn()),
+		).toBeUndefined();
 	});
 });
 

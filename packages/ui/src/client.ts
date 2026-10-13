@@ -16,6 +16,15 @@ interface ClientHandlers {
 const BACKOFF_MS = [500, 1000, 2000, 5000];
 const TOKEN_KEY = "gentle-dot-token";
 
+/**
+ * Stores an access key typed by hand (a phone, or an installed PWA, which keeps its own storage on
+ * iOS) in both storages, the same way a URL token lands (see {@link tokenFromLocation}).
+ */
+export function saveToken(token: string, storages: { session: StorageLike; persistent: StorageLike }): void {
+	storages.session.setItem(TOKEN_KEY, token);
+	storages.persistent.setItem(TOKEN_KEY, token);
+}
+
 /** One WebSocket session with the daemon: hello, reconnect with backoff, and history refresh. */
 export class DotClient {
 	private socket: WebSocket | undefined;
@@ -34,12 +43,29 @@ export class DotClient {
 	start(): void {
 		this.stopped = false;
 		this.connect();
+		this.wakeListeners = wakeTriggers(() => this.wake());
 	}
 
 	stop(): void {
 		this.stopped = true;
+		this.wakeListeners?.();
+		this.wakeListeners = undefined;
 		clearTimeout(this.retryTimer);
 		this.socket?.close();
+	}
+
+	/**
+	 * A phone suspends the socket in the background; when the page returns or the
+	 * network comes back, reconnect now instead of waiting out the backoff. Only a
+	 * dropped connection with a pending retry wakes: an open socket or a client
+	 * waiting on authorization must stay as they are.
+	 */
+	private wake(): void {
+		if (this.stopped || this.ready || this.retryTimer === undefined) return;
+		clearTimeout(this.retryTimer);
+		this.retryTimer = undefined;
+		this.attempts = 0;
+		this.connect();
 	}
 
 	send(message: ClientMessage): boolean {
@@ -49,6 +75,10 @@ export class DotClient {
 	}
 
 	private connect(): void {
+		// The scheduled retry is consumed by this attempt; a fired timer id must not
+		// linger and make a later wake think a retry is still pending.
+		clearTimeout(this.retryTimer);
+		this.retryTimer = undefined;
 		const Impl = this.handlers.WebSocketImpl ?? WebSocket;
 		const socket = new Impl(this.info.url);
 		this.socket = socket;
@@ -101,21 +131,32 @@ interface StorageLike {
 	setItem(key: string, value: string): void;
 }
 
+/** Registers the page-level triggers that should wake a dropped connection; returns the cleanup. */
+function wakeTriggers(wake: () => void): () => void {
+	document.addEventListener("visibilitychange", wake);
+	window.addEventListener("online", wake);
+	return () => {
+		document.removeEventListener("visibilitychange", wake);
+		window.removeEventListener("online", wake);
+	};
+}
+
 /**
  * The browser receives the token once in the URL fragment (`#token=…`), keeps it
- * in session storage, and removes it from the address bar.
+ * in session storage and persistent storage, and removes it from the address bar.
  */
 export function tokenFromLocation(
 	location: LocationLike,
-	storage: StorageLike,
+	storages: { session: StorageLike; persistent: StorageLike },
 	replaceUrl: (url: string) => void,
 ): string | undefined {
 	const match = /(?:^#|&)token=([^&]+)/.exec(location.hash);
 	if (match?.[1]) {
 		const token = decodeURIComponent(match[1]);
-		storage.setItem(TOKEN_KEY, token);
+		storages.session.setItem(TOKEN_KEY, token);
+		storages.persistent.setItem(TOKEN_KEY, token);
 		replaceUrl(`${location.pathname}${location.search}`);
 		return token;
 	}
-	return storage.getItem(TOKEN_KEY) ?? undefined;
+	return storages.session.getItem(TOKEN_KEY) ?? storages.persistent.getItem(TOKEN_KEY) ?? undefined;
 }

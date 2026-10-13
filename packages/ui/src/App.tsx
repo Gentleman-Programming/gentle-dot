@@ -1,6 +1,7 @@
 import type { ClientMessage } from "@gentle-dot/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type ConnectionInfo, tokenFromLocation } from "./client.ts";
+import { type ConnectionInfo, saveToken, tokenFromLocation } from "./client.ts";
+import { AccessKeyForm } from "./components/AccessKeyForm.tsx";
 import { ChatSurface } from "./components/ChatSurface.tsx";
 import type { ComputerControls } from "./components/Computer.tsx";
 import { DotSurface } from "./components/DotSurface.tsx";
@@ -37,14 +38,23 @@ export function windowEffects(search: string): "native" | "none" {
 }
 
 function browserConnection(): ConnectionInfo | undefined {
-	const token = tokenFromLocation(window.location, window.sessionStorage, (url) =>
-		window.history.replaceState(null, "", url),
+	const token = tokenFromLocation(
+		window.location,
+		{ session: window.sessionStorage, persistent: window.localStorage },
+		(url) => window.history.replaceState(null, "", url),
 	);
 	if (!token) return undefined;
 	const daemon = import.meta.env.VITE_DAEMON_ORIGIN as string | undefined;
 	const base = daemon ? new URL(daemon) : window.location;
 	const protocol = base.protocol === "https:" ? "wss:" : "ws:";
 	return { url: `${protocol}//${base.host}/ws`, token };
+}
+
+/** A key typed by hand (no URL token) lands in the same storages, then the app reconnects. */
+function connectWithAccessKey(token: string, onConnected: (info: ConnectionInfo) => void): void {
+	saveToken(token, { session: window.sessionStorage, persistent: window.localStorage });
+	const found = browserConnection();
+	if (found) onConnected(found);
 }
 
 /** ⌘⇧F (Ctrl+Shift+F off macOS) toggles the panel's full screen. */
@@ -194,8 +204,18 @@ function Assistant({ surface }: { surface: Surface }) {
 			<div className="chat chat-web">
 				<div className="status" role="status">
 					{unreachable ??
-						"This page needs your access key. Open it from the Gentle Dot menu (Open in browser)."}
+						"This page needs your access key. Open it from the Gentle Dot menu (Open in browser), or paste it below."}
 				</div>
+				{missingToken ? (
+					<AccessKeyForm
+						onSubmit={(token) =>
+							connectWithAccessKey(token, (info) => {
+								setInfo(info);
+								setMissingToken(false);
+							})
+						}
+					/>
+				) : null}
 			</div>
 		);
 	}
