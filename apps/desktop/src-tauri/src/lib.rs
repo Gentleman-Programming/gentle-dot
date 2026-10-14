@@ -1,6 +1,7 @@
 pub mod alert;
 pub mod app_channel;
 pub mod approvals;
+pub mod autostart;
 pub mod computer;
 pub mod config;
 pub mod daemon;
