@@ -151,7 +151,7 @@ fn desktop_file(config: &DesktopConfig) -> PathBuf {
     config.data_dir.join("desktop.json")
 }
 
-type CommandResult<T = ()> = Result<T, String>;
+pub(crate) type CommandResult<T = ()> = Result<T, String>;
 
 fn err(error: impl std::fmt::Display) -> String {
     error.to_string()

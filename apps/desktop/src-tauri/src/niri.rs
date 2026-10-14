@@ -35,6 +35,11 @@ pub(crate) mod kdl_binds;
 /// testable without a real home directory. Nothing outside Linux+Niri calls it.
 #[allow(dead_code)]
 pub(crate) mod config_file;
+/// Slice 4a pure routing and gate planners: tray/rose predicates, gate/hide
+/// planners, fullscreen dispatch and the joint/unit route predicates. No
+/// `AppHandle`, `Shell`, GTK or thread; `allow(dead_code)` until wiring lands.
+#[allow(dead_code)]
+pub(crate) mod route_gate;
 
 /// Single-line wire requests.
 pub const WINDOWS_REQUEST: &str = "\"Windows\"";
