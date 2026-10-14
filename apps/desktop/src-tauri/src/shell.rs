@@ -29,8 +29,9 @@ use crate::niri::gate::*;
 // snapshot and now live in `niri/route_gate.rs`; imported, never redefined.
 #[cfg(target_os = "linux")]
 use crate::niri::route_gate::{
-    GateEffect, RestoreCompletion, joint_mover_from_signals, native_niri_mode, native_restore_planned,
-    niri_socket_present, plan_gate_effects, plan_restore_completion, shared_route_wanted,
+    GateEffect, RestoreCompletion, hide_intent_next, joint_mover_from_signals, native_niri_mode,
+    native_restore_planned, niri_socket_present, plan_gate_effects, plan_hide_completion,
+    plan_restore_completion, plan_toggle_route, shared_route_wanted,
 };
 #[cfg(target_os = "linux")]
 use gtk::prelude::{GtkWindowExt, WidgetExt};
@@ -543,8 +544,87 @@ async fn connection_info(app: AppHandle) -> CommandResult<ConnectionInfo> {
     .map_err(err)?
 }
 
+/// Publishes a hide intent with its generation:
+/// monotonic high-water — an older overlapping hide can never clobber a
+/// newer publish. Production publishes through take_hide_generation below
+/// (single gate hold); this stays the shared monotonic primitive behind it.
+/// Test-only caller keeps it live under cfg(test); allowed dead in production
+/// builds like the other legacy history helpers.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn publish_hide_intent(hide: &Mutex<Option<u64>>, job: u64) {
+    let mut held = hide.lock().unwrap();
+    *held = hide_intent_next(*held, job);
+}
+
+/// Atomic hide take-plus-publish: the ONE production
+/// path behind hide_panel_niri — bumps the epoch, clears any gate, and owns
+/// the versioned marker inside a SINGLE gate critical section (gate→hide
+/// order, brief, never across socket or main-thread waits), so no show/mode
+/// publish can interleave between the take and the marker. Same bump/clear
+/// semantics as mode_take_generation (SeqCst fetch_add, gate None) plus the
+/// same monotonic rule as publish_hide_intent — but NOT a nested call of
+/// either (both would re-lock a held mutex and deadlock); the orders are
+/// inlined here under the one hold. A newer publish is never overwritten by
+/// an older completion: completions clear only their exact owner.
+#[cfg(target_os = "linux")]
+fn take_hide_generation(
+    epoch: &AtomicU64,
+    gate: &Mutex<Option<u64>>,
+    hide: &Mutex<Option<u64>>,
+) -> u64 {
+    let mut held = gate.lock().unwrap();
+    let next = epoch.fetch_add(1, Ordering::SeqCst) + 1;
+    *held = None;
+    let mut intent = hide.lock().unwrap();
+    *intent = hide_intent_next(*intent, next);
+    niri_trace!("hide take job={next}");
+    next
+}
+
+/// Whether a hide intent is still fresh: the stored
+/// job equals the live epoch. A newer lifecycle (show/mode/hide) advances
+/// the epoch and stales it automatically — no explicit invalidation needed.
+#[cfg(target_os = "linux")]
+fn hide_intent_fresh(hide: &Mutex<Option<u64>>, epoch: &AtomicU64) -> bool {
+    *hide.lock().unwrap() == Some(epoch.load(Ordering::SeqCst))
+}
+
+/// Releases a hide intent only for its exact owner:
+/// returns whether anything was cleared. A newer publish is never clobbered.
+#[cfg(target_os = "linux")]
+fn clear_hide_intent(hide: &Mutex<Option<u64>>, job: u64) -> bool {
+    let mut held = hide.lock().unwrap();
+    if *held == Some(job) {
+        *held = None;
+        true
+    } else {
+        false
+    }
+}
+
 #[tauri::command]
 fn toggle_panel(app: AppHandle) -> CommandResult {
+    // Pending-hide intent (Niri only): a fresh pending hide is
+    // logically hidden — the panel is still mapped while capture runs — so
+    // a second toggle reopens without consulting visibility (and without
+    // its blocking getter). Stale or absent intent falls through below.
+    #[cfg(target_os = "linux")]
+    {
+        let shell = app.state::<Shell>();
+        if niri_route_env(shell.places_windows) {
+            // Dormant shared-unit branch: explicit activation plus
+            // Niri only; the legacy toggle below stays untouched while dormant.
+            if let Some(routed) = route_unit_transition(&app, UnitTransition::Toggle) {
+                return routed;
+            }
+            let show = plan_toggle_route(
+                hide_intent_fresh(&shell.native_hide_job, &shell.native_epoch),
+                || window(&app, PANEL)?.is_visible().map_err(err),
+            )?;
+            return if show { show_panel(&app) } else { hide_panel(app) };
+        }
+    }
     if window(&app, PANEL)?.is_visible().map_err(err)? {
         hide_panel(app)
     } else {
@@ -556,12 +636,214 @@ fn toggle_panel(app: AppHandle) -> CommandResult {
 fn hide_panel(app: AppHandle) -> CommandResult {
     let panel = window(&app, PANEL)?;
     let shell = app.state::<Shell>();
-    if shell.full_screen.lock().unwrap().is_none() {
+    #[cfg(target_os = "linux")]
+    if niri_route_env(shell.places_windows) {
+        // Dormant shared-unit branch: logical close keeps the
+        // mapped RoseOnly surface; only hidden-rose truly unmaps. The
+        // legacy hide (anchor capture + worker) below stays while dormant.
+        if let Some(routed) = route_unit_transition(&app, UnitTransition::Close) {
+            return routed;
+        }
+        return hide_panel_niri(app, &panel);
+    }
+    // Hiding is the user's intent, so it is the only capture point: no panel
+    // Moved listener. Recording every move would misclassify programmatic
+    // placements (the default beside-the-Dot frame) as user moves and break
+    // Dot-following for never-moved panels. On native Wayland the compositor
+    // owns placement, so app coordinates are never authoritative there: the
+    // in-memory spot is preserved untouched. The spot lives in memory only
+    // and never touches the disk, so it cannot survive an app restart; a
+    // legacy `panel_points` value in an old file is ignored, never migrated.
+    if shell.places_windows && shell.full_screen.lock().unwrap().is_none() {
+        let visible = panel.is_visible().unwrap_or(false);
         if let Ok(rect) = rect_of(&panel) {
-            *shell.panel_spot.lock().unwrap() = Some((rect.x, rect.y));
+            if panel_capture_valid(true, false, rect.width, rect.height, visible) {
+                *shell.panel_spot.lock().unwrap() = Some((rect.x, rect.y));
+            }
         }
     }
     panel.hide().map_err(err)
+}
+
+/// Runs one hide capture-to-completion transaction:
+/// the production seam behind hide_panel_niri's pool work, with injected
+/// capture fetch and completion dispatch so tests drive the exact ordering
+/// without a runtime. Acquires native_io, re-checks freshness, captures
+/// whenever mapped float (tiled safely yields None — never skipped on a
+/// stale recorded mode alone), merges and fresh-commits the anchor, then
+/// ALWAYS runs `finish`: the completion itself re-verifies ownership, so a
+/// stale job still resolves its intent instead of stranding it.
+#[cfg(target_os = "linux")]
+fn run_hide_transaction(
+    shell: &Shell,
+    job: u64,
+    visible: bool,
+    snap_epoch: u64,
+    pre_take_epoch: u64,
+    capture: &mut impl FnMut() -> Option<CompactSpot>,
+    finish: &mut impl FnMut(),
+) {
+    let outcome = native_io_sequenced(&shell.native_io, &shell.native_epoch, job, || {
+        let fresh = decide_native_capture(visible, snap_epoch, pre_take_epoch, || capture());
+        let current_anchor = shell.native_compact.lock().unwrap().clone();
+        let remembered = merge_compact_spot(current_anchor, fresh);
+        commit_compact_anchor(
+            &shell.native_compact,
+            &shell.native_gate,
+            &shell.native_epoch,
+            job,
+            remembered,
+        )
+    });
+    match outcome {
+        Some(landed) => niri_trace!("hide pool job={job} anchor_landed={landed}"),
+        None => niri_trace!("hide pool job={job} stale-before-capture"),
+    }
+    finish();
+}
+
+/// Failed hide-delivery resolution: the ONE production
+/// seam behind BOTH the main-thread enqueue failure and the pool-join failure
+/// below — releases only the exact owner's intent and reports whether it did.
+/// An older failure can never clear a newer pending hide, and nothing is
+/// queued here, so no hide runs after this cleanup. Pool work never covers
+/// (no opacity-0), so a failed join leaves the panel as-mapped with nothing
+/// visual to unwind; the caller logs the job for correlation.
+#[cfg(target_os = "linux")]
+fn resolve_hide_delivery_failure(hide: &Mutex<Option<u64>>, job: u64) -> bool {
+    clear_hide_intent(hide, job)
+}
+
+/// Queues one hide completion on the main thread:
+/// unmaps plus visual reset only while still owning its generation AND its
+/// intent; anything else only releases a still-held own claim, never
+/// touching a newer lifecycle. The GTK handle resolves before any native
+/// lock; the gate→hide hold below (never the reverse anywhere)
+/// serializes against a concurrent show publish; only nonwaiting proxies
+/// and direct setters run under it — no getter waits, no socket, no queue
+/// waits. Fire-and-forget — queue errors mean shutdown.
+#[cfg(target_os = "linux")]
+fn queue_hide_completion(app: &AppHandle, panel: &WebviewWindow, job: u64) {
+    let (hidden, hidden_app) = (panel.clone(), app.clone());
+    if panel
+        .run_on_main_thread(move || {
+        let gtk = hidden.gtk_window().ok();
+        let shell = hidden_app.state::<Shell>();
+        let _gate = shell.native_gate.lock().unwrap();
+        let now = shell.native_epoch.load(Ordering::SeqCst);
+        let intent = *shell.native_hide_job.lock().unwrap();
+        match plan_hide_completion(now, job, intent) {
+            Some(effects) => {
+                for effect in effects {
+                    match effect {
+                        GateEffect::Unmap => {
+                            if let Err(error) = hidden.hide().map_err(err) {
+                                eprintln!("gentle-dot: panel hide failed: {error}");
+                            }
+                        }
+                        GateEffect::ResetVisuals => {
+                            if let Some(gtk_window) = gtk.as_ref() {
+                                gtk_window.set_opacity(GATED_OPACITY_SHOWN);
+                                gtk_window.set_accept_focus(true);
+                            }
+                            let _ = hidden.set_ignore_cursor_events(false);
+                        }
+                    }
+                }
+            }
+            None => {
+                niri_trace!("hide completion stale job={job} current={now}");
+            }
+        }
+        clear_hide_intent(&shell.native_hide_job, job);
+        })
+        .is_err()
+    {
+        // The main thread never got the completion: release only our own
+        // intent so a retry can proceed, never unmapping a newer lifecycle —
+        // nothing was queued, so no hide runs after this cleanup.
+        let shell = app.state::<Shell>();
+        resolve_hide_delivery_failure(&shell.native_hide_job, job);
+        eprintln!("gentle-dot: hide completion missed the main thread for job={job}");
+    }
+}
+
+/// Niri-native hide: publishes a versioned hide intent,
+/// captures the compact spot on the blocking pool, then completes the unmap
+/// on the main thread only while still owning its generation. The take plus
+/// intent publication serialize with shows/modes under the gate domain; the
+/// capture IPC runs on the pool under native_io with no state lock held
+/// (same hazard as the mode path). No Tauri getter runs under a
+/// native lock (visibility snapshots first); only brief nonwaiting stores
+/// run while held. Returns Ok once queued — the pool owns the causal
+/// capture-then-completion chain, never the caller.
+#[cfg(target_os = "linux")]
+fn hide_panel_niri(app: AppHandle, panel: &WebviewWindow) -> CommandResult {
+    use std::path::PathBuf;
+    let shell = app.state::<Shell>();
+    // Snapshot the blocking getter before any native lock: getters wait
+    // on the main thread, whose handlers take the mode lock. A racing show
+    // is detected below via the generation instead of re-querying under lock.
+    let snap_epoch = shell.native_epoch.load(Ordering::SeqCst);
+    let visible = snapshot_visible(|| panel.is_visible());
+    // Compare before our own bump: any intervening lifecycle invalidates the
+    // snapshot, and the shared helper stays fail-closed on stale — a negative
+    // or racing snapshot never infers a positive it never observed.
+    let current = shell.native_epoch.load(Ordering::SeqCst);
+    // Publish take + versioned intent atomically: one gate
+    // hold, so no show/mode can interleave between the bump and the marker.
+    let next = take_hide_generation(&shell.native_epoch, &shell.native_gate, &shell.native_hide_job);
+    let socket = std::env::var("NIRI_SOCKET").ok().filter(|path| !path.is_empty());
+    let socket_present = socket.is_some();
+    niri_trace!("hide capture queued job={next} visible={visible} socket={socket_present}");
+    // Pool owns capture-then-completion causally: the completion is queued
+    // only after the merge/commit resolve (or bounded failure), never as a
+    // second independent queue. Socketless skips capture inside the same
+    // path — still bounded, still fresh-checked. No UI wait on IO, mutex,
+    // join, recv, or socket — this returns once spawned.
+    let (pool_app, pool_panel) = (app.clone(), panel.clone());
+    let monitor_app = app.clone();
+    let join = tauri::async_runtime::spawn_blocking(move || {
+        let mut fetch = || {
+            let Some(path) = socket.as_ref().map(PathBuf::from) else {
+                return None;
+            };
+            let mut request = |wire: &str, timeout: Duration| {
+                crate::niri::Client::new(&path, timeout).request(wire)
+            };
+            match crate::niri::capture_compact_spot(std::process::id(), &mut request) {
+                Ok(found) => found,
+                Err(error) => {
+                    // Bounded secret-free diagnostic: kind only,
+                    // never window JSON or socket paths. The merge below keeps
+                    // the current anchor on None, so a failed capture never
+                    // invents a position.
+                    eprintln!("gentle-dot: hide capture failed kind={} job={next}", error.kind());
+                    None
+                }
+            }
+        };
+        let mut finish = || queue_hide_completion(&pool_app, &pool_panel, next);
+        let shell = pool_app.state::<Shell>();
+        run_hide_transaction(&shell, next, visible, snap_epoch, current, &mut fetch, &mut finish);
+    });
+    // Pool-join monitor: the handle only resolves Err on a pool
+    // panic/cancel — spawn itself always returns a handle, so no earlier
+    // Result is claimed. On failure release only our own intent and log; no
+    // visual cleanup is queued (pool work never covers, so the panel stays
+    // as-mapped). Fire-and-forget like every other queue here: at shutdown
+    // the Shell drops with the runtime, and any newer lifecycle already
+    // staled this intent via the epoch. NOTE: native_io is held across the
+    // capture socket deliberately (transaction ownership) — never
+    // across GTK getters, acknowledgments, or UI waits.
+    let _ = tauri::async_runtime::spawn(async move {
+        if let Err(error) = join.await {
+            let shell = monitor_app.state::<Shell>();
+            resolve_hide_delivery_failure(&shell.native_hide_job, next);
+            eprintln!("gentle-dot: hide pool failed job={next}: {error}");
+        }
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -835,12 +1117,287 @@ fn place_panel_next_to_dot(app: &AppHandle) -> CommandResult {
     move_to(&panel, position)
 }
 
+/// Native mode transition with window constraints: expand
+/// releases fixed constraints before tiling (an unresizable GTK window
+/// advertises min=max=420x640 and Niri clamps the tile), compact re-pins them
+/// after the 420x640 size lands (pinning while large would freeze it). Order is
+/// expand: resizable(true) → tile → width → height; compact: float → size →
+/// resizable(false) → restore handoff. Same-compact sends nothing; same-
+/// expanded retries managed geometry best-effort. Setter failure stops with no
+/// IPC and no flip; tile failure rolls constraints back best-effort only while
+/// still compact; post-flip geometry errors report the honestly expanded mode
+/// with a diagnostic instead of a false compact state.
+#[cfg(target_os = "linux")]
+fn run_native_mode_change(
+    expanded: &mut bool,
+    on: bool,
+    pid: u32,
+    set_resizable: &mut impl FnMut(bool) -> Result<(), String>,
+    set_compact_size: &mut impl FnMut() -> Result<(), String>,
+    request: &mut impl FnMut(&str, Duration) -> std::io::Result<serde_json::Value>,
+    queue_restore: &mut impl FnMut(),
+) -> Result<bool, String> {
+    // Actual-mode reconcile: the recorded mode can lag
+    // compositor effects that landed on wire without a state commit — a
+    // superseded tile/float finishes regardless of generations. Consult the
+    // exact own panel once, bounded, under the caller's I/O ownership; a
+    // failed query surfaces exactly like the apply path below, while a
+    // missing/ambiguous panel degrades to the recorded behavior. Never a
+    // focused-window fallback (see own_panel).
+    if let Some(floating) = match request(crate::niri::WINDOWS_REQUEST, crate::niri::NATIVE_MODE_BUDGET) {
+        Ok(windows) => crate::niri::own_panel_window(&windows, pid).map(|panel| panel.floating),
+        Err(error) => return Err(error.to_string()),
+    } {
+        *expanded = !floating;
+    }
+    if !on {
+        // Collapse always ends with a restore queued: a pending show's reveal
+        // obligation transfers to this generation instead of stranding at
+        // opacity 0, and an already-compact panel settles immediately.
+        if !*expanded {
+            queue_restore();
+            return Ok(false);
+        }
+        let now = crate::niri::apply_native_mode(expanded, on, pid, request)
+            .map_err(|error| error.to_string())?;
+        set_compact_size()?;
+        set_resizable(false)?;
+        queue_restore();
+        return Ok(now);
+    }
+    // Expand below, working copy already reconciled: an actually-floating
+    // panel tiles even against a stale expanded record (never a blind
+    // geometry retry + commit over it); an actually-tiled panel takes the
+    // size-only retry without a redundant tile.
+    if *expanded {
+        return retry_managed_geometry(pid, request);
+    }
+    // Expand only below (collapse always returns above): tile with the
+    // reconciled working copy.
+    // Release fixed constraints before tiling; a setter failure stops
+    // here with no IPC and no flip.
+    set_resizable(true)?;
+    match crate::niri::apply_native_mode(expanded, on, pid, request) {
+            Ok(now) => Ok(now),
+            Err(error) => {
+                if *expanded {
+                    // Post-flip geometry failure: honestly expanded already —
+                    // report it with a diagnostic, never a false compact.
+                    eprintln!("gentle-dot: expand geometry failed after tiling: {error}");
+                    Ok(true)
+                } else {
+                    // Still compact: restore fixed constraints best-effort.
+                    let _ = set_resizable(false);
+                    Err(error.to_string())
+                }
+            }
+        }
+}
+
+/// Best-effort managed-geometry retry for an already-expanded panel: resolves the exact own window once, then re-sends width plus height
+/// inside one aggregate budget. Every failure — including a missing window —
+/// keeps the honestly expanded mode with a diagnostic instead of an error.
+#[cfg(target_os = "linux")]
+fn retry_managed_geometry(
+    pid: u32,
+    request: &mut impl FnMut(&str, Duration) -> std::io::Result<serde_json::Value>,
+) -> Result<bool, String> {
+    use std::time::Instant;
+    let start = Instant::now();
+    let remaining = || crate::niri::NATIVE_MODE_BUDGET.saturating_sub(start.elapsed());
+    let windows = match request(crate::niri::WINDOWS_REQUEST, remaining()) {
+        Ok(windows) => windows,
+        Err(error) => {
+            eprintln!("gentle-dot: managed geometry retry lookup failed: {error}");
+            return Ok(true);
+        }
+    };
+    let Some(panel) = crate::niri::own_panel_window(&windows, pid) else {
+        return Ok(true);
+    };
+    for wire in crate::niri::action_managed_geometry(panel.id) {
+        let handled = request(&wire, remaining())
+            .map(|reply| crate::niri::is_handled(&reply))
+            .unwrap_or(false);
+        if !handled {
+            eprintln!("gentle-dot: managed geometry retry failed for window {}", panel.id);
+            return Ok(true);
+        }
+    }
+    Ok(true)
+}
+
+/// Show-entry hide invalidation: the FIRST production
+/// step of show_panel_niri — before ANY branch read, show, focus, emit, or
+/// fail-closed return — so even the gated no-worker Err path stales a fresh
+/// pending hide whose completion could otherwise unmap the show. Conditional
+/// only: with no fresh intent nothing bumps and the gate is untouched (no
+/// unconditional double bump with the handoff below). Atomic under one
+/// gate→hide hold: the freshness check plus the bump/clear share it, so a
+/// concurrent handoff publish can neither slip between them nor lose its gate
+/// here. The bump alone stales the intent (fresh means stored == epoch); the
+/// old hide's own completion still resolves its stale marker, so nothing
+/// strands and no hide runs after this show without a newer user hide.
+#[cfg(target_os = "linux")]
+fn prepare_niri_show(
+    epoch: &AtomicU64,
+    gate: &Mutex<Option<u64>>,
+    hide: &Mutex<Option<u64>>,
+) -> Option<u64> {
+    let mut held = gate.lock().unwrap();
+    if *hide.lock().unwrap() != Some(epoch.load(Ordering::SeqCst)) {
+        return None;
+    }
+    let next = epoch.fetch_add(1, Ordering::SeqCst) + 1;
+    *held = None;
+    niri_trace!("show invalidate hide job={next}");
+    Some(next)
+}
+
 fn show_panel(app: &AppHandle) -> CommandResult {
+    #[cfg(target_os = "linux")]
+    if niri_route_env(app.state::<Shell>().places_windows) {
+        // Dormant shared-unit branch; legacy Niri show below stays.
+        if let Some(routed) = route_unit_transition(&app, UnitTransition::Open) {
+            return routed;
+        }
+        return show_panel_niri(app);
+    }
     place_panel(app)?;
     let panel = window(app, PANEL)?;
     panel.show().map_err(err)?;
     panel.set_focus().map_err(err)?;
     app.emit("dot://panel-shown", ()).map_err(err)
+}
+
+/// Niri-native show (the first-frame gate): every
+/// compact show hides its first frame behind opacity 0, then the existing
+/// worker reveals (opacity 1, focus, panel-shown) only after the settled IPC
+/// position verifies — visible-rose beside and hidden remembered/initial
+/// alike — so the first frame at opacity 1 never visibly slides from the
+/// anchor. Expanded keeps the direct show/focus/emit (tiling has no anchor
+/// to settle) — no workspace park, config rewrite, pre-map position, or
+/// fixed sleep anywhere. The window stays really mapped while
+/// gated (`hide()` still unmaps, and a toggle then hides/cancels); only
+/// focus plus the shown emit wait. During separate-window recovery the gate
+/// is disabled: show/focus/emit happen directly and positioning is best-effort,
+/// so a slow compositor can never turn opening into an invisible chat.
+#[cfg(target_os = "linux")]
+fn show_panel_niri(app: &AppHandle) -> CommandResult {
+    let shell = app.state::<Shell>();
+    // Invalidate a fresh pending hide FIRST: conditional take
+    // before ANY branch read, show, focus, emit, or fail-closed return — so
+    // even the gated no-worker Err below stales the hide whose completion
+    // could otherwise unmap this show. Bare shows bump nothing.
+    let _show_take =
+        prepare_niri_show(&shell.native_epoch, &shell.native_gate, &shell.native_hide_job);
+    // Brief state locks only; no Tauri getter runs while held.
+    let saved_some = shell.native_compact.lock().unwrap().is_some();
+    if !native_recovery_show_gated() {
+        let panel = window(app, PANEL)?;
+        panel.show().map_err(err)?;
+        panel.set_focus().map_err(err)?;
+        app.emit("dot://panel-shown", ()).map_err(err)?;
+        match shell.native_restore.lock().unwrap().as_ref() {
+            Some(tx) => {
+                let job = restore_handoff(
+                    tx,
+                    &shell.native_epoch,
+                    &shell.native_gate,
+                    RestoreIntent::PreserveCompact,
+                    &shell.native_intent,
+                )
+                .0;
+                niri_trace!("show queued job={job} sender=some");
+            }
+            // No entry-fresh hide can reach here: the entry take
+            // above already staled it, and a concurrent newer hide owns its
+            // own completion — taking again would only steal past it.
+            None => niri_trace!("show queue sender=none"),
+        }
+        return Ok(());
+    }
+    // Gated path: bump first so a concurrent hide (which bumps later) wins.
+    let tx = shell.native_restore.lock().unwrap().as_ref().cloned();
+    let Some(tx) = tx else {
+        // No worker can settle or reveal: fail closed for retry instead of
+        // showing at the unconfirmed anchor (same contract as the
+        // disconnected-queue cancel; the direct path stays expanded-only).
+        niri_trace!("show gated no-worker sender=none");
+        return Err("niri: restore worker unavailable; hidden for retry".to_owned());
+    };
+    let (job, queue) = gated_restore_handoff(
+        &tx,
+        &shell.native_epoch,
+        &shell.native_gate,
+        restore_intent_for_show(saved_some),
+        &shell.native_intent,
+    );
+    niri_trace!("show gated job={job}");
+    let panel = window(app, PANEL)?;
+    let (gated, gated_app) = (panel.clone(), app.clone());
+    panel
+        .run_on_main_thread(move || {
+            // Re-check inside: a hide/mode bump or newer show may have staled
+            // this map before the main thread ran it — then skip, so that
+            // lifecycle (hide or reveal) wins. Lock is brief, no getter held.
+            let shell = gated_app.state::<Shell>();
+            let current = shell.native_epoch.load(Ordering::SeqCst);
+            let gate = shell.native_gate.lock().unwrap();
+            let wanted = gate_reveal_fresh(job, current, *gate);
+            drop(gate);
+            if !wanted {
+                niri_trace!("show gated skip job={job} current={current}");
+                return;
+            }
+            // SAME closure, opacity 0 BEFORE show: no frame maps at full
+            // opacity. gtk_window is obtained INSIDE (never crosses threads).
+            match gated.gtk_window() {
+                Ok(gtk_window) => {
+                    gtk_window.set_opacity(GATED_OPACITY_HIDDEN);
+                    gtk_window.set_accept_focus(false);
+                }
+                Err(error) => eprintln!("gentle-dot: gated show lost opacity: {error}"),
+            }
+            // tao 0.37.1 aborts on `CursorIgnoreEvents(true)` before the
+            // native window exists (`event_loop.rs` unwraps the GDK window,
+            // `None` until realize; live RED: `/usr/bin/gentle-dot --toggle`
+            // SIGABRT on a never-yet-shown panel). `show()` and the cursor
+            // request share one FIFO channel and `Visible(true)` runs
+            // `show_all()` (synchronous realize) first, so the ignore request
+            // is only queued AFTER a successful show — never before it —
+            // while opacity 0 above still precedes every map. A failed show
+            // queues no ignore at all and releases only our own gate.
+            // Non-interactive until reveal; restored on reveal or hide/mode.
+            match gated.show().map_err(err) {
+                Ok(()) => {
+                    let _ = gated.set_ignore_cursor_events(true);
+                }
+                Err(error) => {
+                    // Never strand a gate on a hidden window: release only our
+                    // own job so the worker completion stales out cleanly.
+                    let shell = gated_app.state::<Shell>();
+                    let mut gate = shell.native_gate.lock().unwrap();
+                    if *gate == Some(job) {
+                        *gate = None;
+                    }
+                    eprintln!("gentle-dot: gated panel show failed: {error}");
+                }
+            }
+            // No focus, no panel-shown emit here: the worker reveal owns both.
+        })
+        .map_err(err)?;
+    if gated_needs_reveal_fallback(queue) {
+        // No consumer will ever complete this job: cancel the just-published
+        // gate (unmap plus opacity/interaction reset on the main thread, no
+        // focus, no emit) instead of revealing at the unconfirmed anchor.
+        // Queued after the map above, so the cleanup still lands second and
+        // never strands opacity 0; the user can reopen later for a retry.
+        eprintln!("gentle-dot: restore worker gone; hiding the ungated panel for retry");
+        cancel_gated_panel(app, job, "restore worker disconnected");
+        return Err("niri: restore worker disconnected".to_owned());
+    }
+    Ok(())
 }
 
 /// Snaps the Dot to the nearest edge and persists the position.

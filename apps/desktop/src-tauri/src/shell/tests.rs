@@ -2755,3 +2755,456 @@ fn shared_reveal_focus_follows_chat_open_only() {
     assert!(shared_reveal_focusable(true), "chat-open is focusable");
     assert!(!shared_reveal_focusable(false), "rose-only never takes focus");
 }
+
+#[cfg(target_os = "linux")]
+fn native_windows() -> serde_json::Value {
+    serde_json::json!({"Windows": [{
+        "id": 9, "pid": 100, "title": crate::platform::PANEL_TITLE,
+        "workspace_id": 7, "is_floating": true,
+        "layout": {"tile_pos_in_workspace_view": [10.0, 20.0], "window_size": [420, 640]},
+    }]})
+}
+
+/// Same shape with a tiled panel: the superseded-tile state where the
+/// recorded mode says compact but the compositor still tiles (unit 20f1).
+#[cfg(target_os = "linux")]
+fn native_windows_tiled() -> serde_json::Value {
+    serde_json::json!({"Windows": [{
+        "id": 9, "pid": 100, "title": crate::platform::PANEL_TITLE,
+        "workspace_id": 7, "is_floating": false,
+        "layout": {"tile_pos_in_workspace_view": [10.0, 20.0], "window_size": [420, 640]},
+    }]})
+}
+
+#[cfg(target_os = "linux")]
+struct ModeCase {
+    expanded: bool,
+    on: bool,
+    bare_windows: bool,
+    tiled_windows: bool,
+    fail_setter: bool,
+    fail_size: bool,
+    fail_fix: bool,
+    err_wires: Vec<String>,
+    ok_wires: Vec<String>,
+    expect_steps: Vec<ModeStep>,
+    expect_ok: Option<bool>,
+    expect_mode: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn check_mode_case(name: &str, case: &ModeCase) {
+    use std::cell::RefCell;
+    let log = RefCell::new(Vec::<ModeStep>::new());
+    let windows = if case.bare_windows {
+        serde_json::json!({"Windows": []})
+    } else if case.tiled_windows {
+        native_windows_tiled()
+    } else {
+        native_windows()
+    };
+    let mut set_resizable = |resizable: bool| -> Result<(), String> {
+        log.borrow_mut().push(ModeStep::Resizable(resizable));
+        if resizable && case.fail_setter {
+            return Err("setter down".to_owned());
+        }
+        if !resizable && case.fail_fix {
+            return Err("fix down".to_owned());
+        }
+        Ok(())
+    };
+    let mut set_compact_size = || -> Result<(), String> {
+        log.borrow_mut().push(ModeStep::Size);
+        if case.fail_size {
+            return Err("size down".to_owned());
+        }
+        Ok(())
+    };
+    let mut request = |wire: &str, _: Duration| -> std::io::Result<serde_json::Value> {
+        log.borrow_mut().push(ModeStep::Request(wire.to_owned()));
+        if wire == crate::niri::WINDOWS_REQUEST {
+            Ok(windows.clone())
+        } else if case.err_wires.iter().any(|w| w == wire) {
+            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "niri: silent"))
+        } else if case.ok_wires.iter().any(|w| w == wire) {
+            Ok(serde_json::json!({"unexpected": "ok"}))
+        } else {
+            Ok(serde_json::json!("Handled"))
+        }
+    };
+    let mut queue_restore = || log.borrow_mut().push(ModeStep::Handoff);
+    let mut expanded = case.expanded;
+    let outcome = run_native_mode_change(
+        &mut expanded, case.on, 100, &mut set_resizable, &mut set_compact_size,
+        &mut request, &mut queue_restore,
+    );
+    assert_eq!(log.borrow().as_slice(), case.expect_steps.as_slice(), "{name}");
+    match case.expect_ok {
+        Some(ok) => assert_eq!(outcome, Ok(ok), "{name}"),
+        None => assert!(outcome.is_err(), "{name}"),
+    }
+    assert_eq!(expanded, case.expect_mode, "{name}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_mode_table_expand_paths() {
+    let tilt = crate::niri::action_tiling(9);
+    let width = crate::niri::action_set_window_width(9);
+    let height = crate::niri::action_reset_window_height(9);
+    let queried = |wires: Vec<String>| {
+        let mut steps = vec![ModeStep::Request(crate::niri::WINDOWS_REQUEST.to_owned()), ModeStep::Resizable(true)];
+        steps.extend(wires.into_iter().map(ModeStep::Request));
+        steps
+    };
+    for (name, case) in [
+        ("release-tile-width-height", ModeCase {
+            expanded: false, on: true, bare_windows: false, tiled_windows: false,
+            fail_setter: false, fail_size: false, fail_fix: false,
+            err_wires: vec![], ok_wires: vec![],
+            expect_steps: queried(vec![crate::niri::WINDOWS_REQUEST.to_owned(), tilt.clone(), width.clone(), height.clone()]),
+            expect_ok: Some(true), expect_mode: true,
+        }),
+        ("release-failure-stops", ModeCase {
+            expanded: false, on: true, bare_windows: false, tiled_windows: false,
+            fail_setter: true, fail_size: false, fail_fix: false,
+            err_wires: vec![], ok_wires: vec![],
+            expect_steps: vec![ModeStep::Request(crate::niri::WINDOWS_REQUEST.to_owned()), ModeStep::Resizable(true)],
+            expect_ok: None, expect_mode: false,
+        }),
+        ("tile-failure-rolls-back", ModeCase {
+            expanded: false, on: true, bare_windows: false, tiled_windows: false,
+            fail_setter: false, fail_size: false, fail_fix: false,
+            err_wires: vec![tilt.clone()], ok_wires: vec![],
+            expect_steps: [queried(vec![crate::niri::WINDOWS_REQUEST.to_owned(), tilt.clone()]),
+                vec![ModeStep::Resizable(false)]].concat(),
+            expect_ok: None, expect_mode: false,
+        }),
+    ] {
+        check_mode_case(name, &case);
+    }
+    // Geometry failures after a Handled tile keep the honestly expanded
+    // mode while surfacing the error — never a false compact report, and
+    // no rollback clamp after the flip. Earlier geometry wires still run.
+    for (failing, before) in [(width.clone(), vec![]), (height.clone(), vec![width.clone()])] {
+        let name = "geometry-failure-stays-expanded";
+        let mut log_steps = vec![ModeStep::Request(crate::niri::WINDOWS_REQUEST.to_owned()),
+            ModeStep::Resizable(true),
+            ModeStep::Request(crate::niri::WINDOWS_REQUEST.to_owned()),
+            ModeStep::Request(tilt.clone())];
+        log_steps.extend(before.into_iter().map(ModeStep::Request));
+        log_steps.push(ModeStep::Request(failing.clone()));
+        check_mode_case(name, &ModeCase {
+            expanded: false, on: true, bare_windows: false, tiled_windows: false,
+            fail_setter: false, fail_size: false, fail_fix: false,
+            err_wires: vec![], ok_wires: vec![failing],
+            expect_steps: log_steps, expect_ok: Some(true), expect_mode: true,
+        });
+    }
+    // Unit 20f1: recorded expanded but actually floating (a superseded
+    // float landed without a commit) still tiles — never a blind geometry
+    // retry plus commit over a floating window.
+    check_mode_case("tile-despite-stale-expanded-record", &ModeCase {
+        expanded: true, on: true, bare_windows: false, tiled_windows: false,
+        fail_setter: false, fail_size: false, fail_fix: false,
+        err_wires: vec![], ok_wires: vec![],
+        expect_steps: queried(vec![crate::niri::WINDOWS_REQUEST.to_owned(), tilt.clone(), width.clone(), height.clone()]),
+        expect_ok: Some(true), expect_mode: true,
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_mode_table_compact_paths() {
+    let float = crate::niri::action_floating(9);
+    let queried = |wires: Vec<String>| wires.into_iter().map(ModeStep::Request).collect::<Vec<_>>();
+    for (name, case) in [
+        ("float-size-pin-restore", ModeCase {
+            expanded: true, on: false, bare_windows: false, tiled_windows: true,
+            fail_setter: false, fail_size: false, fail_fix: false,
+            err_wires: vec![], ok_wires: vec![],
+            expect_steps: [queried(vec![crate::niri::WINDOWS_REQUEST.to_owned(), crate::niri::WINDOWS_REQUEST.to_owned(), float.clone()]),
+                vec![ModeStep::Size, ModeStep::Resizable(false), ModeStep::Handoff]].concat(),
+            expect_ok: Some(false), expect_mode: false,
+        }),
+        ("float-failure-untouched", ModeCase {
+            expanded: true, on: false, bare_windows: false, tiled_windows: true,
+            fail_setter: false, fail_size: false, fail_fix: false,
+            err_wires: vec![float.clone()], ok_wires: vec![],
+            expect_steps: queried(vec![crate::niri::WINDOWS_REQUEST.to_owned(), crate::niri::WINDOWS_REQUEST.to_owned(), float.clone()]),
+            expect_ok: None, expect_mode: true,
+        }),
+        ("size-failure-compact-no-pin", ModeCase {
+            expanded: true, on: false, bare_windows: false, tiled_windows: true,
+            fail_setter: false, fail_size: true, fail_fix: false,
+            err_wires: vec![], ok_wires: vec![],
+            expect_steps: [queried(vec![crate::niri::WINDOWS_REQUEST.to_owned(), crate::niri::WINDOWS_REQUEST.to_owned(), float.clone()]),
+                vec![ModeStep::Size]].concat(),
+            expect_ok: None, expect_mode: false,
+        }),
+        ("fix-failure-compact", ModeCase {
+            expanded: true, on: false, bare_windows: false, tiled_windows: true,
+            fail_setter: false, fail_size: false, fail_fix: true,
+            err_wires: vec![], ok_wires: vec![],
+            expect_steps: [queried(vec![crate::niri::WINDOWS_REQUEST.to_owned(), crate::niri::WINDOWS_REQUEST.to_owned(), float.clone()]),
+                vec![ModeStep::Size, ModeStep::Resizable(false)]].concat(),
+            expect_ok: None, expect_mode: false,
+        }),
+        ("same-compact-silent", ModeCase {
+            expanded: false, on: false, bare_windows: false, tiled_windows: false,
+            fail_setter: false, fail_size: false, fail_fix: false,
+            err_wires: vec![], ok_wires: vec![],
+            expect_steps: [queried(vec![crate::niri::WINDOWS_REQUEST.to_owned()]),
+                vec![ModeStep::Handoff]].concat(),
+            expect_ok: Some(false), expect_mode: false,
+        }),
+        // Unit 20f1: recorded compact but actually tiled (a superseded
+        // tile landed without a commit) still floats back — a cached
+        // compact record never skips cancelling the tile.
+        ("same-compact-acts-on-tiled", ModeCase {
+            expanded: false, on: false, bare_windows: false, tiled_windows: true,
+            fail_setter: false, fail_size: false, fail_fix: false,
+            err_wires: vec![], ok_wires: vec![],
+            expect_steps: [queried(vec![crate::niri::WINDOWS_REQUEST.to_owned(), crate::niri::WINDOWS_REQUEST.to_owned(), float.clone()]),
+                vec![ModeStep::Size, ModeStep::Resizable(false), ModeStep::Handoff]].concat(),
+            expect_ok: Some(false), expect_mode: false,
+        }),
+    ] {
+        check_mode_case(name, &case);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_mode_table_retry_paths() {
+    let width = crate::niri::action_set_window_width(9);
+    let height = crate::niri::action_reset_window_height(9);
+    let queried = |wires: Vec<String>| wires.into_iter().map(ModeStep::Request).collect::<Vec<_>>();
+    for (name, case) in [
+        ("retry-regrows-geometry", ModeCase {
+            expanded: false, on: true, bare_windows: false, tiled_windows: true,
+            fail_setter: false, fail_size: false, fail_fix: false,
+            err_wires: vec![], ok_wires: vec![],
+            expect_steps: queried(vec![crate::niri::WINDOWS_REQUEST.to_owned(), crate::niri::WINDOWS_REQUEST.to_owned(), width.clone(), height.clone()]),
+            expect_ok: Some(true), expect_mode: true,
+        }),
+        ("retry-geometry-failure-diagnostic-ok", ModeCase {
+            expanded: true, on: true, bare_windows: false, tiled_windows: true,
+            fail_setter: false, fail_size: false, fail_fix: false,
+            err_wires: vec![], ok_wires: vec![width.clone()],
+            expect_steps: queried(vec![crate::niri::WINDOWS_REQUEST.to_owned(), crate::niri::WINDOWS_REQUEST.to_owned(), width.clone()]),
+            expect_ok: Some(true), expect_mode: true,
+        }),
+        ("retry-missing-window-noop", ModeCase {
+            expanded: true, on: true, bare_windows: true, tiled_windows: false,
+            fail_setter: false, fail_size: false, fail_fix: false,
+            err_wires: vec![], ok_wires: vec![],
+            expect_steps: queried(vec![crate::niri::WINDOWS_REQUEST.to_owned(), crate::niri::WINDOWS_REQUEST.to_owned()]),
+            expect_ok: Some(true), expect_mode: true,
+        }),
+    ] {
+        check_mode_case(name, &case);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hide_intent_publish_never_recedes() {
+    // Unit 20f2: overlapping publishes route through the ACTUAL shared
+    // helper — publish 7, then late publish 6 — and the water never
+    // recedes. (RED on the old unconditional store order above.)
+    let hide: Mutex<Option<u64>> = Mutex::new(None);
+    publish_hide_intent(&hide, 7);
+    publish_hide_intent(&hide, 6);
+    assert_eq!(*hide.lock().unwrap(), Some(7u64), "late older publish erased the newer intent");
+    publish_hide_intent(&hide, 7);
+    assert_eq!(*hide.lock().unwrap(), Some(7u64), "republish keeps the water");
+    assert!(clear_hide_intent(&hide, 7), "exact owner clears");
+    assert_eq!(*hide.lock().unwrap(), None);
+    assert!(!clear_hide_intent(&hide, 7), "double clear is a no-op");
+    publish_hide_intent(&hide, 9);
+    assert!(!clear_hide_intent(&hide, 8), "older job never clears newer intent");
+    assert_eq!(*hide.lock().unwrap(), Some(9u64));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hide_take_publishes_atomically_under_one_hold() {
+    // Unit 20f2a: the ACTUAL production take+publish — one bump clears
+    // any gate and owns the marker, so no show/mode can interleave
+    // between them. Monotonic both ways: a newer take supersedes, an
+    // older take never recedes a newer publish, and an older completion
+    // never clears the newer intent.
+    use std::sync::atomic::AtomicU64;
+    let epoch = AtomicU64::new(6);
+    let gate = Mutex::new(Some(6u64));
+    let _intents = Mutex::new(None::<(u64, RestoreIntent)>);
+    let hide = Mutex::new(None);
+    assert_eq!(take_hide_generation(&epoch, &gate, &hide), 7);
+    assert_eq!(epoch.load(Ordering::SeqCst), 7);
+    assert_eq!(*gate.lock().unwrap(), None, "take clears the gate");
+    assert_eq!(*hide.lock().unwrap(), Some(7u64), "take owns the marker");
+    assert_eq!(take_hide_generation(&epoch, &gate, &hide), 8);
+    assert_eq!(*hide.lock().unwrap(), Some(8u64));
+    assert!(!clear_hide_intent(&hide, 7), "older completion never clears newer intent");
+    assert_eq!(*hide.lock().unwrap(), Some(8u64));
+    // Older take against a newer publish keeps the water (same
+    // monotonic rule as publish_hide_intent, shared hold).
+    *hide.lock().unwrap() = Some(9u64);
+    let landed = take_hide_generation(&epoch, &gate, &hide);
+    assert_eq!(*hide.lock().unwrap(), Some(9u64), "stale take must not recede job={landed}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn show_entry_invalidates_fresh_hide_before_any_branch() {
+    // Unit 20f2a: the ACTUAL show-entry helper also called in
+    // show_panel_niri — a fresh pending hide stales before ANY branch
+    // read, so even the gated no-worker Err return cannot leave it
+    // fresh for its completion to unmap the show. No pending intent
+    // bumps nothing (no unconditional double bump with the handoff).
+    use std::sync::atomic::AtomicU64;
+    let epoch = AtomicU64::new(6);
+    let gate: Mutex<Option<u64>> = Mutex::new(None);
+    let hide: Mutex<Option<u64>> = Mutex::new(None);
+    assert_eq!(prepare_niri_show(&epoch, &gate, &hide), None);
+    assert_eq!(epoch.load(Ordering::SeqCst), 6, "bare show bumps nothing");
+    *hide.lock().unwrap() = Some(6u64);
+    assert_eq!(prepare_niri_show(&epoch, &gate, &hide), Some(7));
+    assert_eq!(epoch.load(Ordering::SeqCst), 7);
+    assert!(!hide_intent_fresh(&hide, &epoch), "pending hide stales at entry");
+    // The old hide's completion now plans nothing: no unmap, no reset.
+    assert_eq!(plan_hide_completion(7, 6, Some(6)), None, "stale completion has no effects");
+    // Already-stale intent likewise bumps nothing.
+    assert_eq!(prepare_niri_show(&epoch, &gate, &hide), None);
+    assert_eq!(epoch.load(Ordering::SeqCst), 7);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hide_delivery_failure_releases_only_its_owner() {
+    // Unit 20f2a: the ACTUAL seam behind both the main-thread enqueue
+    // failure and the pool-join failure — an older failure never clears
+    // a newer pending hide, and nothing is queued, so no hide runs
+    // after the cleanup (newer lifecycle plans nothing for the old job).
+    let hide: Mutex<Option<u64>> = Mutex::new(Some(9u64));
+    assert!(!resolve_hide_delivery_failure(&hide, 7), "old failure keeps newer intent");
+    assert_eq!(*hide.lock().unwrap(), Some(9u64));
+    assert_eq!(plan_hide_completion(9, 7, Some(9)), None, "no queued hide for the old job");
+    *hide.lock().unwrap() = Some(7u64);
+    assert!(resolve_hide_delivery_failure(&hide, 7), "exact owner releases");
+    assert_eq!(*hide.lock().unwrap(), None);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn toggle_routes_show_while_hide_pending() {
+    // Unit 20f2: full routing matrix through the ACTUAL production
+    // helper — a fresh pending hide routes Show even while mapped, and
+    // the visibility getter provably never runs then (it panics).
+    assert_eq!(plan_toggle_route::<String>(true, || panic!("getter skipped while pending")), Ok(true));
+    assert_eq!(plan_toggle_route::<String>(true, || Ok(false)), Ok(true));
+    assert_eq!(plan_toggle_route::<String>(false, || Ok(true)), Ok(false));
+    assert_eq!(plan_toggle_route::<String>(false, || Ok(false)), Ok(true));
+    assert!(plan_toggle_route::<String>(false, || Err("getter down".to_owned())).is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hide_completion_plans_only_for_fresh_owner() {
+    // Unit 20f2: delivery matrix through the ACTUAL planner — fresh job
+    // plus own intent unmaps+resets; stale epoch, superseded intent, or
+    // missing intent plan nothing (a gateless hide passes on epoch
+    // freshness alone: no gate is required).
+    assert_eq!(
+        plan_hide_completion(6, 6, Some(6)),
+        Some(vec![GateEffect::Unmap, GateEffect::ResetVisuals])
+    );
+    assert_eq!(plan_hide_completion(7, 6, Some(6)), None);
+    assert_eq!(plan_hide_completion(6, 6, Some(7)), None);
+    assert_eq!(plan_hide_completion(6, 6, None), None);
+    assert_eq!(plan_hide_completion(7, 6, None), None);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hide_transaction_orders_capture_before_finish() {
+    // Unit 20f2: the production seam with injected capture + recorder —
+    // fresh capture merges then finishes; stale skips capture but still
+    // finishes; capture-None preserves the anchor. No AppHandle, no socket.
+    let spot = crate::niri::CompactSpot { output: "DP-1".to_owned(), x: 3.0, y: 4.0 };
+    let shell = test_hide_shell(6, None);
+    let order = std::cell::RefCell::new(Vec::<&'static str>::new());
+    let captures = std::cell::Cell::new(0u32);
+    let mut capture = || {
+        order.borrow_mut().push("capture");
+        captures.set(captures.get() + 1);
+        Some(spot.clone())
+    };
+    let mut finish = || order.borrow_mut().push("finish");
+    run_hide_transaction(&shell, 6, true, 6, 6, &mut capture, &mut finish);
+    assert_eq!(captures.get(), 1);
+    assert_eq!(*order.borrow(), vec!["capture", "finish"]);
+    assert_eq!(*shell.native_compact.lock().unwrap(), Some(spot.clone()));
+    // Stale (epoch advanced): no capture, no overwrite, finish runs.
+    shell.native_epoch.store(7, Ordering::SeqCst);
+    order.borrow_mut().clear();
+    run_hide_transaction(&shell, 6, true, 6, 6, &mut capture, &mut finish);
+    assert_eq!(captures.get(), 1, "stale job never captures");
+    assert_eq!(*shell.native_compact.lock().unwrap(), Some(spot.clone()), "stale job never overwrites");
+    assert_eq!(*order.borrow(), vec!["finish"]);
+    // Capture-None (tiled/err): anchor preserved, finish runs.
+    shell.native_epoch.store(8, Ordering::SeqCst);
+    order.borrow_mut().clear();
+    let mut capture_none = || {
+        order.borrow_mut().push("capture");
+        None
+    };
+    run_hide_transaction(&shell, 8, true, 8, 8, &mut capture_none, &mut finish);
+    assert_eq!(*shell.native_compact.lock().unwrap(), Some(spot.clone()));
+    assert_eq!(*order.borrow(), vec!["capture", "finish"]);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hide_capture_blocked_leaves_state_locks_free() {
+    // Unit 20f2: parked fake capture inside the REAL seam — the caller
+    // never blocks; every state lock stays free under io; a newer show
+    // epoch published mid-capture refuses the commit yet still finishes.
+    // Channel barriers only; every wait is recv_timeout fail-closed and
+    // no spawned thread asserts, so one failure cannot hang the suite.
+    const BOUND: Duration = Duration::from_secs(5);
+    let anchor = crate::niri::CompactSpot { output: "DP-1".to_owned(), x: 1.0, y: 2.0 };
+    let spot = crate::niri::CompactSpot { output: "DP-1".to_owned(), x: 3.0, y: 4.0 };
+    let shell = test_hide_shell(6, Some(anchor.clone()));
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+    let shell_ref = &shell;
+    std::thread::scope(|scope| {
+        scope.spawn(move || {
+            let mut capture = || {
+                entered_tx.send(()).unwrap_or(());
+                if release_rx.recv_timeout(BOUND).is_err() {
+                    return None;
+                }
+                Some(spot.clone())
+            };
+            let mut finish = || {
+                done_tx.send(()).unwrap_or(());
+            };
+            run_hide_transaction(shell_ref, 6, true, 6, 6, &mut capture, &mut finish);
+        });
+        entered_rx.recv_timeout(BOUND).expect("capture parked under io");
+        // Same locks the production code holds brief-only: all free here.
+        assert!(shell.native_expanded.try_lock().is_ok());
+        assert!(shell.native_compact.try_lock().is_ok());
+        assert!(shell.native_mover.try_lock().is_ok());
+        assert!(shell.native_gate.try_lock().is_ok());
+        // Newer show epoch published while blocked: commit must refuse.
+        assert_eq!(mode_take_generation(&shell.native_epoch, &shell.native_gate), 7);
+        release_tx.send(()).expect("release capture");
+        done_rx.recv_timeout(BOUND).expect("stale job still finishes");
+    });
+    assert_eq!(*shell.native_compact.lock().unwrap(), Some(anchor), "stale commit never overwrites");
+}
