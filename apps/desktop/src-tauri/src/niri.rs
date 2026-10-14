@@ -24,6 +24,17 @@ pub(crate) mod gate;
 /// one-panel planning across Pair/PanelOnly/RoseOnly/Fullscreen, no caller yet.
 #[allow(dead_code)]
 pub(crate) mod unit_restore;
+/// App-managed Niri config snippets (binds/login spawn): pure text transforms,
+/// no I/O and no platform API, so this compiles identically on every target and
+/// is only ever CALLED from Linux+Niri paths. `allow(dead_code)`: the transforms
+/// land before their command wiring, and nothing outside Niri may call them.
+#[allow(dead_code)]
+pub(crate) mod kdl_binds;
+/// Portable location plus the safe backup/validate/write path for that snippet.
+/// Plain `std` only, every side effect injectable, so the production order is
+/// testable without a real home directory. Nothing outside Linux+Niri calls it.
+#[allow(dead_code)]
+pub(crate) mod config_file;
 
 /// Single-line wire requests.
 pub const WINDOWS_REQUEST: &str = "\"Windows\"";
