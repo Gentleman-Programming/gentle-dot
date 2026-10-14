@@ -46,6 +46,18 @@ pub(crate) mod route_gate;
 /// GTK or thread; `allow(dead_code)` until the builder+worker unit lands.
 #[allow(dead_code)]
 pub(crate) mod unit_state;
+/// Slice 4d dormant shared-surface runners: the legacy session route, the
+/// startup plan and compact-mode planner, the shared restore/surface
+/// predicates, the bounded render/animation waits, the mapped size settle
+/// and the cached/uncached single-panel restore sequence. No `AppHandle`
+/// or `Shell`; `allow(dead_code)` until the builder+worker unit lands.
+#[allow(dead_code)]
+pub(crate) mod unit;
+/// Dormant Niri-only shared-unit surface (T10/T12/T19): pure scanline
+/// geometry plus a thin main-thread GTK input-shape apply; no caller yet.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+pub(crate) mod unit_surface;
 
 /// Single-line wire requests.
 pub const WINDOWS_REQUEST: &str = "\"Windows\"";

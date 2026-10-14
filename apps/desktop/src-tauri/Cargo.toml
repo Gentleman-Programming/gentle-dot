@@ -58,6 +58,11 @@ core-foundation = "0.10"
 # dependency is already linked by tao on Linux.
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus-secret-service = "4.1"
+# First-visible-frame gate (experimental, Niri compact only): `WidgetExt::set_opacity`
+# on the `gtk_window()` inside a main-thread closure. Tauri 2.12.1 does not re-export
+# its transitive gtk 0.18.2, so this direct Linux-only pin reuses the locked version
+# already in Cargo.lock (crate cached: no new download, offline-safe).
+gtk = { version = "=0.18.2", features = ["v3_24"] }
 
 # The store's tests build D-Bus errors (the same `dbus` that dbus-secret-service uses).
 [target.'cfg(target_os = "linux")'.dev-dependencies]

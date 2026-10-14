@@ -1411,6 +1411,7 @@ dependencies = [
  "dbus",
  "dbus-secret-service",
  "getrandom 0.3.4",
+ "gtk",
  "image",
  "libc",
  "objc2",
