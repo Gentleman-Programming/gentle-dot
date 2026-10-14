@@ -17,6 +17,13 @@ use std::time::{Duration, Instant};
 
 pub(crate) mod calibration;
 pub(crate) mod base;
+/// Niri gate/epoch/restore kernel moved from shell.rs: job freshness,
+/// intent carry, cover planning and quiet helpers. Thin Tauri wrappers stay in shell.
+pub(crate) mod gate;
+/// Dormant shared-window restore planner/identity helper (T10/T11/T12/T19):
+/// one-panel planning across Pair/PanelOnly/RoseOnly/Fullscreen, no caller yet.
+#[allow(dead_code)]
+pub(crate) mod unit_restore;
 
 /// Single-line wire requests.
 pub const WINDOWS_REQUEST: &str = "\"Windows\"";
