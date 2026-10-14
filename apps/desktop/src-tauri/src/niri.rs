@@ -40,6 +40,12 @@ pub(crate) mod config_file;
 /// `AppHandle`, `Shell`, GTK or thread; `allow(dead_code)` until wiring lands.
 #[allow(dead_code)]
 pub(crate) mod route_gate;
+/// Slice 4b dormant shared-unit state and cover executor: activation/open/
+/// ready state, its panel snapshot, the transition planner/committer, the
+/// main-thread cover executor and the worker-wake decision. No `AppHandle`,
+/// GTK or thread; `allow(dead_code)` until the builder+worker unit lands.
+#[allow(dead_code)]
+pub(crate) mod unit_state;
 
 /// Single-line wire requests.
 pub const WINDOWS_REQUEST: &str = "\"Windows\"";
