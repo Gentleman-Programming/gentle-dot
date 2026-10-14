@@ -553,7 +553,21 @@ fn build_windows(
     #[cfg(target_os = "macos")]
     let panel = panel
         .effects(EffectsBuilder::new().effect(Effect::HudWindow).state(EffectState::Active).radius(20.0).build());
-    panel.build()?;
+    let panel = panel.build()?;
+
+    // Add navigation handler to open external links in the system browser instead of navigating within the panel
+    panel.on_navigation(move |window, navigation| {
+        if let tauri::WebviewNavigation::External(url) = &navigation {
+            // Open external links in the system browser instead of navigating in the webview
+            if let Err(e) = window.app_handle().opener().open_url(url.as_str(), None) {
+                eprintln!("Failed to open external URL: {}", e);
+            }
+            // Prevent the navigation in the webview
+            return false;
+        }
+        // Allow internal navigation (app routes, etc.)
+        true
+    });
 
     if !places_windows {
         // Native Wayland ignores positions; Hyprland window rules place and pin the Dot.
