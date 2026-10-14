@@ -353,3 +353,5 @@ Environment notes: Node v24.14.1 and pnpm are present. `cargo` is on PATH but `r
 
 - **L15 (2026-10-14, user):** "busquemos issues en gentle-dot para ayudar, #46 Fedora setup" — tomada.
 - **L16 (2026-10-14):** PR #66 abierto con `scripts/linux/setup-fedora.sh` completo + fix `SKIP_ROOT_CHECK` en `common.sh`. Tests en contenedor Fedora 44: detecta paquetes faltantes correctamente.
+
+- **L17 (2026-10-14):** #42 link navigation fix — PR #67 opened with navigation handler fix for panel webview. Intercepts external links (http/https) and opens in system browser via tauri_plugin_opener.
