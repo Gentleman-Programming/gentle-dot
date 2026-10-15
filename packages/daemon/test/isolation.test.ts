@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import {
 	existsSync,
 	mkdirSync,
@@ -11,6 +12,7 @@ import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import {
+	ensureGitBoundary,
 	ensureMemoryProject,
 	isolatedAgentEnv,
 	MEMORY_PROJECT,
@@ -244,6 +246,52 @@ describe("isolatedAgentEnv temporary folder", () => {
 		).toBe("/var/tmp/me");
 	});
 });
+
+describe("ensureGitBoundary", () => {
+	it("creates a git repo in the workspace so git never resolves upward to the user's HOME (#51)", () => {
+		// The workspace sits inside a parent that is itself a git repo, like a HOME dotfiles repo.
+		const outer = tempDir();
+		spawnGit(outer, ["init", "-q"]);
+		const workspace = join(outer, ".gentle-dot", "workspace");
+		mkdirSync(workspace, { recursive: true });
+		ensureGitBoundary(workspace);
+		// git rev-parse from the workspace now stops at the workspace, not at the parent repo.
+		const top = gitOut(["rev-parse", "--show-toplevel"], workspace);
+		expect(realpathSync(top)).toBe(realpathSync(workspace));
+	});
+
+	it("leaves an existing workspace repo as it is", () => {
+		const workspace = tempDir();
+		spawnGit(workspace, ["init", "-q"]);
+		writeFileSync(join(workspace, ".git", "sentinel"), "keep me");
+		ensureGitBoundary(workspace);
+		expect(readFileSync(join(workspace, ".git", "sentinel"), "utf8")).toBe("keep me");
+	});
+
+	it("writes a minimal .git when no git binary is available", () => {
+		const outer = tempDir();
+		spawnGit(outer, ["init", "-q"]);
+		const workspace = join(outer, "workspace");
+		mkdirSync(workspace, { recursive: true });
+		ensureGitBoundary(workspace, undefined, () => {
+			throw Object.assign(new Error("spawn git ENOENT"), { code: "ENOENT" });
+		});
+		expect(readFileSync(join(workspace, ".git", "HEAD"), "utf8")).toContain("refs/heads/");
+		const top = gitOut(["rev-parse", "--show-toplevel"], workspace);
+		expect(realpathSync(top)).toBe(realpathSync(workspace));
+	});
+});
+
+function spawnGit(cwd: string, args: string[]): void {
+	const result = spawnSync("git", args, { cwd });
+	if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+}
+
+function gitOut(args: string[], cwd: string): string {
+	const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+	if (result.status !== 0) throw new Error(`git failed: ${result.stderr}`);
+	return String(result.stdout).trim();
+}
 
 describe("ensureMemoryProject", () => {
 	it("names the workspace's memory project gentle-dot, replacing any other name", () => {
