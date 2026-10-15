@@ -1,8 +1,9 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { MAX_VOICE_AUDIO, MAX_VOICE_TEXT, type VoiceCapability } from "@gentle-dot/protocol";
 
 /**
@@ -26,6 +27,46 @@ const SPEECH_LANGUAGE = process.env.GENTLE_DOT_SPEECH_LANGUAGE || "es-US";
 const SPEECH_VOICE = process.env.GENTLE_DOT_SPEECH_VOICE || "Magpie-Multilingual.ES-US.Isabela";
 const TRANSCRIBE_TIMEOUT_MS = 45_000;
 const SPEECH_TIMEOUT_MS = 60_000;
+/**
+ * Where to copy the transcriber script and its package.json from: the repo's
+ * `packages/daemon/voice-tools` (source trees) or `<runtime>/daemon/voice-tools`
+ * (packaged installs). GENTLE_DOT_VOICE_TOOLS_SOURCE overrides (tests).
+ */
+function voiceToolsSource(): string | undefined {
+	if (process.env.GENTLE_DOT_VOICE_TOOLS_SOURCE) return process.env.GENTLE_DOT_VOICE_TOOLS_SOURCE;
+	const here = fileURLToPath(import.meta.url);
+	for (const relative of ["../../voice-tools", "../voice-tools"]) {
+		const candidate = join(here, "..", relative);
+		if (existsSync(join(candidate, "transcriber.js"))) return candidate;
+	}
+	return undefined;
+}
+
+/** Installs sherpa-onnx-node into the data dir's voice-tools with npm (default installDeps). */
+function npmInstallDeps(voiceToolsDir: string): Promise<void> {
+	const npm = process.env.GENTLE_DOT_NPM || "npm";
+	return new Promise((resolve, reject) => {
+		const child = spawn(npm, ["install", "--omit=dev", "--no-audit", "--no-fund"], {
+			cwd: voiceToolsDir,
+			stdio: ["ignore", "ignore", "pipe"],
+		});
+		let stderr = "";
+		child.stderr?.on("data", (chunk) => (stderr += String(chunk)));
+		const timer = setTimeout(() => {
+			child.kill();
+			reject(new Error("npm install timed out"));
+		}, 300_000);
+		child.on("error", (error) => {
+			clearTimeout(timer);
+			reject(error);
+		});
+		child.on("exit", (code) => {
+			clearTimeout(timer);
+			if (code === 0) resolve();
+			else reject(new Error(`voice: npm install failed (${code}): ${stderr.trim().split("\n").pop() ?? ""}`));
+		});
+	});
+}
 
 export type VoiceResult<T> = ({ ok: true } & T) | { ok: false; reason: string };
 
@@ -34,6 +75,11 @@ export interface VoiceServiceOptions {
 	apiKey: () => Promise<string | undefined>;
 	/** The daemon data dir; the local transcriber lives under `voice-tools/`. */
 	dataDir: string;
+	/**
+	 * Installs the transcriber's npm dependency into `<dataDir>/voice-tools`.
+	 * Defaults to `npm install`; tests inject a fake.
+	 */
+	installDeps?: () => Promise<void>;
 	fetch?: typeof fetch;
 	log?: (line: string) => void;
 	timeoutMs?: number;
@@ -41,7 +87,7 @@ export interface VoiceServiceOptions {
 
 const REASONS = {
 	noTranscriber:
-		"Voice notes need the local transcription server. Install it in voice-tools and try again.",
+		"The local transcription server is not installed yet. It installs itself the next time a voice note arrives; try again in a minute.",
 	noModel: "The local voice model is not downloaded yet. Download it from the app settings and try again.",
 	noKey: "Voice replies need an NVIDIA API key. Connect one in Accounts.",
 	tooLong: "That recording is too long. Keep it under a minute.",
@@ -91,12 +137,16 @@ class TranscriberServer {
 		timer: ReturnType<typeof setTimeout>;
 	};
 	private waiters: Array<() => void> = [];
+	private readonly dir: string;
 	private readonly script: string;
 	private readonly model: string;
 	private readonly log?: (line: string) => void;
+	private readonly installDeps: () => Promise<void>;
+	private provisioning?: Promise<void>;
 
-	constructor(dataDir: string, log?: (line: string) => void) {
-		this.script = join(dataDir, "voice-tools", "transcriber.js");
+	constructor(dataDir: string, log?: (line: string) => void, installDeps?: () => Promise<void>) {
+		this.dir = join(dataDir, "voice-tools");
+		this.script = join(this.dir, "transcriber.js");
 		this.model =
 			process.env.GENTLE_DOT_VOICE_MODEL ||
 			join(
@@ -104,14 +154,44 @@ class TranscriberServer {
 				".local/share/dev.gentleman.gentle-dot/models/parakeet-tdt-0.6b-v3-int8",
 			);
 		this.log = log;
+		this.installDeps = installDeps ?? (() => npmInstallDeps(this.dir));
+	}
+
+	/**
+	 * Installs the transcriber under `<dataDir>/voice-tools` (script, package.json,
+	 * then npm install of sherpa-onnx-node) the first time it is needed. Serialized:
+	 * concurrent callers share one attempt, and a failed attempt can be retried later.
+	 */
+	provision(): Promise<void> {
+		// A script left in place counts as installed (it may predate this feature); a
+		// failed install deletes it so a later voice note retries from scratch.
+		if (existsSync(this.script)) return Promise.resolve();
+		this.provisioning ??= (async () => {
+			const source = voiceToolsSource();
+			if (!source) {
+				throw new Error("voice: the voice-tools assets are not bundled with this install");
+			}
+			try {
+				await mkdir(this.dir, { recursive: true });
+				await copyFile(join(source, "transcriber.js"), this.script);
+				await copyFile(join(source, "package.json"), join(this.dir, "package.json"));
+				await this.installDeps();
+				this.log?.("voice: local transcriber installed");
+			} catch (error) {
+				await rm(this.script, { force: true });
+				throw error;
+			}
+		})().finally(() => {
+			// Keep the in-flight promise while it settles; a settled failure allows a retry.
+			this.provisioning = undefined;
+		});
+		return this.provisioning;
 	}
 
 	availability(): TranscriberAvailability {
 		return {
 			script: existsSync(this.script),
-			model:
-				existsSync(join(this.model, "encoder.int8.onnx")) &&
-				existsSync(join(this.model, "tokens.txt")),
+			model: existsSync(join(this.model, "encoder.int8.onnx")) && existsSync(join(this.model, "tokens.txt")),
 		};
 	}
 
@@ -128,9 +208,7 @@ class TranscriberServer {
 	private request(file: string): Promise<string> {
 		if (this.current) {
 			// One note at a time; everyone else waits for the current answer.
-			return new Promise<void>((resolve) => this.waiters.push(resolve)).then(() =>
-				this.request(file),
-			);
+			return new Promise<void>((resolve) => this.waiters.push(resolve)).then(() => this.request(file));
 		}
 		return new Promise<string>((resolve, reject) => {
 			const child = this.child;
@@ -196,8 +274,11 @@ class TranscriberServer {
 			child.stdout?.setEncoding("utf8");
 			child.stdout.on("data", (chunk) => {
 				this.stdoutBuffer += chunk;
-				let index: number;
-				while ((index = this.stdoutBuffer.indexOf("\n")) !== -1) {
+				for (
+					let index = this.stdoutBuffer.indexOf("\n");
+					index !== -1;
+					index = this.stdoutBuffer.indexOf("\n")
+				) {
 					const line = this.stdoutBuffer.slice(0, index).trim();
 					this.stdoutBuffer = this.stdoutBuffer.slice(index + 1);
 					if (!line) continue;
@@ -233,7 +314,14 @@ export class VoiceService {
 
 	constructor(options: VoiceServiceOptions) {
 		this.options = options;
-		this.transcriber = new TranscriberServer(options.dataDir, options.log);
+		this.transcriber = new TranscriberServer(options.dataDir, options.log, options.installDeps);
+		// When the desktop app already downloaded the local model, provision the
+		// transcriber in the background so voice notes work without any setup.
+		if (this.transcriber.availability().model && !this.transcriber.availability().script) {
+			this.transcriber.provision().catch((error: Error) => {
+				options.log?.(`voice: could not install the local transcriber: ${error.message}`);
+			});
+		}
 	}
 
 	/** The capability as last checked. */
@@ -250,8 +338,17 @@ export class VoiceService {
 
 	async transcribe(mime: string, data: string): Promise<VoiceResult<{ text: string }>> {
 		if (data.length > MAX_VOICE_AUDIO) return { ok: false, reason: REASONS.tooLong };
-		const availability = this.transcriber.availability();
+		let availability = this.transcriber.availability();
 		if (!availability.model) return { ok: false, reason: REASONS.noModel };
+		if (!availability.script) {
+			// The model is here but the transcriber is not: install it and answer this note.
+			try {
+				await this.transcriber.provision();
+				availability = this.transcriber.availability();
+			} catch {
+				return { ok: false, reason: REASONS.noTranscriber };
+			}
+		}
 		if (!availability.script) return { ok: false, reason: REASONS.noTranscriber };
 		const type = mime.split(";")[0]?.trim().toLowerCase() ?? "";
 		const extension = EXTENSIONS[type] ?? "webm";

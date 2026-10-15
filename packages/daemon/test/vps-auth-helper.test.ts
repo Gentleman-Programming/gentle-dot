@@ -6,23 +6,30 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ServerMessage } from "@gentle-dot/protocol";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { type DaemonOptions, type DotDaemon, startDaemon } from "../src/daemon.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+
+// Each case boots a daemon + auth-helper (agent login via jiti); slow hosts cross the 5 s default.
+vi.setConfig({ testTimeout: 30_000 });
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const own = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
 
 const daemons: DotDaemon[] = [];
+let savedVoiceModel: string | undefined;
 afterEach(async () => {
 	await Promise.all(daemons.splice(0).map((d) => d.close()));
+	if (savedVoiceModel === undefined) delete process.env.GENTLE_DOT_VOICE_MODEL;
+	else process.env.GENTLE_DOT_VOICE_MODEL = savedVoiceModel;
+	savedVoiceModel = undefined;
 });
 
 /** The engine's environment without a model key from the machine running the tests. */
 function cleanEnv(): NodeJS.ProcessEnv {
 	const env = { ...process.env };
-	for (const key of ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"]) delete env[key];
+	for (const key of ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "NVIDIA_API_KEY"]) delete env[key];
 	return env;
 }
 
@@ -38,6 +45,10 @@ function plantCommandKey(agentHome: string, marker: string): void {
 async function setup(vps: DaemonOptions["vps"] | undefined, plant?: (agentHome: string) => void) {
 	const dataDir = tempDir();
 	const agentHome = join(dataDir, "agent");
+	// The daemon reads GENTLE_DOT_VOICE_MODEL from this process: point it at a directory
+	// that does not exist, so a machine with the real model downloaded stays deterministic.
+	savedVoiceModel = process.env.GENTLE_DOT_VOICE_MODEL;
+	process.env.GENTLE_DOT_VOICE_MODEL = join(dataDir, "missing-model");
 	plant?.(agentHome);
 	const d = await startDaemon({
 		port: 0,

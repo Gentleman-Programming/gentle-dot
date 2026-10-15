@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { MAX_VOICE_AUDIO, MAX_VOICE_TEXT, type ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
@@ -115,6 +116,90 @@ function service(
 
 const header = (call: Call | undefined, name: string) => new Headers(call?.init.headers).get(name);
 
+/** Points the voice-tools asset source at the repo copy. Returns the env restore. */
+function setSourceEnv(path: string): () => void {
+	const saved = process.env.GENTLE_DOT_VOICE_TOOLS_SOURCE;
+	process.env.GENTLE_DOT_VOICE_TOOLS_SOURCE = path;
+	return () => {
+		if (saved === undefined) delete process.env.GENTLE_DOT_VOICE_TOOLS_SOURCE;
+		else process.env.GENTLE_DOT_VOICE_TOOLS_SOURCE = saved;
+	};
+}
+
+/** The transcriber assets shipped with the daemon package. */
+const REPO_VOICE_TOOLS = fileURLToPath(new URL("../voice-tools", import.meta.url));
+
+/** Model directory only (no transcriber script), so provisioning is the only path. */
+function modelOnly(dataDir: string): () => void {
+	const model = join(dataDir, "model");
+	mkdirSync(model, { recursive: true });
+	writeFileSync(join(model, "encoder.int8.onnx"), "");
+	writeFileSync(join(model, "tokens.txt"), "");
+	return setModelEnv(model);
+}
+
+describe("VoiceService transcriber provisioning", () => {
+	it("installs the transcriber on first use when the model is already downloaded", async () => {
+		const dataDir = tempDir();
+		const restoreModel = modelOnly(dataDir);
+		const restoreSource = setSourceEnv(REPO_VOICE_TOOLS);
+		let installs = 0;
+		const voice = new VoiceService({
+			apiKey: async () => KEY,
+			dataDir,
+			fetch: fakeFetch(() => new Response()).fetch,
+			installDeps: async () => {
+				installs += 1;
+				// A real install drops the dependencies next to the script; the fake
+				// replaces the copied transcriber with the stub the tests can run.
+				writeFileSync(join(dataDir, "voice-tools", "transcriber.js"), STUB_TRANSCRIBER);
+			},
+		});
+		try {
+			expect(await voice.transcribe("audio/ogg", AUDIO)).toEqual({
+				ok: true,
+				text: "hello from the local transcriber",
+			});
+			expect(installs).toBe(1);
+			// A second note reuses the installed transcriber: no reinstall.
+			await voice.transcribe("audio/ogg", AUDIO);
+			expect(installs).toBe(1);
+		} finally {
+			restoreModel();
+			restoreSource();
+		}
+	});
+
+	it("reports noTranscriber when the install fails, and retries later", async () => {
+		const dataDir = tempDir();
+		const restoreModel = modelOnly(dataDir);
+		const restoreSource = setSourceEnv(REPO_VOICE_TOOLS);
+		let installs = 0;
+		const voice = new VoiceService({
+			apiKey: async () => KEY,
+			dataDir,
+			fetch: fakeFetch(() => new Response()).fetch,
+			installDeps: async () => {
+				installs += 1;
+				if (installs === 1) throw new Error("npm install failed");
+				writeFileSync(join(dataDir, "voice-tools", "transcriber.js"), STUB_TRANSCRIBER);
+			},
+		});
+		try {
+			const first = await voice.transcribe("audio/ogg", AUDIO);
+			expect(first.ok).toBe(false);
+			expect(await voice.transcribe("audio/ogg", AUDIO)).toEqual({
+				ok: true,
+				text: "hello from the local transcriber",
+			});
+			expect(installs).toBe(2);
+		} finally {
+			restoreModel();
+			restoreSource();
+		}
+	});
+});
+
 afterEach(() => {
 	// Nothing global: each test restores its own environment.
 });
@@ -170,9 +255,10 @@ describe("VoiceService.transcribe", () => {
 	it("says nothing was heard when the transcript is empty", async () => {
 		const { voice, restore } = service(() => new Response());
 		try {
-			expect(
-				await voice.transcribe("audio/webm", Buffer.from("empty").toString("base64")),
-			).toEqual({ ok: false, reason: "I didn't catch anything. Try again." });
+			expect(await voice.transcribe("audio/webm", Buffer.from("empty").toString("base64"))).toEqual({
+				ok: false,
+				reason: "I didn't catch anything. Try again.",
+			});
 		} finally {
 			restore();
 		}
@@ -193,7 +279,8 @@ describe("VoiceService.transcribe", () => {
 		try {
 			expect(await voice.transcribe("audio/webm", AUDIO)).toEqual({
 				ok: false,
-				reason: "The local voice model is not downloaded yet. Download it from the app settings and try again.",
+				reason:
+					"The local voice model is not downloaded yet. Download it from the app settings and try again.",
 			});
 		} finally {
 			restore();
@@ -239,10 +326,26 @@ describe("VoiceService.speak", () => {
 
 describe("VoiceService errors", () => {
 	const cases: [string, () => Response | Promise<Response>, string][] = [
-		["401", () => new Response(`{"detail":"bad key ${KEY}"}`, { status: 401 }), "NVIDIA did not accept the API key. Check it in Accounts."],
-		["403", () => new Response(`{"detail":"forbidden for ${KEY}"}`, { status: 403 }), "This NVIDIA key is not allowed to use speech. Check its project and permissions."],
-		["429", () => new Response(`{"detail":"quota for ${KEY}"}`, { status: 429 }), "NVIDIA is limiting requests or the account is out of credit. Try again later."],
-		["500", () => new Response(`oops ${KEY}`, { status: 500 }), "NVIDIA could not handle the voice request. Try again."],
+		[
+			"401",
+			() => new Response(`{"detail":"bad key ${KEY}"}`, { status: 401 }),
+			"NVIDIA did not accept the API key. Check it in Accounts.",
+		],
+		[
+			"403",
+			() => new Response(`{"detail":"forbidden for ${KEY}"}`, { status: 403 }),
+			"This NVIDIA key is not allowed to use speech. Check its project and permissions.",
+		],
+		[
+			"429",
+			() => new Response(`{"detail":"quota for ${KEY}"}`, { status: 429 }),
+			"NVIDIA is limiting requests or the account is out of credit. Try again later.",
+		],
+		[
+			"500",
+			() => new Response(`oops ${KEY}`, { status: 500 }),
+			"NVIDIA could not handle the voice request. Try again.",
+		],
 		[
 			"network",
 			() => Promise.reject(new TypeError(`fetch failed for ${KEY}`)),
@@ -281,7 +384,8 @@ async function startWith(
 	const fake = fakeFetch(reply);
 	const logs: string[] = [];
 	const dataDir = tempDir();
-	const restore = options.assets === false ? setModelEnv(join(dataDir, "missing-model")) : localAssets(dataDir);
+	const restore =
+		options.assets === false ? setModelEnv(join(dataDir, "missing-model")) : localAssets(dataDir);
 	try {
 		const d = await startDaemon({
 			port: 0,
@@ -358,7 +462,8 @@ describe("voice through the daemon", () => {
 			send({ type: "voice_transcribe", requestId: "v2", mime: "audio/webm", data: AUDIO });
 			expect(await find("voice_unavailable")).toMatchObject({
 				requestId: "v2",
-				reason: "The local voice model is not downloaded yet. Download it from the app settings and try again.",
+				reason:
+					"The local voice model is not downloaded yet. Download it from the app settings and try again.",
 			});
 			expect(calls).toHaveLength(0);
 		} finally {
@@ -369,23 +474,32 @@ describe("voice through the daemon", () => {
 
 describe("createModelAuthRuntime keys (offline)", () => {
 	const withoutEnvKey = async (run: () => Promise<void>) => {
-		const saved = process.env.OPENAI_API_KEY;
+		const savedOpenAI = process.env.OPENAI_API_KEY;
+		const savedNvidia = process.env.NVIDIA_API_KEY;
 		delete process.env.OPENAI_API_KEY;
+		delete process.env.NVIDIA_API_KEY;
 		try {
 			await run();
 		} finally {
-			if (saved !== undefined) process.env.OPENAI_API_KEY = saved;
+			if (savedOpenAI !== undefined) process.env.OPENAI_API_KEY = savedOpenAI;
+			if (savedNvidia !== undefined) process.env.NVIDIA_API_KEY = savedNvidia;
 		}
 	};
 
-	it("returns a stored NVIDIA API key", () =>
-		withoutEnvKey(async () => {
-			const home = tempDir();
-			await createModelAuthRuntime(home, home);
-			const runtime = await createModelAuthRuntime(home, home);
-			await runtime.login("openai", "api_key", { prompt: async () => KEY, notify: () => {} });
-			expect(await runtime.nvidiaApiKey?.()).toBeUndefined();
-		}));
+	it(
+		"returns a stored NVIDIA API key",
+		// createModelAuthRuntime loads the engine's providers through jiti; on slow
+		// hosts that alone approaches the 5 s default.
+		{ timeout: 20_000 },
+		() =>
+			withoutEnvKey(async () => {
+				const home = tempDir();
+				await createModelAuthRuntime(home, home);
+				const runtime = await createModelAuthRuntime(home, home);
+				await runtime.login("openai", "api_key", { prompt: async () => KEY, notify: () => {} });
+				expect(await runtime.nvidiaApiKey?.()).toBeUndefined();
+			}),
+	);
 
 	it("never returns the ChatGPT sign-in token, which cannot transcribe", () =>
 		withoutEnvKey(async () => {
