@@ -1189,6 +1189,15 @@ export class DotBridge {
 				this.interrupted = true;
 				this.broadcast({ type: "interrupted" });
 				break;
+			case "turn_timeout":
+				this.broadcast({ type: "turn_timeout", timeoutMs: event.timeoutMs });
+				break;
+			case "turn_timeout_error":
+				this.broadcast({ type: "error", code: "turn_timeout", message: event.error });
+				this.interrupted = true;
+				this.clearRun();
+				this.clearQueue();
+				break;
 			case "message_start":
 				this.onMessageStart(event);
 				break;
