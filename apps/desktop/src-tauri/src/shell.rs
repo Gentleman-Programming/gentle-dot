@@ -750,15 +750,22 @@ fn toggle_on_press(app: &AppHandle, _: &Shortcut, event: ShortcutEvent) {
     }
 }
 
-/// Binds the configured shortcut, or the default one when it is unavailable. Returns the bound one.
+/// Binds the configured shortcut, or the first free fallback when it is unavailable (#50).
+/// Returns the bound one, or None when every candidate is taken.
 fn register_shortcut(app: &AppHandle, shortcut: &str) -> Option<String> {
-    match app.global_shortcut().on_shortcut(shortcut, toggle_on_press) {
-        Ok(()) => return Some(shortcut.to_string()),
-        Err(error) => eprintln!("gentle-dot: shortcut `{shortcut}` is unavailable ({error}); using {DEFAULT_SHORTCUT}"),
+    let options = shortcut::candidates(shortcut);
+    for option in &options {
+        match app.global_shortcut().on_shortcut(option.as_str(), toggle_on_press) {
+            Ok(()) => {
+                if !shortcut::same_keys(option, shortcut) {
+                    eprintln!("gentle-dot: shortcut `{shortcut}` is taken; using the fallback `{option}`");
+                }
+                return Some(option.clone());
+            }
+            Err(error) => eprintln!("gentle-dot: shortcut `{option}` is unavailable ({error})"),
+        }
     }
-    if shortcut != DEFAULT_SHORTCUT && app.global_shortcut().on_shortcut(DEFAULT_SHORTCUT, toggle_on_press).is_ok() {
-        return Some(DEFAULT_SHORTCUT.to_string());
-    }
+    eprintln!("gentle-dot: no panel shortcut is free; open it from the tray or run `gentle-dot --toggle`");
     None
 }
 
@@ -873,6 +880,12 @@ pub fn run() {
                 let bound = register_shortcut(&handle, &config.shortcut);
                 if let Some(bound) = &bound {
                     label_tray_open(&handle, bound);
+                    // Persist a fallback so the next launch binds it directly (#50).
+                    if !shortcut::same_keys(bound, &config.shortcut) {
+                        if let Err(error) = config::save_shortcut(&config.data_dir.join("config.json"), bound) {
+                            eprintln!("gentle-dot: cannot remember the fallback shortcut `{bound}`: {error}");
+                        }
+                    }
                 }
                 *app.state::<Shell>().shortcut.lock().unwrap() = bound;
                 let snap = app.state::<Shell>().snap.clone();
