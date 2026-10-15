@@ -22,7 +22,9 @@ export type SupervisorState = "stopped" | "starting" | "ready" | "restarting";
 export type SupervisorEvent =
 	| AgentRecord
 	| { type: "supervisor_state"; state: SupervisorState }
-	| { type: "interrupted" };
+	| { type: "interrupted" }
+	| { type: "turn_timeout"; command: string; timeoutMs: number }
+	| { type: "turn_timeout_error"; error: string };
 
 export interface SupervisorOptions {
 	/** Executable to run, for example `gentle-shell`. */
@@ -45,6 +47,8 @@ export interface SupervisorOptions {
 	stableMs?: number;
 	/** Deadline for one command response. Default 5 minutes. */
 	requestTimeoutMs?: number;
+	/** Deadline for an LLM turn (prompt with tools). Default 10 minutes. */
+	turnTimeoutMs?: number;
 	/** Deadline for the agent to answer its first `get_state`. Default 60s. */
 	startTimeoutMs?: number;
 	/** Grace period after closing stdin before SIGTERM. Default 5s. */
@@ -132,7 +136,11 @@ export class AgentSupervisor {
 	async request(command: AgentRecord): Promise<RpcResponse> {
 		if (this.state !== "ready") throw new Error("Agent is not ready");
 		const settledBefore = this.settledRuns;
-		const response = await this.rawRequest(command, this.options.requestTimeoutMs ?? 300_000);
+		const timeoutMs =
+			command.type === "prompt" && this.options.turnTimeoutMs
+				? this.options.turnTimeoutMs
+				: this.options.requestTimeoutMs ?? 300_000;
+		const response = await this.rawRequest(command, timeoutMs);
 		// The run may already have settled before this response was handled.
 		if (
 			command.type === "prompt" &&
@@ -244,6 +252,10 @@ export class AgentSupervisor {
 		return new Promise<RpcResponse>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				this.pending.delete(id);
+				if (command.type === "prompt") {
+					this.emit({ type: "turn_timeout", command: command.type, timeoutMs });
+					this.emit({ type: "turn_timeout_error", error: `Turn timed out after ${timeoutMs} ms` });
+				}
 				reject(new Error(`Agent did not answer ${command.type} within ${timeoutMs} ms`));
 			}, timeoutMs);
 			this.pending.set(id, { resolve, reject, timer });

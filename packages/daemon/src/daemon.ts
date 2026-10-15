@@ -262,7 +262,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 			return env;
 		},
 		// The first start in a new home installs the engine's companion packages.
-		...(options.agentHome ? { startTimeoutMs: 180_000 } : {}),
+		...(config.turnTimeoutMs ? { turnTimeoutMs: config.turnTimeoutMs } : {}),
 		...(options.backoffMs ? { backoffMs: options.backoffMs } : {}),
 		log: (line) => log(`[agent] ${line}`),
 	});
