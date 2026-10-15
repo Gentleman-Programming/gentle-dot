@@ -553,6 +553,25 @@ fn build_windows(
     #[cfg(target_os = "macos")]
     let panel = panel
         .effects(EffectsBuilder::new().effect(Effect::HudWindow).state(EffectState::Active).radius(20.0).build());
+    // Defense in depth (#42): same-window navigation must never replace the panel UI (no
+    // back button). External http(s) links go to the system browser; the app's own origin and
+    // relative or #anchor hrefs pass through. Registered on the builder: the built window
+    // exposes no on_navigation in tauri 2.12.
+    let opener_app = app.clone();
+    let panel = panel.on_navigation(move |url| {
+        if matches!(url.scheme(), "http" | "https") {
+            // The bundled UI itself is served from this origin on Linux and Windows
+            // (http://tauri.localhost); real web pages open in the user's browser.
+            let internal = matches!(url.host_str(), Some("tauri.localhost"));
+            if !internal {
+                if let Err(e) = opener_app.opener().open_url(url.as_str(), None::<&str>) {
+                    eprintln!("Failed to open external URL: {e}");
+                }
+                return false;
+            }
+        }
+        true
+    });
     panel.build()?;
 
     if !places_windows {
