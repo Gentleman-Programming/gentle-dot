@@ -838,6 +838,13 @@ html[data-effects="none"] .chat-panel {
 	align-items: flex-end;
 }
 
+/* The compact chat is 420pt wide, so a long unbroken token (a URL, a token, a path)
+   has to wrap: without this the whole message column grows and the chat body gets a
+   horizontal scrollbar of its own. */
+.message-body {
+	overflow-wrap: anywhere;
+}
+
 .message-user .message-body {
 	max-width: 85%;
 	padding: 9px 13px;
@@ -883,6 +890,7 @@ html[data-effects="none"] .chat-panel {
 }
 
 .message-body pre {
+	overflow-wrap: normal;
 	overflow-x: auto;
 	padding: 10px 12px;
 	border-radius: var(--radius-sm);
