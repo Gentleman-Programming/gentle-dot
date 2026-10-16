@@ -29,10 +29,11 @@ use crate::niri::gate::*;
 // snapshot and now live in `niri/route_gate.rs`; imported, never redefined.
 #[cfg(target_os = "linux")]
 use crate::niri::route_gate::{
-    GateEffect, RestoreCompletion, collapse_cover_wanted, default_rose_hidden_for, hide_intent_next,
-    joint_mover_from_signals, joint_unit_active, native_niri_mode, native_restore_planned,
-    niri_fullscreen_offload, niri_socket_present, plan_gate_effects, plan_hide_completion,
-    plan_restore_completion, plan_toggle_route, rose_visible_for_mode, shared_route_wanted,
+    FullscreenDispatch, GateEffect, RestoreCompletion, collapse_cover_wanted, default_rose_hidden_for,
+    hide_intent_next, joint_mover_from_signals, joint_unit_active, native_niri_mode,
+    native_restore_planned, niri_fullscreen_offload, niri_socket_present, plan_fullscreen_dispatch,
+    plan_gate_effects, plan_hide_completion, plan_restore_completion, plan_toggle_route,
+    rose_visible_for_mode, shared_route_wanted, tray_click_toggles_panel, tray_left_click_toggles,
     unit_branch_wanted,
 };
 #[cfg(target_os = "linux")]
@@ -43,14 +44,14 @@ use crate::niri::unit_state::NiriUnitSnapshot;
 #[cfg(target_os = "linux")]
 use crate::niri::unit_state::{
     NiriUnitState, UnitExecEffect, UnitExecOutcome, UnitTransition, UnitWake, UnitWindow, ack_unit_ready,
-    cleanup_unit_dispatch, plan_unit_wake, run_unit_cover_exec, unit_ready_for, unit_snapshot_locked,
-    unit_transition_commit, unit_window_for,
+    activate_shared_unit, cleanup_unit_dispatch, plan_unit_wake, run_unit_cover_exec, unit_ready_for,
+    unit_snapshot_locked, unit_transition_commit, unit_window_for,
 };
-// Test-only unit-state helpers: the shell tests pin the activation/open
-// handshake through the same cores production calls; normal builds use
-// neither name, so this import stays test-scoped and warning-free.
+// Test-only unit-state helper: the shell tests pin the open
+// handshake through the same core production calls; normal builds never use
+// this name, so this import stays test-scoped and warning-free.
 #[cfg(test)]
-use crate::niri::unit_state::{activate_shared_unit, publish_unit_open};
+use crate::niri::unit_state::publish_unit_open;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -85,7 +86,7 @@ const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(20);
 /// first, asks again and connects without a reopen (S35.2).
 const ASSISTANT_READY: &str = "dot://assistant-ready";
 
-struct Shell {
+pub(crate) struct Shell {
     config: DesktopConfig,
     daemon: Arc<Daemon>,
     snap: mpsc::Sender<()>,
@@ -1016,6 +1017,41 @@ fn niri_unit_ready(app: AppHandle, revision: u64) -> bool {
 #[tauri::command]
 fn set_rose_hidden(app: AppHandle, hidden: bool) -> CommandResult<bool> {
     let shell = app.state::<Shell>();
+    // Dormant shared-unit branch (Linux only): the preference save
+    // is shared, but the commit owns rose state under the gate, the dot
+    // window is never touched, and positioning waits for the joint worker.
+    // Falls through to legacy when dormant (the save below is idempotent).
+    #[cfg(target_os = "linux")]
+    {
+        let wanted = unit_branch_wanted(
+            shell.native_unit.lock().unwrap().active,
+            shell.places_windows,
+            platform::is_niri(&|key| std::env::var(key).ok()),
+            niri_socket_present(),
+        );
+        if wanted {
+            // Fullscreen implies no rose — the toggle (already disabled in the
+            // tray via set_enabled(!expanded)) must not start a transition here
+            // either. Safe no-op reporting the
+            // current state: no preference write, no generation, no worker
+            // wake, matching the gated tray item.
+            let expanded = *shell.native_expanded.lock().unwrap();
+            if !shared_rose_toggle_allowed(expanded) {
+                niri_trace!("rose toggle refused while fullscreen");
+                return Ok(shell.rose_hidden.load(Ordering::SeqCst));
+            }
+            position::save_rose_hidden(&desktop_file(&shell.config), hidden).map_err(err)?;
+            if let Some(routed) = route_unit_transition(&app, UnitTransition::SetRoseHidden(hidden)) {
+                if routed.is_ok() {
+                    if let Some(item) = app.try_state::<RoseMenuItem>() {
+                        item.0.set_text(rose_menu_label(hidden)).map_err(err)?;
+                    }
+                    app.emit("dot://rose", serde_json::json!({ "hidden": hidden })).map_err(err)?;
+                }
+                return routed.map(|()| hidden);
+            }
+        }
+    }
     position::save_rose_hidden(&desktop_file(&shell.config), hidden).map_err(err)?;
     shell.rose_hidden.store(hidden, Ordering::SeqCst);
     let dot = window(&app, DOT)?;
@@ -1233,6 +1269,24 @@ struct ShortcutChoice {
 #[tauri::command]
 fn shortcut_get(app: AppHandle) -> ShortcutInfo {
     let shell = app.state::<Shell>();
+    #[cfg(target_os = "linux")]
+    if niri_route_env(shell.places_windows) {
+        // S19: the compositor owns the key — report the binding the snippet
+        // really has, so Settings shows the truth instead of a dead value.
+        // The default is the Niri binding default even when the effective
+        // binding is unknown: frontend Reset sends this default back, and
+        // other backends keep their own default below. Niri-only.
+        if let Some(bound) = crate::niri::config_file::read_toggle_binding() {
+            return ShortcutInfo {
+                shortcut: shortcut::normalize(&bound).unwrap_or(bound),
+                default: crate::niri::kdl_binds::DEFAULT_KEY.to_string(),
+            };
+        }
+        return ShortcutInfo {
+            shortcut: crate::niri::kdl_binds::DEFAULT_KEY.to_string(),
+            default: crate::niri::kdl_binds::DEFAULT_KEY.to_string(),
+        };
+    }
     let current = shell.shortcut.lock().unwrap().clone().unwrap_or_else(|| shell.config.shortcut.clone());
     ShortcutInfo {
         shortcut: shortcut::normalize(&current).unwrap_or(current),
@@ -1245,6 +1299,14 @@ fn shortcut_get(app: AppHandle) -> ShortcutInfo {
 async fn shortcut_set(app: AppHandle, shortcut: String) -> CommandResult<ShortcutChoice> {
     tauri::async_runtime::spawn_blocking(move || {
         let shell = app.state::<Shell>();
+        #[cfg(target_os = "linux")]
+        if niri_route_env(shell.places_windows) {
+            // S19: the Settings field manages the Niri binding itself — mapped,
+            // upserted, backed up and validated — instead of always failing.
+            let saved = crate::niri::config_file::write_toggle_binding(&shortcut)
+                .map_err(|error| error.to_string())?;
+            return Ok(ShortcutChoice { shortcut: saved });
+        }
         if !shell.places_windows {
             return Err(DESKTOP_OWNS_SHORTCUTS.to_string());
         }
@@ -1918,6 +1980,30 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tau
         .tooltip("Gentle Dot")
         .menu(&menu)
         .show_menu_on_left_click(true)
+        .on_tray_icon_event(|tray, event| {
+            // Left-click activation exists only on the opt-in KSNI backend (Linux);
+            // everywhere else this is a no-op and the menu behavior is unchanged.
+            // The KSNI event carries an empty rect, so the panel keeps its existing
+            // placement instead of anchoring to the click coordinates.
+            if let tauri::tray::TrayIconEvent::Click {
+                button,
+                button_state,
+                ..
+            } = event
+            {
+                if tray_click_toggles_panel(
+                    Os::CURRENT,
+                    tray_left_click_toggles(),
+                    button,
+                    button_state,
+                ) {
+                    let app = tray.app_handle().clone();
+                    if let Err(error) = toggle_panel(app) {
+                        eprintln!("gentle-dot: cannot toggle the panel: {error}");
+                    }
+                }
+            }
+        })
         .on_menu_event(move |app, event| {
             let result = match event.id().as_ref() {
                 "open" => show_panel(app),
@@ -2175,6 +2261,9 @@ fn toggle_panel_fullscreen(app: AppHandle) -> CommandResult {
 /// A launch of `gentle-dot` (usually `--toggle` or `--fullscreen` from a desktop
 /// shortcut) reaches the running app.
 fn handle_launch(app: &AppHandle, args: &[String]) {
+    if std::env::var_os("GENTLE_DOT_NIRI_TRACE").is_some() {
+        eprintln!("[niri:launch] callback entered");
+    }
     let result = match platform::launch_request(args) {
         LaunchRequest::Toggle => toggle_panel(app.clone()),
         LaunchRequest::Show => show_panel(app),
@@ -2186,6 +2275,8 @@ fn handle_launch(app: &AppHandle, args: &[String]) {
 }
 
 pub fn run() {
+    let launch_trace = std::env::var_os("GENTLE_DOT_NIRI_TRACE").is_some();
+    if launch_trace { eprintln!("[niri:launch] run entered pid={}", std::process::id()); }
     // GNOME on Wayland: run under XWayland so the Dot can place itself, stay on top, and snap.
     // This must happen before GTK starts.
     #[cfg(target_os = "linux")]
@@ -2193,7 +2284,9 @@ pub fn run() {
         std::env::set_var("GDK_BACKEND", backend);
     }
     let places_windows = !platform::compositor_places_windows(|key| std::env::var(key).ok());
+    if launch_trace { eprintln!("[niri:launch] config begin"); }
     let config = config::load_config();
+    if launch_trace { eprintln!("[niri:launch] builder begin"); }
     tauri::Builder::default()
         // First, so a second launch forwards its arguments and exits before anything else starts.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| handle_launch(app, &args)))
@@ -2213,35 +2306,69 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![
-            connection_info,
-            toggle_panel,
-            hide_panel,
-            set_dot_state,
-            rose_hidden,
-            set_rose_hidden,
-            niri_unit_state,
-            niri_unit_ready,
-            set_panel_fullscreen,
-            shortcut_get,
-            shortcut_set,
-            connector_command,
-            computer::computer_endpoint,
-            computer::computer_permissions,
-            computer::computer_request_permission,
-            computer::computer_stop,
-            computer::computer_status,
-            computer::computer_set_yolo,
-            computer::computer_working_ready,
-            voice::voice_status,
-            voice::voice_start,
-            voice::voice_stop,
-            voice::voice_cancel,
-            voice::voice_model_status,
-            voice::voice_model_download,
-            voice::voice_model_cancel,
-            voice::voice_model_remove
-        ])
+        .invoke_handler({
+            // Dual dispatch: two SEPARATE generated handlers share
+            // one frontend command name — never one generated match, so no
+            // duplicate match-entry collision. Niri-native fullscreen invokes
+            // route async-only; everything else keeps the original sync
+            // handler exactly (macOS default, Linux X11/Hyprland, all other
+            // commands). Non-Linux builds compile the sync handler only.
+            let legacy_handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+                connection_info,
+                toggle_panel,
+                hide_panel,
+                set_dot_state,
+                rose_hidden,
+                set_rose_hidden,
+                niri_unit_state,
+                niri_unit_ready,
+                set_panel_fullscreen,
+                shortcut_get,
+                shortcut_set,
+                connector_command,
+                computer::computer_endpoint,
+                computer::computer_permissions,
+                computer::computer_request_permission,
+                computer::computer_stop,
+                computer::computer_status,
+                computer::computer_set_yolo,
+                computer::computer_working_ready,
+                voice::voice_status,
+                voice::voice_start,
+                voice::voice_stop,
+                voice::voice_cancel,
+                voice::voice_model_status,
+                voice::voice_model_download,
+                voice::voice_model_cancel,
+                voice::voice_model_remove
+            ];
+            #[cfg(target_os = "linux")]
+            let niri_handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool =
+                tauri::generate_handler![set_panel_fullscreen_niri];
+            move |invoke| {
+                // Unit 20f: exact command-name short-circuit FIRST — unrelated
+                // commands never touch app state or the environment here.
+                // Runtime branch on the live invoke for fullscreen only:
+                // command name plus native placement signals, no lock held
+                // across either handler call.
+                #[cfg(target_os = "linux")]
+                if invoke.message.command() == "set_panel_fullscreen"
+                    && plan_fullscreen_dispatch(
+                        invoke.message.command(),
+                        invoke
+                            .message
+                            .webview()
+                            .app_handle()
+                            .state::<Shell>()
+                            .places_windows,
+                        platform::is_niri(&|key| std::env::var(key).ok()),
+                    ) == FullscreenDispatch::AsyncNiri
+                {
+                    return niri_handler(invoke);
+                }
+                legacy_handler(invoke)
+            }
+        })
         .setup(move |app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -2292,12 +2419,20 @@ pub fn run() {
                 } else {
                     (None, None)
                 };
+            #[cfg(target_os = "linux")]
+            niri_trace!("setup places_windows={places_windows} worker={}", if native_restore.is_some() { "some" } else { "none" });
             app.manage(Shell {
                 config: config.clone(),
                 daemon,
                 snap: spawn_snapper(handle.clone()),
                 places_windows,
                 rose_hidden: AtomicBool::new(rose_hidden),
+                // Session-only memory, always starting empty: a hidden panel
+                // reopens at the in-memory spot remembered by this run, or at
+                // the default anchor when absent. Nothing is restored from the
+                // disk and nothing is written back; a legacy `panel_points`
+                // value in an old file is ignored without migration, and
+                // native Wayland ignores this entirely.
                 panel_spot: Mutex::new(None),
                 full_screen: Mutex::new(None),
                 #[cfg(target_os = "linux")]
@@ -2318,6 +2453,7 @@ pub fn run() {
                 native_suppress_until: Mutex::new(None),
                 #[cfg(target_os = "linux")]
                 cover_cancelled: Mutex::new(None),
+                #[cfg(target_os = "linux")]
                 native_hide_job: Mutex::new(None),
                 #[cfg(target_os = "linux")]
                 native_io: Mutex::new(()),
@@ -2348,6 +2484,31 @@ pub fn run() {
 
             build_windows(&handle, &config, places_windows, rose_hidden)?;
             build_tray(&handle, &config, rose_hidden)?;
+            // Final shared-surface activation (Linux only): LAST
+            // setup step — single surface mapped/parked above, worker+follow
+            // spawned, env live. Unreadiness keeps `active` FALSE (legacy Niri
+            // paths serve, with the windows they still own on that path).
+            #[cfg(target_os = "linux")]
+            {
+                let is_niri = platform::is_niri(&|key| std::env::var(key).ok());
+                let socket_present = niri_socket_present();
+                if shared_surface_available() && native_niri_mode(places_windows, is_niri, socket_present) {
+                    let shell = handle.state::<Shell>();
+                    if !activate_shared_unit(
+                        &shell.native_gate,
+                        &shell.native_unit,
+                        &shell.native_epoch,
+                        shell.places_windows,
+                        is_niri,
+                        socket_present,
+                        follow_planned,
+                        follow_planned,
+                        true,
+                    ) {
+                        eprintln!("gentle-dot: shared surface stayed dormant; serving legacy Niri windows");
+                    }
+                }
+            }
             if places_windows {
                 let bound = register_shortcut(&handle, &config.shortcut);
                 if let Some(bound) = &bound {
@@ -2362,6 +2523,27 @@ pub fn run() {
                     }
                 });
             } else {
+                // Native Wayland: the compositor places the windows and owns the
+                // keys. Only Niri gets the managed snippet — every other native
+                // Wayland session (Hyprland and friends) keeps the message and
+                // an untouched config.
+                #[cfg(target_os = "linux")]
+                if platform::is_niri(&|key| std::env::var(key).ok()) {
+                    // First-run repair: make the user's Niri config include
+                    // our snippet and bind the toggle, so the shortcut works
+                    // without hand-editing. Best-effort and logged: a refused or
+                    // unreadable config never blocks startup (the snippet path
+                    // backs up, validates and restores on its own).
+                    match crate::niri::config_file::ensure_first_run() {
+                        Ok(report) => eprintln!("gentle-dot: niri bindings {report:?}"),
+                        Err(error) => eprintln!("gentle-dot: niri bindings left untouched: {error}"),
+                    }
+                } else {
+                    eprintln!(
+                        "gentle-dot: native Wayland: the desktop places the windows and owns shortcuts; bind `gentle-dot --toggle` (docs/linux-testing.md)"
+                    );
+                }
+                #[cfg(not(target_os = "linux"))]
                 eprintln!(
                     "gentle-dot: native Wayland: the desktop places the windows and owns shortcuts; bind `gentle-dot --toggle` (docs/linux-testing.md)"
                 );
@@ -4592,113 +4774,6 @@ fn run_restore_job_inner(shell: &Shell, job: u64, set_resizable_panel: &mut impl
     }
 }
 
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tray_hides_new_conversation_in_the_single_chat() {
-        assert_eq!(
-            tray_menu_ids(false, false),
-            vec!["open", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
-        );
-    }
-
-    #[test]
-    fn tray_shows_new_conversation_with_the_conversations_list() {
-        assert_eq!(
-            tray_menu_ids(true, false),
-            vec!["open", "new", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
-        );
-    }
-
-    #[test]
-    fn tray_offers_stop_computer_control_where_it_exists() {
-        assert_eq!(
-            tray_menu_ids(false, true),
-            vec!["open", "browser", "rose", "computer-stop", "computer-yolo", "-", "restart", "autostart", "-", "quit"]
-        );
-    }
-
-    #[test]
-    fn the_rose_item_offers_the_opposite_of_its_state() {
-        assert_eq!(rose_menu_label(false), "Hide the rose");
-        assert_eq!(rose_menu_label(true), "Show the rose");
-    }
-
-    #[test]
-    fn shortcut_and_tray_open_place_the_panel_without_the_rose_when_it_is_hidden() {
-        // `toggle_panel` (the shortcut) and the tray's Open both go through `show_panel`.
-        assert_eq!(
-            panel_placement(true, false, false, None),
-            Placement::BesideDot
-        );
-        assert_eq!(panel_placement(true, false, true, None), Placement::Alone);
-        // Full screen keeps its frame; native Wayland leaves placement to the compositor.
-        assert_eq!(panel_placement(true, true, true, None), Placement::Keep);
-        assert_eq!(panel_placement(true, true, false, None), Placement::Keep);
-        assert_eq!(panel_placement(false, false, true, None), Placement::Keep);
-    }
-
-    #[test]
-    fn the_shortcut_and_connector_commands_are_registered_and_granted_to_the_panel_only() {
-        let build = include_str!("../build.rs");
-        let capabilities: serde_json::Value =
-            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
-        for command in ["shortcut_get", "shortcut_set", "connector_command"] {
-            assert!(build.contains(&format!("\"{command}\",")), "{command} is missing from build.rs");
-            let permission = format!("allow-{}", command.replace('_', "-"));
-            let windows: Vec<&serde_json::Value> = capabilities["capabilities"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|c| c["permissions"].as_array().unwrap().iter().any(|p| p == permission.as_str()))
-                .flat_map(|c| c["windows"].as_array().unwrap())
-                .collect();
-            assert_eq!(windows, ["panel"], "{permission}");
-        }
-    }
-
-    #[test]
-    fn only_the_glow_overlay_may_acknowledge_the_working_rings() {
-        let build = include_str!("../build.rs");
-        assert!(build.contains("\"computer_working_ready\","), "computer_working_ready is missing from build.rs");
-        let capabilities: serde_json::Value =
-            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
-        let windows: Vec<&serde_json::Value> = capabilities["capabilities"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|c| c["permissions"].as_array().unwrap().iter().any(|p| p == "allow-computer-working-ready"))
-            .flat_map(|c| c["windows"].as_array().unwrap())
-            .collect();
-        assert_eq!(windows, [computer::GLOW_WINDOW]);
-    }
-
-    #[test]
-    fn the_windows_listen_for_the_assistant_ready_event() {
-        let desktop = include_str!("../../../../packages/ui/src/desktop.ts");
-        let app = include_str!("../../../../packages/ui/src/App.tsx");
-        let quoted = format!("\"{ASSISTANT_READY}\"");
-        assert!(desktop.contains(&quoted), "desktop.ts does not accept {quoted}");
-        assert!(app.contains(&format!("onDesktopEvent({quoted}")), "App.tsx does not listen for {quoted}");
-    }
-
-    #[test]
-    fn conversations_flag_reads_like_the_daemon() {
-        assert!(conversations_on(Some("1")));
-        assert!(!conversations_on(None));
-        assert!(!conversations_on(Some("0")));
-        assert!(!conversations_on(Some("true")));
-    }
-}
-
-// Behavior-neutral extraction unit niri-shell-capture (C/F/T): the file
-// module below holds only this unit's tests. It cannot reuse the `tests`
-// name while the base inline module above keeps the pre-existing suite
-// (its source versions need later-unit signatures), so it is declared
-// under a unit name until the follow-up units merge the modules.
 #[cfg(test)]
 #[path = "shell/tests.rs"]
-mod shell_capture_tests;
+mod tests;

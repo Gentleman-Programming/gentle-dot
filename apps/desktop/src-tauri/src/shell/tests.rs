@@ -2,6 +2,82 @@ use super::*;
 use crate::niri::gate::*;
 
 #[test]
+fn tray_hides_new_conversation_in_the_single_chat() {
+    assert_eq!(
+        tray_menu_ids(false, false),
+        vec!["open", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
+    );
+}
+
+#[test]
+fn tray_shows_new_conversation_with_the_conversations_list() {
+    assert_eq!(
+        tray_menu_ids(true, false),
+        vec!["open", "new", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
+    );
+}
+
+#[test]
+fn tray_offers_stop_computer_control_where_it_exists() {
+    assert_eq!(
+        tray_menu_ids(false, true),
+        vec!["open", "browser", "rose", "computer-stop", "computer-yolo", "-", "restart", "autostart", "-", "quit"]
+    );
+}
+
+#[test]
+fn the_shortcut_and_connector_commands_are_registered_and_granted_to_the_panel_only() {
+    let build = include_str!("../../build.rs");
+    let capabilities: serde_json::Value =
+        serde_json::from_str(include_str!("../../capabilities/default.json")).unwrap();
+    for command in ["shortcut_get", "shortcut_set", "connector_command"] {
+        assert!(build.contains(&format!("\"{command}\",")), "{command} is missing from build.rs");
+        let permission = format!("allow-{}", command.replace('_', "-"));
+        let windows: Vec<&serde_json::Value> = capabilities["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["permissions"].as_array().unwrap().iter().any(|p| p == permission.as_str()))
+            .flat_map(|c| c["windows"].as_array().unwrap())
+            .collect();
+        assert_eq!(windows, ["panel"], "{permission}");
+    }
+}
+
+#[test]
+fn conversations_flag_reads_like_the_daemon() {
+    assert!(conversations_on(Some("1")));
+    assert!(!conversations_on(None));
+    assert!(!conversations_on(Some("0")));
+    assert!(!conversations_on(Some("true")));
+}
+
+#[test]
+fn only_the_glow_overlay_may_acknowledge_the_working_rings() {
+    let build = include_str!("../../build.rs");
+    assert!(build.contains("\"computer_working_ready\","), "computer_working_ready is missing from build.rs");
+    let capabilities: serde_json::Value =
+        serde_json::from_str(include_str!("../../capabilities/default.json")).unwrap();
+    let windows: Vec<&serde_json::Value> = capabilities["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["permissions"].as_array().unwrap().iter().any(|p| p == "allow-computer-working-ready"))
+        .flat_map(|c| c["windows"].as_array().unwrap())
+        .collect();
+    assert_eq!(windows, [computer::GLOW_WINDOW]);
+}
+
+#[test]
+fn the_windows_listen_for_the_assistant_ready_event() {
+    let desktop = include_str!("../../../../../packages/ui/src/desktop.ts");
+    let app = include_str!("../../../../../packages/ui/src/App.tsx");
+    let quoted = format!("\"{ASSISTANT_READY}\"");
+    assert!(desktop.contains(&quoted), "desktop.ts does not accept {quoted}");
+    assert!(app.contains(&format!("onDesktopEvent({quoted}")), "App.tsx does not listen for {quoted}");
+}
+
+#[test]
 fn native_follow_matches_the_mac_drag_settle_quiet() {
     // Native follow reanchors only after the same 300 ms drag-settle
     // quiet the mac snapper waits before re-snapping the Dot: the
@@ -1760,6 +1836,30 @@ fn settled_reveal_needs_confirmed_settlement() {
     assert!(!settled_reveal_eligible(true, 3, 3, Some(4)));
     assert!(!settled_reveal_eligible(true, 3, 3, None));
     assert!(!settled_reveal_eligible(false, 3, 4, None));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unit_wiring_registered_for_the_panel() {
+    // T10/T19 wiring: the getter exists in shell, is invoked, has a
+    // generated permission, and the capability grants it to the panel
+    // only. These pass before behavior lands; the pins below fail first.
+    let source = include_str!("../shell.rs");
+    assert!(source.contains("fn niri_unit_state"), "getter must exist");
+    assert!(source.contains("fn niri_unit_ready"), "ready command must exist");
+    let invoked = source.split(".invoke_handler").nth(1).unwrap_or("");
+    assert!(invoked.contains("niri_unit_state"), "getter must be invoked");
+    assert!(invoked.contains("niri_unit_ready"), "ready command must be invoked");
+    let build = include_str!("../../build.rs");
+    assert!(build.contains("\"niri_unit_state\""), "generated permission must exist");
+    assert!(build.contains("\"niri_unit_ready\""), "ready permission must exist");
+    let caps = include_str!("../../capabilities/default.json");
+    // Split on the identifier line: the bare id also prefixes the
+    // permission name, so a bare split would cut inside it.
+    let block = caps.split("\"identifier\": \"niri-unit\"").nth(1).unwrap_or("");
+    assert!(block.contains("allow-niri-unit-state"), "panel capability must grant the getter");
+    assert!(block.contains("allow-niri-unit-ready"), "panel capability must grant the handshake");
+    assert!(block.contains("\"windows\": [\"panel\"]"), "grant must be panel-only");
 }
 
 
