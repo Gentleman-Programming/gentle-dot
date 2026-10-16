@@ -3348,4 +3348,615 @@ fn shared_rose_toggle_refused_while_fullscreen() {
     assert!(shared_rose_toggle_allowed(false), "minimized keeps the toggle");
 }
 
+/// Unit 20a1 regression: a successful collapse must commit compact BEFORE
+/// its own restore handoff increments the generation. The handoff fake
+/// below performs the REAL epoch-incrementing handoff (as production
+/// does), so the old inside-transition order self-stales and this fails
+/// with `Ok(true)` / expanded still true despite a landed float.
+#[cfg(target_os = "linux")]
+#[test]
+fn collapse_commits_compact_before_its_restore_handoff() {
+    let epoch = AtomicU64::new(5);
+    let gate = Mutex::new(None::<u64>);
+    let intents = Mutex::new(None::<(u64, RestoreIntent)>);
+    let expanded = Mutex::new(true);
+    let (tx, _rx) = mpsc::sync_channel::<()>(1);
+    let mut kinds = Vec::new();
+    // Faithful to production: the atomic compare-and-handoff on the
+    // expected generation, so this still guards commit-before-handoff.
+    let mut handoff = |kind: ModeRestore, expected: u64| -> bool {
+        kinds.push(kind);
+        match kind {
+            ModeRestore::Gated => gated_handoff_if_expected(&tx, &epoch, &gate, expected, RestoreIntent::CollapseToBase, &intents).is_some(),
+            ModeRestore::Plain => plain_handoff_if_expected(&tx, &epoch, &gate, expected, RestoreIntent::CollapseToBase, &intents).is_some(),
+        }
+    };
+    let windows = native_windows();
+    let mut set_resizable = |_: bool| Ok(());
+    let mut set_compact_size = || Ok(());
+    let mut request = |wire: &str, _: Duration| -> std::io::Result<serde_json::Value> {
+        if wire == crate::niri::WINDOWS_REQUEST {
+            Ok(windows.clone())
+        } else {
+            Ok(serde_json::json!("Handled"))
+        }
+    };
+    let outcome = execute_mode_transition(
+        true, false, 100, 5, true,
+        &epoch, &expanded,
+        &mut set_resizable, &mut set_compact_size, &mut request,
+        &mut handoff,
+    );
+    assert_eq!(outcome, Ok(false), "successful float commits compact");
+    assert_eq!(*expanded.lock().unwrap(), false);
+    assert_eq!(kinds, vec![ModeRestore::Gated]);
+}
 
+/// Wire failure is an error, never a stale-success: no commit flip, no
+/// handoff queued behind the failure.
+#[cfg(target_os = "linux")]
+#[test]
+fn collapse_wire_failure_returns_error_without_handoff() {
+    // The float must actually be attempted: a tiled panel with recorded
+    // expanded (unit 20f1 reconcile would otherwise settle silent with
+    // no wire at all).
+    let epoch = AtomicU64::new(5);
+    let expanded = Mutex::new(true);
+    let float = crate::niri::action_floating(9);
+    let mut kinds = Vec::new();
+    let mut handoff = |kind: ModeRestore, _expected: u64| -> bool {
+        kinds.push(kind);
+        true
+    };
+    let windows = native_windows_tiled();
+    let mut set_resizable = |_: bool| Ok(());
+    let mut set_compact_size = || Ok(());
+    let mut request = |wire: &str, _: Duration| -> std::io::Result<serde_json::Value> {
+        if wire == crate::niri::WINDOWS_REQUEST {
+            Ok(windows.clone())
+        } else if wire == float {
+            Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "niri: silent"))
+        } else {
+            Ok(serde_json::json!("Handled"))
+        }
+    };
+    let outcome = execute_mode_transition(
+        true, false, 100, 5, true,
+        &epoch, &expanded,
+        &mut set_resizable, &mut set_compact_size, &mut request,
+        &mut handoff,
+    );
+    assert!(outcome.is_err(), "float failure surfaces, got {outcome:?}");
+    assert_eq!(*expanded.lock().unwrap(), true);
+    assert!(kinds.is_empty());
+}
+
+/// A genuinely superseded transition (external hide bumped first) is
+/// harmless: it never overwrites newer state, never unhides anything,
+/// and queues no handoff — while reporting the live mode.
+#[cfg(target_os = "linux")]
+#[test]
+fn superseded_transition_never_overwrites_newer_state() {
+    let epoch = AtomicU64::new(6);
+    let gate = Mutex::new(None);
+    let intents = Mutex::new(None::<(u64, RestoreIntent)>);
+    let expanded = Mutex::new(true);
+    let (tx, _rx) = mpsc::sync_channel::<()>(1);
+    let mut kinds = Vec::new();
+    // Faithful to production: the domain refuses the stale expectation,
+    // so the attempt queues nothing into the newer lifecycle.
+    let mut handoff = |kind: ModeRestore, expected: u64| -> bool {
+        kinds.push(kind);
+        match kind {
+            ModeRestore::Gated => gated_handoff_if_expected(&tx, &epoch, &gate, expected, RestoreIntent::CollapseToBase, &intents).is_some(),
+            ModeRestore::Plain => plain_handoff_if_expected(&tx, &epoch, &gate, expected, RestoreIntent::CollapseToBase, &intents).is_some(),
+        }
+    };
+    let windows = native_windows();
+    let mut set_resizable = |_: bool| Ok(());
+    let mut set_compact_size = || Ok(());
+    let mut request = |wire: &str, _: Duration| -> std::io::Result<serde_json::Value> {
+        if wire == crate::niri::WINDOWS_REQUEST {
+            Ok(windows.clone())
+        } else {
+            Ok(serde_json::json!("Handled"))
+        }
+    };
+    let outcome = execute_mode_transition(
+        true, false, 100, 5, true,
+        &epoch, &expanded,
+        &mut set_resizable, &mut set_compact_size, &mut request,
+        &mut handoff,
+    );
+    assert_eq!(outcome, Ok(true), "stale op reports the live mode");
+    assert_eq!(*expanded.lock().unwrap(), true);
+    assert_eq!(kinds, vec![ModeRestore::Gated], "attempted, then refused");
+    assert_eq!(epoch.load(Ordering::SeqCst), 6, "no bump past newer lifecycle");
+    assert_eq!(*gate.lock().unwrap(), None, "no gate stolen");
+}
+
+/// Covered collapse outcomes through the ONE shared finish: refused-Ok,
+/// disconnected-sender, wire-error, and successful Sent/Coalesced shapes —
+/// real mode orchestration plus real sender outcomes, never a hardcoded
+/// handoff behind the assertions.
+#[cfg(target_os = "linux")]
+#[test]
+fn covered_ok_refused_handoff_queues_cleanup() {
+    use std::sync::atomic::AtomicU64;
+    let epoch = AtomicU64::new(5);
+    let gate = Mutex::new(None);
+    let intents = Mutex::new(None::<(u64, RestoreIntent)>);
+    let expanded = Mutex::new(true);
+    let (tx, _rx) = mpsc::sync_channel::<()>(1);
+    let mut handoff = |kind: ModeRestore, expected: u64| -> bool {
+        let _newer = mode_take_generation(&epoch, &gate);
+        match kind {
+            ModeRestore::Gated => gated_handoff_if_expected(&tx, &epoch, &gate, expected, RestoreIntent::CollapseToBase, &intents).is_some(),
+            ModeRestore::Plain => plain_handoff_if_expected(&tx, &epoch, &gate, expected, RestoreIntent::CollapseToBase, &intents).is_some(),
+        }
+    };
+    let windows = native_windows();
+    let mut set_resizable = |_: bool| Ok(());
+    let mut set_compact_size = || Ok(());
+    let mut request = |wire: &str, _: Duration| -> std::io::Result<serde_json::Value> {
+        if wire == crate::niri::WINDOWS_REQUEST {
+            Ok(windows.clone())
+        } else {
+            Ok(serde_json::json!("Handled"))
+        }
+    };
+    let outcome = execute_mode_transition(
+        true, false, 100, 5, true,
+        &epoch, &expanded,
+        &mut set_resizable, &mut set_compact_size, &mut request,
+        &mut handoff,
+    );
+    assert!(outcome.is_ok(), "refused handoff reports Ok, never an error");
+    assert_eq!(epoch.load(Ordering::SeqCst), 6);
+    // The caller routes this covered-Ok-nothing-queued shape through the
+    // ONE shared finish: superseded by a gateless take, so no live gate
+    // owns the visuals — uncover under the current generation.
+    let mut recorded = Vec::new();
+    finish_collapse_cover_with(
+        true, 5, outcome.is_err(), false,
+        epoch.load(Ordering::SeqCst), *gate.lock().unwrap(),
+        &mut |cleanup| recorded.push(cleanup),
+    );
+    assert_eq!(recorded, vec![CoverCleanup::Current(6)]);
+    // Disconnected-sender shape: the REAL gated handoff against a dead
+    // worker bumps, publishes, and reports Disconnected — production
+    // bookkeeping records not-queued (mirroring do_handoff minus the
+    // app-bound cancel); the finish then plans against the live state.
+    let epoch2 = AtomicU64::new(5);
+    let gate2 = Mutex::new(None);
+    let intents2 = Mutex::new(None::<(u64, RestoreIntent)>);
+    let expanded2 = Mutex::new(true);
+    let (tx2, rx2) = mpsc::sync_channel::<()>(1);
+    drop(rx2);
+    let mut queued2 = true;
+    let mut handoff_dead = |kind: ModeRestore, expected: u64| -> bool {
+        let attempted = match kind {
+            ModeRestore::Gated => gated_handoff_if_expected(&tx2, &epoch2, &gate2, expected, RestoreIntent::CollapseToBase, &intents2),
+            ModeRestore::Plain => plain_handoff_if_expected(&tx2, &epoch2, &gate2, expected, RestoreIntent::CollapseToBase, &intents2),
+        };
+        match attempted {
+            Some((_, queue)) => {
+                queued2 = queue_reaches_worker(queue);
+                queued2
+            }
+            None => false,
+        }
+    };
+    let windows2 = native_windows();
+    let mut set_resizable2 = |_: bool| Ok(());
+    let mut set_compact_size2 = || Ok(());
+    let mut request2 = |wire: &str, _: Duration| -> std::io::Result<serde_json::Value> {
+        if wire == crate::niri::WINDOWS_REQUEST {
+            Ok(windows2.clone())
+        } else {
+            Ok(serde_json::json!("Handled"))
+        }
+    };
+    let outcome2 = execute_mode_transition(
+        true, false, 100, 5, true,
+        &epoch2, &expanded2,
+        &mut set_resizable2, &mut set_compact_size2, &mut request2,
+        &mut handoff_dead,
+    );
+    assert!(outcome2.is_ok());
+    assert!(!queued2, "dead worker queues nothing");
+    assert_eq!(epoch2.load(Ordering::SeqCst), 6);
+    // Production runs its app-bound cancel (own-gate release) before the
+    // shared finish; the finish then sees the post-cancel state —
+    // gateless, epoch advanced, no visual owner — and uncovers.
+    *gate2.lock().unwrap() = None;
+    let mut recorded2 = Vec::new();
+    finish_collapse_cover_with(
+        true, 5, outcome2.is_err(), queued2,
+        epoch2.load(Ordering::SeqCst), *gate2.lock().unwrap(),
+        &mut |cleanup| recorded2.push(cleanup),
+    );
+    assert_eq!(recorded2, vec![CoverCleanup::Current(6)]);
+    // Wire-error shape: errors propagate and the failed op owns cleanup.
+    let mut request_err = |_: &str, _: Duration| -> std::io::Result<serde_json::Value> {
+        Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "niri down"))
+    };
+    let mut handoff3 = |_: ModeRestore, _: u64| -> bool { panic!("no handoff on error") };
+    let mut set_resizable3 = |_: bool| Ok(());
+    let mut set_compact_size3 = || Ok(());
+    let epoch3 = AtomicU64::new(5);
+    let gate3 = Mutex::new(None);
+    let _intents3 = Mutex::new(None::<(u64, RestoreIntent)>);
+    let expanded3 = Mutex::new(true);
+    let outcome3 = execute_mode_transition(
+        true, false, 100, 5, true,
+        &epoch3, &expanded3,
+        &mut set_resizable3, &mut set_compact_size3, &mut request_err,
+        &mut handoff3,
+    );
+    assert!(outcome3.is_err(), "wire errors propagate, never stale-success");
+    let mut recorded3 = Vec::new();
+    finish_collapse_cover_with(
+        true, 5, outcome3.is_err(), false,
+        epoch3.load(Ordering::SeqCst), *gate3.lock().unwrap(),
+        &mut |cleanup| recorded3.push(cleanup),
+    );
+    assert_eq!(recorded3, vec![CoverCleanup::Own(5)]);
+    // Successful Sent/Coalesced handoffs queue NO cleanup callback — the
+    // reveal owns visuals until settle. Real sender outcomes, not literals.
+    let epoch4 = AtomicU64::new(5);
+    let gate4 = Mutex::new(None);
+    let intents4 = Mutex::new(None::<(u64, RestoreIntent)>);
+    let (tx4, _rx4) = mpsc::sync_channel::<()>(1);
+    let (_, queue4) = gated_handoff_if_expected(&tx4, &epoch4, &gate4, 5, RestoreIntent::PreserveCompact, &intents4).expect("fresh sends");
+    assert_eq!(queue4, RestoreQueue::Sent);
+    let mut recorded4 = Vec::new();
+    finish_collapse_cover_with(
+        true, 5, false, queue_reaches_worker(queue4),
+        epoch4.load(Ordering::SeqCst), *gate4.lock().unwrap(),
+        &mut |cleanup| recorded4.push(cleanup),
+    );
+    assert!(recorded4.is_empty(), "queued handoff owns visuals; no cleanup");
+    let (_, queue5) = gated_handoff_if_expected(&tx4, &epoch4, &gate4, 6, RestoreIntent::PreserveCompact, &intents4).expect("coalesces while full");
+    assert_eq!(queue5, RestoreQueue::Coalesced);
+    let mut recorded5 = Vec::new();
+    finish_collapse_cover_with(
+        true, 6, false, queue_reaches_worker(queue5),
+        epoch4.load(Ordering::SeqCst), *gate4.lock().unwrap(),
+        &mut |cleanup| recorded5.push(cleanup),
+    );
+    assert!(recorded5.is_empty(), "coalesced handoff still reaches the worker; no cleanup");
+}
+
+/// Unit 20a2a: hidden collapse hands off plain through the same domain —
+/// mode commits compact, no gate is ever published, and the epoch moves
+/// exactly once for the successful transition.
+#[cfg(target_os = "linux")]
+#[test]
+fn hidden_collapse_hands_off_plain_without_gate() {
+    let epoch = AtomicU64::new(5);
+    let gate = Mutex::new(None);
+    let intents = Mutex::new(None::<(u64, RestoreIntent)>);
+    let expanded = Mutex::new(true);
+    let (tx, _rx) = mpsc::sync_channel::<()>(1);
+    let mut kinds = Vec::new();
+    let mut handoff = |kind: ModeRestore, expected: u64| -> bool {
+        kinds.push(kind);
+        match kind {
+            ModeRestore::Gated => gated_handoff_if_expected(&tx, &epoch, &gate, expected, RestoreIntent::CollapseToBase, &intents).is_some(),
+            ModeRestore::Plain => plain_handoff_if_expected(&tx, &epoch, &gate, expected, RestoreIntent::CollapseToBase, &intents).is_some(),
+        }
+    };
+    let windows = native_windows();
+    let mut set_resizable = |_: bool| Ok(());
+    let mut set_compact_size = || Ok(());
+    let mut request = |wire: &str, _: Duration| -> std::io::Result<serde_json::Value> {
+        if wire == crate::niri::WINDOWS_REQUEST {
+            Ok(windows.clone())
+        } else {
+            Ok(serde_json::json!("Handled"))
+        }
+    };
+    let outcome = execute_mode_transition(
+        true, false, 100, 5, false,
+        &epoch, &expanded,
+        &mut set_resizable, &mut set_compact_size, &mut request,
+        &mut handoff,
+    );
+    assert_eq!(outcome, Ok(false));
+    assert_eq!(*expanded.lock().unwrap(), false);
+    assert_eq!(kinds, vec![ModeRestore::Plain]);
+    assert_eq!(*gate.lock().unwrap(), None, "plain never publishes");
+    assert_eq!(epoch.load(Ordering::SeqCst), 6);
+}
+
+/// Unit 20a2a: full seam with a competitor injected between our commit
+/// and our handoff — the exact interleave the old order could not
+/// survive. Our compare-and-handoff must refuse: the newer gate stays,
+/// the epoch never moves past it, and we still report our committed
+/// compact mode. Deterministic: the injection runs inside the handoff
+/// step itself, no threads or sleeps.
+#[cfg(target_os = "linux")]
+#[test]
+fn mode_handoff_never_steals_gate_published_after_commit() {
+    let epoch = AtomicU64::new(5);
+    let gate = Mutex::new(None);
+    let intents = Mutex::new(None::<(u64, RestoreIntent)>);
+    let expanded = Mutex::new(true);
+    let (tx, _rx) = mpsc::sync_channel::<()>(1);
+    let mut handoff = |kind: ModeRestore, expected: u64| -> bool {
+        // Competing show lands first, then our handoff must refuse.
+        let (show_job, _) = gated_restore_handoff(&tx, &epoch, &gate, RestoreIntent::PreserveCompact, &intents);
+        assert_eq!(show_job, 6);
+        match kind {
+            ModeRestore::Gated => gated_handoff_if_expected(&tx, &epoch, &gate, expected, RestoreIntent::CollapseToBase, &intents).is_some(),
+            ModeRestore::Plain => plain_handoff_if_expected(&tx, &epoch, &gate, expected, RestoreIntent::CollapseToBase, &intents).is_some(),
+        }
+    };
+    let windows = native_windows();
+    let mut set_resizable = |_: bool| Ok(());
+    let mut set_compact_size = || Ok(());
+    let mut request = |wire: &str, _: Duration| -> std::io::Result<serde_json::Value> {
+        if wire == crate::niri::WINDOWS_REQUEST {
+            Ok(windows.clone())
+        } else {
+            Ok(serde_json::json!("Handled"))
+        }
+    };
+    let outcome = execute_mode_transition(
+        true, false, 100, 5, true,
+        &epoch, &expanded,
+        &mut set_resizable, &mut set_compact_size, &mut request,
+        &mut handoff,
+    );
+    assert_eq!(outcome, Ok(false), "our commit landed before the competitor");
+    assert_eq!(*expanded.lock().unwrap(), false);
+    assert_eq!(*gate.lock().unwrap(), Some(6), "newer gate retained");
+    assert_eq!(epoch.load(Ordering::SeqCst), 6, "no bump past newer show");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn io_serializes_overlapping_mode_wire() {
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
+    // Unit 20f: op1 collapse parks in fake wire under io; a racing take
+    // publishes epoch 6; contender opB attempts wire and must wait; op1's
+    // commit/handoff refuse stale and report live; opB enters only after
+    // op1 releases. Channel barriers only — no sleeps. Every wait is
+    // recv_timeout fail-closed and no spawned thread asserts, so one
+    // failure can never hang the suite.
+    const BOUND: Duration = Duration::from_secs(5);
+    let io = Arc::new(Mutex::new(()));
+    let epoch = Arc::new(AtomicU64::new(5));
+    let gate: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
+    let expanded = Arc::new(Mutex::new(true));
+    let log = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+    let intent1 = Arc::new(Mutex::new(None::<(u64, RestoreIntent)>));
+    let (tx, _rx) = mpsc::sync_channel::<()>(1);
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let (attempting_tx, attempting_rx) = mpsc::channel::<()>();
+    let (done_tx, done_rx) = mpsc::channel::<CommandResult<bool>>();
+    let windows = native_windows();
+    let (io1, epoch1, gate1, expanded1, log1, intents1) =
+        (Arc::clone(&io), Arc::clone(&epoch), Arc::clone(&gate), Arc::clone(&expanded), Arc::clone(&log), Arc::clone(&intent1));
+    let op1 = std::thread::spawn(move || {
+        let note = |s: &'static str| log1.lock().unwrap().push(s);
+        let mut calls = 0u32;
+        let mut request = |wire: &str, _: Duration| -> std::io::Result<serde_json::Value> {
+            calls += 1;
+            if calls == 1 {
+                note("op1-wire-enter");
+                entered_tx.send(()).unwrap_or(());
+                if release_rx.recv_timeout(BOUND).is_err() {
+                    return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "test barrier"));
+                }
+            }
+            if wire == crate::niri::WINDOWS_REQUEST {
+                Ok(windows.clone())
+            } else {
+                Ok(serde_json::json!("Handled"))
+            }
+        };
+        let mut set_resizable = |_: bool| Ok(());
+        let mut set_compact_size = || Ok(());
+        let mut handoff = |kind: ModeRestore, expected: u64| -> bool {
+            match kind {
+                ModeRestore::Gated => gated_handoff_if_expected(&tx, &epoch1, &gate1, expected, RestoreIntent::CollapseToBase, &intents1).is_some(),
+                ModeRestore::Plain => plain_handoff_if_expected(&tx, &epoch1, &gate1, expected, RestoreIntent::CollapseToBase, &intents1).is_some(),
+            }
+        };
+        // Mirrors the production transition closure: sequenced execute.
+        let outcome = native_io_sequenced(&io1, &epoch1, 5, || {
+            execute_mode_transition(
+                true, false, 100, 5, true, &epoch1, &expanded1,
+                &mut set_resizable, &mut set_compact_size, &mut request, &mut handoff,
+            )
+        })
+        .unwrap_or_else(|| Ok(*expanded1.lock().unwrap()));
+        note("op1-exit");
+        done_tx.send(outcome).unwrap_or(());
+    });
+    entered_rx.recv_timeout(BOUND).expect("op1 parked in wire");
+    // Production-bound (unit 20f1): the parked wire runs inside the real
+    // transition under io — these SAME state locks must stay free.
+    assert!(expanded.try_lock().is_ok(), "mode lock free while mode wire blocked");
+    assert!(gate.try_lock().is_ok(), "gate free while mode wire blocked");
+    assert_eq!(mode_take_generation(&epoch, &gate), 6, "racing take publishes");
+    let (io2, epoch2, logb) = (Arc::clone(&io), Arc::clone(&epoch), Arc::clone(&log));
+    let opb = std::thread::spawn(move || {
+        logb.lock().unwrap().push("opB-attempt");
+        attempting_tx.send(()).unwrap_or(());
+        native_io_sequenced(&io2, &epoch2, 6, || {
+            logb.lock().unwrap().push("opB-enter");
+        });
+    });
+    attempting_rx.recv_timeout(BOUND).expect("contender at the gate");
+    release_tx.send(()).expect("release op1");
+    assert_eq!(done_rx.recv_timeout(BOUND).expect("op1 completes"), Ok(true));
+    op1.join().expect("op1 joined");
+    opb.join().expect("opB joined");
+    assert_eq!(epoch.load(Ordering::SeqCst), 6, "refused handoff never bumps");
+    assert_eq!(*expanded.lock().unwrap(), true, "stale op keeps previous mode");
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec!["op1-wire-enter", "opB-attempt", "op1-exit", "opB-enter"],
+        "second mode enters wire only after first released"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn io_expand_wire_refuses_after_racing_take() {
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
+    // Unit 20f, expand direction (false→true): parked wire, racing take
+    // to 7, released op reports the live previous mode — commit and
+    // handoff both refuse, no false atomicity from the epoch bump.
+    const BOUND: Duration = Duration::from_secs(5);
+    let io = Arc::new(Mutex::new(()));
+    let epoch = Arc::new(AtomicU64::new(6));
+    let gate: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
+    let expanded = Arc::new(Mutex::new(false));
+    let intentt = Arc::new(Mutex::new(None::<(u64, RestoreIntent)>));
+    let (tx, _rx) = mpsc::sync_channel::<()>(1);
+    let (entered_tx, entered_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let (done_tx, done_rx) = mpsc::channel::<CommandResult<bool>>();
+    let windows = native_windows();
+    let (iot, epocht, gatet, expandedt, intentst) =
+        (Arc::clone(&io), Arc::clone(&epoch), Arc::clone(&gate), Arc::clone(&expanded), Arc::clone(&intentt));
+    let op = std::thread::spawn(move || {
+        let mut calls = 0u32;
+        let mut request = |wire: &str, _: Duration| -> std::io::Result<serde_json::Value> {
+            calls += 1;
+            if calls == 1 {
+                entered_tx.send(()).unwrap_or(());
+                if release_rx.recv_timeout(BOUND).is_err() {
+                    return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "test barrier"));
+                }
+            }
+            if wire == crate::niri::WINDOWS_REQUEST {
+                Ok(windows.clone())
+            } else {
+                Ok(serde_json::json!("Handled"))
+            }
+        };
+        let mut set_resizable = |_: bool| Ok(());
+        let mut set_compact_size = || Ok(());
+        let mut handoff = |kind: ModeRestore, expected: u64| -> bool {
+            match kind {
+                ModeRestore::Gated => gated_handoff_if_expected(&tx, &epocht, &gatet, expected, RestoreIntent::PreserveCompact, &intentst).is_some(),
+                ModeRestore::Plain => plain_handoff_if_expected(&tx, &epocht, &gatet, expected, RestoreIntent::PreserveCompact, &intentst).is_some(),
+            }
+        };
+        let outcome = native_io_sequenced(&iot, &epocht, 6, || {
+            execute_mode_transition(
+                false, true, 100, 6, true, &epocht, &expandedt,
+                &mut set_resizable, &mut set_compact_size, &mut request, &mut handoff,
+            )
+        })
+        .unwrap_or_else(|| Ok(*expandedt.lock().unwrap()));
+        done_tx.send(outcome).unwrap_or(());
+    });
+    entered_rx.recv_timeout(BOUND).expect("op parked in wire");
+    // Same production boundary as above: io holds no state lock.
+    assert!(expanded.try_lock().is_ok(), "mode lock free while mode wire blocked");
+    assert!(gate.try_lock().is_ok(), "gate free while mode wire blocked");
+    assert_eq!(mode_take_generation(&epoch, &gate), 7);
+    release_tx.send(()).expect("release op");
+    assert_eq!(done_rx.recv_timeout(BOUND).expect("op completes"), Ok(false));
+    op.join().expect("op joined");
+    assert_eq!(epoch.load(Ordering::SeqCst), 7);
+    assert_eq!(*expanded.lock().unwrap(), false);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn niri_offload_keeps_caller_moving_with_shapes() {
+    // Deterministic caller progress through the REAL production seam:
+    // mode work parks on a channel rendezvous while the caller acts,
+    // then both bool and Err shapes round-trip. No sleeps; one bounded
+    // channel wait as an anti-hang, never a fence.
+    let (started_tx, started_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let pending = spawn_niri_mode_blocking(move || -> CommandResult<bool> {
+        started_tx.send(()).expect("caller waits for start");
+        release_rx.recv().expect("caller releases parked work");
+        Ok(true)
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("mode work runs off the caller");
+    // Reached while pool-thread work parks: the caller was never blocked.
+    release_tx.send(()).expect("release");
+    let done =
+        tauri::async_runtime::block_on(async move { pending.await.map_err(err).unwrap() });
+    assert_eq!(done, Ok(true));
+    let pending_err =
+        spawn_niri_mode_blocking(|| -> CommandResult<bool> { Err("niri: boom".to_owned()) });
+    let failed =
+        tauri::async_runtime::block_on(async move { pending_err.await.map_err(err).unwrap() });
+    assert_eq!(failed, Err("niri: boom".to_owned()));
+}
+
+#[test]
+fn shortcut_and_tray_open_place_the_panel_without_the_rose_when_it_is_hidden() {
+    // `toggle_panel` (the shortcut) and the tray's Open both go through `show_panel`.
+    assert_eq!(
+        panel_placement(true, false, false, None),
+        Placement::BesideDot
+    );
+    assert_eq!(panel_placement(true, false, true, None), Placement::Alone);
+    // Full screen keeps its frame; native Wayland leaves placement to the compositor.
+    assert_eq!(panel_placement(true, true, true, None), Placement::Keep);
+    assert_eq!(panel_placement(true, true, false, None), Placement::Keep);
+    assert_eq!(panel_placement(false, false, true, None), Placement::Keep);
+}
+
+#[test]
+fn remembered_spot_never_overrides_the_visible_rose() {
+    // Task 4: a visible rose always recomputes beside-the-Dot on every
+    // reopen; a session-remembered spot only feeds the hidden `Alone`
+    // path. This reaches the exact decision `show_panel` uses via
+    // `place_panel`, whose first frame is placed before it maps.
+    assert_eq!(
+        panel_placement(true, false, false, Some((300, 200))),
+        Placement::BesideDot
+    );
+    assert_eq!(
+        panel_placement(true, false, true, Some((300, 200))),
+        Placement::Alone
+    );
+    // Fullscreen and native-Wayland Keep still win over any saved spot.
+    assert_eq!(
+        panel_placement(true, true, false, Some((300, 200))),
+        Placement::Keep
+    );
+    assert_eq!(
+        panel_placement(false, false, false, Some((300, 200))),
+        Placement::Keep
+    );
+    // No saved spot keeps the historical behavior.
+    assert_eq!(
+        panel_placement(true, false, false, None),
+        Placement::BesideDot
+    );
+    assert_eq!(panel_placement(true, false, true, None), Placement::Alone);
+}
+
+#[test]
+fn visible_rose_recalculates_beside_dot_task4() {
+    // Task 4: a visible rose always recomputes beside-the-Dot on reopen;
+    // a session-remembered spot never overrides it. Hidden always Alone.
+    assert_eq!(
+        panel_placement(true, false, false, Some((300, 200))),
+        Placement::BesideDot
+    );
+    assert_eq!(
+        panel_placement(true, false, true, Some((300, 200))),
+        Placement::Alone
+    );
+    assert_eq!(panel_placement(true, false, true, None), Placement::Alone);
+}

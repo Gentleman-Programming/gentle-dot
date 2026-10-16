@@ -29,10 +29,11 @@ use crate::niri::gate::*;
 // snapshot and now live in `niri/route_gate.rs`; imported, never redefined.
 #[cfg(target_os = "linux")]
 use crate::niri::route_gate::{
-    GateEffect, RestoreCompletion, default_rose_hidden_for, hide_intent_next, joint_mover_from_signals,
-    joint_unit_active, native_niri_mode, native_restore_planned, niri_socket_present, plan_gate_effects,
-    plan_hide_completion, plan_restore_completion, plan_toggle_route, rose_visible_for_mode,
-    shared_route_wanted,
+    GateEffect, RestoreCompletion, collapse_cover_wanted, default_rose_hidden_for, hide_intent_next,
+    joint_mover_from_signals, joint_unit_active, native_niri_mode, native_restore_planned,
+    niri_fullscreen_offload, niri_socket_present, plan_gate_effects, plan_hide_completion,
+    plan_restore_completion, plan_toggle_route, rose_visible_for_mode, shared_route_wanted,
+    unit_branch_wanted,
 };
 #[cfg(target_os = "linux")]
 use gtk::prelude::{GtkWindowExt, WidgetExt};
@@ -248,7 +249,18 @@ enum Placement {
 }
 
 /// Opening the panel never depends on the Dot window being visible.
-fn panel_placement(places_windows: bool, full_screen: bool, rose_hidden: bool) -> Placement {
+/// A visible rose always recomputes beside-the-Dot on every reopen (the
+/// app-owned first frame is placed before it maps, so it never shows a
+/// stale spot first); a session-remembered spot only feeds the hidden
+/// `Alone` path. Fullscreen and native-Wayland Keep still win. The spot
+/// lives in memory only and is only read back where the app places its own
+/// windows, so native Wayland never reaches it.
+fn panel_placement(
+    places_windows: bool,
+    full_screen: bool,
+    rose_hidden: bool,
+    _remembered: Option<(i32, i32)>,
+) -> Placement {
     if !places_windows || full_screen {
         Placement::Keep
     } else if rose_hidden {
@@ -1059,10 +1071,47 @@ fn set_rose_hidden(app: AppHandle, hidden: bool) -> CommandResult<bool> {
     Ok(hidden)
 }
 
-/// Fills the work area of the panel's display, or returns to the frame before (S26.2).
+/// Blocking-pool spawn for Niri mode work: the single
+/// production seam behind the async fullscreen command — the command and the
+/// tests share it, so the suite exercises the real offload rather than a
+/// test-only spawn. Thin by design: ordering and affinity live in the mode
+/// path itself, which keeps its sync signature.
+#[cfg(target_os = "linux")]
+fn spawn_niri_mode_blocking<F, T>(work: F) -> tauri::async_runtime::JoinHandle<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+}
+/// Fills the work area of the panel's display, or returns to the frame before.
 /// It stays an accessory window, never a separate macOS fullscreen Space. Returns the new state.
 #[tauri::command]
 fn set_panel_fullscreen(app: AppHandle, on: bool) -> CommandResult<bool> {
+    // Non-Niri dispatch only: the invoke router sends Niri-native
+    // invokes to the async twin below, so this keeps the ORIGINAL synchronous
+    // dispatch, order, and window affinity for every other backend.
+    set_panel_fullscreen_sync(app, on)
+}
+/// Niri-only async twin: same frontend command name
+/// via rename — registered in a SEPARATE handler from the sync original (never
+/// the same generated match), reachable only through the invoke router below.
+/// Awaits the blocking-pool offload so no socket IPC, getter, or cover-ack
+/// wait runs on the command handler; bool result and frontend errors are
+/// unchanged. Socketless Niri keeps the async bounded no-op policy: the mode
+/// path itself fails bounded (previous mode), never the legacy fake frame.
+#[cfg(target_os = "linux")]
+#[tauri::command(rename = "set_panel_fullscreen")]
+async fn set_panel_fullscreen_niri(app: AppHandle, on: bool) -> CommandResult<bool> {
+    let owned = app.clone();
+    spawn_niri_mode_blocking(move || set_panel_niri_mode(owned, on))
+        .await
+        .map_err(err)?
+}
+/// Legacy app-owned fullscreen frame (sync): the exact pre-20e body,
+/// kept verbatim for macOS/X11/other backends behind the sync command (unit
+/// 20e1) — same order, same window affinity, same return shape.
+fn set_panel_fullscreen_sync(app: AppHandle, on: bool) -> CommandResult<bool> {
     let panel = window(&app, PANEL)?;
     let shell = app.state::<Shell>();
     let mut full_screen = shell.full_screen.lock().unwrap();
@@ -1086,6 +1135,86 @@ fn set_panel_fullscreen(app: AppHandle, on: bool) -> CommandResult<bool> {
         _ => {}
     }
     Ok(full_screen.is_some())
+}
+/// Which restore handoff a mode transition wants:
+/// visible collapses hand off gated (cover → settle → reveal), hidden ones
+/// plain (the reveal never touches hidden windows). The transition records
+/// the want; the orchestration below performs it only after a fresh commit.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModeRestore {
+    Gated,
+    Plain,
+}
+/// Runs one mode transition plus its generation commit (units 20a1/20a2a,
+/// Linux only): the single orchestration the production mode path calls,
+/// with injectable setters/socket/handoff so tests execute this exact order
+/// — no test-only fantasy copy. The transition only RECORDS its restore
+/// want; the commit lands first, and `handoff` runs only after a fresh
+/// commit of a successful transition — so this op can never stale itself.
+/// `handoff` receives the expected generation and performs the atomic
+/// compare-and-handoff itself, returning whether it queued anything: a
+/// show/hide/mode interleaving between our commit and our handoff refuses
+/// instead of stealing the newer gate. Errors always propagate, never
+/// converted to stale-success.
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+fn execute_mode_transition(
+    was_expanded: bool,
+    on: bool,
+    pid: u32,
+    job: u64,
+    visible: bool,
+    epoch: &AtomicU64,
+    expanded: &Mutex<bool>,
+    set_resizable: &mut impl FnMut(bool) -> Result<(), String>,
+    set_compact_size: &mut impl FnMut() -> Result<(), String>,
+    request: &mut impl FnMut(&str, Duration) -> std::io::Result<serde_json::Value>,
+    handoff: &mut impl FnMut(ModeRestore, u64) -> bool,
+) -> CommandResult<bool> {
+    let mut proposed = was_expanded;
+    // Record only: no generation increment may run before the commit below —
+    // the old order handed off inside the transition, so a successful
+    // collapse self-staled and kept `native_expanded=true`.
+    let mut restore_wanted: Option<ModeRestore> = None;
+    let mut queue_restore = || {
+        restore_wanted = Some(if visible { ModeRestore::Gated } else { ModeRestore::Plain });
+    };
+    let outcome = run_native_mode_change(
+        &mut proposed,
+        on,
+        pid,
+        set_resizable,
+        set_compact_size,
+        request,
+        &mut queue_restore,
+    );
+    // Generation commit BEFORE any restore handoff: publish the transitioned
+    // mode only while still fresh; a superseded op never overwrites newer
+    // state (its compositor effects, if any, converge through the worker's
+    // actual-vs-desired reconcile). The invoke shape stays true/false
+    // actual final mode on every path.
+    let committed = commit_mode_if_fresh(expanded, job, epoch, proposed);
+    niri_trace!("mode exit on={on} now={committed} ok={}", outcome.is_ok());
+    match outcome {
+        Err(error) => Err(error),
+        Ok(_) => match restore_wanted {
+            None => Ok(committed),
+            Some(kind) => {
+                if handoff(kind, job) {
+                    Ok(committed)
+                } else {
+                    // Refused: a newer lifecycle published between our commit
+                    // and our handoff. Report a fresh read under the lock —
+                    // never the pre-interleave commit value — and queue
+                    // nothing into the newer lifecycle.
+                    let live = *expanded.lock().unwrap();
+                    niri_trace!("mode superseded job={job} live={live}");
+                    Ok(live)
+                }
+            }
+        },
+    }
 }
 
 /// Result of `shortcut_get`: the shortcut that opens the panel and the default one.
@@ -1224,7 +1353,13 @@ fn keep_dot_size(dot: &WebviewWindow, current: Rect) -> CommandResult {
 fn place_panel(app: &AppHandle) -> CommandResult {
     let shell = app.state::<Shell>();
     let full_screen = shell.full_screen.lock().unwrap().is_some();
-    match panel_placement(shell.places_windows, full_screen, shell.rose_hidden.load(Ordering::SeqCst)) {
+    let remembered = *shell.panel_spot.lock().unwrap();
+    match panel_placement(
+        shell.places_windows,
+        full_screen,
+        shell.rose_hidden.load(Ordering::SeqCst),
+        remembered,
+    ) {
         Placement::Keep => Ok(()),
         Placement::BesideDot => place_panel_next_to_dot(app),
         Placement::Alone => place_panel_alone(app),
@@ -2021,11 +2156,29 @@ fn register_shortcut(app: &AppHandle, shortcut: &str) -> Option<String> {
     None
 }
 
-/// A launch of `gentle-dot` (usually `--toggle` from a desktop shortcut) reaches the running app.
+/// Keyboard/CLI fullscreen-minimize toggle: the target of the managed Niri
+/// fullscreen binding and of `gentle-dot --fullscreen`. The Niri session flips the
+/// native mode; every other backend runs the exact legacy sync body with its
+/// order and window affinity. Best-effort like every other launch: the result
+/// is logged by the caller, never thrown.
+fn toggle_panel_fullscreen(app: AppHandle) -> CommandResult {
+    let shell = app.state::<Shell>();
+    #[cfg(target_os = "linux")]
+    if niri_fullscreen_offload(shell.places_windows, platform::is_niri(&|key| std::env::var(key).ok())) {
+        let on = !*shell.native_expanded.lock().unwrap();
+        return set_panel_niri_mode(app, on).map(|_| ());
+    }
+    let on = shell.full_screen.lock().unwrap().is_none();
+    set_panel_fullscreen_sync(app, on).map(|_| ())
+}
+
+/// A launch of `gentle-dot` (usually `--toggle` or `--fullscreen` from a desktop
+/// shortcut) reaches the running app.
 fn handle_launch(app: &AppHandle, args: &[String]) {
     let result = match platform::launch_request(args) {
         LaunchRequest::Toggle => toggle_panel(app.clone()),
         LaunchRequest::Show => show_panel(app),
+        LaunchRequest::Fullscreen => toggle_panel_fullscreen(app.clone()),
     };
     if let Err(error) = result {
         eprintln!("gentle-dot: cannot show the panel: {error}");
@@ -2593,6 +2746,304 @@ fn clamp_anchor_to_work_area(
         Some((x, y)) => CompactSpot { output: anchor.output, x, y },
         None => anchor,
     }
+}
+
+/// Niri-native expanded/compact switch (position-independent): expanded
+/// is a normal managed tiling window, compact is floating. Socket budgets are
+/// 250 ms per phase with the remainder passed per request, with no worker
+/// thread and no retries: capture 250 + reconcile 250 + apply/retry 250 for a
+/// nominal 750 ms on a capturing collapse (500 without capture), PLUS the
+/// collapse-cover ack wait (250 ms) and the native_io ownership wait (an
+/// unbounded pool queue — never UI-blocking, never a state lock over wire).
+/// No end-to-end aggregate is claimed: the ownership lock sits outside every
+/// socket budget. No state lock is held across socket IPC
+/// or main-thread waits: snapshot, one atomic generation take,
+/// acknowledged cover, transition under I/O ownership (never state locks),
+/// generation commit. Collapse
+/// hands the restore worker off only after the float lands, so the mode
+/// transition always completes before restore processing. Missing/ambiguous
+/// windows or a missing socket are a bounded no-op returning the previous
+/// mode; action wire errors surface as command errors with the mode untouched.
+/// Never the legacy workarea frame, never `SetFixed`, never a
+/// focused-window fallback. Capture before expanding and the restore worker
+/// are S2b-2 below.
+#[cfg(target_os = "linux")]
+fn set_panel_niri_mode(app: AppHandle, on: bool) -> CommandResult<bool> {
+    use std::path::PathBuf;
+    // Snapshot the blocking getter before any native lock (same deadlock
+    // as the hide path): missing windows read as hidden, skipping capture.
+    let snap_epoch = app.state::<Shell>().native_epoch.load(Ordering::SeqCst);
+    let visible = snapshot_visible(|| {
+        window(&app, PANEL).and_then(|panel| panel.is_visible().map_err(err))
+    });
+    let shell = app.state::<Shell>();
+    // Brief state reads only: every guard drops before any socket IPC or
+    // main-thread wait below (the old flow held `native_expanded`
+    // across the capture plus the whole transition's socket I/O).
+    let was_expanded = *shell.native_expanded.lock().unwrap();
+    let places_windows = shell.places_windows;
+    let pre_epoch = shell.native_epoch.load(Ordering::SeqCst);
+    // Socket-level half of the native gate, through the unit-tested predicate:
+    // Niri-native without a usable socket is a bounded no-op returning the
+    // previous mode. (The dispatch above already keeps socket-less Niri out of
+    // the legacy fake-fullscreen frame.)
+    let socket = std::env::var("NIRI_SOCKET").ok().filter(|path| !path.is_empty());
+    niri_trace!("mode enter on={on} was={was_expanded} visible={visible} snap_epoch={snap_epoch} socket={}", socket.is_some());
+    if !native_niri_mode(
+        places_windows,
+        platform::is_niri(&|key| std::env::var(key).ok()),
+        socket.is_some(),
+    ) {
+        niri_trace!("mode skip reason=gate");
+        return Ok(was_expanded);
+    }
+    // The predicate held, so a usable socket is present; re-bind it for the
+    // client below, staying a bounded no-op on any drift instead of panicking.
+    let Some(socket) = socket else {
+        return Ok(was_expanded);
+    };
+    // Dormant shared-unit branch: explicit activation only; the
+    // legacy mode engine below (capture → cover → worker) stays untouched
+    // while dormant. The commit owns the expanded flag under the gate so it
+    // pairs with the unit snapshot; the anchor is preserved (no capture).
+    if unit_branch_wanted(
+        shell.native_unit.lock().unwrap().active,
+        places_windows,
+        platform::is_niri(&|key| std::env::var(key).ok()),
+        niri_socket_present(),
+    ) {
+        if let Some(routed) = route_unit_transition(&app, UnitTransition::SetExpanded(on)) {
+            return routed.map(|()| on);
+        }
+    }
+    // One generation owns this whole op (units 20a/20f1): EVERY valid native
+    // command publishes cancellation FIRST via the take below — even a
+    // same-mode no-op — so a cached-compact shortcut can never skip
+    // cancelling an in-flight tile (wire effects land regardless of
+    // generations; only commits and reveals are generation-gated). The
+    // actual-mode reconcile inside the transition then decides wire versus
+    // silent against the compositor, never the possibly-stale record alone.
+    // Bump plus gate-clear is atomic under the brief gate lock, never across
+    // waits, so rapid toggles/show/hide serialize on generations and no older
+    // job can reveal or steal a newer gate. Expanding unwinds the orphaned
+    // gated first frame here (the take above staled its reveal): restore
+    // opacity/interaction on the still-mapped window instead of stranding it
+    // at opacity 0. Collapsing owns its visuals through cover → settle →
+    // reveal below, so it queues no pre-bump reset that would only no-op
+    // against its own later handoff.
+    let job = mode_take_generation(&shell.native_epoch, &shell.native_gate);
+    if on {
+        if let Ok(mode_panel) = window(&app, PANEL) {
+            queue_gate_reset(&app, &mode_panel, job);
+        }
+    }
+    let pid = std::process::id();
+    let path = PathBuf::from(socket);
+    let mut request = |wire: &str, timeout: Duration| crate::niri::Client::new(&path, timeout).request(wire);
+    // Capture the compact spot before leaving it: ALWAYS resolves
+    // the actual floating geometry — the recorded flag is not proof — subject
+    // to visible/epoch freshness; tiled, hidden, missing, or failed captures
+    // preserve the current anchor with no inferred mode and no reveal.
+    capture_mode_anchor(&shell, job, pid, visible, snap_epoch, pre_epoch, &mut request);
+    // Window constraint setters are nonwaiting proxies (Tauri user-event queue
+    // into tao's channel); only getters block, and none run under the lock.
+    let mut set_resizable = |resizable: bool| {
+        window(&app, PANEL).and_then(|panel| panel.set_resizable(resizable).map_err(err))
+    };
+    let mut set_compact_size = || {
+        window(&app, PANEL).and_then(|panel| {
+            panel.set_size(LogicalSize::new(PANEL_SIZE.0, PANEL_SIZE.1)).map_err(err)
+        })
+    };
+    // Explicit collapse to base: EVERY valid `!on`
+    // request resets the session anchor to the compositor base — independent
+    // of the recorded `was_expanded` the transition reconciles against, so
+    // an explicit collapse from an already-compact record still resets the
+    // base the user asked for. Native validity was established above (early
+    // return), so only the request direction decides here; freshness gates
+    // the commit below, never the intent. The reset lands only after a
+    // successful mode commit: a superseded or failed collapse must not
+    // clear an anchor a newer lifecycle just wrote. Outside collapse the
+    // anchor is untouched (only user-mover and hide/expand capture write
+    // it). The worker settles the explicit base in a later unit (20g2);
+    // until then a base-less job fails explicitly instead of adopting an
+    // arbitrary compositor position.
+    let collapse_requested = !on;
+    if collapse_requested {
+        niri_trace!("mode collapse requested visible={visible}");
+    }
+    // The real epoch-incrementing handoff, run through the orchestration
+    // (units 20a1/20a2a/20c; defined before the cover dispatch so the routed
+    // transition can borrow it, invoked only after commit): gated for visible
+    // collapses, plain for hidden ones, both atomic compare-and-handoff on the
+    // expected generation — a newer lifecycle interleaving after our commit
+    // refuses instead of stealing its gate. Returns whether the worker will
+    // actually complete it (Sent/Coalesced only): a missing sender or a
+    // disconnected queue returns false so the cover cleanup below can tell a
+    // queued restore from a stranded cover — never on the Ok bool alone.
+    let mut handoff_queued = false;
+    // Mode-request intent (requirement S15/S17): `!on` keeps the remembered
+    // compact spot so leaving expanded/fullscreen returns the pair to where
+    // the user left it; only a request with nothing remembered falls back to
+    // the calibrated upper-right base. Native validity was established above
+    // (early return).
+    let anchored = shell.native_compact.lock().unwrap().is_some();
+    let mode_intent = restore_intent_for_mode_request(on, true, anchored);
+    let mut do_handoff = |kind: ModeRestore, expected: u64| -> bool {
+        let queued = match kind {
+            ModeRestore::Gated => {
+                if let Some(tx) = shell.native_restore.lock().unwrap().as_ref().cloned() {
+                    match gated_handoff_if_expected(
+                        &tx,
+                        &shell.native_epoch,
+                        &shell.native_gate,
+                        expected,
+                        mode_intent,
+                        &shell.native_intent,
+                    ) {
+                        Some((gated_job, queue)) => {
+                            niri_trace!("mode collapse gated job={gated_job} queue={queue:?}");
+                            if !queue_reaches_worker(queue) {
+                                cancel_gated_panel(&app, gated_job, "restore worker disconnected");
+                                false
+                            } else {
+                                true
+                            }
+                        }
+                        None => {
+                            niri_trace!("mode queue refuse stale expected={expected}");
+                            false
+                        }
+                    }
+                } else {
+                    niri_trace!("mode queue sender=none");
+                    false
+                }
+            }
+            ModeRestore::Plain => {
+                if let Some(tx) = shell.native_restore.lock().unwrap().as_ref() {
+                    match plain_handoff_if_expected(
+                        &tx,
+                        &shell.native_epoch,
+                        &shell.native_gate,
+                        expected,
+                        mode_intent,
+                        &shell.native_intent,
+                    ) {
+                        Some((plain_job, queue)) => {
+                            niri_trace!("mode collapse plain job={plain_job} queue={queue:?}");
+                            queue_reaches_worker(queue)
+                        }
+                        None => {
+                            niri_trace!("mode queue refuse stale expected={expected}");
+                            false
+                        }
+                    }
+                } else {
+                    niri_trace!("mode queue sender=none");
+                    false
+                }
+            }
+        };
+        handoff_queued = queued;
+        queued
+    };
+    // Composed apply under I/O ownership: the whole transition —
+    // wire, commit, handoff — serializes against worker passes. Superseded
+    // before the first wire runs no IPC and reports the live mode exactly
+    // like a refused handoff, queueing nothing. Shared by the routed cover
+    // below and the direct path alike.
+    let mut run_transition = || {
+        match native_io_sequenced(&shell.native_io, &shell.native_epoch, job, || {
+            execute_mode_transition(
+                was_expanded,
+                on,
+                pid,
+                job,
+                visible,
+                &shell.native_epoch,
+                &shell.native_expanded,
+                &mut set_resizable,
+                &mut set_compact_size,
+                &mut request,
+                &mut do_handoff,
+            )
+        }) {
+            Some(outcome) => outcome,
+            None => Ok(*shell.native_expanded.lock().unwrap()),
+        }
+    };
+    // Ordered cover (units 20a/20a2a/20d1/20f3): dispatch the opacity-0 cover,
+    // then AWAIT its acknowledgment with no lock held. Only an ACKED cover
+    // runs the float/size socket transition below — an unconfirmed cover
+    // (timeout) or a superseded one (stale) runs NO mode IPC. No fixed sleep
+    // and no gate published yet; the restore handoff runs after commit, so
+    // the mode transition always completes before any restore processing. A
+    // dispatched cover arms the shared tail finish below: a failed
+    // transition with a possibly-applied cover and no successor must reset
+    // visuals explicitly.
+    let mut cover_dispatched = false;
+    let mut cover_route: Option<CommandResult<bool>> = None;
+    // Cover is an explicit requested-compact + visible decision,
+    // never the anchor-reset predicate: a stale-while-covering snapshot still
+    // refuses the transition below, and hidden requests keep the honest
+    // previous-mode path with no cover queued.
+    if collapse_cover_wanted(on, visible) {
+        if shell.native_restore.lock().unwrap().is_some() {
+            if let Ok(cover_panel) = window(&app, PANEL) {
+                let cover_ack = dispatch_collapse_cover(&app, &cover_panel, job);
+                cover_dispatched = true;
+                let live = *shell.native_expanded.lock().unwrap();
+                cover_route = Some(route_covered_collapse(
+                    await_cover_ack(&cover_ack, job, &shell.native_epoch, COLLAPSE_COVER_ACK),
+                    job,
+                    live,
+                    &shell.cover_cancelled,
+                    &mut || run_transition(),
+                ));
+            }
+        } else {
+            niri_trace!("mode collapse queue sender=none");
+        }
+    }
+    // A routed cover already ran (or refused) its transition inside the
+    // routing above; every other path transitions here. The shared tail
+    // finish below owns cleanup for all of them.
+    let outcome = match cover_route {
+        Some(routed) => routed,
+        None => run_transition(),
+    };
+    if collapse_requested && outcome.is_ok() && !anchored {
+        // Nothing remembered: the base is the only place to land, so the
+        // anchor reset here is a no-op that also clears a stale mover. A
+        // remembered spot is never discarded on a mode change.
+        let live = shell.native_epoch.load(Ordering::SeqCst);
+        let anchor_cleared = commit_compact_anchor(
+            &shell.native_compact,
+            &shell.native_gate,
+            &shell.native_epoch,
+            live,
+            None,
+        );
+        let mover_cleared =
+            clear_mover_if_fresh(&shell.native_mover, &shell.native_gate, &shell.native_epoch, live);
+        niri_trace!("mode collapse anchor=reset-to-default visible={visible} anchor_cleared={anchor_cleared} mover_cleared={mover_cleared}");
+    }
+    if outcome.is_ok() {
+        // S5/S9: the extended mode hides the rose and its visibility toggle;
+        // returning re-presents the rose beside the panel instead of leaving
+        // it wherever the compositor dropped the remap.
+        sync_rose_for_mode(&app, &shell);
+    }
+    // Unified cover cleanup (units 20c/20d): every dispatched cover with no
+    // queued restore routes through the ONE shared finish — errors, refused
+    // handoffs, and missing/disconnected senders alike — so a mapped covered
+    // panel can never strand at opacity 0. A queued handoff never resets here
+    // (the reveal owns visuals until settle); a newer gated show is never
+    // uncovered (its stale reset deliberately no-ops). Outcome errors still
+    // propagate, never converted to stale-success.
+    finish_collapse_cover(&app, cover_dispatched, job, outcome.is_err(), handoff_queued);
+    outcome
 }
 
 /// Idle poll quantum for the native follow subscription (Linux only): a
@@ -4179,12 +4630,15 @@ mod tests {
     #[test]
     fn shortcut_and_tray_open_place_the_panel_without_the_rose_when_it_is_hidden() {
         // `toggle_panel` (the shortcut) and the tray's Open both go through `show_panel`.
-        assert_eq!(panel_placement(true, false, false), Placement::BesideDot);
-        assert_eq!(panel_placement(true, false, true), Placement::Alone);
+        assert_eq!(
+            panel_placement(true, false, false, None),
+            Placement::BesideDot
+        );
+        assert_eq!(panel_placement(true, false, true, None), Placement::Alone);
         // Full screen keeps its frame; native Wayland leaves placement to the compositor.
-        assert_eq!(panel_placement(true, true, true), Placement::Keep);
-        assert_eq!(panel_placement(true, true, false), Placement::Keep);
-        assert_eq!(panel_placement(false, false, true), Placement::Keep);
+        assert_eq!(panel_placement(true, true, true, None), Placement::Keep);
+        assert_eq!(panel_placement(true, true, false, None), Placement::Keep);
+        assert_eq!(panel_placement(false, false, true, None), Placement::Keep);
     }
 
     #[test]

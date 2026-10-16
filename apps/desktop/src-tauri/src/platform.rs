@@ -87,13 +87,16 @@ pub fn compositor_places_windows(env: impl Fn(&str) -> Option<String>) -> bool {
 pub enum LaunchRequest {
     Toggle,
     Show,
+    Fullscreen,
 }
 
 /// Reads the arguments of a launch, `args[0]` being the program. Exact tokens only,
 /// so `toggle` or `--fullscreen-x` never match; when both verbs are present the
 /// fullscreen one wins because it is the rarer, more deliberate request.
 pub fn launch_request(args: &[String]) -> LaunchRequest {
-    if args.iter().skip(1).any(|arg| arg == "--toggle") {
+    if args.iter().skip(1).any(|arg| arg == "--fullscreen") {
+        LaunchRequest::Fullscreen
+    } else if args.iter().skip(1).any(|arg| arg == "--toggle") {
         LaunchRequest::Toggle
     } else {
         LaunchRequest::Show
@@ -183,6 +186,9 @@ mod tests {
         let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(launch_request(&args(&["gentle-dot", "--toggle"])), LaunchRequest::Toggle);
         assert_eq!(launch_request(&args(&["/opt/gentle-dot", "--verbose", "--toggle"])), LaunchRequest::Toggle);
+        assert_eq!(launch_request(&args(&["gentle-dot", "--fullscreen"])), LaunchRequest::Fullscreen);
+        assert_eq!(launch_request(&args(&["gentle-dot", "--toggle", "--fullscreen"])), LaunchRequest::Fullscreen);
+        assert_eq!(launch_request(&args(&["gentle-dot", "--fullscreen-x"])), LaunchRequest::Show);
         assert_eq!(launch_request(&args(&["gentle-dot"])), LaunchRequest::Show);
         assert_eq!(launch_request(&args(&["gentle-dot", "toggle", "--toggled"])), LaunchRequest::Show);
         // The program path is never read as an argument.
