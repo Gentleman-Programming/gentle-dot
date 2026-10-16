@@ -5,12 +5,14 @@ import { ChatSurface } from "./components/ChatSurface.tsx";
 import type { ComputerControls } from "./components/Computer.tsx";
 import { DotSurface } from "./components/DotSurface.tsx";
 import { GlowSurface } from "./components/GlowSurface.tsx";
+import { NiriUnitSurface } from "./components/NiriUnitSurface.tsx";
 import { computerPermissions, requestComputerPermission, setComputerYolo, stopComputer } from "./computer.ts";
 import {
 	connectionInfo,
 	connectorCommand,
 	hidePanel,
 	inDesktop,
+	niriUnitReady,
 	onDesktopEvent,
 	setDotState,
 	startDragging,
@@ -19,6 +21,7 @@ import {
 import { createUploader } from "./uploads.ts";
 import { useComputerAvailable, useComputerState } from "./useComputer.ts";
 import { useDot } from "./useDot.ts";
+import { useNiriUnit } from "./useNiriUnit.ts";
 import { usePanelWindow } from "./usePanelWindow.ts";
 
 type Surface = "dot" | "panel" | "web";
@@ -88,6 +91,13 @@ function Assistant({ surface }: { surface: Surface }) {
 	);
 	// The panel's own window (S26): hide the rose, full screen.
 	const panel = usePanelWindow(desktop && surface === "panel");
+	// The dormant shared Niri unit (T10/T19): logical state only, no anchor. Disabled (including
+	// off-desktop and every legacy route) renders exactly the existing App below.
+	const unit = useNiriUnit(desktop && surface === "panel");
+	// Command callbacks stay the shell's; the rendered rose/fullscreen state follows the snapshot.
+	const panelWindow = unit.enabled
+		? { ...panel.controls, roseHidden: unit.roseHidden, fullscreen: unit.fullscreen }
+		: panel.controls;
 	const fullscreenNow = panel.fullscreenNow;
 	const setFullscreen = panel.controls.setFullscreen;
 	const computer: ComputerControls | undefined =
@@ -125,7 +135,7 @@ function Assistant({ surface }: { surface: Surface }) {
 					},
 				);
 			// A refused or timed-out window recovers without a reopen: the app reports its assistant
-			// ready after Restart assistant, or after a start slower than `connection_info` waits (S35.2).
+				// ready after Restart assistant, or after a start slower than `connection_info` waits (S35.2).
 			const ready = onDesktopEvent("dot://assistant-ready", () => void connect());
 			void connect();
 			return () => {
@@ -139,8 +149,41 @@ function Assistant({ surface }: { surface: Surface }) {
 	}, []);
 
 	useEffect(() => {
-		if (surface === "dot") setDotState(state.agentState);
-	}, [surface, state.agentState]);
+		// The standalone Dot reports itself; the shared unit reports from its panel instead,
+		// since that Dot will be hidden once the single window activates.
+		if (surface === "dot" || unit.enabled) setDotState(state.agentState);
+	}, [surface, state.agentState, unit.enabled]);
+
+	// Render-ready handshake (T10/T19): after the shared wrapper DOM commits for the live
+	// enabled revision — never inside the event receiver/getter. Stale pending acks are
+	// cancelled on revision change/unmount, so nothing late is ever acknowledged.
+	useEffect(() => {
+		if (!unit.enabled) return;
+		const revision = unit.revision;
+		let cancelled = false;
+		let settled = false;
+		let frame: ReturnType<typeof requestAnimationFrame> | undefined;
+		let backup: ReturnType<typeof setTimeout> | undefined;
+		const send = () => {
+			if (settled || cancelled) return;
+			settled = true;
+			if (frame !== undefined) cancelAnimationFrame(frame);
+			if (backup !== undefined) clearTimeout(backup);
+			try {
+				void niriUnitReady(revision).catch(() => {});
+			} catch {
+				// Legacy bridge without the handshake: stay silent, never throw.
+			}
+		};
+		if (typeof requestAnimationFrame === "function") frame = requestAnimationFrame(send);
+		// Backup for surfaces where the frame never lands; the once-guard keeps one ack.
+		backup = setTimeout(send, 50);
+		return () => {
+			cancelled = true;
+			if (frame !== undefined) cancelAnimationFrame(frame);
+			if (backup !== undefined) clearTimeout(backup);
+		};
+	}, [unit.enabled, unit.revision]);
 
 	useEffect(() => {
 		if (surface !== "panel") return;
@@ -190,7 +233,7 @@ function Assistant({ surface }: { surface: Surface }) {
 		);
 	}
 	if (unreachable !== undefined || missingToken) {
-		return (
+		const degraded = (
 			<div className="chat chat-web">
 				<div className="status" role="status">
 					{unreachable ??
@@ -198,8 +241,29 @@ function Assistant({ surface }: { surface: Surface }) {
 				</div>
 			</div>
 		);
+		// The shared unit still owns the one window while degraded: the rose-only pose keeps
+		// its rose (a 72x72 window of clipped prose is unreachable prose), and the chat pose
+		// keeps this explanation visible in the panel slot. Disabled renders as before.
+		return unit.enabled ? (
+			<NiriUnitSurface
+				open={unit.open}
+				roseHidden={unit.roseHidden}
+				fullscreen={unit.fullscreen}
+				revision={unit.revision}
+				agentState={state.agentState}
+				connected={state.connection === "open"}
+				inControl={computerSession !== undefined}
+				yolo={yolo !== undefined}
+				onTogglePanel={togglePanel}
+				onStartDrag={() => void startDragging()}
+			>
+				{degraded}
+			</NiriUnitSurface>
+		) : (
+			degraded
+		);
 	}
-	return (
+	const chat = (
 		<ChatSurface
 			variant={surface === "panel" ? "panel" : "web"}
 			state={state}
@@ -211,9 +275,29 @@ function Assistant({ surface }: { surface: Surface }) {
 			{...(desktop && surface === "panel" ? { appSend } : {})}
 			{...(computer ? { computer } : {})}
 			{...(desktop && surface === "panel" ? { voiceModel: true } : {})}
-			{...(desktop && surface === "panel" ? { panelWindow: panel.controls } : {})}
+			{...(desktop && surface === "panel" ? { panelWindow } : {})}
 			{...(desktop && surface === "panel" ? { settings: true } : {})}
 			{...(upload ? { upload } : {})}
 		/>
+	);
+	// The shared unit owns the one window around the same chat element: one connection, and
+	// open/mode changes never remount it. Dormant while the backend serves disabled.
+	return unit.enabled ? (
+		<NiriUnitSurface
+			open={unit.open}
+			roseHidden={unit.roseHidden}
+			fullscreen={unit.fullscreen}
+			revision={unit.revision}
+			agentState={state.agentState}
+			connected={state.connection === "open"}
+			inControl={computerSession !== undefined}
+			yolo={yolo !== undefined}
+			onTogglePanel={togglePanel}
+			onStartDrag={() => void startDragging()}
+		>
+			{chat}
+		</NiriUnitSurface>
+	) : (
+		chat
 	);
 }
