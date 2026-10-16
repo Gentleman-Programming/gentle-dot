@@ -17,7 +17,8 @@
 		"@gentle-dot/protocol": "workspace:*",
 		"gentle-pi": "4.0.0",
 		"jiti": "2.7.0",
-		"ws": "^8.22.0"
+		"ws": "^8.22.0",
+		"@earendil-works/pi-codemode": "1.0.4"
 	},
 	"devDependencies": {
 		"@types/ws": "^8.18.2",
