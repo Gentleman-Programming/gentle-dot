@@ -92,6 +92,41 @@ Gentle Dot ships as a self-contained package: it carries its own Node.js, assist
 
 Keep the `./` with `apt`. The package manager adds WebKitGTK and tray support. Then open **Gentle Dot** from your app menu, or run `gentle-dot`.
 
+### Arch / Niri: build, install, and update
+
+Use the packaged app, not `tauri dev`, to update an installation managed by pacman. Building requires Docker, Node.js 24 or later, and pnpm; run the build as your normal user, **not with sudo**. From the repository root, run these commands in Bash:
+
+```bash
+pnpm install --frozen-lockfile
+mkdir -p build/package-tmp
+export TMPDIR="$PWD/build/package-tmp"
+package_dir="$(mktemp -d "$PWD/build/package-tmp/niri-package-XXXXXX")"
+pnpm package:linux --arch amd64 --ksni-tray --out "$package_dir" &&
+  sudo pacman -U "$package_dir"/gentle-dot-*.pkg.tar.zst
+```
+
+The fresh output directory contains only this build's package: no version or tag is hardcoded, and the wildcard cannot select an older build. `TMPDIR` keeps packaging temporaries on the repository filesystem instead of a possibly full `/tmp`. Do not run the install command if packaging fails. Pacman asks for confirmation; keep that prompt enabled.
+
+**Update:** quit Gentle Dot through its tray menu, obtain the source revision you want to install, and run the same commands again. `pacman -U` installs or updates the local package, including reinstalling a corrected build with the same version. It preserves `~/.gentle-dot`, your desktop keyring, and Engram. Then launch `/usr/bin/gentle-dot` and check `pacman -Q gentle-dot`. Avoid a source-build launcher in `~/.local/bin` shadowing the packaged command (`command -v gentle-dot` shows which one your shell uses).
+
+No pacman-package install helper currently exists. `scripts/linux/setup-arch.sh` is a **source-build** installer, not the package update path above. Generated packages belong outside Git; do not commit `.pkg.tar.zst` files.
+
+### Niri desktop setup and login launch
+
+Build with `--ksni-tray` as above for the StatusNotifier tray. The flag selects the Linux tray backend; it does **not** install KDL rules. It remains opt-in to preserve the default AppIndicator behavior on other Linux desktops; it does not change macOS.
+
+**Niri window rules are required for the intended first-map floating, decoration-free, non-focus-stealing behavior.** On first Niri launch, the app attempts to add its managed include and `Alt+Space` toggle binding, with backup and validation. It heals matching window-rule blocks that already exist, but does not create missing rule blocks. Follow the [Niri desktop setup](linux-testing.md#3-desktop-setup) to ensure the shipped window rules are present; do not treat a working shortcut as proof that the rules were installed. Keep existing user bindings and startup entries when merging the rules.
+
+**Launch at login** is controlled from the app's tray menu. On Niri, enabling it maintains both `~/.config/autostart/gentle-dot.desktop` and a managed `spawn-at-startup` block in `~/.config/niri/gentle-dot.kdl`; the latter must be included by `config.kdl`. The current Niri login-launch implementation resolves these paths under `$HOME/.config`. Niri reloads after the config changes: that reload is not a reboot or proof that the app has launched at login. Do not add a second manual startup command.
+
+Check the configuration without launching another instance:
+
+```sh
+niri validate --config "$HOME/.config/niri/config.kdl"
+```
+
+After an update that changes the executable's location, disable and enable **Launch at login** from the final installed app to refresh its recorded path. To test it, save your work, quit Gentle Dot, and log out and back into Niri (or reboot). The tray should appear without opening the app manually. See the [Linux checklist](linux-testing.md) for compact/fullscreen, shortcut, and login-launch checks.
+
 - The app is `/usr/bin/gentle-dot`; its bundled runtime is in `/usr/lib/Gentle Dot/runtime`. Your data lives in `~/.gentle-dot`.
 - First launch needs the network once: the engine installs its companion packages (about 20 seconds).
 - Computer control is macOS only.

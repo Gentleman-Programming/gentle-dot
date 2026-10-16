@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Builds the self-contained Linux packages (S29.3) in Docker, from any machine with Docker:
 // `node scripts/package/package-linux.mjs --arch <arm64|amd64> [--out <dir>] [--engram-version <x.y.z>]
-// [--no-arch-package]`. It builds the .deb in a Debian 12 container of that architecture (amd64 on an
+// [--no-arch-package] [--ksni-tray]`. It builds the .deb in a Debian 12 container of that architecture (amd64 on an
 // Apple Silicon Mac runs emulated) and, for amd64, the Arch package from it. Artifacts land in
 // build/linux/; `linux-check.mjs` installs them in clean containers.
 import { spawnSync } from "node:child_process";
@@ -27,6 +27,7 @@ import {
 	builderImage,
 	cacheVolumes,
 	debFileName,
+	dockerEnvArgs,
 	fillPkgbuild,
 	formatDuration,
 	formatSize,
@@ -57,7 +58,7 @@ function sha256(path) {
 	return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-function buildDeb({ arch, engramVersion }, scratch, timings) {
+function buildDeb({ arch, engramVersion, ksniTray }, scratch, timings) {
 	const { platform } = ARCHES[arch];
 	timed(timings, `Builder image ${builderImage(arch)}`, () =>
 		docker([
@@ -70,7 +71,7 @@ function buildDeb({ arch, engramVersion }, scratch, timings) {
 		]),
 	);
 	const volumes = cacheVolumes(arch).flatMap(({ name, target }) => ["-v", `${name}:${target}`]);
-	const env = engramVersion ? ["-e", `ENGRAM_VERSION=${engramVersion}`] : [];
+	const env = dockerEnvArgs({ engramVersion, ksniTray });
 	timed(timings, `.deb for ${arch} (stage the runtime, tauri build)`, () =>
 		docker([
 			"run",
@@ -141,7 +142,7 @@ function main() {
 	const scratch = mkdtempSync(join(tmpdir(), `gentle-dot-linux-${arch}-`));
 	const started = Date.now();
 	const timings = [];
-	say(`Gentle Dot ${version} for linux/${arch}; scratch ${scratch}`);
+	say(`Gentle Dot ${version} for linux/${arch}${options.ksniTray ? " with ksni-tray" : ""}; scratch ${scratch}`);
 
 	const built = buildDeb(options, scratch, timings);
 	mkdirSync(out, { recursive: true });

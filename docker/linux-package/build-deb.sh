@@ -2,6 +2,7 @@
 # Runs inside gentle-dot-linux-builder (see Dockerfile). Copies the working tree mounted at /src,
 # stages the runtime for this container's architecture (S29.5), builds the .deb with Tauri, and
 # leaves it with the runtime's MANIFEST.json in /out (an empty folder). Optional: ENGRAM_VERSION=x.y.z.
+# Opt-in Niri/Waybar tray: GENTLE_DOT_KSNI_TRAY=1 (set only by package-linux.mjs --ksni-tray).
 set -euo pipefail
 
 case "$(dpkg --print-architecture)" in
@@ -34,7 +35,15 @@ step "Building the .deb"
 # The runtime is mapped here rather than in tauri.linux.conf.json: Tauri merges that file into
 # every Linux build, and tauri-build fails when a resource is missing, as in source builds.
 resources="{\"bundle\":{\"resources\":{\"$runtime/\":\"runtime/\"}}}"
-pnpm --filter @gentle-dot/desktop tauri build --bundles deb --config "$resources"
+# Opt-in StatusNotifier (KSNI) tray backend for desktops whose tray speaks StatusNotifier but
+# not AppIndicator (Niri/Waybar). package-linux.mjs exports GENTLE_DOT_KSNI_TRAY=1 only with
+# --ksni-tray; default builds omit --features and keep the AppIndicator backend everywhere.
+ksni_features=()
+if [ "${GENTLE_DOT_KSNI_TRAY:-0}" = "1" ]; then
+	ksni_features=(--features ksni-tray)
+	echo "building with the opt-in ksni-tray feature (StatusNotifier backend)"
+fi
+pnpm --filter @gentle-dot/desktop tauri build --bundles deb "${ksni_features[@]}" --config "$resources"
 
 step "Checking the result"
 binary=apps/desktop/src-tauri/target/release/gentle-dot

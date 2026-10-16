@@ -20,7 +20,7 @@ export const DISTROS = Object.freeze({
 export const PKGREL = 1;
 
 export const PACKAGE_USAGE =
-	"usage: package-linux --arch <arm64|amd64> [--out <dir>] [--engram-version <x.y.z>] [--no-arch-package]";
+	"usage: package-linux --arch <arm64|amd64> [--out <dir>] [--engram-version <x.y.z>] [--no-arch-package] [--ksni-tray]";
 export const CHECK_USAGE =
 	"usage: linux-check --arch <arm64|amd64> [--distro <debian|ubuntu|arch>[,…]] [--out <dir>]";
 export const CARGO_CHECK_USAGE = "usage: linux-cargo-check --arch <arm64|amd64>";
@@ -55,7 +55,7 @@ export function parsePackageArgs(argv) {
 	const options = readFlags(
 		argv,
 		{ "--arch": "arch", "--out": "out", "--engram-version": "engramVersion" },
-		{ "--no-arch-package": "noArchPackage" },
+		{ "--no-arch-package": "noArchPackage", "--ksni-tray": "ksniTray" },
 		PACKAGE_USAGE,
 	);
 	checkArch(options.arch, PACKAGE_USAGE);
@@ -63,6 +63,18 @@ export function parsePackageArgs(argv) {
 		throw new Error(`--engram-version must be x.y.z, got ${options.engramVersion}.`);
 	const { noArchPackage, ...rest } = options;
 	return { ...rest, archPackage: !noArchPackage && DISTROS.arch.arches.includes(options.arch) };
+}
+
+/**
+ * Extra `docker run -e` entries for the Linux builder container. The KSNI tray option
+ * travels as a fixed boolean entry (`GENTLE_DOT_KSNI_TRAY=1`) so no free text from the
+ * command line ever reaches the container; absent by default, preserving ordinary builds.
+ */
+export function dockerEnvArgs({ engramVersion, ksniTray } = {}) {
+	return [
+		...(engramVersion ? ["-e", `ENGRAM_VERSION=${engramVersion}`] : []),
+		...(ksniTray ? ["-e", "GENTLE_DOT_KSNI_TRAY=1"] : []),
+	];
 }
 
 /** `linux-check` options: the architecture and the distributions, by default every one it supports. */

@@ -2,15 +2,16 @@
 
 Thanks for testing! This guide walks you through installing Gentle Dot, from a package or from source, and checking that it works on your desktop. With a package it takes about 20 minutes; from source, about 30, most of it waiting for the first build.
 
-We test three setups. Pick the one you have:
+We test four setups. Pick the one you have:
 
 | Setup | Desktop | Session | How the app runs |
 |---|---|---|---|
 | **A. Debian 12 or 13** | GNOME | Wayland (default) | Under XWayland, set automatically |
 | **B. Ubuntu 24.04 or later** | GNOME | Wayland (default) | Under XWayland, set automatically |
 | **C. Omarchy** (Arch) | Hyprland | Wayland | Native Wayland, with window rules you paste |
+| **D. Arch with Niri** | Niri | Wayland | Native Wayland, managed include and shortcut; build the package with `--ksni-tray` |
 
-The tray icon, the floating rose, the panel, and the toggle shortcut should work on all three. Where Wayland does not allow something, there is a workaround, explained below.
+The tray icon, the floating rose, the panel, and the toggle shortcut should work on all four. Where Wayland does not allow something, there is a workaround, explained below.
 
 ## Before you start
 
@@ -30,6 +31,7 @@ The tray icon, the floating rose, the panel, and the toggle shortcut should work
 |---|---|---|
 | A. Debian or B. Ubuntu | `gentle-dot_<version>_amd64.deb` (or `_arm64.deb`; `dpkg --print-architecture` tells which) | `scripts/linux/setup-debian.sh` |
 | C. Omarchy (x86_64) | `gentle-dot-<version>-1-x86_64.pkg.tar.zst` | `scripts/linux/setup-arch.sh` |
+| D. Arch / Niri (x86_64) | Arch package built with `--ksni-tray`; [install/update commands](install.md#arch--niri-build-install-and-update) | Build with `ksni-tray`; the generic setup script does not enable it |
 | The app command | `gentle-dot`, that is `/usr/bin/gentle-dot` | `~/.local/bin/gentle-dot` |
 
 The package needs nothing else installed: it carries its own Node.js, assistant engine, and Engram (in `/usr/lib/Gentle Dot/runtime`). In the steps below, **the app command** means `/usr/bin/gentle-dot` if you installed the package and `~/.local/bin/gentle-dot` if you built from source. To remove the package later, run `sudo apt remove gentle-dot` or `sudo pacman -R gentle-dot`; your assistant data in `~/.gentle-dot` stays.
@@ -67,6 +69,7 @@ Do each step in order and note **Pass**, **Fail**, or **Partial** for each one. 
 |---|---|---|
 | A. Debian or B. Ubuntu | `sudo apt install ./gentle-dot_<version>_<arch>.deb` | `scripts/linux/setup-debian.sh` |
 | C. Omarchy | `sudo pacman -U gentle-dot-<version>-1-x86_64.pkg.tar.zst` | `scripts/linux/setup-arch.sh` |
+| D. Arch / Niri | [Version-independent build, install, and update](install.md#arch--niri-build-install-and-update) | See the [desktop build notes](../apps/desktop/README.md#linux) for `ksni-tray` |
 
 **Expected with a package:** the package manager lists the libraries it adds (WebKitGTK and tray support), installs them, and finishes without errors. With `apt`, keep the `./` in front of the file name. A note that `_apt` could not access the file is harmless.
 
@@ -98,12 +101,21 @@ The snippets call `/usr/bin/gentle-dot`, the packaged app. If you built from sou
 
 Hyprland reloads the file when you save it. If it shows a configuration error, write the error message in the report.
 
+**D. Niri:** the shipped [KDL window rules](../scripts/linux/niri/gentle-dot.kdl) are required for the intended first-map floating, decoration-free, non-focus-stealing behavior; they are not enabled by the `--ksni-tray` compile flag. On first run, the app attempts to add the include and toggle binding (`Alt+Space`, the app default), and heals matching rules already present. It does **not** create missing window-rule blocks.
+
+1. Inspect the app-owned `gentle-dot.kdl` next to your Niri config. If absent, copy the shipped snippet there. If present, merge only missing window-rule blocks from the shipped snippet; preserve your existing `binds` and managed autostart block.
+2. Ensure `config.kdl` includes `gentle-dot.kdl` once. First-run repair normally adds this; manual addition is the fallback.
+3. Use `/usr/bin/gentle-dot` in the binding for packages, or an absolute source-build executable path (`~` is not expanded by `spawn`). Check that the selected shortcut does not conflict.
+4. Run `niri validate --config ~/.config/niri/config.kdl` and restart the app: the rules apply on first map. With a custom `NIRI_CONFIG`, first-run binding repair uses that config file; otherwise it respects `XDG_CONFIG_HOME`, then `$HOME/.config`. The login-launch path currently uses `$HOME/.config` separately.
+
+ On Niri 26.04 the single shared surface was measured through the close/reopen sequence: placement, geometry, ordering and both cycles returned to the remembered spot via the shared capture path. The snippet also turns border, focus-ring and shadow off for these windows, because the compositor draws them even at client opacity 0 and they leaked a visible outline and a travel artefact, and sets open-focused false so the rose-only pose never takes focus on map (opening the chat still focuses via explicit client activation). The first visible frame was checked logically, not pixel-witnessed, and there is no claim about tray-click focus behaviour beyond what was measured. Niri exposes no work area or strut geometry, so a bar that changes height in place, without recreating its layer surface or reloading config, can leave an older measurement in use until a later position check catches it; closing that gap would need a heuristic re-probe, and we document it instead.
+
 ### 4. First launch
 
 Open **Gentle Dot** from your app menu (or run the app command in a terminal, which also shows its log messages).
 
 **Expected:**
-- Within a few seconds, a black circle with a glowing pink rose appears at the right edge of the screen, vertically centered.
+- Within a few seconds, a black circle with a glowing pink rose appears at the right edge of the screen, vertically centered. **Niri:** respect the saved rose visibility preference; if the rose is hidden, use the tray or shortcut to open the compact chat.
 - After up to 20 seconds the rose stops looking dimmed: the assistant is ready.
 - Around the circle, the desktop shows through. A black or white square around the circle is a **Fail**: write down your GPU and driver.
 - **Hyprland:** the rose has no border, shadow, or blur.
@@ -143,6 +155,8 @@ gnome-extensions enable ubuntu-appindicators@ubuntu.com
 - Hovering over the icon may show "Gentle Dot — Ready". Many Linux panels do not show tray tooltips, so this is not a failure.
 - While the assistant answers (step 11), the icon's outer petals turn dashed. When it waits for your answer, an amber dot appears on the icon.
 
+**Opt-in StatusNotifier build only** (default builds behave as above): with `ksni-tray` enabled, left-clicking the icon toggles the panel instead of opening the menu; right-click still opens the menu. Where the app places its own windows, the panel reopens where it was when last hidden, even after a restart, because that spot is saved in `~/.gentle-dot/desktop.json` (never secrets or tokens). On native Wayland the compositor owns window placement, so the remembered spot applies only where the app places its own windows; on Niri a user-moved window keeps its spot across close and reopen, returning to the remembered position rather than beside the rose. No initial tray-anchor position is claimed.
+
 ### 9. Toggle shortcut
 
 **GNOME:** open Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts → Add Shortcut:
@@ -165,9 +179,11 @@ The first `gsettings` line replaces any custom shortcuts you already have. If yo
 
 **Hyprland:** the binding is already in the snippet from step 3.
 
-**Expected:** pressing `Super + Alt + D` while any other app has focus shows the panel; pressing it again hides it. Also run the app command with `--toggle` (for example `gentle-dot --toggle`) in a terminal: it toggles the panel and returns right away.
+**Niri:** use the managed `Alt+Space` shortcut (or the key you selected in Settings), not the GNOME/Hyprland binding above.
 
-The app's own `Alt + Space` shortcut works only on an X11 session. On Wayland, desktops do not let apps register global shortcuts, which is why you set one in your desktop settings instead. On GNOME, `Alt + Space` is also the window menu.
+**Expected:** pressing your configured shortcut while any other app has focus shows the panel; pressing it again hides it. Also run the app command with `--toggle` (for example `gentle-dot --toggle`) in a terminal: it toggles the panel and returns right away.
+
+The app's own `Alt + Space` shortcut works only on an X11 session. On Wayland, desktops do not let apps register global shortcuts, which is why you set one in your desktop settings instead. On GNOME, `Alt + Space` is also the window menu. The Niri exception is the managed snippet from step 3: the app adds an `Alt+Space` binding running `gentle-dot --toggle` on its first Niri run, so no desktop-settings shortcut is needed there.
 
 ### 10. Sign in with an API key
 
@@ -209,7 +225,9 @@ Choose **Quit** in the tray menu, then open Gentle Dot again from the app menu.
 
 Turn on **Launch at login** in the tray menu, log out, and log back in.
 
-**Expected:** the rose appears after login. Turn the option off again afterwards.
+**Niri:** use the packaged executable when enabling this option. Check both `~/.config/autostart/gentle-dot.desktop` and the managed `spawn-at-startup` block in `~/.config/niri/gentle-dot.kdl`; its include must be present in `config.kdl` (the current Niri login-launch implementation uses `$HOME/.config`). Both startup commands should point at the final installed executable, normally `/usr/bin/gentle-dot`, not a temporary debug build. `niri validate --config ~/.config/niri/config.kdl` must pass. A config reload after toggling is expected, but is not proof of a successful login launch. Do not add another manual `spawn-at-startup` line. See [login-launch details](install.md#niri-desktop-setup-and-login-launch).
+
+**Expected:** the tray appears after login without launching the app manually; the rose follows your saved visibility preference. Turn the option off again afterwards and check that the app no longer starts on a later login. A reboot/login test not performed is **Pending**, not Pass.
 
 ### 17. Connector secrets and approvals (optional, needs an account for one connector)
 
@@ -235,8 +253,8 @@ For a quick comparison on GNOME, you can start the app as a native Wayland clien
 | Symptom | Try |
 |---|---|
 | The panel or rose is blank, or the app prints `Failed to create GBM buffer` (often with NVIDIA) | Quit the app, then start it with `WEBKIT_DISABLE_DMABUF_RENDERER=1` before the app command, for example `WEBKIT_DISABLE_DMABUF_RENDERER=1 gentle-dot`. Note in the report whether it helped. |
-| A connector that needs a sign-in or token never runs, and `daemon.log` says `no Secret Service in this desktop session` | Your session has no keyring. Install `gnome-keyring` (or KWallet) and make sure it runs and is unlocked in your session, then quit Gentle Dot from the tray, open it again, and try the connector again. |
 | The rose stays dimmed | Look at `~/.gentle-dot/daemon.log` and attach it (see below). |
+| A connector that needs a sign-in or token never runs, and `daemon.log` says `no Secret Service in this desktop session` | Your session has no keyring. Install `gnome-keyring` (or KWallet) and make sure it runs and is unlocked in your session, then quit Gentle Dot from the tray, open it again, and try the connector again. |
 | No tray icon on GNOME | Check that the AppIndicator extension is on: `gnome-extensions list --enabled` |
 | `gentle-dot: command not found` | Use the full path: `/usr/bin/gentle-dot` with the package, `~/.local/bin/gentle-dot` from source |
 
