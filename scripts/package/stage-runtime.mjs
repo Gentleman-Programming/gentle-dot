@@ -159,6 +159,8 @@ function installDaemonModules(out) {
 	writeFileSync(npmrc, "");
 	say("Daemon dependencies (npm install --omit=dev)");
 	// A clean npm setup: no user npmrc, a cache of its own, and a scratch HOME for install scripts.
+	// Pin pi-codemode@1.0.4 to avoid version drift: pi-codemode@1.2.0 removed MCP_TYPESCRIPT_PREAMBLE
+	// export that the daemon's codemode integration expects (see #64).
 	const result = spawnSync(
 		join(out, "node", "bin", "node"),
 		[
