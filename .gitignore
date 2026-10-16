@@ -14,5 +14,6 @@ apps/desktop/src-tauri/gen/
 /build/
 .DS_Store
 
-# Declarations emitted next to sources by accident
+# Declarations emitted next to sources by accident, except hand-written ones
 packages/*/src/**/*.d.ts
+!packages/daemon/src/builderbot.d.ts
