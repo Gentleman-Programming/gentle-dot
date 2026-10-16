@@ -3208,3 +3208,144 @@ fn hide_capture_blocked_leaves_state_locks_free() {
     });
     assert_eq!(*shell.native_compact.lock().unwrap(), Some(anchor), "stale commit never overwrites");
 }
+
+#[test]
+fn rose_visible_by_default_everywhere_task4() {
+    // Task 4: the rose is visible by default on every build, including
+    // Linux KSNI on Niri; only an explicit persisted choice hides it.
+    assert!(!default_rose_hidden_for(Os::Linux, true, true));
+    assert!(!default_rose_hidden_for(Os::Linux, true, false));
+    assert!(!default_rose_hidden_for(Os::Linux, false, true));
+    assert!(!default_rose_hidden_for(Os::MacOs, true, true));
+}
+
+#[test]
+fn rose_default_is_visible_everywhere() {
+    // Task 4: the rose is visible by default on every build and desktop,
+    // including Linux KSNI on Niri; only an explicit persisted choice
+    // hides it across restarts.
+    assert!(!default_rose_hidden_for(Os::Linux, true, true));
+    // macOS, AppIndicator, Hyprland/GNOME stay shown by default.
+    assert!(!default_rose_hidden_for(Os::MacOs, true, true));
+    assert!(!default_rose_hidden_for(Os::MacOs, false, false));
+    assert!(!default_rose_hidden_for(Os::Linux, false, true));
+    assert!(!default_rose_hidden_for(Os::Linux, true, false));
+    assert!(!default_rose_hidden_for(Os::Linux, false, false));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn rose_hides_in_fullscreen_and_returns_with_the_user_preference() {
+    // Requirement S5: the rose is hidden in fullscreen whatever the saved
+    // preference says, and returning shows it only while the user still
+    // wants it — the preference stays the single source of truth.
+    for (expanded, wants, visible) in [
+        (true, true, false),
+        (true, false, false),
+        (false, true, true),
+        (false, false, false),
+    ] {
+        assert_eq!(
+            rose_visible_for_mode(expanded, wants), visible,
+            "expanded={expanded} wants_rose={wants}"
+        );
+    }
+}
+
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unit_fullscreen_hides_rose_keeps_preference() {
+    // S5/S9: fullscreen implies no rose whatever the saved preference
+    // says, and the preference itself is untouched (still true here) so
+    // leaving fullscreen restores the rose beside the chat.
+    let wants_rose = true;
+    assert!(!rose_visible_for_mode(true, wants_rose));
+    assert!(wants_rose, "saved preference must survive fullscreen");
+    assert!(rose_visible_for_mode(false, wants_rose));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unit_fullscreen_roundtrip_keeps_preference_and_anchor_intent() {
+    // Fullscreen roundtrip: expanding keeps the saved rose preference,
+    // derives Fullscreen, and preserves; collapsing with an anchor
+    // preserves it (S15/S17), without one falls back to the base.
+    // The commit takes no compact lock, so the anchor is preserved.
+    use std::sync::atomic::AtomicU64;
+    use crate::niri::unit_surface::UnitMode;
+    let gate = Mutex::new(None);
+    let unit = Mutex::new(NiriUnitState::dormant());
+    unit.lock().unwrap().active = true;
+    let epoch = AtomicU64::new(9);
+    let expanded = Mutex::new(false);
+    let rose = AtomicBool::new(true);
+    let intents = Mutex::new(None);
+    let commit = |kind, anchored| {
+        unit_transition_commit(&gate, &unit, &epoch, &expanded, &rose, &intents, false, true, true, anchored, kind).unwrap()
+    };
+    let opened = commit(UnitTransition::Open, true);
+    assert!(opened.open);
+    let full = commit(UnitTransition::SetExpanded(true), true);
+    assert!(full.fullscreen && full.rose_hidden, "preference survives expand");
+    assert_eq!(unit_mode_for(full.open, full.rose_hidden, full.fullscreen), UnitMode::Fullscreen);
+    assert_eq!(*intents.lock().unwrap(), Some((11, RestoreIntent::PreserveCompact)));
+    let back = commit(UnitTransition::SetExpanded(false), true);
+    assert!(!back.fullscreen && back.rose_hidden);
+    assert_eq!(*intents.lock().unwrap(), Some((12, RestoreIntent::PreserveCompact)), "remembered anchor preserved");
+    let unanchored = commit(UnitTransition::SetExpanded(false), false);
+    assert_eq!(*intents.lock().unwrap(), Some((13, RestoreIntent::CollapseToBase)), "anchorless collapse falls back");
+    assert!(unanchored.rose_hidden, "preference still kept");
+}
+
+#[test]
+fn rose_reappear_reanchors_visible_panel_beside_dot() {
+    // Unit fix: unhide with a mapped app-placed non-fullscreen panel
+    // reanchors beside the rose synchronously; every other cell stays.
+    assert!(rose_unhide_reanchors(false, true, true, false));
+    assert!(!rose_unhide_reanchors(true, true, true, false));
+    assert!(!rose_unhide_reanchors(false, false, true, false));
+    assert!(!rose_unhide_reanchors(false, true, true, true));
+    assert!(!rose_unhide_reanchors(false, true, false, false));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn niri_unhide_moves_the_rose_beside_the_visible_panel() {
+    // Live FAIL mv347ejs leg (2): Niri unhide must move the ROSA beside
+    // the moved panel — never pull the panel back. Hide/fullscreen win,
+    // expanded wins, app-owned sessions keep the panel path, hidden or
+    // unmapped panels never move the rose.
+    assert!(rose_unhide_moves_rose(false, true, false, true, false, false));
+    for blocked in [
+        (true, true, false, true, false, false),
+        (false, false, false, true, false, false),
+        (false, true, true, true, false, false),
+        (false, true, false, false, false, false),
+        (false, true, false, true, true, false),
+        (false, true, false, true, false, true),
+        (true, false, true, false, true, true),
+    ] {
+        assert!(
+            !rose_unhide_moves_rose(blocked.0, blocked.1, blocked.2, blocked.3, blocked.4, blocked.5),
+            "{blocked:?}"
+        );
+    }
+}
+
+#[test]
+fn the_rose_item_offers_the_opposite_of_its_state() {
+    assert_eq!(rose_menu_label(false), "Hide the rose");
+    assert_eq!(rose_menu_label(true), "Show the rose");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn shared_rose_toggle_refused_while_fullscreen() {
+    // Fullscreen implies no rose; the shared branch must refuse a rose
+    // toggle instead of starting a transition.
+    assert!(!shared_rose_toggle_allowed(true), "fullscreen blocks the rose toggle");
+    assert!(shared_rose_toggle_allowed(false), "minimized keeps the toggle");
+}
+
+

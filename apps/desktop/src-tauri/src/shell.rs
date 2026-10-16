@@ -29,9 +29,10 @@ use crate::niri::gate::*;
 // snapshot and now live in `niri/route_gate.rs`; imported, never redefined.
 #[cfg(target_os = "linux")]
 use crate::niri::route_gate::{
-    GateEffect, RestoreCompletion, hide_intent_next, joint_mover_from_signals, native_niri_mode,
-    native_restore_planned, niri_socket_present, plan_gate_effects, plan_hide_completion,
-    plan_restore_completion, plan_toggle_route, shared_route_wanted,
+    GateEffect, RestoreCompletion, default_rose_hidden_for, hide_intent_next, joint_mover_from_signals,
+    joint_unit_active, native_niri_mode, native_restore_planned, niri_socket_present, plan_gate_effects,
+    plan_hide_completion, plan_restore_completion, plan_toggle_route, rose_visible_for_mode,
+    shared_route_wanted,
 };
 #[cfg(target_os = "linux")]
 use gtk::prelude::{GtkWindowExt, WidgetExt};
@@ -272,6 +273,41 @@ fn panel_capture_valid(
     places_windows && !full_screen && visible && width > 0 && height > 0
 }
 
+/// Whether unhiding the rose reanchors a visible panel beside it (unit fix):
+/// unhide plus a mapped panel on an app-placed, non-fullscreen session
+/// recomputes beside-the-Dot synchronously. Hides, hidden panels,
+/// fullscreen frames, and native-Wayland sessions (the compositor owns
+/// placement there) never reanchor here. Pure so tests pin the decision
+/// without windows.
+fn rose_unhide_reanchors(
+    hidden: bool,
+    panel_visible: bool,
+    places_windows: bool,
+    full_screen: bool,
+) -> bool {
+    !hidden && panel_visible && places_windows && !full_screen
+}
+
+/// Whether unhiding the rose moves the ROSA beside the visible panel on Niri
+/// (mv347ejs leg 2, Linux only): unhide plus a mapped compact panel on a
+/// compositor-placed Niri session moves the exact DOT id beside the panel
+/// with the same pid+title guards, instead of pulling the panel back to the
+/// old rose spot. Hides, hidden panels, expanded/fullscreen frames,
+/// app-owned sessions (the panel path above owns those), and non-Niri
+/// sessions never move the rose here. Pure so tests pin the decision
+/// without windows or IPC.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn rose_unhide_moves_rose(
+    hidden: bool,
+    panel_visible: bool,
+    places_windows: bool,
+    is_niri: bool,
+    expanded: bool,
+    full_screen: bool,
+) -> bool {
+    !hidden && panel_visible && !places_windows && is_niri && !expanded && !full_screen
+}
+
 #[cfg(target_os = "linux")]
 fn plan_shared_startup(rose_hidden: bool) -> SharedStartup {
     let mode = unit_mode_for(false, rose_hidden, false);
@@ -452,6 +488,16 @@ fn emit_unit_to_panel(app: &AppHandle, snapshot: &NiriUnitSnapshot) {
     if let Ok(panel) = window(app, PANEL) {
         let _ = panel.emit("dot://unit", snapshot);
     }
+}
+
+
+/// The startup fallback for this build and environment.
+fn default_rose_hidden() -> bool {
+    default_rose_hidden_for(
+        Os::CURRENT,
+        cfg!(all(target_os = "linux", feature = "ksni-tray")),
+        platform::is_niri(&|key| std::env::var(key).ok()),
+    )
 }
 
 
@@ -846,6 +892,57 @@ fn hide_panel_niri(app: AppHandle, panel: &WebviewWindow) -> CommandResult {
     Ok(())
 }
 
+/// Presents the rose beside the compact panel: the worker
+/// keeps the remembered anchor — a freshly remapped rose appears at the
+/// compositor default, never at the user's spot — and plans the joint pair in
+/// one pass with NO mover, so the rose lands beside the panel instead of
+/// staying centred. Best-effort: a missing sender only traces. Callers own the
+/// visibility predicates and never hold a state lock across this call.
+#[cfg(target_os = "linux")]
+fn present_rose_beside_panel(shell: &Shell) {
+    // No mover: the worker keeps the anchor (remap imposes it), never chases
+    // the fresh center-mapped rose (live trace c).
+    *shell.native_mover.lock().unwrap() = None;
+    if let Some(tx) = shell.native_restore.lock().unwrap().as_ref() {
+        restore_handoff(
+            tx,
+            &shell.native_epoch,
+            &shell.native_gate,
+            RestoreIntent::PreserveCompact,
+            &shell.native_intent,
+        );
+    } else {
+        niri_trace!("rose present joint queue sender=none");
+    }
+}
+
+/// Applies the expanded/compact rose policy and re-presents the rose beside
+/// the panel on return. The saved preference stays the
+/// single source of truth, so repeats are idempotent. Best-effort: a window
+/// or menu failure never fails a mode transition that already committed.
+#[cfg(target_os = "linux")]
+fn sync_rose_for_mode(app: &AppHandle, shell: &Shell) {
+    let expanded = *shell.native_expanded.lock().unwrap();
+    let wants_rose = !shell.rose_hidden.load(Ordering::SeqCst);
+    // The visibility toggle has nothing to do in fullscreen: hide it
+    // rather than let the user flip a rose that is deliberately hidden.
+    if let Some(item) = app.try_state::<RoseMenuItem>() {
+        let _ = item.0.set_enabled(!expanded);
+    }
+    let Ok(dot) = window(app, DOT) else {
+        return;
+    };
+    if rose_visible_for_mode(expanded, wants_rose) {
+        if let Err(error) = dot.show().map_err(err) {
+            eprintln!("gentle-dot: rose show on mode change failed: {error}");
+            return;
+        }
+        present_rose_beside_panel(shell);
+    } else if let Err(error) = dot.hide().map_err(err) {
+        eprintln!("gentle-dot: rose hide on mode change failed: {error}");
+    }
+}
+
 #[tauri::command]
 fn rose_hidden(app: AppHandle) -> bool {
     rose_hidden_state(&app)
@@ -914,6 +1011,46 @@ fn set_rose_hidden(app: AppHandle, hidden: bool) -> CommandResult<bool> {
         dot.hide().map_err(err)?;
     } else {
         dot.show().map_err(err)?;
+    }
+    // Unit fix: unhide with a mapped app-placed non-fullscreen panel
+    // reanchors beside the rose synchronously. Visibility snapshots before
+    // any state lock; best-effort so a move failure never fails the
+    // unhide itself. Native Wayland never reaches the move (compositor owns
+    // placement); fullscreen keeps its frame.
+    let panel_visible = window(&app, PANEL)
+        .and_then(|panel| panel.is_visible().map_err(err))
+        .unwrap_or(false);
+    let full_screen = shell.full_screen.lock().unwrap().is_some();
+    if rose_unhide_reanchors(hidden, panel_visible, shell.places_windows, full_screen) {
+        if let Err(error) = place_panel_next_to_dot(&app) {
+            eprintln!("gentle-dot: rose reappear reanchor failed: {error}");
+        }
+    }
+    // Niri unhide with a visible compact panel (joint unit, Linux only,
+    // additive): wakes the single restore worker for a JOINT pass from the
+    // anchor (both destinations, same epoch) instead of a one-shot rose
+    // move. A freshly remapped rose is transiently absent from the IPC list
+    // (live trace a: `rose or panel window missing`); the worker retries it
+    // bounded inside its budget, while a one-shot here could only fail.
+    // Hide/fullscreen/expanded win via the pure decision; best-effort so a
+    // queue failure never fails the unhide itself.
+    #[cfg(target_os = "linux")]
+    {
+        let expanded = *shell.native_expanded.lock().unwrap();
+        let is_niri = platform::is_niri(&|key| std::env::var(key).ok());
+        let socket_present = niri_socket_present();
+        if rose_unhide_moves_rose(
+            hidden,
+            panel_visible,
+            shell.places_windows,
+            is_niri,
+            expanded,
+            full_screen,
+        ) {
+            if joint_unit_active(shell.places_windows, is_niri, socket_present) {
+                present_rose_beside_panel(&shell);
+            }
+        }
     }
     if let Some(item) = app.try_state::<RoseMenuItem>() {
         item.0.set_text(rose_menu_label(hidden)).map_err(err)?;
@@ -1986,7 +2123,8 @@ pub fn run() {
                     }
                 }
             });
-            let rose_hidden = position::load_rose_hidden(&desktop_file(&config));
+            let rose_hidden =
+                position::load_rose_hidden_or(&desktop_file(&config), default_rose_hidden());
             #[cfg(target_os = "linux")]
             let (native_restore, native_receiver): (Option<mpsc::SyncSender<()>>, Option<mpsc::Receiver<()>>) =
                 if native_restore_planned(
