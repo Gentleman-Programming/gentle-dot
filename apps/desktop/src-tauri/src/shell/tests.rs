@@ -53,6 +53,25 @@ fn conversations_flag_reads_like_the_daemon() {
 }
 
 #[test]
+fn niri_trace_is_opt_in_and_allowlisted() {
+    // Default off: only the exact opt-in enables any trace line.
+    assert!(niri_trace_enabled(Some("1")));
+    assert!(!niri_trace_enabled(None));
+    assert!(!niri_trace_enabled(Some("0")));
+    assert!(!niri_trace_enabled(Some("true")));
+    // The panel summary carries only allowlisted numerics/flags: no
+    // titles, socket paths, window JSON, accounts, or content.
+    let line = format_trace_panel(11, true, Some((90.0, 205.0)), (420, 640), Some("DP-1"), Some((10, -5)), Some(true));
+    assert!(line.contains("id=11"));
+    assert!(line.contains("floating=true"));
+    assert!(line.contains("delta=10,-5"));
+    assert!(line.contains("handled=true"));
+    for banned in ["title", "socket", "NIRI_SOCKET", "token", "account", "prompt"] {
+        assert!(!line.contains(banned), "trace leaks {banned}");
+    }
+}
+
+#[test]
 fn only_the_glow_overlay_may_acknowledge_the_working_rings() {
     let build = include_str!("../../build.rs");
     assert!(build.contains("\"computer_working_ready\","), "computer_working_ready is missing from build.rs");
@@ -1916,6 +1935,21 @@ fn unit_snapshot_pairs_revision_under_gate() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn shortcut_get_niri_default_is_the_niri_binding_default() {
+    // S19 RED: the Niri default reported to Settings must be the binding
+    // default, even for the unknown-binding fallback; other backends
+    // keep their own default below the Niri branch.
+    let source = include_str!("../shell.rs");
+    let get = source.split("fn shortcut_get").nth(1).expect("shortcut_get exists")
+        .split("\nfn ").next().unwrap_or("");
+    assert!(
+        get.contains("kdl_binds::DEFAULT_KEY"),
+        "Niri shortcut_get must report the Niri binding default"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn restore_completion_routes_production_results() {
     // Production-path routing through `plan_restore_completion` with the
     // real `CommandResult<bool>` shapes `run_restore_job_inner`
@@ -2104,6 +2138,355 @@ fn niri_shared_surface_uses_one_niri_only_policy() {
     assert!(!shared_route_wanted(shared_surface_available(),false,false,true));
     assert!(!shared_route_wanted(shared_surface_available(),false,true,false));
     assert!(native_niri_mode(false,true,true), "Niri integration must remain enabled");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn shared_unit_seam_tests() {
+    use crate::niri::unit_restore::UnitRestoreMode as R;
+    use crate::niri::unit_surface::{shape_for, ShapeKind, UnitMode};
+    use serde_json::{json, Value};
+    use std::cell::{Cell, RefCell};
+    use std::io;
+    // Mode: closed stored-full reads RoseOnly; open pairs / stands alone.
+    assert_eq!(shared_restore_mode(true, false, true), R::Fullscreen);
+    assert_eq!(shared_restore_mode(true, false, false), R::Pair);
+    assert_eq!(shared_restore_mode(true, true, false), R::PanelOnly);
+    assert_eq!(shared_restore_mode(false, false, true), R::RoseOnly);
+    assert_eq!(shared_restore_mode(false, true, true), R::RoseOnly);
+    assert_eq!(shared_surface_mode(R::Pair), Some(UnitMode::Pair));
+    assert_eq!(shared_surface_mode(R::Fullscreen), Some(UnitMode::Fullscreen));
+    // Shape contract: empty while covered (even fullscreen); revealed
+    // fullscreen is Full, revealed pair is the compact region.
+    assert_eq!(shape_for(UnitMode::Pair, false, true), ShapeKind::Empty);
+    assert_eq!(shape_for(UnitMode::Fullscreen, false, true), ShapeKind::Empty);
+    assert_eq!(shape_for(UnitMode::Fullscreen, false, false), ShapeKind::Full);
+    assert!(matches!(shape_for(UnitMode::Pair, false, false), ShapeKind::Region(_)));
+    // Route gate: explicit activation AND Niri only; dormant FALSE never routes.
+    assert!(shared_route_wanted(true, false, true, true));
+    assert!(!shared_route_wanted(false, false, true, true));
+    assert!(!shared_route_wanted(true, true, true, true));
+    assert!(!shared_route_wanted(true, false, false, true));
+    assert!(!shared_route_wanted(true, false, true, false));
+    // Scripted compositor: probes move the exact PANEL id only (id 9).
+    // Models the live Niri frame: the shared window maps at the 200x200
+    // GTK content size while non-resizable, and while the window stays
+    // mapped the requested size never lands no matter how often it is
+    // re-requested — it only adopts the queued size on remap
+    // (hide+show). Code that never remaps spins stale and fails honest.
+    struct Fake {
+        pos: Cell<(f64, f64)>,
+        handled: bool,
+        drift: bool,
+        floating: Cell<bool>,
+        released: Cell<bool>,
+        pending: Cell<Option<(i32, i32)>>,
+        mapped: Cell<bool>,
+        remaps: Cell<usize>,
+        seen: RefCell<Vec<(i32, i32)>>,
+        window_size: Cell<(i32, i32)>,
+        tile: Cell<(f64, f64)>,
+        offset: Cell<(f64, f64)>,
+        log: RefCell<Vec<Value>>,
+    }
+    impl Fake {
+        fn live() -> Self {
+            Self { pos: Cell::new((200.0, 100.0)), handled: true, drift: false, floating: Cell::new(true), released: Cell::new(false), pending: Cell::new(None), mapped: Cell::new(true), remaps: Cell::new(0), seen: RefCell::new(vec![]), window_size: Cell::new((200, 200)), tile: Cell::new((200.0, 200.0)), offset: Cell::new((0.0, 0.0)), log: RefCell::new(vec![]) }
+        }
+        fn adopt(&self, size: (i32, i32)) {
+            match size {
+                (420, 640) => { self.window_size.set((420, 640)); self.tile.set((420.5, 640.5)); self.offset.set((0.0, 0.0)); }
+                (500, 640) => { self.window_size.set((500, 640)); self.tile.set((508.0, 648.0)); self.offset.set((4.0, 4.0)); }
+                (72, 72) => { self.window_size.set((72, 72)); self.tile.set((80.0, 80.0)); self.offset.set((4.0, 4.0)); }
+                _ => {}
+            }
+        }
+        /// Scripted GTK+compositor resize: panics while pinned (sizing
+        /// before release would silently keep the old frame); queues the
+        /// request but never lands while mapped — only a remap adopts it.
+        fn land(&self, size: (i32, i32)) {
+            assert!(self.released.get(), "GTK clamps set_size while min=max is pinned");
+            if !self.seen.borrow().contains(&size) {
+                self.seen.borrow_mut().push(size);
+            }
+            self.pending.set(Some(size));
+        }
+        /// Immediate landing for sub-cases isolating a later step
+        /// (render-ack, drift) from the remap the happy path covers.
+        fn land_now(&self, size: (i32, i32)) {
+            assert!(self.released.get(), "GTK clamps set_size while min=max is pinned");
+            if !self.seen.borrow().contains(&size) {
+                self.seen.borrow_mut().push(size);
+            }
+            self.pending.set(Some(size));
+            self.adopt(size);
+        }
+        fn hide(&self) -> bool {
+            self.mapped.set(false);
+            true
+        }
+        fn show(&self) -> bool {
+            self.mapped.set(true);
+            self.remaps.set(self.remaps.get() + 1);
+            if let Some(size) = self.pending.get() {
+                self.adopt(size);
+            }
+            true
+        }
+        fn request(&self, wire: &str, _: Duration) -> io::Result<Value> {
+            let asked: Value = serde_json::from_str(wire)?;
+            self.log.borrow_mut().push(asked.clone());
+            if asked == json!("Version") {
+                return Ok(json!({"Version": "26.04 (test)"}));
+            }
+            if asked == json!("Windows") {
+                let ws = if self.drift { 8 } else { 7 };
+                let (px, py) = self.pos.get();
+                let (sw, sh) = self.window_size.get();
+                let (tw, th) = self.tile.get();
+                let (ox, oy) = self.offset.get();
+                return Ok(json!({"Windows": [
+                    {"id": 9, "pid": 42, "title": crate::platform::PANEL_TITLE, "workspace_id": ws, "is_floating": self.floating.get(),
+                     "layout": {"window_size": [sw, sh], "tile_size": [tw, th], "window_offset_in_tile": [ox, oy], "tile_pos_in_workspace_view": [px, py]}},
+                    {"id": 5, "pid": 42, "title": crate::platform::DOT_TITLE, "workspace_id": 7, "is_floating": true,
+                     "layout": {"window_size": [72, 72], "tile_size": [72.0, 72.0], "tile_pos_in_workspace_view": [300.0, 100.0]}},
+                ]}));
+            }
+            if asked == json!("Workspaces") {
+                return Ok(json!({"Workspaces": [{"id": 7, "output": "DP-1"}, {"id": 8, "output": "HDMI-1"}]}));
+            }
+            if asked == json!("Outputs") {
+                return Ok(json!({"Outputs": {"DP-1": {"name": "DP-1", "logical": {"x": 0, "y": 0, "width": 2560, "height": 1440, "scale": 1.0, "transform": "Normal"}}}}));
+            }
+            if asked == json!("Layers") {
+                return Ok(json!({"Layers": []}));
+            }
+            if asked["Action"]["MoveWindowToFloating"]["id"] == json!(9) {
+                if !self.handled {
+                    return Ok(json!({"unexpected": "ok"}));
+                }
+                self.floating.set(true);
+                return Ok(json!("Handled"));
+            }
+            for label in ["SetWindowWidth", "SetWindowHeight"] {
+                if let Some(change) = asked["Action"].get(label) {
+                    assert_eq!(change["id"],9);
+                    assert!(change["change"]["SetFixed"].as_i64().is_some_and(|v| v > 0));
+                    // An ACK alone does not commit a scripted stale buffer.
+                    return Ok(if self.handled { json!("Handled") } else { json!({"unexpected":"ok"}) });
+                }
+            }
+            let mover = &asked["Action"]["MoveFloatingWindow"];
+            assert_eq!(mover["id"], 9, "shared route moves the exact PANEL id, never the DOT");
+            if !self.handled {
+                return Ok(json!({"unexpected": "ok"}));
+            }
+            if let (Some(dx), Some(dy)) = (mover["x"]["AdjustFixed"].as_i64(), mover["y"]["AdjustFixed"].as_i64()) {
+                let (x, y) = self.pos.get();
+                self.pos.set((x + dx as f64, y + dy as f64));
+            } else {
+                let axis = |v: &Value, origin: f64, extent: f64| if let Some(fixed) = v["SetFixed"].as_f64() { origin + fixed } else { origin + extent - 75.0 };
+                self.pos.set((axis(&mover["x"], 12.0, 1280.0), axis(&mover["y"], 30.0, 1000.0)));
+            }
+            Ok(json!("Handled"))
+        }
+        fn moved_ids(&self) -> Vec<u64> {
+            self.log.borrow().iter().filter_map(|w| w.pointer("/Action/MoveFloatingWindow/id").and_then(Value::as_u64)).collect()
+        }
+    }
+    fn anchor(x: f64, y: f64) -> crate::niri::CompactSpot {
+        crate::niri::CompactSpot { output: "DP-1".into(), x, y }
+    }
+    // cover -> release -> 420 -> prepare -> mode-resize -> finish -> render-ack -> reveal.
+    // The 200x200 start proves the unmapped apply: each size is queued
+    // while unmapped and adopted on show, so the settle observes it
+    // without retries. A regression that only re-requests while mapped
+    // The mapped mode resize commits without replacing the prepared id.
+    let fake = Fake::live();
+    let mut steps = Vec::new();
+    let mut cover = || true;
+    let mut release = || { fake.released.set(true); true };
+    let mut resize = |size: (i32, i32)| {
+        if fake.mapped.get() { fake.land_now(size); } else { fake.land(size); }
+        true
+    };
+    let mut hide = || fake.hide();
+    let mut show = || fake.show();
+    let mut request = |wire: &str, budget: Duration| fake.request(wire, budget);
+    let mut ready = || true;
+    let outcome = run_shared_unit_sequence(42, Some(&anchor(100.0, 200.0)), R::Pair, false, 8, 12.0,
+        Duration::from_secs(2), || true, &mut cover, &mut release, &mut resize, &mut hide, &mut show, &mut request, &mut ready, &mut steps);
+    assert_eq!(steps, vec!["cover", "release", "420", "prepare", "mode-resize", "finish", "animate-settle", "render-ack", "reveal"]);
+    assert_eq!(outcome, SharedOutcome::Revealed(Some(anchor(100.0, 200.0))));
+    assert!(!fake.moved_ids().is_empty() && fake.moved_ids().iter().all(|id| *id == 9));
+    // Mapped-only (S26): the mode resize preserves the mapping; no
+    // calibration remap ever runs.
+    assert_eq!(fake.window_size.get(), (500, 640));
+    assert_eq!(fake.seen.borrow().as_slice(), [(420, 640), (500, 640)]);
+    assert_eq!(fake.remaps.get(), 0, "mapped-only: no unmap/remap step");
+    // A compositor that never commits fails honest and moves nothing:
+    // budget exhausted names the stall instead of faking a reveal.
+    // Mapped-only: no remap fallback exists; the settle cancels honest.
+    let fake = Fake::live();
+    let mut steps = Vec::new();
+    let mut cover = || true;
+    let mut release = || { fake.released.set(true); true };
+    let mut resize = |_: (i32, i32)| { assert!(fake.released.get()); true };
+    let mut hide = || true;
+    let mut show = || true;
+    let mut request = |wire: &str, budget: Duration| fake.request(wire, budget);
+    let mut ready = || true;
+    let outcome = run_shared_unit_sequence(42, Some(&anchor(100.0, 200.0)), R::Pair, false, 8, 12.0,
+        Duration::from_millis(150), || true, &mut cover, &mut release, &mut resize, &mut hide, &mut show, &mut request, &mut ready, &mut steps);
+    assert_eq!(outcome, SharedOutcome::Cancelled("unit size unsettled"));
+    assert_eq!(steps, vec!["cover", "release", "420"]);
+    assert!(fake.moved_ids().is_empty());
+    // Re-requests that never land expire instead of revealing stale:
+    // mapped-only settle cancels honest with no remap fallback.
+    let fake = Fake::live();
+    let mut steps = Vec::new();
+    let mut cover = || true;
+    let mut release = || { fake.released.set(true); true };
+    let mut resize = |size: (i32, i32)| { fake.land(size); true };
+    let mut hide = || true;
+    let mut show = || true;
+    let mut request = |wire: &str, budget: Duration| fake.request(wire, budget);
+    let mut ready = || true;
+    let outcome = run_shared_unit_sequence(42, Some(&anchor(100.0, 200.0)), R::Pair, false, 8, 12.0,
+        Duration::from_millis(400), || true, &mut cover, &mut release, &mut resize, &mut hide, &mut show, &mut request, &mut ready, &mut steps);
+    assert_eq!(outcome, SharedOutcome::Cancelled("unit size unsettled"));
+    assert_eq!(fake.window_size.get(), (200, 200));
+    assert!(fake.moved_ids().is_empty());
+    // Mapped-only (S26): no remap ever runs, so the Niri window id is
+    // stable across the whole transition. This fixture keeps the
+    // fixed-id geometry path above; any unmap would be a defect.
+    let fake = Fake::live();
+    let id = Cell::new(9_u64);
+    let mut steps = Vec::new();
+    let mut cover = || true;
+    let mut release = || { fake.released.set(true); true };
+    let mut resize = |size| { fake.land_now(size); true };
+    let mut hide = || fake.hide();
+    let mut show = || { id.set(id.get() + 1); fake.show() };
+    let mut request = |wire: &str, budget| {
+        let asked: Value = serde_json::from_str(wire)?;
+        if asked == json!("Windows") {
+            let mut value = fake.request(wire, budget)?;
+            value["Windows"][0]["id"] = json!(id.get());
+            return Ok(value);
+        }
+        // Translate only the current exact-id action for this fixture.
+        if let Some(action_id) = asked.pointer("/Action/MoveFloatingWindow/id").and_then(Value::as_u64) {
+            assert_eq!(action_id, id.get(), "never move a previous mapping");
+            let mut translated = asked.clone();
+            translated["Action"]["MoveFloatingWindow"]["id"] = json!(9);
+            return fake.request(&translated.to_string(), budget);
+        }
+        fake.request(wire, budget)
+    };
+    let mut ready = || true;
+    let outcome = run_shared_unit_sequence(42, Some(&anchor(100.0, 200.0)), R::Pair, false, 8, 12.0,
+        Duration::from_secs(2), || true, &mut cover, &mut release, &mut resize, &mut hide, &mut show, &mut request, &mut ready, &mut steps);
+    assert_eq!(outcome, SharedOutcome::Revealed(Some(anchor(100.0, 200.0))),
+        "prepare and finish must observe the same mapping");
+    assert_eq!(id.get(), 9, "mapped-only: no remap replaces the validated id");
+
+    // Fixed constraints are still pinned when the resize is asked: GTK would
+    // clamp the size to the old frame and finish would refuse to move.
+    let fake = Fake::live();
+    let mut steps = Vec::new();
+    let mut cover = || true;
+    let mut release = || false;
+    let mut resize = |_: (i32, i32)| panic!("never size without releasing the pinned constraints");
+    let mut hide = || true;
+    let mut show = || panic!("never map after a failed release");
+    let mut request = |wire: &str, budget: Duration| fake.request(wire, budget);
+    let mut ready = || true;
+    let outcome = run_shared_unit_sequence(42, Some(&anchor(100.0, 200.0)), R::Pair, false, 8, 12.0,
+        Duration::from_secs(2), || true, &mut cover, &mut release, &mut resize, &mut hide, &mut show, &mut request, &mut ready, &mut steps);
+    assert_eq!(outcome, SharedOutcome::Cancelled("unit size release unacked"));
+    assert_eq!(steps, vec!["cover", "release"]);
+    assert!(fake.moved_ids().is_empty());
+    // Absent render ack: geometry succeeded but nothing reveals.
+    let fake = Fake::live();
+    let mut steps = Vec::new();
+    let mut cover = || true;
+    let mut release = || { fake.released.set(true); true };
+    let mut resize = |size: (i32, i32)| { fake.land_now(size); true };
+    let mut hide = || fake.hide();
+    let mut show = || fake.show();
+    let mut request = |wire: &str, budget: Duration| fake.request(wire, budget);
+    let mut ready = || false;
+    let outcome = run_shared_unit_sequence(42, Some(&anchor(100.0, 200.0)), R::Pair, false, 8, 12.0,
+        Duration::from_millis(60), || true, &mut cover, &mut release, &mut resize, &mut hide, &mut show, &mut request, &mut ready, &mut steps);
+    assert_eq!(outcome, SharedOutcome::Cancelled("unit render ack absent"));
+    assert_eq!(*steps.last().unwrap(), "render-ack");
+    // Stale before reveal: silent, no visual effect, anchor untouched.
+    let fake = Fake::live();
+    let mut steps = Vec::new();
+    let mut cover = || true;
+    let mut release = || true;
+    let mut resize = |_: (i32, i32)| true;
+    let mut hide = || true;
+    let mut show = || true;
+    let mut request = |wire: &str, budget: Duration| fake.request(wire, budget);
+    let mut ready = || fake.log.borrow().len() > 4;
+    let outcome = run_shared_unit_sequence(42, Some(&anchor(100.0, 200.0)), R::Pair, false, 8, 12.0,
+        Duration::from_secs(2), || fake.log.borrow().len() < 4, &mut cover, &mut release, &mut resize, &mut hide, &mut show, &mut request, &mut ready, &mut steps);
+    assert_eq!(outcome, SharedOutcome::Silent);
+    // Output drift: remembered DP-1 vs fresh HDMI-1 fails closed with no commit.
+    // The remap still lands 420 first, so this isolates the prepare gate.
+    let fake = Fake { drift: true, ..Fake::live() };
+    let mut steps = Vec::new();
+    let mut cover = || true;
+    let mut release = || { fake.released.set(true); true };
+    let mut resize = |size: (i32, i32)| { fake.land(size); true };
+    let mut hide = || fake.hide();
+    let mut show = || fake.show();
+    let mut request = |wire: &str, budget: Duration| fake.request(wire, budget);
+    let mut ready = || true;
+    let kept = Some(anchor(100.0, 200.0));
+    let outcome = run_shared_unit_sequence(42, kept.as_ref(), R::Pair, false, 8, 12.0,
+        Duration::from_secs(2), || true, &mut cover, &mut release, &mut resize, &mut hide, &mut show, &mut request, &mut ready, &mut steps);
+    assert!(matches!(outcome, SharedOutcome::Cancelled(_)));
+    assert_eq!(kept, Some(anchor(100.0, 200.0)));
+    // Cover ack timeout fails closed with zero socket traffic.
+    let fake = Fake::live();
+    let mut steps = Vec::new();
+    let mut cover = || false;
+    let mut release = || true;
+    let mut resize = |_: (i32, i32)| true;
+    let mut hide = || panic!("never remap after a failed cover");
+    let mut show = || panic!("never remap after a failed cover");
+    let mut request = |wire: &str, budget: Duration| fake.request(wire, budget);
+    let mut ready = || true;
+    let outcome = run_shared_unit_sequence(42, Some(&anchor(100.0, 200.0)), R::Pair, false, 8, 12.0,
+        Duration::from_secs(2), || true, &mut cover, &mut release, &mut resize, &mut hide, &mut show, &mut request, &mut ready, &mut steps);
+    assert_eq!(outcome, SharedOutcome::Cancelled("unit cover unacked"));
+    assert_eq!(steps, vec!["cover"]);
+    assert!(fake.log.borrow().is_empty());
+    // Fullscreen roundtrip retains the anchor with zero moves.
+    let fake = Fake::live();
+    let mut steps = Vec::new();
+    let mut cover = || true;
+    let mut release = || panic!("fullscreen is managed: the compact release never runs");
+    let mut resize = |_: (i32, i32)| panic!("fullscreen never resizes a client");
+    let mut hide = || panic!("fullscreen never remaps a client");
+    let mut show = || panic!("fullscreen never remaps a client");
+    let mut request = |wire: &str, budget: Duration| fake.request(wire, budget);
+    let mut ready = || true;
+    let outcome = run_shared_unit_sequence(42, Some(&anchor(100.0, 200.0)), R::Fullscreen, false, 8, 12.0,
+        Duration::from_secs(2), || true, &mut cover, &mut release, &mut resize, &mut hide, &mut show, &mut request, &mut ready, &mut steps);
+    assert_eq!(outcome, SharedOutcome::Revealed(Some(anchor(100.0, 200.0))));
+    assert!(fake.moved_ids().is_empty());
+    // Drag: restore returns preserved `remembered`; only this commit writes.
+    let compact = Mutex::new(None);
+    let gate: Mutex<Option<u64>> = Mutex::new(None);
+    let epoch = AtomicU64::new(7);
+    assert!(commit_dragged_anchor(&compact, &gate, &epoch, 7, Some(anchor(1.0, 2.0))));
+    assert_eq!(*compact.lock().unwrap(), Some(anchor(1.0, 2.0)));
+    assert!(!commit_dragged_anchor(&compact, &gate, &epoch, 6, Some(anchor(9.0, 9.0))));
+    assert_eq!(*compact.lock().unwrap(), Some(anchor(1.0, 2.0)));
 }
 
 #[cfg(target_os = "linux")]
@@ -2845,6 +3228,163 @@ fn shared_stale_strut_self_corrects_in_the_same_job() {
     assert!(ops.stored.borrow().is_none(), "a Cancelled miss drops the stored entry");
     assert_eq!(ops.cleared.get(), 1, "exactly one generation-gated clear");
     assert_eq!(*ops.cancels.borrow(), vec!["unit prepare unresolvable"]);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn environment_layer_change_clears_cache_and_next_transition_reprobes() {
+    // T10/S7 residual: a REMOVED bar leaves the old inset legal
+    // (actual==planned, verification passes), so only the layer-set
+    // change can drop the stale entry before it is reused.
+    use crate::niri::unit_restore::{CachedCalibration, UnitRestoreMode as R};
+    use serde_json::{json, Value};
+    use std::cell::{Cell, RefCell};
+    use std::io;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU64;
+    fn anchor(x: f64, y: f64) -> crate::niri::CompactSpot {
+        crate::niri::CompactSpot { output: "DP-1".into(), x, y }
+    }
+    fn bar_event() -> Value {
+        json!({"Layers": [{"namespace": "bar", "output": "DP-1", "layer": "Top", "keyboard_interactivity": "None"}]})
+    }
+    struct Fake {
+        pos: Cell<(f64, f64)>,
+        size: Cell<(i32, i32)>,
+        tile: Cell<(f64, f64)>,
+        offset: Cell<(f64, f64)>,
+        log: RefCell<Vec<Value>>,
+    }
+    impl Fake {
+        fn live() -> Self {
+            Self { pos: Cell::new((200.0, 100.0)), size: Cell::new((200, 200)),
+                tile: Cell::new((200.0, 200.0)), offset: Cell::new((0.0, 0.0)), log: RefCell::new(vec![]) }
+        }
+        fn adopt(&self, size: (i32, i32)) {
+            match size {
+                (420, 640) => { self.size.set((420, 640)); self.tile.set((420.5, 640.5)); self.offset.set((0.0, 0.0)); }
+                (500, 640) => { self.size.set((500, 640)); self.tile.set((508.0, 648.0)); self.offset.set((4.0, 4.0)); }
+                _ => {}
+            }
+        }
+        fn request(&self, wire: &str, _: Duration) -> io::Result<Value> {
+            let asked: Value = serde_json::from_str(wire)?;
+            self.log.borrow_mut().push(asked.clone());
+            if asked == json!("Version") {
+                return Ok(json!({"Version": "26.04 (test)"}));
+            }
+            if asked == json!("Windows") {
+                let (px, py) = self.pos.get();
+                let (sw, sh) = self.size.get();
+                let (tw, th) = self.tile.get();
+                let (ox, oy) = self.offset.get();
+                return Ok(json!({"Windows": [
+                    {"id": 9, "pid": 42, "title": crate::platform::PANEL_TITLE, "workspace_id": 7, "is_floating": true,
+                     "layout": {"window_size": [sw, sh], "tile_size": [tw, th], "window_offset_in_tile": [ox, oy], "tile_pos_in_workspace_view": [px, py]}},
+                ]}));
+            }
+            if asked == json!("Workspaces") {
+                return Ok(json!({"Workspaces": [{"id": 7, "output": "DP-1"}]}));
+            }
+            if asked == json!("Outputs") {
+                return Ok(json!({"Outputs": {"DP-1": {"name": "DP-1",
+                    "logical": {"x": 0, "y": 0, "width": 2560, "height": 1440, "scale": 1.0, "transform": "Normal"}}}}));
+            }
+            if asked == json!("Layers") {
+                return Ok(json!({"Layers": []}));
+            }
+            let mover = &asked["Action"]["MoveFloatingWindow"];
+            assert_eq!(mover["id"], 9);
+            if let (Some(dx), Some(dy)) = (mover["x"]["AdjustFixed"].as_i64(), mover["y"]["AdjustFixed"].as_i64()) {
+                let (x, y) = self.pos.get();
+                self.pos.set((x + dx as f64, y + dy as f64));
+            } else {
+                let axis = |v: &Value, o: f64, e: f64| if let Some(f) = v["SetFixed"].as_f64() { o + f } else { o + e - 75.0 };
+                self.pos.set((axis(&mover["x"], 12.0, 1280.0), axis(&mover["y"], 30.0, 1000.0)));
+            }
+            Ok(json!("Handled"))
+        }
+        fn probes(&self) -> usize {
+            self.log.borrow().iter().filter(|w| {
+                w.pointer("/Action/MoveFloatingWindow/id").and_then(Value::as_u64) == Some(9)
+                    && w.pointer("/Action/MoveFloatingWindow/x/AdjustFixed").is_none()
+            }).count()
+        }
+    }
+    fn shell_with(cache: Option<CachedCalibration>) -> Shell {
+        let data_dir = std::env::temp_dir().join(format!("gd-env-data-{}", std::process::id()));
+        let (snap, _rx) = mpsc::channel();
+        Shell {
+            config: DesktopConfig { data_dir: data_dir.clone(), port: 0, shortcut: String::new() },
+            daemon: Arc::new(Daemon::new(0, data_dir, None)), snap, places_windows: false,
+            rose_hidden: AtomicBool::new(false), panel_spot: Mutex::new(None), full_screen: Mutex::new(None),
+            native_expanded: Mutex::new(false),
+            native_compact: Mutex::new(Some(anchor(100.0, 200.0))),
+            native_epoch: AtomicU64::new(6), native_restore: Mutex::new(None), native_gate: Mutex::new(None),
+            native_intent: Mutex::new(None),
+            native_unit: Mutex::new(NiriUnitState::dormant()),
+            native_mover: Mutex::new(None),
+            native_suppress_until: Mutex::new(None), cover_cancelled: Mutex::new(None),
+            native_hide_job: Mutex::new(None), native_io: Mutex::new(()),
+            native_work_area: Mutex::new(None), native_unit_cache: Mutex::new(cache), shortcut: Mutex::new(None),
+        }
+    }
+    fn run(fake: &Fake, spot: &crate::niri::CompactSpot, cached: Option<CachedCalibration>)
+        -> (SharedOutcome, Vec<&'static str>, Option<CachedCalibration>) {
+        let mut steps = Vec::new();
+        let mut cache_out = None;
+        let mut cache_clear = false;
+        let mut cover = || true;
+        let mut release = || true;
+        let mut resize = |size: (i32, i32)| { fake.adopt(size); true };
+        let mut hide = || true;
+        let mut show = || true;
+        let mut request = |wire: &str, budget: Duration| fake.request(wire, budget);
+        let mut ready = || true;
+        let outcome = run_shared_unit_sequence_cached(42, Some(spot), R::Pair, false, 8, 12.0,
+            Duration::from_secs(2), || true, &mut cover, &mut release, &mut resize, &mut hide, &mut show,
+            &mut request, &mut ready, &mut steps, cached, &mut cache_out, &mut cache_clear);
+        (outcome, steps, cache_out)
+    }
+    let spot = anchor(100.0, 200.0);
+    // First placement probes and fills the cache.
+    let fake = Fake::live();
+    let (outcome, _, cache) = run(&fake, &spot, None);
+    assert_eq!(outcome, SharedOutcome::Revealed(Some(spot.clone())));
+    let cache = cache.expect("probe fills the cache");
+    let probes = fake.probes();
+    assert!(probes > 0);
+    // Baseline Layers observation records without clearing.
+    let shell = shell_with(Some(cache.clone()));
+    let mut last = None;
+    assert!(!note_environment_event(&shell.native_gate, &shell.native_unit_cache, &bar_event(), &mut last, &|| true));
+    assert!(shell.native_unit_cache.lock().unwrap().is_some(), "baseline records, never clears");
+    // Unchanged payload leaves the entry intact: next transition reuses
+    // it with zero probe moves.
+    assert!(!note_environment_event(&shell.native_gate, &shell.native_unit_cache, &bar_event(), &mut last, &|| true));
+    let (outcome, steps, _) = run(&fake, &spot, shell.native_unit_cache.lock().unwrap().clone());
+    assert_eq!(outcome, SharedOutcome::Revealed(Some(spot.clone())));
+    assert!(steps.contains(&"cached") && !steps.contains(&"prepare"));
+    assert_eq!(fake.probes(), probes, "unchanged payload issues no extra probe");
+    // The bar is removed: an empty list differs, so the entry is dropped
+    // and the next transition re-probes once and re-fills it.
+    assert!(note_environment_event(&shell.native_gate, &shell.native_unit_cache, &json!({"Layers": []}), &mut last, &|| true));
+    assert!(shell.native_unit_cache.lock().unwrap().is_none(), "layer change clears the entry");
+    let (outcome, steps, refilled) = run(&fake, &spot, shell.native_unit_cache.lock().unwrap().clone());
+    assert_eq!(outcome, SharedOutcome::Revealed(Some(spot.clone())));
+    assert!(steps.contains(&"prepare"), "cleared entry re-probes: {steps:?}");
+    assert!(refilled.is_some(), "re-probe re-fills the entry");
+    // A config reload clears the entry the same way.
+    let shell = shell_with(refilled);
+    let mut last = None;
+    assert!(note_environment_event(&shell.native_gate, &shell.native_unit_cache, &json!({"ConfigLoaded": {"failed": false}}), &mut last, &|| true));
+    assert!(shell.native_unit_cache.lock().unwrap().is_none(), "ConfigLoaded clears the entry");
+    // A stale generation clears nothing and records nothing.
+    let shell = shell_with(Some(cache.clone()));
+    let mut last = None;
+    assert!(!note_environment_event(&shell.native_gate, &shell.native_unit_cache, &bar_event(), &mut last, &|| false));
+    assert!(shell.native_unit_cache.lock().unwrap().is_some(), "stale event clears nothing");
+    assert!(last.is_none(), "stale event records nothing");
 }
 
 #[cfg(target_os = "linux")]
