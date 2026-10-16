@@ -21,27 +21,13 @@ import { MAX_VOICE_AUDIO, MAX_VOICE_TEXT, type VoiceCapability } from "@gentle-d
  * bodies. Local transcription never leaves the machine.
  */
 
-export const SPEECH_URL =
+export const DEFAULT_SPEECH_URL =
 	"https://877104f7-e885-42b9-8de8-f6e4c6303969.invocation.api.nvcf.nvidia.com/v1/audio/synthesize";
+export const SPEECH_URL = process.env.GENTLE_DOT_SPEECH_URL || DEFAULT_SPEECH_URL;
 const SPEECH_LANGUAGE = process.env.GENTLE_DOT_SPEECH_LANGUAGE || "es-US";
 const SPEECH_VOICE = process.env.GENTLE_DOT_SPEECH_VOICE || "Magpie-Multilingual.ES-US.Isabela";
 const TRANSCRIBE_TIMEOUT_MS = 45_000;
 const SPEECH_TIMEOUT_MS = 60_000;
-/**
- * Where to copy the transcriber script and its package.json from: the repo's
- * `packages/daemon/voice-tools` (source trees) or `<runtime>/daemon/voice-tools`
- * (packaged installs). GENTLE_DOT_VOICE_TOOLS_SOURCE overrides (tests).
- */
-function voiceToolsSource(): string | undefined {
-	if (process.env.GENTLE_DOT_VOICE_TOOLS_SOURCE) return process.env.GENTLE_DOT_VOICE_TOOLS_SOURCE;
-	const here = fileURLToPath(import.meta.url);
-	for (const relative of ["../../voice-tools", "../voice-tools"]) {
-		const candidate = join(here, "..", relative);
-		if (existsSync(join(candidate, "transcriber.js"))) return candidate;
-	}
-	return undefined;
-}
-
 /** Installs sherpa-onnx-node into the data dir's voice-tools with npm (default installDeps). */
 function npmInstallDeps(voiceToolsDir: string): Promise<void> {
 	const npm = process.env.GENTLE_DOT_NPM || "npm";
@@ -67,6 +53,24 @@ function npmInstallDeps(voiceToolsDir: string): Promise<void> {
 		});
 	});
 }
+
+/**
+ * Returns the voice-tools asset source directory, checking in order:
+ * 1. GENTLE_DOT_VOICE_TOOLS_PATH (explicit override)
+ * 2. GENTLE_DOT_VOICE_TOOLS_SOURCE (test override)
+ * 3. Relative to this module: ../../voice-tools (source) or ../voice-tools (packaged)
+ */
+function voiceToolsSource(): string | undefined {
+	if (process.env.GENTLE_DOT_VOICE_TOOLS_PATH) return process.env.GENTLE_DOT_VOICE_TOOLS_PATH;
+	if (process.env.GENTLE_DOT_VOICE_TOOLS_SOURCE) return process.env.GENTLE_DOT_VOICE_TOOLS_SOURCE;
+	const here = fileURLToPath(import.meta.url);
+	for (const relative of ["../../voice-tools", "../voice-tools"]) {
+		const candidate = join(here, "..", relative);
+		if (existsSync(join(candidate, "transcriber.js"))) return candidate;
+	}
+	return undefined;
+}
+
 
 export type VoiceResult<T> = ({ ok: true } & T) | { ok: false; reason: string };
 
