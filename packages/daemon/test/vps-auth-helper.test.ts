@@ -6,23 +6,30 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ServerMessage } from "@gentle-dot/protocol";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { type DaemonOptions, type DotDaemon, startDaemon } from "../src/daemon.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+
+// Each case boots a daemon + auth-helper (agent login via jiti); slow hosts cross the 5 s default.
+vi.setConfig({ testTimeout: 30_000 });
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const own = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
 
 const daemons: DotDaemon[] = [];
+let savedVoiceModel: string | undefined;
 afterEach(async () => {
 	await Promise.all(daemons.splice(0).map((d) => d.close()));
+	if (savedVoiceModel === undefined) delete process.env.GENTLE_DOT_VOICE_MODEL;
+	else process.env.GENTLE_DOT_VOICE_MODEL = savedVoiceModel;
+	savedVoiceModel = undefined;
 });
 
 /** The engine's environment without a model key from the machine running the tests. */
 function cleanEnv(): NodeJS.ProcessEnv {
 	const env = { ...process.env };
-	for (const key of ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"]) delete env[key];
+	for (const key of ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "NVIDIA_API_KEY"]) delete env[key];
 	return env;
 }
 
@@ -31,13 +38,17 @@ function plantCommandKey(agentHome: string, marker: string): void {
 	mkdirSync(agentHome, { recursive: true });
 	writeFileSync(
 		join(agentHome, "auth.json"),
-		JSON.stringify({ openai: { type: "api_key", key: `!echo $PPID > '${marker}'; echo sk-from-command` } }),
+		JSON.stringify({ nvidia: { type: "api_key", key: `!echo $PPID > '${marker}'; echo sk-from-command` } }),
 	);
 }
 
 async function setup(vps: DaemonOptions["vps"] | undefined, plant?: (agentHome: string) => void) {
 	const dataDir = tempDir();
 	const agentHome = join(dataDir, "agent");
+	// The daemon reads GENTLE_DOT_VOICE_MODEL from this process: point it at a directory
+	// that does not exist, so a machine with the real model downloaded stays deterministic.
+	savedVoiceModel = process.env.GENTLE_DOT_VOICE_MODEL;
+	process.env.GENTLE_DOT_VOICE_MODEL = join(dataDir, "missing-model");
 	plant?.(agentHome);
 	const d = await startDaemon({
 		port: 0,
@@ -107,8 +118,8 @@ describe("server mode: sign-in runs as the engine's user (S25.8, B1)", () => {
 		const s = await setup(vpsAs(own), (home) => plantCommandKey(home, marker));
 		const listed = await s.accounts();
 		// The key resolved, so voice is on, but in the helper: the shell's parent is not the daemon.
-		expect(listed.providers.find((p) => p.id === "openai")).toMatchObject({ configured: true });
-		expect(listed.voice).toMatchObject({ transcribe: true });
+		expect(listed.providers.find((p) => p.id === "nvidia")).toMatchObject({ configured: true });
+		expect(listed.voice).toMatchObject({ transcribe: false, speak: true });
 		await waitFor(() => existsSync(marker));
 		const parent = Number(readFileSync(marker, "utf8").trim());
 		expect(parent).toBeGreaterThan(0);
@@ -131,18 +142,18 @@ describe("server mode: sign-in runs as the engine's user (S25.8, B1)", () => {
 
 	it("signs in, lists, uses the key for voice, and signs out through the helper", async () => {
 		const s = await setup(vpsAs(own));
-		expect((await s.signIn("openai", "sk-helper-test-not-real")).ok).toBe(true);
+		expect((await s.signIn("nvidia", "sk-helper-test-not-real")).ok).toBe(true);
 		const auth = JSON.parse(readFileSync(join(s.agentHome, "auth.json"), "utf8"));
-		expect(auth.openai).toMatchObject({ type: "api_key", key: "sk-helper-test-not-real" });
+		expect(auth.nvidia).toMatchObject({ type: "api_key", key: "sk-helper-test-not-real" });
 		const listed = await s.accounts();
-		expect(listed.providers.find((p) => p.id === "openai")).toMatchObject({
+		expect(listed.providers.find((p) => p.id === "nvidia")).toMatchObject({
 			configured: true,
 			source: "stored",
 		});
-		expect(listed.voice).toMatchObject({ transcribe: true });
-		s.send({ type: "auth_logout", providerId: "openai" });
-		await waitFor(() => !JSON.parse(readFileSync(join(s.agentHome, "auth.json"), "utf8")).openai);
-		expect((await s.accounts()).providers.find((p) => p.id === "openai")).toMatchObject({
+		expect(listed.voice).toMatchObject({ transcribe: false, speak: true });
+		s.send({ type: "auth_logout", providerId: "nvidia" });
+		await waitFor(() => !JSON.parse(readFileSync(join(s.agentHome, "auth.json"), "utf8")).nvidia);
+		expect((await s.accounts()).providers.find((p) => p.id === "nvidia")).toMatchObject({
 			configured: false,
 		});
 	});
@@ -166,15 +177,15 @@ describe("server mode: sign-in runs as the engine's user (S25.8, B1)", () => {
 describe("on the desktop, sign-in stays in the daemon (regression)", () => {
 	it("signs in with an API key, turns voice on, and signs out, with no helper", async () => {
 		const s = await setup(undefined);
-		expect((await s.signIn("openai", "sk-desktop-test-not-real")).ok).toBe(true);
+		expect((await s.signIn("nvidia", "sk-desktop-test-not-real")).ok).toBe(true);
 		const listed = await s.accounts();
-		expect(listed.providers.find((p) => p.id === "openai")).toMatchObject({
+		expect(listed.providers.find((p) => p.id === "nvidia")).toMatchObject({
 			configured: true,
 			source: "stored",
 		});
-		expect(listed.voice).toMatchObject({ transcribe: true });
-		s.send({ type: "auth_logout", providerId: "openai" });
-		await waitFor(() => !JSON.parse(readFileSync(join(s.agentHome, "auth.json"), "utf8")).openai);
+		expect(listed.voice).toMatchObject({ transcribe: false, speak: true });
+		s.send({ type: "auth_logout", providerId: "nvidia" });
+		await waitFor(() => !JSON.parse(readFileSync(join(s.agentHome, "auth.json"), "utf8")).nvidia);
 		expect((await s.accounts()).voice).toMatchObject({ transcribe: false });
 	});
 });
