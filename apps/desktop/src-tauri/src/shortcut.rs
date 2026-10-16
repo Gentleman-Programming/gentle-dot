@@ -97,25 +97,89 @@ pub trait Host {
     fn label_tray(&self, shortcut: &str);
 }
 
+// Fallback chain for when the preferred shortcut is taken.
+// Ordered by preference: first is the user's choice, then sensible alternatives.
+fn fallback_chain(preferred: &str) -> Vec<String> {
+    // Normalize the preferred shortcut first to get its canonical form
+    let preferred = match normalize(preferred) {
+        Ok(s) => s,
+        Err(_) => preferred.to_string(),
+    };
+
+    // If the preferred shortcut is already a function key, no fallbacks needed
+    if preferred.starts_with('F') && preferred.len() <= 3 {
+        return vec![preferred];
+    }
+
+    let is_alt_space = matches!(preferred.as_str(), "Alt+Space");
+
+    let mut fallbacks = vec![preferred.to_string()];
+
+    // For Alt+Space (the default), provide sensible fallbacks
+    if matches!(preferred.as_str(), "Alt+Space") {
+        fallbacks.extend([
+            "Super+Space".to_string(),
+            "Ctrl+Space".to_string(),
+            "Ctrl+Alt+Space".to_string(),
+            "Super+Space".to_string(),
+            "F1".to_string(),
+            "F2".to_string(),
+            "F3".to_string(),
+            "F4".to_string(),
+            "F5".to_string(),
+        ]);
+    } else {
+        // For other shortcuts, provide generic fallbacks
+        fallbacks.extend([
+            "Super+Space".to_string(),
+            "Ctrl+Space".to_string(),
+            "Ctrl+Alt+Space".to_string(),
+            "F1".to_string(),
+            "F2".to_string(),
+            "F3".to_string(),
+            "F4".to_string(),
+            "F6".to_string(),
+        ]);
+    }
+
+    // Remove duplicates while preserving order
+    let mut seen = std::collections::HashSet::new();
+    fallbacks.retain(|s| seen.insert(s.clone()));
+    fallbacks
+}
+
 /// Applies a new panel shortcut at once. The new one is bound before the old one is released,
 /// so a refused or unsaved change leaves the old one working. Returns the saved spelling.
+/// Tries fallback chain when the preferred shortcut is taken.
 pub fn apply(host: &impl Host, current: Option<&str>, requested: &str) -> Result<String, String> {
     let shortcut = normalize(requested)?;
     let rebind = !current.is_some_and(|current| same_keys(current, &shortcut));
-    if rebind {
-        host.bind_toggle(&shortcut).map_err(|_| TAKEN.to_string())?;
-    }
-    if let Err(error) = host.save(&shortcut) {
+    
+    // Try the requested shortcut first, then fallbacks if taken
+    let fallbacks = fallback_chain(requested);
+    for candidate in fallbacks {
+        let rebind = !current.is_some_and(|current| same_keys(current, &candidate));
         if rebind {
-            host.unbind(&shortcut);
+            match host.bind_toggle(&candidate) {
+                Ok(()) => {},
+                Err(_) => continue, // Try next fallback
+            }
         }
-        return Err(error);
+        
+        if let Err(error) = host.save(&candidate) {
+            host.unbind(&candidate);
+            return Err(error);
+        }
+        
+        if let Some(current) = current.filter(|_| !same_keys(current, &candidate)) {
+            host.unbind(current);
+        }
+        host.label_tray(&candidate);
+        return Ok(candidate);
     }
-    if let Some(current) = current.filter(|_| rebind) {
-        host.unbind(current);
-    }
-    host.label_tray(&shortcut);
-    Ok(shortcut)
+    
+    // All fallbacks exhausted
+    Err(TAKEN.to_string())
 }
 
 #[cfg(test)]
