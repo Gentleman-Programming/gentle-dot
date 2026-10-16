@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Gentle Dot desktop shell"
 edition = "2021"
 publish = false
+rust-version = "1.99"
 
 [lib]
 name = "gentle_dot_lib"
@@ -86,3 +87,11 @@ opt-level = 3
 
 [profile.dev.package.sha2]
 opt-level = 3
+
+# Prevent cargo from stripping build-dependencies (proc-macros) in release mode.
+# Required for macOS 27+ (Xcode 27) with Rust < 1.99: stripping proc-macro dylibs
+# mis-aligns the LINKEDIT string pool, causing dyld to reject the dylibs.
+# With Rust 1.99+ this is no longer needed, but keeping it as a safeguard.
+# See: #53 macOS 27 / Xcode 27 proc-macro strip issue
+[profile.release.build-override]
+strip = false
