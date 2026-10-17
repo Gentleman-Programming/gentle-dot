@@ -23,6 +23,7 @@ import {
 	type AuthProvider,
 	JSON_RPC_ERROR_CODES,
 	LATEST_PROTOCOL_VERSION,
+	McpAbortError,
 	McpAuthRequiredError,
 	McpClient,
 	McpError,
@@ -109,6 +110,20 @@ const MAX_BODY = 8 * 1024 * 1024;
 /** A tool call may wait for the user's approval and then the server: just under the engine's 300 s. */
 const CALL_TIMEOUT_MS = 290_000;
 const REQUEST_TIMEOUT_MS = 60_000;
+/** How much of a dying server's own words are kept, as the engine keeps them. */
+const STDERR_TAIL_CHARS = 2_000;
+/**
+ * The requests the engine may safely repeat: it retries these itself after a transient status, and
+ * repeating one changes nothing. A tool call is never here, since it may have run.
+ */
+const REPEATABLE_METHODS = new Set([
+	"ping",
+	"initialize",
+	"tools/list",
+	"resources/list",
+	"resources/templates/list",
+	"prompts/list",
+]);
 
 interface Upstream {
 	client: McpClient;
@@ -120,9 +135,24 @@ interface Upstream {
 
 type Message = { jsonrpc?: unknown; id?: unknown; method?: unknown; params?: unknown };
 
+/** What a stdio server wrote on its way out; a server reached over HTTP has nothing to say here. */
+function stderrTail(transport: McpTransport | undefined): string | undefined {
+	if (!(transport instanceof StdioTransport)) return undefined;
+	return transport.stderr.trim().slice(-STDERR_TAIL_CHARS) || undefined;
+}
+
+/** The user stopped the answer, or the engine gave up: the server did nothing wrong. */
+function wasCancelled(error: unknown, signal: AbortSignal): boolean {
+	return signal.aborted || error instanceof McpAbortError || (error as Error)?.name === "AbortError";
+}
+
 export class McpProxy {
 	private key = "";
+	/** The key of the launch before this one, so a call already in flight when the engine restarted lands. */
+	private previousKey = "";
 	private readonly upstreams = new Map<string, Upstream>();
+	/** What the last server that died while starting said, by connector. */
+	private readonly stderrTails = new Map<string, string>();
 	/** Requests being answered, by connector and request id, so a `notifications/cancelled` stops them. */
 	private readonly running = new Map<string, AbortController>();
 	private readonly options: McpProxyOptions;
@@ -131,8 +161,13 @@ export class McpProxy {
 		this.options = options;
 	}
 
-	/** A fresh key for the next engine launch; the previous one stops working at once. */
+	/**
+	 * A fresh key for the next engine launch. The one before it keeps working until the launch after
+	 * that: a restart must not cut off a call in flight, a subagent that already read `mcp.json`, or a
+	 * `/mcp` run right after it.
+	 */
 	rotateKey(): string {
+		this.previousKey = this.key;
 		this.key = randomBytes(32).toString("base64url");
 		return this.key;
 	}
@@ -149,7 +184,10 @@ export class McpProxy {
 	sync(): void {
 		for (const [id, upstream] of this.upstreams) {
 			const connector = this.options.connector(id);
-			if (!connector?.enabled || connector.revision !== upstream.revision) this.drop(id, upstream);
+			if (!connector?.enabled || connector.revision !== upstream.revision) {
+				this.drop(id, upstream);
+				this.stderrTails.delete(id);
+			}
 		}
 	}
 
@@ -215,7 +253,13 @@ export class McpProxy {
 			);
 			this.reply(req, res, 200, rpcId, { result });
 		} catch (error) {
-			this.reply(req, res, 200, rpcId, { error: this.rpcError(connector, error) });
+			const failure = this.rpcError(connector, error, controller.signal);
+			// A request the engine may safely repeat is answered with a transient status, so the retry the
+			// engine already does covers a server that is still starting. Answering 200 with an error is not
+			// transient for it, and a failed connect there costs the session's tools until `/mcp`.
+			const status =
+				REPEATABLE_METHODS.has(message.method) && this.outOfReach(error, controller.signal) ? 503 : 200;
+			this.reply(req, res, status, rpcId, { error: failure });
 		} finally {
 			if (this.running.get(key) === controller) this.running.delete(key);
 		}
@@ -357,6 +401,7 @@ export class McpProxy {
 			this.drop(connector.id, upstream);
 			upstream = undefined;
 		}
+		let opened: McpTransport | undefined;
 		if (!upstream) {
 			const client = new McpClient({
 				name: "gentle-dot",
@@ -368,7 +413,8 @@ export class McpProxy {
 				revision: connector.revision,
 				connecting: (async () => {
 					const credentials = await this.options.credentials(connector.id);
-					await client.connect(this.transport(connector, credentials));
+					opened = this.transport(connector, credentials);
+					await client.connect(opened);
 				})(),
 			};
 			client.onClose(() => {
@@ -379,7 +425,11 @@ export class McpProxy {
 		}
 		try {
 			await upstream.connecting;
+			this.stderrTails.delete(connector.id);
 		} catch (error) {
+			// A server that dies while starting leaves its own words as the only clue to why: keep them.
+			const said = stderrTail(opened);
+			if (said) this.stderrTails.set(connector.id, said);
 			this.drop(connector.id, upstream);
 			throw error;
 		}
@@ -425,7 +475,24 @@ export class McpProxy {
 		void upstream.client.close().catch(() => {});
 	}
 
-	private rpcError(connector: ProxiedConnector, error: unknown): { code: number; message: string } {
+	/**
+	 * Whether the server itself is out of reach, as opposed to a refusal this proxy made, the server's
+	 * own answer, or a cancellation. Only this kind is worth the engine's retry.
+	 */
+	private outOfReach(error: unknown, signal: AbortSignal): boolean {
+		if (error instanceof ProxyError || error instanceof SecretsUnavailableError || error instanceof McpError)
+			return false;
+		// A rejected credential is the user's to fix by signing in, not a server that is out of reach.
+		if (error instanceof McpOAuthAuthorizationRequiredError || error instanceof McpAuthRequiredError)
+			return false;
+		return !wasCancelled(error, signal);
+	}
+
+	private rpcError(
+		connector: ProxiedConnector,
+		error: unknown,
+		signal: AbortSignal,
+	): { code: number; message: string } {
 		if (error instanceof ProxyError) return { code: error.code, message: error.message };
 		if (error instanceof SecretsUnavailableError) {
 			if (error.message !== NO_APP)
@@ -434,6 +501,9 @@ export class McpProxy {
 		}
 		// The server's own answer, passed on as it came.
 		if (error instanceof McpError) return { code: error.code, message: error.message };
+		// The user stopped the answer, or the engine gave up. That is not the server being unreachable,
+		// and it is no reason to close a server that is working: the next call reuses it.
+		if (wasCancelled(error, signal)) return { code: REFUSED, message: "The request was cancelled." };
 		const upstream = this.upstreams.get(connector.id);
 		if (upstream) this.drop(connector.id, upstream);
 		if (error instanceof McpOAuthAuthorizationRequiredError || error instanceof McpAuthRequiredError) {
@@ -443,16 +513,29 @@ export class McpProxy {
 				message: `${connector.name} needs the user to sign in again. Ask them to sign in to ${connector.name} in Connectors.`,
 			};
 		}
+		const said = this.stderrTails.get(connector.id);
 		const detail = ((error as Error)?.message ?? String(error)).replace(/https?:\/\/\S+/g, "[address]");
-		this.log(`could not reach connector ${connector.id}: ${detail.slice(0, 200)}`);
-		return { code: REFUSED, message: `Could not reach ${connector.name} right now. Try again in a moment.` };
+		this.log(
+			`could not reach connector ${connector.id}: ${detail.slice(0, 200)}${said ? ` | the server said: ${said.slice(0, 200)}` : ""}`,
+		);
+		return {
+			code: REFUSED,
+			message: `Could not reach ${connector.name} right now. Try again in a moment.${said ? `\nThe server said: ${said}` : ""}`,
+		};
 	}
 
 	private authorized(header: string | undefined): boolean {
 		const given = /^Bearer\s+(\S+)\s*$/i.exec(header ?? "")?.[1];
 		if (!given || !this.key) return false;
+		return (
+			this.matches(given, this.key) || (this.previousKey !== "" && this.matches(given, this.previousKey))
+		);
+	}
+
+	/** Compares without leaking where the difference is. */
+	private matches(given: string, expected: string): boolean {
 		const a = Buffer.from(given);
-		const b = Buffer.from(this.key);
+		const b = Buffer.from(expected);
 		return a.length === b.length && timingSafeEqual(a, b);
 	}
 
