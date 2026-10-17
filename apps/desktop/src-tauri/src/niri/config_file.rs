@@ -15,6 +15,7 @@
 use crate::niri::kdl_binds;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// Niri's config directory, honouring `NIRI_CONFIG` (a config file path),
 /// `XDG_CONFIG_HOME` and `HOME` in that order. `None` when nothing identifies a
@@ -108,11 +109,18 @@ pub fn with_include(config_text: &str) -> Option<String> {
     Some(text)
 }
 
+/// The infix that marks a backup sibling: `<name>.gd-backup-<stamp>`.
+pub const BACKUP_INFIX: &str = ".gd-backup-";
+
+/// How many backups of one file are kept. Every write leaves one and nothing else removes them, so
+/// without a limit a long series of writes fills the folder.
+pub const BACKUPS_KEPT: usize = 3;
+
 /// Backup path for `path`: sibling file carrying the caller's stamp, so a
 /// timestamp never has to live in this module.
 pub fn backup_path(path: &Path, stamp: &str) -> PathBuf {
     let mut name = path.file_name().map(|name| name.to_os_string()).unwrap_or_default();
-    name.push(format!(".gd-backup-{stamp}"));
+    name.push(format!("{BACKUP_INFIX}{stamp}"));
     path.with_file_name(name)
 }
 
@@ -130,6 +138,15 @@ pub trait ConfigIo {
     /// Niri never auto-reloads a half-published pair.
     fn validate_candidate(&mut self, _config_text: &str, _snippet_text: &str, _config_file: &Path) -> io::Result<()> {
         Ok(())
+    }
+    /// The siblings of `path` in its folder, as far as the implementation can see. The default finds
+    /// none, so an implementation that does not care about pruning keeps working.
+    fn siblings(&mut self, _path: &Path) -> io::Result<Vec<PathBuf>> {
+        Ok(Vec::new())
+    }
+    /// When `path` last changed, when the filesystem offers a time. The default has none.
+    fn modified(&mut self, _path: &Path) -> io::Result<Option<SystemTime>> {
+        Ok(None)
     }
 }
 
@@ -180,6 +197,26 @@ fn backup(io: &mut impl ConfigIo, live: &Path, stamp: &str) -> io::Result<(PathB
         Ok(()) => Ok((backup, true)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok((backup, false)),
         Err(error) => Err(error),
+    }
+}
+
+/// Removes the backups of `live` beyond the newest [`BACKUPS_KEPT`]. It runs only after a write was
+/// validated, and keeps the newest ones: the backup of an in-flight write is the newest of all, so a
+/// concurrent writer never loses bytes it could still have to restore. Best effort by design, so a
+/// folder that cannot be tidied never fails a write that already succeeded.
+fn prune_backups(io: &mut impl ConfigIo, live: &Path) {
+    let Ok(siblings) = io.siblings(live) else {
+        return;
+    };
+    let mut backups: Vec<(Option<SystemTime>, PathBuf)> =
+        siblings.into_iter().map(|path| (io.modified(&path).ok().flatten(), path)).collect();
+    if backups.len() <= BACKUPS_KEPT {
+        return;
+    }
+    // Newest first; an undated file sorts last, so a dated one is kept before it.
+    backups.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+    for (_, path) in backups.into_iter().skip(BACKUPS_KEPT) {
+        let _ = io.remove(&path);
     }
 }
 
@@ -237,6 +274,7 @@ fn publish_snippet(
         }
     }
     report.wrote_snippet = true;
+    prune_backups(io, &manifest.snippet);
     Ok(())
 }
 
@@ -319,6 +357,8 @@ pub fn first_run(
             }
             report.wrote_snippet = true;
             report.wrote_include = true;
+            prune_backups(io, &manifest.snippet);
+            prune_backups(io, &manifest.config_file);
         }
     }
     Ok(report)
@@ -420,6 +460,31 @@ impl ConfigIo for RealConfigIo {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
         }
+    }
+
+    /// The folder's backups of `path`, found by name so nothing else is ever touched.
+    fn siblings(&mut self, path: &Path) -> io::Result<Vec<PathBuf>> {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            return Ok(Vec::new());
+        };
+        let prefix = format!("{name}{BACKUP_INFIX}");
+        let parent = path.parent().unwrap_or_else(|| Path::new(""));
+        let entries = match std::fs::read_dir(parent) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut found = Vec::new();
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(prefix.as_str()) {
+                found.push(entry.path());
+            }
+        }
+        Ok(found)
+    }
+
+    fn modified(&mut self, path: &Path) -> io::Result<Option<SystemTime>> {
+        Ok(std::fs::metadata(path)?.modified().ok())
     }
 
     /// Stage both candidates in a temp dir and validate there, so the live
@@ -532,6 +597,10 @@ fn apply_toggle(
         }
         return Err(io::Error::new(error.kind(), format!("{error}; {}", detail.join("; "))));
     }
+    prune_backups(io, &manifest.snippet);
+    if needs_include {
+        prune_backups(io, &manifest.config_file);
+    }
     Ok(key)
 }
 
@@ -593,6 +662,7 @@ mod tests {
 
     struct Fake {
         files: HashMap<PathBuf, String>,
+        times: HashMap<PathBuf, u64>,
         written: Vec<PathBuf>,
         validated: Vec<PathBuf>,
         events: Vec<&'static str>,
@@ -606,6 +676,7 @@ mod tests {
         fn new(files: &[(&str, &str)]) -> Self {
             Self {
                 files: files.iter().map(|(path, text)| (PathBuf::from(path), (*text).to_owned())).collect(),
+                times: HashMap::new(),
                 written: Vec::new(),
                 validated: Vec::new(),
                 events: Vec::new(),
@@ -614,6 +685,27 @@ mod tests {
                 fail_snippet_read: false,
                 fail_restore_copy: false,
             }
+        }
+    }
+
+    impl Fake {
+        /// Gives the named files a modification time, which is what pruning orders by.
+        fn at(mut self, times: &[(&str, u64)]) -> Self {
+            self.times = times.iter().map(|(path, at)| (PathBuf::from(path), *at)).collect();
+            self
+        }
+
+        /// The backups of `live` still on disk, by stamp.
+        fn backups_of(&self, live: &Path) -> Vec<String> {
+            let prefix = format!("{}{BACKUP_INFIX}", live.file_name().unwrap().to_string_lossy());
+            let mut stamps: Vec<String> = self
+                .files
+                .keys()
+                .filter(|path| path.parent() == live.parent())
+                .filter_map(|path| path.file_name()?.to_str()?.strip_prefix(&prefix).map(str::to_owned))
+                .collect();
+            stamps.sort();
+            stamps
         }
     }
 
@@ -644,6 +736,9 @@ mod tests {
                 return Err(io::Error::new(io::ErrorKind::PermissionDenied, "restore denied"));
             }
             let text = self.read(from)?;
+            // A real copy lands now, so the newest backup is always the one just written.
+            let next = self.times.values().max().copied().unwrap_or(0) + 1;
+            self.times.insert(to.to_path_buf(), next);
             self.files.insert(to.to_path_buf(), text);
             Ok(())
         }
@@ -657,6 +752,23 @@ mod tests {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "niri: config invalid"));
             }
             Ok(())
+        }
+        fn siblings(&mut self, path: &Path) -> io::Result<Vec<PathBuf>> {
+            let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+            let prefix = format!("{name}{BACKUP_INFIX}");
+            Ok(self
+                .files
+                .keys()
+                .filter(|sibling| sibling.parent() == path.parent())
+                .filter(|sibling| {
+                    sibling.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with(&prefix))
+                })
+                .cloned()
+                .collect())
+        }
+        fn modified(&mut self, path: &Path) -> io::Result<Option<SystemTime>> {
+            let at = self.times.get(path).copied().unwrap_or(0);
+            Ok(Some(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(at)))
         }
         fn validate_candidate(&mut self, _config_text: &str, _snippet_text: &str, _config_file: &Path) -> io::Result<()> {
             self.events.push("candidate");
@@ -719,6 +831,69 @@ mod tests {
         );
         assert!(io.written.is_empty());
         assert!(io.validated.is_empty());
+    }
+
+    #[test]
+    fn keeps_the_newest_backups_and_removes_the_older_ones() {
+        let mut io = Fake::new(&[("/home/someone/.config/niri/gentle-dot.kdl", SNIPPET)]);
+        let live = manifest().snippet;
+        for age in 0..5u64 {
+            let path = backup_path(&live, &format!("stamp-{age}"));
+            io.files.insert(path.clone(), SNIPPET.to_owned());
+            io.times.insert(path, 100 + age);
+        }
+        prune_backups(&mut io, &live);
+        assert_eq!(io.backups_of(&live), vec!["stamp-2", "stamp-3", "stamp-4"]);
+    }
+
+    #[test]
+    fn leaves_a_short_history_alone() {
+        let mut io = Fake::new(&[("/home/someone/.config/niri/gentle-dot.kdl", SNIPPET)]);
+        let live = manifest().snippet;
+        for age in 0..2u64 {
+            let path = backup_path(&live, &format!("stamp-{age}"));
+            io.files.insert(path.clone(), SNIPPET.to_owned());
+            io.times.insert(path, 100 + age);
+        }
+        prune_backups(&mut io, &live);
+        assert_eq!(io.backups_of(&live), vec!["stamp-0", "stamp-1"]);
+    }
+
+    #[test]
+    fn a_successful_write_does_not_leave_one_backup_per_write() {
+        let mut io = Fake::new(&[
+            ("/home/someone/.config/niri/config.kdl", CONFIG),
+            ("/home/someone/.config/niri/gentle-dot.kdl", SNIPPET),
+        ]);
+        let live = manifest().snippet;
+        for age in 0..4u64 {
+            let path = backup_path(&live, &format!("stamp-{age}"));
+            io.files.insert(path.clone(), SNIPPET.to_owned());
+            io.times.insert(path, 100 + age);
+        }
+        first_run(&mut io, &manifest(), EXE, "20260101T000000Z", kdl_binds::TOGGLE_ARG, kdl_binds::DEFAULT_KEY).unwrap();
+        let left = io.backups_of(&live);
+        assert_eq!(left.len(), BACKUPS_KEPT, "the folder keeps a bounded history");
+        assert!(left.contains(&"20260101T000000Z".to_owned()), "the write's own backup is the newest");
+    }
+
+    #[test]
+    fn a_refused_write_keeps_every_backup() {
+        let mut io = Fake::new(&[
+            ("/home/someone/.config/niri/config.kdl", CONFIG),
+            ("/home/someone/.config/niri/gentle-dot.kdl", SNIPPET),
+        ]);
+        io.fail_validate = true;
+        let live = manifest().snippet;
+        for age in 0..4u64 {
+            let path = backup_path(&live, &format!("stamp-{age}"));
+            io.files.insert(path.clone(), SNIPPET.to_owned());
+            io.times.insert(path, 100 + age);
+        }
+        let error =
+            first_run(&mut io, &manifest(), EXE, "stamp-new", kdl_binds::TOGGLE_ARG, kdl_binds::DEFAULT_KEY).unwrap_err();
+        assert_eq!(error.to_string(), "niri: config invalid");
+        assert_eq!(io.backups_of(&live).len(), 5, "a refused write keeps what it may still need");
     }
 
     #[test]
