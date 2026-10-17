@@ -838,6 +838,13 @@ html[data-effects="none"] .chat-panel {
 	align-items: flex-end;
 }
 
+/* The compact chat is 420pt wide, so a long unbroken token (a URL, a token, a path)
+   has to wrap: without this the whole message column grows and the chat body gets a
+   horizontal scrollbar of its own. */
+.message-body {
+	overflow-wrap: anywhere;
+}
+
 .message-user .message-body {
 	max-width: 85%;
 	padding: 9px 13px;
@@ -883,6 +890,7 @@ html[data-effects="none"] .chat-panel {
 }
 
 .message-body pre {
+	overflow-wrap: normal;
 	overflow-x: auto;
 	padding: 10px 12px;
 	border-radius: var(--radius-sm);
@@ -1877,4 +1885,58 @@ html[data-surface="glow"] body {
 .voice-send-option.on {
 	border-color: var(--accent);
 	color: var(--accent);
+}
+
+/* ---------- Niri unit (one shared window: panel + rose, T10/T12/T19) ---------- */
+/* Narrow selectors only: other backends keep their own .dot/.chat CSS untouched. The unit is
+   transparent with no backdrop, so the 8px strip between panel and rose stays see-through. */
+.niri-unit {
+	display: flex;
+	align-items: flex-start;
+	background: transparent;
+}
+
+.niri-unit-panel {
+	flex: none;
+	width: 420px;
+	height: 640px;
+}
+
+.niri-unit-panel[hidden] {
+	display: none;
+}
+
+.niri-unit-rose {
+	flex: none;
+	width: 72px;
+	height: 72px;
+}
+
+/* Compact pair: 420 panel + 8 gap + 72 rose = 500 wide; the rose sits right of the panel
+   (420 + 8 = x428) and centered vertically ((640 - 72) / 2 = y284). */
+.niri-unit-pair {
+	width: 500px;
+	height: 640px;
+	gap: 8px;
+}
+
+.niri-unit-pair .niri-unit-rose {
+	margin-top: 284px;
+}
+
+.niri-unit-fullscreen {
+	width: 100%;
+	height: 100%;
+}
+
+.niri-unit-fullscreen .niri-unit-panel {
+	flex: 1;
+	width: 100%;
+	height: 100%;
+}
+
+.niri-unit-empty {
+	width: 0;
+	height: 0;
+	overflow: hidden;
 }

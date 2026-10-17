@@ -476,13 +476,18 @@ function MuteButton({ voice }: { voice: VoiceControls }) {
 
 function RoseButton({ controls }: { controls: PanelWindowControls }) {
 	const label = controls.roseHidden ? "Show the rose" : "Hide the rose";
+	const unavailable = controls.fullscreen;
 	return (
 		<button
 			type="button"
 			className="icon"
 			aria-label={label}
-			title={label}
-			onClick={() => controls.setRoseHidden(!controls.roseHidden)}
+			title={unavailable ? `${label} (unavailable in full screen)` : label}
+			disabled={unavailable}
+			onClick={() => {
+				if (controls.fullscreen) return;
+				controls.setRoseHidden(!controls.roseHidden);
+			}}
 		>
 			{controls.roseHidden ? <EyeIcon /> : <EyeOffIcon />}
 		</button>

@@ -169,6 +169,28 @@ describe("full-screen chat (S26.2)", () => {
 		expect(invoked("hide_panel")).toHaveLength(0);
 	});
 
+	it("disables the rose toggle in full screen and restores it after", async () => {
+		const { container } = await renderApp("?surface=panel");
+		await screen.findByRole("button", { name: "Hide the rose" });
+		const before = invoked("set_rose_hidden").length;
+
+		await userEvent.click(await screen.findByRole("button", { name: "Full screen" }));
+		await waitFor(() => expect(chat(container)).toHaveClass("chat-fullscreen"));
+		const disabled = await screen.findByRole("button", { name: "Hide the rose" });
+		expect(disabled).toBeDisabled();
+		expect(disabled.getAttribute("title") ?? "").toContain("full screen");
+		await userEvent.click(disabled);
+		expect(invoked("set_rose_hidden")).toHaveLength(before);
+
+		await userEvent.click(await screen.findByRole("button", { name: "Exit full screen" }));
+		await screen.findByRole("button", { name: "Full screen" });
+		const enabled = await screen.findByRole("button", { name: "Hide the rose" });
+		expect(enabled).toBeEnabled();
+		await userEvent.click(enabled);
+		expect(invoked("set_rose_hidden")).toHaveLength(before + 1);
+		expect(lastArgs("set_rose_hidden")).toEqual({ hidden: true });
+	});
+
 	it("gives the conversation a readable centered column in full screen", async () => {
 		const stylesheet = "../src/styles.css";
 		const css = readFileSync(fileURLToPath(new URL(stylesheet, import.meta.url)), "utf8");

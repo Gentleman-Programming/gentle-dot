@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-niri-unit-state"
+description = "Enables the niri_unit_state command without any pre-configured scope."
+commands.allow = ["niri_unit_state"]
+
+[[permission]]
+identifier = "deny-niri-unit-state"
+description = "Denies the niri_unit_state command without any pre-configured scope."
+commands.deny = ["niri_unit_state"]

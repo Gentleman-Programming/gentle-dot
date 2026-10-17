@@ -47,6 +47,12 @@
 			"permissions": ["allow-shortcut-get", "allow-shortcut-set"]
 		},
 		{
+			"identifier": "niri-unit",
+			"description": "Dormant shared-unit state (T10/T19): the panel may read the logical unit state and acknowledge its committed revision; the Dot never reads it.",
+			"windows": ["panel"],
+			"permissions": ["allow-niri-unit-state", "allow-niri-unit-ready"]
+		},
+		{
 			"identifier": "connectors",
 			"description": "Connector changes from the panel (S25.2): sent to the daemon over the app's private channel on behalf of the panel's window; the Dot and the web page cannot make them.",
 			"windows": ["panel"],

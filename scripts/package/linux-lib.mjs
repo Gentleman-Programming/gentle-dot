@@ -1,5 +1,7 @@
 // Pure helpers for the Linux packages (S29.3): `package-linux.mjs` builds them in containers
 // and `linux-check.mjs` installs them in clean ones.
+import { spawnSync } from "node:child_process";
+import { join, resolve, sep } from "node:path";
 
 /** The architectures a Linux package is built for, with each tool's name for them. */
 export const ARCHES = Object.freeze({
@@ -20,7 +22,7 @@ export const DISTROS = Object.freeze({
 export const PKGREL = 1;
 
 export const PACKAGE_USAGE =
-	"usage: package-linux --arch <arm64|amd64> [--out <dir>] [--engram-version <x.y.z>] [--no-arch-package]";
+	"usage: package-linux --arch <arm64|amd64> [--out <dir>] [--engram-version <x.y.z>] [--no-arch-package] [--ksni-tray]";
 export const CHECK_USAGE =
 	"usage: linux-check --arch <arm64|amd64> [--distro <debian|ubuntu|arch>[,…]] [--out <dir>]";
 export const CARGO_CHECK_USAGE = "usage: linux-cargo-check --arch <arm64|amd64>";
@@ -55,7 +57,7 @@ export function parsePackageArgs(argv) {
 	const options = readFlags(
 		argv,
 		{ "--arch": "arch", "--out": "out", "--engram-version": "engramVersion" },
-		{ "--no-arch-package": "noArchPackage" },
+		{ "--no-arch-package": "noArchPackage", "--ksni-tray": "ksniTray" },
 		PACKAGE_USAGE,
 	);
 	checkArch(options.arch, PACKAGE_USAGE);
@@ -63,6 +65,18 @@ export function parsePackageArgs(argv) {
 		throw new Error(`--engram-version must be x.y.z, got ${options.engramVersion}.`);
 	const { noArchPackage, ...rest } = options;
 	return { ...rest, archPackage: !noArchPackage && DISTROS.arch.arches.includes(options.arch) };
+}
+
+/**
+ * Extra `docker run -e` entries for the Linux builder container. The KSNI tray option
+ * travels as a fixed boolean entry (`GENTLE_DOT_KSNI_TRAY=1`) so no free text from the
+ * command line ever reaches the container; absent by default, preserving ordinary builds.
+ */
+export function dockerEnvArgs({ engramVersion, ksniTray } = {}) {
+	return [
+		...(engramVersion ? ["-e", `ENGRAM_VERSION=${engramVersion}`] : []),
+		...(ksniTray ? ["-e", "GENTLE_DOT_KSNI_TRAY=1"] : []),
+	];
 }
 
 /** `linux-check` options: the architecture and the distributions, by default every one it supports. */
@@ -157,6 +171,47 @@ export function fillPkgbuild(pkgbuild, { version, arch, sha256, pkgrel = PKGREL 
 		filled = filled.replace(pattern, line);
 	}
 	return filled;
+}
+
+/**
+ * Extra read-only `docker run -v` entries so Git works in a container whose /src is a
+ * linked worktree: its `.git` file points at the clone's admin directory, which is
+ * outside the mount, so the clone's common directory is mounted read-only at the same
+ * absolute path it has on the host. A normal checkout keeps its metadata under /src
+ * and needs no extra mount; only clone metadata travels, never unrelated host paths.
+ */
+export function gitMountArgs({ repoRoot, gitCommonDir } = {}) {
+	if (!gitCommonDir) return [];
+	const root = resolve(repoRoot);
+	const common = resolve(gitCommonDir);
+	if (common === root || common.startsWith(root + sep)) return [];
+	return ["-v", `${common}:${common}:ro`];
+}
+
+/**
+ * The clone's common Git directory for `repoRoot` as an absolute path: the directory a
+ * linked worktree's `.git` file points into. Throws, so a caller that cannot resolve it
+ * fails before Docker does, with the nonzero exit intact.
+ */
+export function readGitCommonDir(repoRoot) {
+	const resolved = spawnSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
+		cwd: repoRoot,
+		encoding: "utf8",
+	});
+	if (resolved.status !== 0)
+		throw new Error(
+			`git rev-parse --git-common-dir failed in ${repoRoot} (${resolved.stderr?.trim() || `exit ${resolved.status}`}).`,
+		);
+	return resolved.stdout.trim();
+}
+
+/**
+ * The prefix for `package-linux.mjs` heavy per-build scratch: a fresh directory under the
+ * checkout's ignored `build/`, never the system temp folder, so large copies stay on the
+ * repository's volume and out of /tmp. Callers create it with `mkdtempSync`.
+ */
+export function scratchPrefix(repoRoot, arch) {
+	return join(repoRoot, "build", `.tmp-linux-${arch}-`);
 }
 
 export function formatSize(bytes) {

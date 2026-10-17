@@ -40,6 +40,21 @@ import {
 } from "./lib.mjs";
 
 const REPO = fileURLToPath(new URL("../..", import.meta.url));
+
+// `gentle-pi` asks for `@earendil-works/pi-codemode` `^1.1.0`, and 1.2.0 removed
+// `MCP_TYPESCRIPT_PREAMBLE`, which `@earendil-works/pi-coding-agent` still imports: a build that
+// leaves the range floating ships a runtime whose `auth_list` fails, and the panel then never
+// leaves "the assistant is restarting". Pin the release the engine matches until upstream catches up.
+export const PI_CODEMODE = "@earendil-works/pi-codemode";
+export const PI_CODEMODE_VERSION = "1.1.0";
+
+export function pinDaemonDependency(daemon, name, version) {
+	const file = join(daemon, "package.json");
+	if (!existsSync(file)) throw new Error(`staged daemon has no ${file} to pin ${name} in.`);
+	const manifest = JSON.parse(readFileSync(file, "utf8"));
+	manifest.overrides = { ...(manifest.overrides ?? {}), [name]: version };
+	writeFileSync(file, `${JSON.stringify(manifest, null, "\t")}\n`);
+}
 const CACHE = join(REPO, ".cache", "package");
 const ENGRAM_RELEASES = "https://github.com/Gentleman-Programming/engram/releases";
 const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
@@ -157,6 +172,7 @@ function installDaemonModules(out) {
 	mkdirSync(npmHome, { recursive: true });
 	const npmrc = join(CACHE, "npmrc");
 	writeFileSync(npmrc, "");
+	pinDaemonDependency(daemon, PI_CODEMODE, PI_CODEMODE_VERSION);
 	say("Daemon dependencies (npm install --omit=dev)");
 	// A clean npm setup: no user npmrc, a cache of its own, and a scratch HOME for install scripts.
 	const result = spawnSync(
@@ -286,7 +302,10 @@ async function main() {
 	say(`Staged ${out}: ${formatSize(manifest.sizeBytes)} (${manifest.sizeBytes} bytes)`);
 }
 
-main().catch((error) => {
-	process.stderr.write(`stage-runtime: ${error.message}\n`);
-	process.exit(1);
-});
+const invokedAsScript = resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url);
+if (invokedAsScript) {
+	main().catch((error) => {
+		process.stderr.write(`stage-runtime: ${error.message}\n`);
+		process.exit(1);
+	});
+}
