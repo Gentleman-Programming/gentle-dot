@@ -1,5 +1,6 @@
 import type { ClientMessage } from "@gentle-dot/protocol";
-import { type DragEvent, useState } from "react";
+import { type DragEvent, type KeyboardEvent as ReactKeyboardEvent, useRef, useState } from "react";
+import { chatScrollKey, scrollChatTo } from "../chat-scroll.ts";
 import { openUrl as openExternal } from "../desktop.ts";
 import { activeTitle, type DotAction, type DotState, isBusy, needsAccount } from "../store.ts";
 import type { Uploader } from "../uploads.ts";
@@ -168,11 +169,35 @@ export function ChatSurface({
 	const status = statusText(state);
 	const ready =
 		state.connection === "open" && state.agentState !== "restarting" && state.agentState !== "starting";
+	const body = useRef<HTMLElement>(null);
+	// Esc closes the overlay in front of the user, exactly like its own ×, and only then does the app
+	// hide the panel (App.tsx hides on the keys nothing else handled). Bound to the chat surface and
+	// never to the window, so it stays local to the chat.
+	const onEscape = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+		if (event.key !== "Escape" || event.defaultPrevented) return;
+		if (state.auth.open) dispatch({ type: "accounts", open: false });
+		else if (state.profiles.open) dispatch({ type: "profiles", open: false });
+		else if (state.connectors.open) dispatch({ type: "connectors", open: false });
+		else if (settingsShown) setShowSettings(false);
+		else return;
+		event.preventDefault();
+	};
+	// The chat's own scroll keys. They are bound to the conversation region rather than to the window,
+	// so they stay local to the chat and never become app-wide; inside a text field they remain the
+	// caret's commands, which `chatScrollKey` decides.
+	const onKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+		const edge = chatScrollKey(event);
+		if (!edge) return;
+		event.preventDefault();
+		scrollChatTo(body.current, edge);
+	};
 
+	// biome-ignore-start lint/a11y/noStaticElementInteractions: the surface handles one key, only to close its own overlay, and only for keys raised inside the chat.
 	return (
 		<div
 			className={`chat chat-${variant}${panelWindow?.fullscreen ? " chat-fullscreen" : ""}${dropping ? " chat-dropping" : ""}`}
 			data-state={state.agentState}
+			onKeyDown={onEscape}
 			{...dropHandlers}
 		>
 			<header className="chat-header" data-tauri-drag-region={variant === "panel" ? "" : undefined}>
@@ -286,14 +311,16 @@ export function ChatSurface({
 				</div>
 			) : null}
 
+			{/* Each overlay takes focus on click (a negative tabindex, never a tab stop), so the chat's
+			    own Esc still reaches the surface when the click lands on its text. */}
 			{state.auth.open ? (
-				<main className="chat-body">
+				<main className="chat-body" tabIndex={-1}>
 					<AccountsPanel auth={state.auth} send={send} dispatch={dispatch} openUrl={openUrl} />
 				</main>
 			) : null}
 
 			{state.profiles.open && !state.auth.open ? (
-				<main className="chat-body">
+				<main className="chat-body" tabIndex={-1}>
 					<ProfilesPanel
 						profiles={state.profiles}
 						send={send}
@@ -304,7 +331,7 @@ export function ChatSurface({
 			) : null}
 
 			{state.connectors.open && !state.auth.open && !state.profiles.open ? (
-				<main className="chat-body">
+				<main className="chat-body" tabIndex={-1}>
 					<ConnectorsPanel
 						connectors={state.connectors}
 						send={send}
@@ -318,12 +345,20 @@ export function ChatSurface({
 			) : null}
 
 			{settingsShown ? (
-				<main className="chat-body">
+				<main className="chat-body" tabIndex={-1}>
 					<SettingsPanel close={() => setShowSettings(false)} />
 				</main>
 			) : null}
 
-			<main className="chat-body" hidden={covered || settingsShown}>
+			{/* biome-ignore-start lint/a11y/noNoninteractiveTabindex: the conversation is a scroll region, which must be focusable to take keyboard scrolling; it holds focusable children, so the browser will not make it focusable on its own. */}
+			<main
+				className="chat-body"
+				ref={body}
+				tabIndex={0}
+				aria-label="Conversation"
+				onKeyDown={onKeyDown}
+				hidden={covered || settingsShown}
+			>
 				{/* In the chat's own flow, so messages start below it instead of sliding under it. */}
 				{needsAccount(state) ? (
 					<div className="onboarding">
@@ -369,6 +404,7 @@ export function ChatSurface({
 					/>
 				))}
 			</main>
+			{/* biome-ignore-end lint/a11y/noNoninteractiveTabindex: the conversation is a scroll region. */}
 
 			{pinPending && pin ? (
 				<div
@@ -454,6 +490,7 @@ export function ChatSurface({
 				{...(attachments ? { attachments } : {})}
 			/>
 		</div>
+		// biome-ignore-end lint/a11y/noStaticElementInteractions: the chat surface.
 	);
 }
 
