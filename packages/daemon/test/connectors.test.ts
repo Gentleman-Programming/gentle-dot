@@ -570,18 +570,39 @@ describe("connector reachability (T4-T5)", () => {
 		expect(manager.disconnect("notion")).toBeUndefined();
 		expect(manager.list()[0]).toMatchObject({ status: "off" });
 		expect(manager.list()[0]?.unreachableReason).toBeUndefined();
-		// Retry asks the probe hook and keeps what it found (turned back on first).
+		// Retry asks the probe hook and reports what it found. The state is the proxy's to set: it is
+		// the one that can tell a server out of reach from a sign-in the user has to do, so a stub
+		// probe that reports a failure must not turn the badge amber on its own.
 		expect(manager.connect(owner, "notion", emit)).toBeUndefined();
 		withReach.probe = async () => ({
 			ok: false,
 			reason: "Could not reach Notion right now. Try again in a moment.",
 		});
 		const failed = await withReach.retry("notion");
-		expect(failed).toMatchObject({ ok: false });
-		expect(manager.list()[0]?.status).toBe("unreachable");
+		expect(failed).toEqual({
+			ok: false,
+			reason: "Could not reach Notion right now. Try again in a moment.",
+		});
+		expect(manager.list()[0]?.status).toBe("connected");
 		withReach.probe = async () => ({ ok: true, tools: 3 });
 		const ok = await withReach.retry("notion");
 		expect(ok).toEqual({ ok: true, tools: 3 });
 		expect(manager.list()[0]).toMatchObject({ status: "connected" });
+	});
+
+	it("keeps the reason across a mode change, and drops it when the connector is removed", async () => {
+		const { manager, owner, emit, find } = setup("auto");
+		manager.connect(owner, "notion", emit);
+		expect((await find("auth_done")).ok).toBe(true);
+		const withReach = manager as unknown as { setReachability(id: string, reason?: string): void };
+		const reason = "Could not reach Notion right now. Try again in a moment.";
+		withReach.setReachability("notion", reason);
+		// What the connector may do is not what the server is: forgetting the reason here would put
+		// the badge back to "Connected" while the server is still out of reach.
+		expect(manager.setMode("notion", "read_write")).toBeUndefined();
+		expect(manager.list()[0]).toMatchObject({ status: "unreachable", unreachableReason: reason });
+		expect(await manager.remove("notion")).toBeUndefined();
+		expect(manager.list()[0]?.unreachableReason).toBeUndefined();
+		expect(manager.list()[0]).toMatchObject({ status: "off" });
 	});
 });

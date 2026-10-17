@@ -631,6 +631,13 @@ describe("MCP proxy: telling the engine what really happened", () => {
 		expect(((await answer.json()) as Rec).error).toMatchObject({ code: -32000 });
 		// What the server said on its way out is what makes this diagnosable.
 		expect(logs.join("\n")).toContain("cannot find the compositor");
+		// A resource read is a pure read too, so it is answered the same way.
+		const read = await post(
+			"/mcp/notes",
+			{ jsonrpc: "2.0", id: 3, method: "resources/read", params: { uri: "file:///a" } },
+			auth,
+		);
+		expect(read.status).toBe(503);
 		// A tool call may have run, so the engine never repeats one: it keeps its own status and message.
 		const call = await post(
 			"/mcp/notes",
@@ -756,5 +763,20 @@ describe("MCP proxy: reachability truth (T4-T5)", () => {
 		});
 		// A hung server is dropped, so pressing Retry again starts a new one instead of reusing it.
 		await waitFor(() => upstream.state.closed === 1);
+	});
+
+	it("probe answers without throwing for a connector that is missing or turned off", async () => {
+		const { proxy, views } = await setup();
+		const withProbe = proxy as unknown as {
+			probe(id: string): Promise<{ ok: true; tools: number } | { ok: false; reason: string }>;
+		};
+		expect(await withProbe.probe("nope")).toEqual({
+			ok: false,
+			reason: "That connector does not exist.",
+		});
+		views.set("notes", connector({ enabled: false }));
+		const off = await withProbe.probe("notes");
+		expect(off.ok).toBe(false);
+		if (!off.ok) expect(off.reason).toMatch(/turned off/);
 	});
 });

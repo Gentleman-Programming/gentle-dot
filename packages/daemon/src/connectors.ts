@@ -1895,14 +1895,13 @@ export class ConnectorManager {
 	}
 
 	/**
-	 * Asks the connector's server whether it answers and keeps what was found: clears the
-	 * reason when it answers, sets it when it does not. Never throws.
+	 * Asks the connector's server whether it answers, and reports what it found. The proxy owns the
+	 * reachability state: it is the one that can tell a server out of reach from something the user
+	 * has to fix (a secret, a sign-in), and marking those as out of reach would put a wrong reason
+	 * on the badge. This only returns the result for the caller to show.
 	 */
 	async retry(id: string): Promise<{ ok: true; tools: number } | { ok: false; reason: string }> {
-		const result = await this.probe(id);
-		if (result.ok) this.setReachability(id);
-		else this.setReachability(id, result.reason);
-		return result;
+		return await this.probe(id);
 	}
 
 	/**

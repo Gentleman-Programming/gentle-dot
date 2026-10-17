@@ -63,6 +63,9 @@ else
 	echo "    not found: $HOME/.local/bin/gentle-dot (or not a link; left alone)"
 fi
 remove "$DATA_HOME/applications/gentle-dot.desktop"
+# Both names: the app writes the stable one and still honors the legacy one as a compatible
+# existing entry (autostart.rs), so removing only one leaves a login launch behind.
+remove "$CONFIG_HOME/autostart/gentle-dot.desktop"
 remove "$CONFIG_HOME/autostart/Gentle Dot.desktop"
 
 echo "==> Private Node.js"
