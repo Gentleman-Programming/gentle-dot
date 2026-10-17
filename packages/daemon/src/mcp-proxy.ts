@@ -76,6 +76,8 @@ export interface ApprovalPreview {
 export interface McpProxyOptions {
 	/** The connector's current state, read on every request. */
 	connector(id: string): ProxiedConnector | undefined;
+	/** Reports whether the connector's server answers; no reason means it does again. */
+	reachable?(id: string, reason?: string): void;
 	/** Runs before the state is read (the daemon reads the connector's secrets from the app). */
 	prepare?(id: string): Promise<void>;
 	credentials(id: string): Promise<UpstreamCredentials>;
@@ -86,6 +88,8 @@ export interface McpProxyOptions {
 	/** The environment stdio servers start from (the engine's own), and their working folder. */
 	env?: NodeJS.ProcessEnv;
 	cwd?: string;
+	/** How long a health check waits before calling the server out of reach. */
+	probeTimeoutMs?: number;
 	/**
 	 * Server mode (S25.8): stdio servers run as this user, with this folder as their home and working
 	 * folder, out of reach of both the engine and the daemon's files.
@@ -110,6 +114,8 @@ const MAX_BODY = 8 * 1024 * 1024;
 /** A tool call may wait for the user's approval and then the server: just under the engine's 300 s. */
 const CALL_TIMEOUT_MS = 290_000;
 const REQUEST_TIMEOUT_MS = 60_000;
+/** A health check, not a call: the engine's own wait would keep a Retry button hanging too long. */
+const PROBE_TIMEOUT_MS = 15_000;
 /** How much of a dying server's own words are kept, as the engine keeps them. */
 const STDERR_TAIL_CHARS = 2_000;
 /**
@@ -373,6 +379,54 @@ export class McpProxy {
 		return await current.client.callTool(name, args, { signal, timeoutMs: CALL_TIMEOUT_MS });
 	}
 
+	/**
+	 * Asks the connector's server whether it answers, the way the engine would: the same
+	 * `tools/list` path, with its own bounded wait. Never throws: the caller wants a result
+	 * to show. On failure the reason is the message the engine gets, stderr tail included.
+	 */
+	async probe(id: string): Promise<{ ok: true; tools: number } | { ok: false; reason: string }> {
+		try {
+			const connector = this.options.connector(id);
+			if (!connector) return { ok: false, reason: "That connector does not exist." };
+			if (!connector.enabled)
+				return {
+					ok: false,
+					reason: `${connector.name} is turned off. If the user wants it, ask them to turn it on in Connectors.`,
+				};
+			const controller = new AbortController();
+			const budget = this.options.probeTimeoutMs ?? PROBE_TIMEOUT_MS;
+			let timedOut = false;
+			const timeout = setTimeout(() => {
+				timedOut = true;
+				controller.abort();
+			}, budget);
+			try {
+				const tools = await this.listTools(connector, controller.signal);
+				this.options.reachable?.(connector.id);
+				return { ok: true, tools: tools.length };
+			} catch (error) {
+				// A server that never answers is out of reach, and must not be reused: a retry wants a
+				// fresh process, not the hung one.
+				if (timedOut) {
+					const upstream = this.upstreams.get(connector.id);
+					if (upstream) this.drop(connector.id, upstream);
+					const seconds = Math.round(budget / 1000);
+					const reason = `${connector.name} did not answer within ${seconds} second${seconds === 1 ? "" : "s"}.`;
+					this.options.reachable?.(connector.id, reason);
+					return { ok: false, reason };
+				}
+				// `rpcError` reports the outcome to `reachable` (without the stderr block) and
+				// returns the engine's message (with the stderr tail when there is one).
+				const failure = this.rpcError(connector, error, controller.signal);
+				return { ok: false, reason: failure.message };
+			} finally {
+				clearTimeout(timeout);
+			}
+		} catch (error) {
+			return { ok: false, reason: (error as Error)?.message ?? String(error) };
+		}
+	}
+
 	private async listTools(connector: ProxiedConnector, signal: AbortSignal): Promise<Tool[]> {
 		const upstream = await this.upstream(connector);
 		const tools = await upstream.client.listTools({ signal, timeoutMs: REQUEST_TIMEOUT_MS });
@@ -426,6 +480,8 @@ export class McpProxy {
 		try {
 			await upstream.connecting;
 			this.stderrTails.delete(connector.id);
+			// The server answered: whatever was out of reach before is reachable again.
+			this.options.reachable?.(connector.id);
 		} catch (error) {
 			// A server that dies while starting leaves its own words as the only clue to why: keep them.
 			const said = stderrTail(opened);
@@ -518,9 +574,13 @@ export class McpProxy {
 		this.log(
 			`could not reach connector ${connector.id}: ${detail.slice(0, 200)}${said ? ` | the server said: ${said.slice(0, 200)}` : ""}`,
 		);
+		// The engine gets the human message plus what the dying server said; the reachability
+		// callback gets only the human message (the stderr already went to the log).
+		const human = `Could not reach ${connector.name} right now. Try again in a moment.`;
+		if (this.outOfReach(error, signal)) this.options.reachable?.(connector.id, human);
 		return {
 			code: REFUSED,
-			message: `Could not reach ${connector.name} right now. Try again in a moment.${said ? `\nThe server said: ${said}` : ""}`,
+			message: `${human}${said ? `\nThe server said: ${said}` : ""}`,
 		};
 	}
 

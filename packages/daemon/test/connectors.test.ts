@@ -527,3 +527,61 @@ describe("connector sign-in", () => {
 		expect(await manager.remove("nope")).toMatchObject({ code: "unknown_connector" });
 	});
 });
+
+describe("connector reachability (T4-T5)", () => {
+	it("status is unreachable with the reason while the server is out of reach", async () => {
+		const { manager, owner, emit, find, changes } = setup("auto");
+		manager.connect(owner, "notion", emit);
+		expect((await find("auth_done")).ok).toBe(true);
+		const withReach = manager as unknown as {
+			setReachability(id: string, reason?: string): void;
+			retry(id: string): Promise<{ ok: true; tools: number } | { ok: false; reason: string }>;
+			probe: (id: string) => Promise<{ ok: true; tools: number } | { ok: false; reason: string }>;
+		};
+		changes.splice(0);
+		withReach.setReachability("notion", "Could not reach Notion right now. Try again in a moment.");
+		expect(manager.list()[0]).toMatchObject({
+			status: "unreachable",
+			unreachableReason: "Could not reach Notion right now. Try again in a moment.",
+		});
+		// The broadcast is not a restart: the engine keeps its tools.
+		expect(changes).toEqual([false]);
+		// Setting the same reason again is noise-free.
+		withReach.setReachability("notion", "Could not reach Notion right now. Try again in a moment.");
+		expect(changes).toEqual([false]);
+		// The server answers again: back to connected.
+		withReach.setReachability("notion");
+		expect(manager.list()[0]).toMatchObject({ status: "connected" });
+		expect(manager.list()[0]?.unreachableReason).toBeUndefined();
+		expect(changes).toEqual([false, false]);
+	});
+
+	it("the reason is gone after disconnecting, and retry reports what the probe found", async () => {
+		const { manager, owner, emit, find } = setup("auto");
+		manager.connect(owner, "notion", emit);
+		expect((await find("auth_done")).ok).toBe(true);
+		const withReach = manager as unknown as {
+			setReachability(id: string, reason?: string): void;
+			retry(id: string): Promise<{ ok: true; tools: number } | { ok: false; reason: string }>;
+			probe: (id: string) => Promise<{ ok: true; tools: number } | { ok: false; reason: string }>;
+		};
+		withReach.setReachability("notion", "Could not reach Notion right now. Try again in a moment.");
+		expect(manager.list()[0]?.status).toBe("unreachable");
+		expect(manager.disconnect("notion")).toBeUndefined();
+		expect(manager.list()[0]).toMatchObject({ status: "off" });
+		expect(manager.list()[0]?.unreachableReason).toBeUndefined();
+		// Retry asks the probe hook and keeps what it found (turned back on first).
+		expect(manager.connect(owner, "notion", emit)).toBeUndefined();
+		withReach.probe = async () => ({
+			ok: false,
+			reason: "Could not reach Notion right now. Try again in a moment.",
+		});
+		const failed = await withReach.retry("notion");
+		expect(failed).toMatchObject({ ok: false });
+		expect(manager.list()[0]?.status).toBe("unreachable");
+		withReach.probe = async () => ({ ok: true, tools: 3 });
+		const ok = await withReach.retry("notion");
+		expect(ok).toEqual({ ok: true, tools: 3 });
+		expect(manager.list()[0]).toMatchObject({ status: "connected" });
+	});
+});

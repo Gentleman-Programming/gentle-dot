@@ -30,8 +30,8 @@ stderr del servidor) y que el panel muestre alcanzabilidad real con un reintento
 - **T3** — La clave rota por arranque conserva **una generación** de gracia, para que una llamada en
   vuelo, un subagente o un `/mcp` inmediato no queden con 401 permanente. Specs S4. Commit: 9c5074b
 - **T4** — El proxy informa alcanzabilidad y el estado del conector la refleja (`unreachable` + motivo,
-  se limpia al volver a andar). Specs S1, S3.
-- **T5** — Acción de reintento en el panel de conectores, con el motivo visible. Specs S1.
+  se limpia al volver a andar). Specs S1, S3. Commit: _(pendiente)_
+- **T5** — Acción de reintento en el panel de conectores, con el motivo visible. Specs S1. Commit: _(pendiente)_
 
 ## Log
 
@@ -58,3 +58,12 @@ stack #34), no un solo commit gigante: el corte de slice es **T1–T3** (proxy: 
 commit `9c5074b`) y **T4–T5** (alcanzabilidad + reintento, commit siguiente). El aviso de slice del
 harness cuenta los 27 commits de toda la cadena desde `origin/main` (24 555 líneas), que es la entrega
 ya documentada en el tracker #12: una PR por capa, tracker como tronco.
+- **L8** — Revisión del diff del worker (parent): tres hallazgos. (1) El chip `connector-unreachable` no
+  tenía regla CSS: se agregó una en `styles.css` con el token `--yellow`, siguiendo la forma de
+  `.chip.ok`. (2) El timeout del probe era el del motor (60 s) y al abortar caía en la rama de
+  cancelación, así que un servidor colgado se reportaba como "The request was cancelled." — se le dio
+  presupuesto propio (`PROBE_TIMEOUT_MS = 15 s`, ajustable con `probeTimeoutMs`), motivo veraz y drop
+  del upstream colgado, con test RED observado. (3) Se probó que un cambio de modo borrara el motivo:
+  el test **no falló** con el `delete` incondicional, porque `change()` (`connectors.ts:2382`, el
+  camino de `setMode`) no pasa por `save`. La premisa era falsa: se revirtió el cambio y se sacó el
+  test que no podía fallar; queda registrado que un cambio de modo conserva el motivo.

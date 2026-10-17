@@ -90,7 +90,7 @@ function memoryUpstream() {
 				return;
 			}
 			// Held requests stay in flight, so a test can cancel one and see what the proxy says.
-			if (state.hold && message.method === "tools/call") {
+			if (state.hold && (message.method === "tools/call" || message.method === "tools/list")) {
 				held.push(() => {
 					void server.send({
 						jsonrpc: "2.0",
@@ -158,6 +158,7 @@ async function setup(
 		upstream?: ReturnType<typeof memoryUpstream>;
 		inMemory?: boolean;
 		transport?: (connector: ProxiedConnector, credentials: UpstreamCredentials) => McpTransport;
+		probeTimeoutMs?: number;
 	} = {},
 ) {
 	const views = new Map((options.connectors ?? [connector()]).map((c) => [c.id, c]));
@@ -174,6 +175,7 @@ async function setup(
 		...((options.transport ?? (options.inMemory === false ? undefined : upstream.transport))
 			? { transport: options.transport ?? upstream.transport }
 			: {}),
+		...(options.probeTimeoutMs === undefined ? {} : { probeTimeoutMs: options.probeTimeoutMs }),
 		env: process.env,
 		cwd: tempDir(),
 		log: (line) => logs.push(line),
@@ -657,5 +659,102 @@ describe("MCP proxy: telling the engine what really happened", () => {
 		expect((await post("/mcp/notes", rpc("ping"), bearer(next))).status).toBe(401);
 		expect((await post("/mcp/notes", rpc("ping"), bearer(third))).status).toBe(200);
 		expect((await post("/mcp/notes", rpc("ping"), bearer(fourth))).status).toBe(200);
+	});
+});
+
+describe("MCP proxy: reachability truth (T4-T5)", () => {
+	it("probe answers ok:false with the server's own stderr words when the server is dead", async () => {
+		const { proxy } = await setup({
+			inMemory: false,
+			transport: () =>
+				new StdioTransport({
+					command: "/bin/sh",
+					args: ["-c", "printf 'cannot find the compositor\\n' >&2; exit 3"],
+					stderr: "pipe",
+				}),
+		});
+		const withProbe = proxy as unknown as {
+			probe(id: string): Promise<{ ok: true; tools: number } | { ok: false; reason: string }>;
+		};
+		const result = await withProbe.probe("notes");
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.reason).toContain("cannot find the compositor");
+			expect(result.reason).toMatch(/could not reach|Could not reach/i);
+		}
+	});
+
+	it("probe answers ok:true with the tool count when the server is healthy", async () => {
+		const { proxy } = await setup();
+		const withProbe = proxy as unknown as {
+			probe(id: string): Promise<{ ok: true; tools: number } | { ok: false; reason: string }>;
+		};
+		const result = await withProbe.probe("notes");
+		expect(result).toEqual({ ok: true, tools: 5 });
+	});
+
+	it("a failed connect reports unreachable to the callback and a later success clears it", async () => {
+		const calls: Array<{ id: string; reason?: string }> = [];
+		let dead = true;
+		const healthy = memoryUpstream();
+		const views = new Map([["notes", connector()]] as Array<[string, ProxiedConnector]>);
+		const proxy = new McpProxy({
+			connector: (id) => views.get(id),
+			credentials: async () => ({}),
+			approve: async () => true,
+			transport: () =>
+				dead
+					? new StdioTransport({
+							command: "/bin/sh",
+							args: ["-c", "printf 'compositor gone\\n' >&2; exit 3"],
+							stderr: "pipe",
+						})
+					: healthy.transport(),
+			reachable: (id, reason) => void calls.push({ id, reason }),
+			env: process.env,
+			cwd: tempDir(),
+		});
+		proxies.push(proxy);
+		const base = await listen((req, res) => proxy.handle(req, res));
+		const key = proxy.rotateKey();
+		const auth = { authorization: `Bearer ${key}` };
+		const failing = await fetch(`${base}/mcp/notes`, {
+			method: "POST",
+			headers: { "content-type": "application/json", accept: "application/json", ...auth },
+			body: JSON.stringify(rpc("tools/list")),
+		});
+		expect(failing.status).toBe(503);
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.id).toBe("notes");
+		expect(calls[0]?.reason).toMatch(/could not reach notes/i);
+		// The reachable reason is the human message: the stderr stays in the log, not in the callback.
+		expect(calls[0]?.reason).not.toContain("compositor gone");
+		// The server is healthy again: the next list clears the reason.
+		dead = false;
+		const ok = await fetch(`${base}/mcp/notes`, {
+			method: "POST",
+			headers: { "content-type": "application/json", accept: "application/json", ...auth },
+			body: JSON.stringify(rpc("tools/list")),
+		});
+		expect(ok.status).toBe(200);
+		expect(calls).toHaveLength(2);
+		expect(calls[1]).toEqual({ id: "notes", reason: undefined });
+	});
+
+	it("a server that never answers is out of reach in time, and is not the one reused", async () => {
+		const upstream = memoryUpstream();
+		const { proxy } = await setup({ upstream, probeTimeoutMs: 1_000 });
+		upstream.state.hold = true;
+		const withProbe = proxy as unknown as {
+			probe(id: string): Promise<{ ok: true; tools: number } | { ok: false; reason: string }>;
+		};
+		// A wait of its own: the engine's 60 s would leave the user staring at the button, and "the
+		// request was cancelled" would blame the user for a server that never answered.
+		expect(await withProbe.probe("notes")).toEqual({
+			ok: false,
+			reason: "Notes did not answer within 1 second.",
+		});
+		// A hung server is dropped, so pressing Retry again starts a new one instead of reusing it.
+		await waitFor(() => upstream.state.closed === 1);
 	});
 });

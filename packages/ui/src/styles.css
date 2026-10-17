@@ -189,6 +189,12 @@ textarea:focus {
 	color: var(--green);
 }
 
+.chip.connector-unreachable {
+	border-color: rgba(224, 194, 122, 0.35);
+	background: rgba(224, 194, 122, 0.1);
+	color: var(--yellow);
+}
+
 .card {
 	padding: 14px;
 	border-radius: var(--radius-md);

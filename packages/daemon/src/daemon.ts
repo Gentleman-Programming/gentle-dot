@@ -223,6 +223,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 				approvalRequest(preview.connector, preview.connectorId, preview.tool, preview.arguments),
 				signal,
 			),
+		reachable: (id, reason) => connectors.setReachability(id, reason),
 		...(options.connectorTransport ? { transport: options.connectorTransport } : {}),
 		env: agentEnv,
 		cwd: options.workspace,
@@ -302,6 +303,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 			: {}),
 		log,
 	});
+	connectors.probe = (id) => proxy.probe(id);
 	const voice = new VoiceService({
 		apiKey: () => auth.openAIApiKey(),
 		...(options.voiceFetch ? { fetch: options.voiceFetch } : {}),

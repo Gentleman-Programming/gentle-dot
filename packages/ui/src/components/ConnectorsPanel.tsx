@@ -34,6 +34,7 @@ const STATUS_LABELS: Record<ConnectorStatus, string> = {
 	needs_signin: "Needs sign-in",
 	connected: "Connected",
 	error: "Sign-in failed",
+	unreachable: "Not reachable",
 };
 
 /** What the chat says for "Add another connector"; the assistant answers with a draft to review. */
@@ -180,6 +181,7 @@ export function ConnectorsPanel({
 									}
 									signIn={() => start(connector, "connector_signin")}
 									setUp={() => start(connector, "connector_setup")}
+									retry={() => send({ type: "connectors_retry", connectorId: connector.id })}
 								/>
 							))}
 					</ul>
@@ -371,9 +373,11 @@ interface ConnectorRowProps {
 	connect: () => void;
 	signIn: () => void;
 	setUp: () => void;
+	/** Asks the server whether it answers again; a window message, so it works everywhere. */
+	retry: () => void;
 }
 
-function ConnectorRow({ connector: c, appSend, connect, signIn, setUp }: ConnectorRowProps) {
+function ConnectorRow({ connector: c, appSend, connect, signIn, setUp, retry }: ConnectorRowProps) {
 	const locked = !appSend;
 	const nameId = `connector-${c.id}`;
 	const readOnlyNote = c.custom
@@ -394,6 +398,9 @@ function ConnectorRow({ connector: c, appSend, connect, signIn, setUp }: Connect
 			) : null}
 			<p className="connector-note">{c.reads}</p>
 			<p className="connector-note">{c.mode === "read_write" ? c.sends : readOnlyNote}</p>
+			{c.status === "unreachable" && c.unreachableReason ? (
+				<p className="connector-note">{c.unreachableReason}</p>
+			) : null}
 			{c.enabled ? (
 				<fieldset className="connector-mode">
 					<legend>What {c.name} may do</legend>
@@ -463,6 +470,11 @@ function ConnectorRow({ connector: c, appSend, connect, signIn, setUp }: Connect
 						onClick={() => appSend?.({ type: "connector_disconnect", connectorId: c.id })}
 					>
 						Disconnect
+					</button>
+				) : null}
+				{c.status === "unreachable" ? (
+					<button type="button" aria-label={`Retry ${c.name}`} onClick={retry}>
+						Retry
 					</button>
 				) : null}
 				{c.added ? (

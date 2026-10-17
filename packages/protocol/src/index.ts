@@ -151,7 +151,7 @@ export type AuthEvent =
 export type ConnectorMode = "read_only" | "read_write";
 
 /** `off`: not added or turned off; `needs_setup`: a value the user types is missing; `error`: the last sign-in failed. */
-export type ConnectorStatus = "off" | "needs_setup" | "needs_signin" | "connected" | "error";
+export type ConnectorStatus = "off" | "needs_setup" | "needs_signin" | "connected" | "error" | "unreachable";
 
 /** In-app steps for a connector the user sets up with an app or bot of their own. */
 export interface ConnectorGuide {
@@ -188,6 +188,8 @@ export interface ConnectorInfo {
 	builtin?: true;
 	/** The current model does not accept images, so the assistant cannot see the screenshots. */
 	noImages?: true;
+	/** Why the server is out of reach, while its configuration is still there. */
+	unreachableReason?: string;
 }
 
 /** The daemon keeps at most this many drafts waiting; a newer one drops the oldest. */
@@ -374,6 +376,7 @@ export type ClientMessage =
 			connectorId: string;
 	  }
 	| { type: "connector_mode"; connectorId: string; mode: ConnectorMode }
+	| { type: "connectors_retry"; connectorId: string }
 	| { type: "connector_draft_reply"; draftId: string; approve: boolean }
 	| { type: "connectors_scan" }
 	| { type: "connector_import"; ids: string[] }
@@ -665,6 +668,10 @@ export function parseClientMessage(raw: string): ClientMessage | undefined {
 		case "connector_mode":
 			return isConnectorId(m.connectorId) && (m.mode === "read_only" || m.mode === "read_write")
 				? { type: "connector_mode", connectorId: m.connectorId, mode: m.mode }
+				: undefined;
+		case "connectors_retry":
+			return isConnectorId(m.connectorId)
+				? { type: "connectors_retry", connectorId: m.connectorId }
 				: undefined;
 		case "connector_draft_reply":
 			return isShortString(m.draftId) && typeof m.approve === "boolean"
