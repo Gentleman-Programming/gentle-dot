@@ -2,6 +2,7 @@
 # Runs inside gentle-dot-linux-builder (see Dockerfile). Copies the working tree mounted at /src,
 # stages the runtime for this container's architecture (S29.5), builds the .deb with Tauri, and
 # leaves it with the runtime's MANIFEST.json in /out (an empty folder). Optional: ENGRAM_VERSION=x.y.z.
+# Opt-in Niri/Waybar tray: GENTLE_DOT_KSNI_TRAY=1 (set only by package-linux.mjs --ksni-tray).
 set -euo pipefail
 
 case "$(dpkg --print-architecture)" in
@@ -22,6 +23,11 @@ git ls-files -z --cached --others --exclude-standard -- . ':!:.codegraph' ':!:.a
 	tar --null --files-from=- --ignore-failed-read -cf - 2>/dev/null | tar -xf - -C /work
 cp -a /src/.git /work/.git
 cd /work
+# A linked worktree's .git file points at the clone's admin directory, which the host
+# mounts read-only at the same absolute path; fail here, not in a later packaging step,
+# when that provenance is missing, and record which revision the copy carries.
+git rev-parse HEAD >/dev/null
+echo "source revision: $(git rev-parse --short HEAD)"
 
 step "pnpm install"
 pnpm install --frozen-lockfile --store-dir /pnpm-store
@@ -34,7 +40,15 @@ step "Building the .deb"
 # The runtime is mapped here rather than in tauri.linux.conf.json: Tauri merges that file into
 # every Linux build, and tauri-build fails when a resource is missing, as in source builds.
 resources="{\"bundle\":{\"resources\":{\"$runtime/\":\"runtime/\"}}}"
-pnpm --filter @gentle-dot/desktop tauri build --bundles deb --config "$resources"
+# Opt-in StatusNotifier (KSNI) tray backend for desktops whose tray speaks StatusNotifier but
+# not AppIndicator (Niri/Waybar). package-linux.mjs exports GENTLE_DOT_KSNI_TRAY=1 only with
+# --ksni-tray; default builds omit --features and keep the AppIndicator backend everywhere.
+ksni_features=()
+if [ "${GENTLE_DOT_KSNI_TRAY:-0}" = "1" ]; then
+	ksni_features=(--features ksni-tray)
+	echo "building with the opt-in ksni-tray feature (StatusNotifier backend)"
+fi
+pnpm --filter @gentle-dot/desktop tauri build --bundles deb "${ksni_features[@]}" --config "$resources"
 
 step "Checking the result"
 binary=apps/desktop/src-tauri/target/release/gentle-dot

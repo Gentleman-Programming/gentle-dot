@@ -568,6 +568,26 @@ export class DotBridge {
 			case "connectors_list":
 				this.deliver(client, { type: "connectors", connectors: this.requireConnectors().list() });
 				return;
+			case "connectors_retry": {
+				const connectors = this.requireConnectors();
+				const result = await connectors.retry(message.connectorId);
+				const list = connectors.list();
+				const name = list.find((c) => c.id === message.connectorId)?.name ?? message.connectorId;
+				this.broadcast({ type: "connectors", connectors: list });
+				if (result.ok)
+					this.deliver(client, {
+						type: "toast",
+						level: "info",
+						message: `${name} answered with ${result.tools} tool${result.tools === 1 ? "" : "s"}.`,
+					});
+				else
+					this.deliver(client, {
+						type: "toast",
+						level: "warning",
+						message: `${name} did not answer: ${result.reason}`,
+					});
+				return;
+			}
 			case "connector_connect":
 			case "connector_signin":
 			case "connector_setup":

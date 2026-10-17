@@ -313,6 +313,36 @@ describe("connector changes outside the desktop app (S25.2)", () => {
 	});
 });
 
+describe("unreachable connectors (T5)", () => {
+	it("shows Not reachable with the reason, and Retry sends connectors_retry", async () => {
+		const unreachable: ConnectorInfo[] = [
+			connector({
+				added: true,
+				enabled: true,
+				status: "unreachable",
+				unreachableReason: "Could not reach Notion right now. Try again in a moment.",
+			}),
+		];
+		const send = vi.fn();
+		render(
+			<ConnectorsPanel
+				connectors={apply(ready, { type: "connectors", connectors: unreachable, open: true }).connectors}
+				send={send}
+				appSend={send}
+				dispatch={vi.fn()}
+				openUrl={vi.fn()}
+			/>,
+		);
+		const notion = within(screen.getByRole("listitem", { name: "Notion" }));
+		expect(notion.getByText("Not reachable")).toBeInTheDocument();
+		expect(
+			notion.getByText("Could not reach Notion right now. Try again in a moment."),
+		).toBeInTheDocument();
+		await userEvent.setup().click(notion.getByRole("button", { name: "Retry Notion" }));
+		expect(send).toHaveBeenCalledWith({ type: "connectors_retry", connectorId: "notion" });
+	});
+});
+
 describe("the window's id for the app's commands", () => {
 	it("comes with ready, and a refused change drops the sign-in that was starting", () => {
 		let s = apply(ready, { type: "ready", agentState: "idle", clientId: "window-1" });

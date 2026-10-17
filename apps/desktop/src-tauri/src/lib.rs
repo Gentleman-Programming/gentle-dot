@@ -1,6 +1,7 @@
 pub mod alert;
 pub mod app_channel;
 pub mod approvals;
+pub mod autostart;
 pub mod computer;
 pub mod config;
 pub mod daemon;
@@ -8,6 +9,8 @@ pub mod daemon;
 pub mod disclaimed;
 pub mod geometry;
 pub mod health;
+#[cfg(target_os = "linux")]
+pub mod niri;
 pub mod platform;
 pub mod position;
 pub mod secure_store;

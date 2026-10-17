@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Builds the self-contained Linux packages (S29.3) in Docker, from any machine with Docker:
 // `node scripts/package/package-linux.mjs --arch <arm64|amd64> [--out <dir>] [--engram-version <x.y.z>]
-// [--no-arch-package]`. It builds the .deb in a Debian 12 container of that architecture (amd64 on an
+// [--no-arch-package] [--ksni-tray]`. It builds the .deb in a Debian 12 container of that architecture (amd64 on an
 // Apple Silicon Mac runs emulated) and, for amd64, the Arch package from it. Artifacts land in
 // build/linux/; `linux-check.mjs` installs them in clean containers.
 import { spawnSync } from "node:child_process";
@@ -17,7 +17,6 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -27,10 +26,14 @@ import {
 	builderImage,
 	cacheVolumes,
 	debFileName,
+	dockerEnvArgs,
 	fillPkgbuild,
 	formatDuration,
 	formatSize,
+	gitMountArgs,
 	parsePackageArgs,
+	readGitCommonDir,
+	scratchPrefix,
 } from "./linux-lib.mjs";
 
 const REPO = fileURLToPath(new URL("../..", import.meta.url));
@@ -57,7 +60,7 @@ function sha256(path) {
 	return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-function buildDeb({ arch, engramVersion }, scratch, timings) {
+function buildDeb({ arch, engramVersion, ksniTray }, scratch, timings) {
 	const { platform } = ARCHES[arch];
 	timed(timings, `Builder image ${builderImage(arch)}`, () =>
 		docker([
@@ -70,7 +73,10 @@ function buildDeb({ arch, engramVersion }, scratch, timings) {
 		]),
 	);
 	const volumes = cacheVolumes(arch).flatMap(({ name, target }) => ["-v", `${name}:${target}`]);
-	const env = engramVersion ? ["-e", `ENGRAM_VERSION=${engramVersion}`] : [];
+	const env = dockerEnvArgs({ engramVersion, ksniTray });
+	// A linked worktree's .git file points outside /src, so its clone metadata travels
+	// read-only at the same absolute path; a normal checkout resolves to no extra mount.
+	const gitProvenance = gitMountArgs({ repoRoot: REPO, gitCommonDir: readGitCommonDir(REPO) });
 	timed(timings, `.deb for ${arch} (stage the runtime, tauri build)`, () =>
 		docker([
 			"run",
@@ -81,6 +87,7 @@ function buildDeb({ arch, engramVersion }, scratch, timings) {
 			platform,
 			"-v",
 			`${REPO}:/src:ro`,
+			...gitProvenance,
 			"-v",
 			`${scratch}:/out`,
 			...volumes,
@@ -137,11 +144,12 @@ function main() {
 	const version = JSON.parse(
 		readFileSync(join(REPO, "apps", "desktop", "src-tauri", "tauri.conf.json"), "utf8"),
 	).version;
-	// Docker Desktop shares the system temp folder with containers.
-	const scratch = mkdtempSync(join(tmpdir(), `gentle-dot-linux-${arch}-`));
+	// Heavy per-build scratch stays on this volume under the ignored build/ directory.
+	mkdirSync(join(REPO, "build"), { recursive: true });
+	const scratch = mkdtempSync(scratchPrefix(REPO, arch));
 	const started = Date.now();
 	const timings = [];
-	say(`Gentle Dot ${version} for linux/${arch}; scratch ${scratch}`);
+	say(`Gentle Dot ${version} for linux/${arch}${options.ksniTray ? " with ksni-tray" : ""}; scratch ${scratch}`);
 
 	const built = buildDeb(options, scratch, timings);
 	mkdirSync(out, { recursive: true });

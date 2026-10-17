@@ -19,6 +19,39 @@ use crate::status::{is_template, tray_status, TrayGlyph};
 use crate::voice::app as voice;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "linux")]
+use crate::niri::CompactSpot;
+use crate::niri::gate::niri_trace;
+use crate::niri::unit::*;
+#[cfg(target_os = "linux")]
+use crate::niri::gate::*;
+// Slice-4a reorganization: these were shell-private helpers in the source
+// snapshot and now live in `niri/route_gate.rs`; imported, never redefined.
+#[cfg(target_os = "linux")]
+use crate::niri::route_gate::{
+    FullscreenDispatch, GateEffect, RestoreCompletion, collapse_cover_wanted, default_rose_hidden_for,
+    hide_intent_next, joint_mover_from_signals, joint_unit_active, native_niri_mode,
+    native_restore_planned, niri_fullscreen_offload, niri_socket_present, plan_fullscreen_dispatch,
+    plan_gate_effects, plan_hide_completion, plan_restore_completion, plan_toggle_route,
+    rose_visible_for_mode, shared_route_wanted, tray_click_toggles_panel, tray_left_click_toggles,
+    unit_branch_wanted,
+};
+#[cfg(target_os = "linux")]
+use gtk::prelude::{GtkWindowExt, WidgetExt};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::AtomicU64;
+use crate::niri::unit_state::NiriUnitSnapshot;
+#[cfg(target_os = "linux")]
+use crate::niri::unit_state::{
+    NiriUnitState, UnitExecEffect, UnitExecOutcome, UnitTransition, UnitWake, UnitWindow, ack_unit_ready,
+    activate_shared_unit, cleanup_unit_dispatch, plan_unit_wake, run_unit_cover_exec, unit_ready_for,
+    unit_snapshot_locked, unit_transition_commit, unit_window_for,
+};
+// Test-only unit-state helper: the shell tests pin the open
+// handshake through the same core production calls; normal builds never use
+// this name, so this import stays test-scoped and warning-free.
+#[cfg(test)]
+use crate::niri::unit_state::publish_unit_open;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -31,7 +64,7 @@ use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, RunEvent, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder, WindowEvent,
 };
-use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
+use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutEvent, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
@@ -53,7 +86,7 @@ const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(20);
 /// first, asks again and connects without a reopen (S35.2).
 const ASSISTANT_READY: &str = "dot://assistant-ready";
 
-struct Shell {
+pub(crate) struct Shell {
     config: DesktopConfig,
     daemon: Arc<Daemon>,
     snap: mpsc::Sender<()>,
@@ -65,6 +98,94 @@ struct Shell {
     panel_spot: Mutex<Option<(i32, i32)>>,
     /// While the panel fills the screen (S26.2): its frame before, to restore.
     full_screen: Mutex<Option<Rect>>,
+    /// Niri-native expanded state (Linux only): tiling is expanded,
+    /// floating is compact. Separate from `full_screen`/`panel_spot`, which
+    /// the native branch never reads or writes.
+    #[cfg(target_os = "linux")]
+    native_expanded: Mutex<bool>,
+    /// Remembered Niri compact spot (Linux only): in-session only.
+    #[cfg(target_os = "linux")]
+    native_compact: Mutex<Option<CompactSpot>>,
+
+    /// Measured Niri work area (Linux only): the last successful covered
+    /// calibration's working area (origin plus size, which already excludes the
+    /// bar). Used ONLY to keep the visible pair inside the screen — an absent
+    /// measurement never invents a position, it just leaves the anchor alone.
+    #[cfg(target_os = "linux")]
+    native_work_area: Mutex<Option<crate::niri::calibration::WorkAreaEstimate>>,
+    /// Cached covered calibration (Linux only): the last successful
+    /// probe's work area plus observed client offset, valid only under its
+    /// output layout key. A transition reuses it with zero probe moves
+    /// while the live output key still matches; any key change re-measures.
+    #[cfg(target_os = "linux")]
+    pub(crate) native_unit_cache: Mutex<Option<crate::niri::unit_restore::CachedCalibration>>,
+    /// Restore generation (Linux only): hide/show/mode bump it and the
+    /// worker drops older jobs. Atomic, so no lock ordering is needed.
+    #[cfg(target_os = "linux")]
+    native_epoch: AtomicU64,
+    /// Handoff to the single restore worker (Linux only): capacity-1
+    /// signal plus the generation above. Taken on exit so the worker drops
+    /// its handle clone at shutdown instead of lingering.
+    #[cfg(target_os = "linux")]
+    native_restore: Mutex<Option<mpsc::SyncSender<()>>>,
+    /// First-visible-frame gate (experimental, Niri compact only, Linux
+    /// only): `Some(job)` while a gated show is mapped at opacity 0 awaiting
+    /// the worker's settled reveal. Epoch-bound alongside `native_epoch`:
+    /// hide/mode bumps stale it, a newer show overwrites it. No new thread;
+    /// the existing worker's completion reveals. The window itself stays
+    /// really mapped (`hide()` still unmaps, `is_visible` still works), so no
+    /// persistent logical-visibility latch is needed — only this short gate.
+    #[cfg(target_os = "linux")]
+    pub(crate) native_gate: Mutex<Option<u64>>,
+
+    /// Generation-owned restore intent (Linux only):
+    /// `Some((generation, intent))` for the latest handoff. Published and
+    /// read only under the gate domain (gate lock held across both), so the
+    /// generation and its intent move atomically. Lock order is always gate then intent.
+    #[cfg(target_os = "linux")]
+    native_intent: Mutex<Option<(u64, RestoreIntent)>>,
+    /// Dormant shared-unit logical state (Linux only): explicit
+    /// activation plus logical chat-open. The PANEL anchor stays
+    /// `native_compact` — this adapter owns NO position. Initial FALSE.
+    #[cfg(target_os = "linux")]
+    native_unit: Mutex<NiriUnitState>,
+    /// Joint unit (Niri only, additive): the SOLE anchor writers are the
+    /// EventStream follow (user move, via `native_mover`) and the explicit
+    /// hide/expand capture. The worker NEVER rewrites the anchor from its
+    /// own joint moves — that is the anti-ping-pong by construction.
+    /// `native_mover` carries who moved (Dot/Panel) from follow to worker;
+    /// `native_suppress_until` mutes follow echoes of our own joint pass.
+    #[cfg(target_os = "linux")]
+    native_mover: Mutex<Option<crate::niri::Mover>>,
+    #[cfg(target_os = "linux")]
+    native_suppress_until: Mutex<Option<std::time::Instant>>,
+    /// Cancelled collapse cover (Linux only): `Some(job)` once a
+    /// cover acknowledgment times out, so the late cover closure can never
+    /// re-apply opacity 0 after cleanup. Shared state, never a local flag;
+    /// job-scoped, so no clearing is needed (generations never repeat).
+    #[cfg(target_os = "linux")]
+    cover_cancelled: Mutex<Option<u64>>,
+
+    /// Pending hide intent (Linux only): `Some(job)` while a hide
+    /// capture is still running on the pool. Generation-associated, never a
+    /// bare boolean: toggle treats a fresh intent (equal to the live epoch)
+    /// as logically hidden and routes Show; a stale intent is ignored
+    /// automatically. Published with its generation in gate order; cleared
+    /// only by its exact owner.
+    #[cfg(target_os = "linux")]
+    native_hide_job: Mutex<Option<u64>>,
+    /// Composed Niri I/O ownership (Linux only): serializes MODE +
+    /// RESTORE worker query/action/verify traffic. Raw clients open a fresh
+    /// socket per request and cannot serialize transactions; this mutex does.
+    /// Strict root of the domain: brief state reads may nest under it, but
+    /// state locks never nest over it — and it is never held across sleeps,
+    /// getters, waits, or queued-and-waited UI callbacks. Hide/show capture
+    /// stays synchronous outside it, as do reveal/cancel
+    /// deliveries after the worker returns.
+    /// (Hide capture runs on the blocking pool under it; shows settle
+    /// through the worker instead — there is no show capture.)
+    #[cfg(target_os = "linux")]
+    native_io: Mutex<()>,
     /// The shortcut that toggles the panel now; `None` while none is bound (native Wayland).
     shortcut: Mutex<Option<String>>,
 }
@@ -129,7 +250,18 @@ enum Placement {
 }
 
 /// Opening the panel never depends on the Dot window being visible.
-fn panel_placement(places_windows: bool, full_screen: bool, rose_hidden: bool) -> Placement {
+/// A visible rose always recomputes beside-the-Dot on every reopen (the
+/// app-owned first frame is placed before it maps, so it never shows a
+/// stale spot first); a session-remembered spot only feeds the hidden
+/// `Alone` path. Fullscreen and native-Wayland Keep still win. The spot
+/// lives in memory only and is only read back where the app places its own
+/// windows, so native Wayland never reaches it.
+fn panel_placement(
+    places_windows: bool,
+    full_screen: bool,
+    rose_hidden: bool,
+    _remembered: Option<(i32, i32)>,
+) -> Placement {
     if !places_windows || full_screen {
         Placement::Keep
     } else if rose_hidden {
@@ -138,6 +270,249 @@ fn panel_placement(places_windows: bool, full_screen: bool, rose_hidden: bool) -
         Placement::BesideDot
     }
 }
+
+/// Whether the current panel frame may be remembered as the user-moved spot.
+/// Only a mapped frame counts: nonzero size plus shown state. The origin is
+/// never checked, so a genuine (0, 0) is kept while a never-shown startup
+/// rect (0x0, hidden) is rejected. Fullscreen frames and native-Wayland
+/// coordinates (the compositor owns placement there) are never authoritative.
+fn panel_capture_valid(
+    places_windows: bool,
+    full_screen: bool,
+    width: i32,
+    height: i32,
+    visible: bool,
+) -> bool {
+    places_windows && !full_screen && visible && width > 0 && height > 0
+}
+
+/// Whether unhiding the rose reanchors a visible panel beside it (unit fix):
+/// unhide plus a mapped panel on an app-placed, non-fullscreen session
+/// recomputes beside-the-Dot synchronously. Hides, hidden panels,
+/// fullscreen frames, and native-Wayland sessions (the compositor owns
+/// placement there) never reanchor here. Pure so tests pin the decision
+/// without windows.
+fn rose_unhide_reanchors(
+    hidden: bool,
+    panel_visible: bool,
+    places_windows: bool,
+    full_screen: bool,
+) -> bool {
+    !hidden && panel_visible && places_windows && !full_screen
+}
+
+/// Whether unhiding the rose moves the ROSA beside the visible panel on Niri
+/// (mv347ejs leg 2, Linux only): unhide plus a mapped compact panel on a
+/// compositor-placed Niri session moves the exact DOT id beside the panel
+/// with the same pid+title guards, instead of pulling the panel back to the
+/// old rose spot. Hides, hidden panels, expanded/fullscreen frames,
+/// app-owned sessions (the panel path above owns those), and non-Niri
+/// sessions never move the rose here. Pure so tests pin the decision
+/// without windows or IPC.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn rose_unhide_moves_rose(
+    hidden: bool,
+    panel_visible: bool,
+    places_windows: bool,
+    is_niri: bool,
+    expanded: bool,
+    full_screen: bool,
+) -> bool {
+    !hidden && panel_visible && !places_windows && is_niri && !expanded && !full_screen
+}
+
+#[cfg(target_os = "linux")]
+fn plan_shared_startup(rose_hidden: bool) -> SharedStartup {
+    let mode = unit_mode_for(false, rose_hidden, false);
+    SharedStartup {
+        size: crate::niri::unit_surface::mode_size(mode).unwrap_or((420, 640)),
+        map: matches!(unit_window_for(false, rose_hidden, false), UnitWindow::KeepMapped),
+    }
+}
+
+/// Snapshot from live Shell state (Linux only): the ONE Shell-typed reader
+/// of the unit adapter; delegates to `unit_snapshot_locked`.
+#[cfg(target_os = "linux")]
+fn unit_snapshot_of(
+    shell: &Shell,
+    places_windows: bool,
+    is_niri: bool,
+    socket_present: bool,
+) -> NiriUnitSnapshot {
+    unit_snapshot_locked(
+        &shell.native_gate,
+        &shell.native_unit,
+        &shell.native_epoch,
+        &shell.native_expanded,
+        &shell.rose_hidden,
+        places_windows,
+        is_niri,
+        socket_present,
+    )
+}
+
+/// Routes one command through the dormant shared-unit branch (Linux only):
+/// commits under a fresh gate-owned generation, then queues the covered map
+/// on the main thread (opacity 0 + focus off, show, input-arm — or unmap +
+/// reset for hidden-rose close), and only after that succeeds emits
+/// `dot://unit` at the new revision and signals the worker. A missing
+/// window after commit, a failed queue, or a disconnected/absent worker
+/// each run exact-owned gated cleanup (unmap + reset) and report Err — a
+/// disconnected worker cancels instead of stranding the panel transparent.
+/// Stale queued
+/// callbacks run zero effects and emit/signal nothing; dispatch or effect
+/// failures run exact-owned cleanup and report Err (never false success).
+/// The independent dot window is never touched. Thin glue over the tested
+/// core: all decisions and state effects live there. Live once setup
+/// activates; the worker entry gates on `active` too, so legacy wakes never
+/// run as shared and stale callbacks stay effect-free.
+#[cfg(target_os = "linux")]
+fn route_unit_transition(app: &AppHandle, kind: UnitTransition) -> Option<CommandResult<()>> {
+    let shell = app.state::<Shell>();
+    let sender = shell.native_restore.lock().unwrap().clone();
+    let anchored = shell.native_compact.lock().unwrap().is_some();
+    let places = shell.places_windows;
+    let is_niri = platform::is_niri(&|key| std::env::var(key).ok());
+    let socket = niri_socket_present();
+    let snap = unit_transition_commit(
+        &shell.native_gate,
+        &shell.native_unit,
+        &shell.native_epoch,
+        &shell.native_expanded,
+        &shell.rose_hidden,
+        &shell.native_intent,
+        places,
+        is_niri,
+        socket,
+        anchored,
+        kind,
+    )?;
+    let job = snap.revision;
+    let mapping = unit_window_for(snap.open, snap.rose_hidden, snap.fullscreen);
+    // S5 on the single surface: effective fullscreen hides the rose and its
+    // visibility toggle; leaving fullscreen restores the toggle. Best-effort.
+    if let Some(item) = app.try_state::<RoseMenuItem>() {
+        let _ = item.0.set_enabled(!snap.fullscreen);
+    }
+    let panel = match window(app, PANEL) {
+        Ok(panel) => panel,
+        Err(error) => {
+            // The commit already bumped and carried: clear exactly our own
+            // install while still current, like a queue failure — the window
+            // never existed, so no cover ran and nothing emits or signals.
+            let shell = app.state::<Shell>();
+            cleanup_unit_dispatch(&shell.native_gate, &shell.native_epoch, job);
+            return Some(Err(error));
+        }
+    };
+    // S24/S26 shared-boundary anchor capture: resolve the ACTUAL floating
+    // compact spot BEFORE any cover/map effect below — the follow observer
+    // deliberately ignores shared moves and the legacy mode hook is bypassed
+    // on this route, so without this the worker would preserve a stale anchor
+    // (e.g. a user drag) through managed mode and back. Covered, hidden,
+    // tiled, transient, racing, or stale snapshots run zero wire and preserve;
+    // an unavailable capture (no snapshot, no socket, faded budget) also
+    // preserves — the job still proceeds, never a false success. No state
+    // lock is held across the GTK snapshot or the socket IPC below.
+    {
+        let shell = app.state::<Shell>();
+        let snap_epoch = shell.native_epoch.load(Ordering::SeqCst);
+        let cover_state = snapshot_shared_cover(&panel, COLLAPSE_COVER_ACK);
+        let pre_epoch = shell.native_epoch.load(Ordering::SeqCst);
+        let (visible, uncovered) = match cover_state {
+            Some((visible, opacity)) => (visible, visible && opacity >= GATED_OPACITY_SHOWN),
+            None => (false, false),
+        };
+        if let Some(path) = std::env::var("NIRI_SOCKET").ok().filter(|path| !path.is_empty()) {
+            let path = std::path::PathBuf::from(path);
+            let mut request = |wire: &str, timeout: Duration| crate::niri::Client::new(&path, timeout).request(wire);
+            capture_shared_transition_anchor(&shell, job, std::process::id(), visible, uncovered, snap_epoch, pre_epoch, &mut request);
+        }
+    }
+    let (queue_panel, queue_app, queue_snap, queue_sender) = (panel.clone(), app.clone(), snap, sender);
+    let queued = panel.run_on_main_thread(move || {
+        // GTK handle BEFORE any state lock; the epoch/gate recheck runs
+        // inside the executor under its own brief holds — no state lock is
+        // held for any getter or action below. No socket IPC here either.
+        let gtk = queue_panel.gtk_window().ok();
+        let shell = queue_app.state::<Shell>();
+        let mut ops = |effect: UnitExecEffect| -> CommandResult<()> {
+            match effect {
+                UnitExecEffect::CoverVisuals => {
+                    if let Some(gtk_window) = gtk.as_ref() {
+                        gtk_window.set_opacity(GATED_OPACITY_HIDDEN);
+                        gtk_window.set_accept_focus(false);
+                    }
+                    Ok(())
+                }
+                UnitExecEffect::Map => queue_panel.show().map_err(err),
+                UnitExecEffect::CoverInput => queue_panel.set_ignore_cursor_events(true).map_err(err),
+                UnitExecEffect::Unmap => queue_panel.hide().map_err(err),
+                UnitExecEffect::ResetVisuals => {
+                    if let Some(gtk_window) = gtk.as_ref() {
+                        gtk_window.set_opacity(GATED_OPACITY_SHOWN);
+                        gtk_window.set_accept_focus(true);
+                    }
+                    queue_panel.set_ignore_cursor_events(false).map_err(err)
+                }
+            }
+        };
+        match run_unit_cover_exec(&mut ops, &shell.native_gate, &shell.native_epoch, job, mapping) {
+            UnitExecOutcome::Applied => {
+                // Logical truth first: the commit succeeded, so the frontend
+                // learns the fresh snapshot even if the wake below fails.
+                emit_unit_to_panel(&queue_app, &queue_snap);
+                match plan_unit_wake(queue_sender.as_ref().map(signal_restore)) {
+                    UnitWake::Proceed => {}
+                    UnitWake::Cancel => {
+                        // No consumer will ever reveal this cover: converge
+                        // through exact-owned gated cancellation (unmap +
+                        // reset) instead of stranding the panel transparent.
+                        // Coalesced counts as success (a wake is pending).
+                        eprintln!("gentle-dot: unit worker disconnected job={job}");
+                        cancel_gated_panel(&queue_app, job, "unit worker disconnected");
+                    }
+                }
+            }
+            UnitExecOutcome::Stale => {
+                // Superseded: zero effects ran, nothing to emit or signal.
+            }
+            UnitExecOutcome::Failed => {
+                eprintln!("gentle-dot: unit cover failed job={job}");
+            }
+        }
+    });
+    if queued.is_err() {
+        let shell = app.state::<Shell>();
+        cleanup_unit_dispatch(&shell.native_gate, &shell.native_epoch, job);
+        return Some(Err("gentle-dot: unit cover missed the main thread; hidden for retry".to_owned()));
+    }
+    Some(Ok(()))
+}
+
+/// Publishes a unit transition to the panel window only (Linux only):
+/// `dot://unit` carries the logical snapshot, never an anchor. Dormant: no
+/// transition publishes yet; future publishers advance-then-publish (see
+/// `publish_unit_open`) before emitting here, never `app.emit`.
+/// Dormant: no transition publishes yet (callsite branches land next unit).
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn emit_unit_to_panel(app: &AppHandle, snapshot: &NiriUnitSnapshot) {
+    if let Ok(panel) = window(app, PANEL) {
+        let _ = panel.emit("dot://unit", snapshot);
+    }
+}
+
+
+/// The startup fallback for this build and environment.
+fn default_rose_hidden() -> bool {
+    default_rose_hidden_for(
+        Os::CURRENT,
+        cfg!(all(target_os = "linux", feature = "ksni-tray")),
+        platform::is_niri(&|key| std::env::var(key).ok()),
+    )
+}
+
 
 fn rose_menu_label(hidden: bool) -> &'static str {
     if hidden {
@@ -151,7 +526,7 @@ fn desktop_file(config: &DesktopConfig) -> PathBuf {
     config.data_dir.join("desktop.json")
 }
 
-type CommandResult<T = ()> = Result<T, String>;
+pub(crate) type CommandResult<T = ()> = Result<T, String>;
 
 fn err(error: impl std::fmt::Display) -> String {
     error.to_string()
@@ -228,8 +603,87 @@ async fn connection_info(app: AppHandle) -> CommandResult<ConnectionInfo> {
     .map_err(err)?
 }
 
+/// Publishes a hide intent with its generation:
+/// monotonic high-water — an older overlapping hide can never clobber a
+/// newer publish. Production publishes through take_hide_generation below
+/// (single gate hold); this stays the shared monotonic primitive behind it.
+/// Test-only caller keeps it live under cfg(test); allowed dead in production
+/// builds like the other legacy history helpers.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn publish_hide_intent(hide: &Mutex<Option<u64>>, job: u64) {
+    let mut held = hide.lock().unwrap();
+    *held = hide_intent_next(*held, job);
+}
+
+/// Atomic hide take-plus-publish: the ONE production
+/// path behind hide_panel_niri — bumps the epoch, clears any gate, and owns
+/// the versioned marker inside a SINGLE gate critical section (gate→hide
+/// order, brief, never across socket or main-thread waits), so no show/mode
+/// publish can interleave between the take and the marker. Same bump/clear
+/// semantics as mode_take_generation (SeqCst fetch_add, gate None) plus the
+/// same monotonic rule as publish_hide_intent — but NOT a nested call of
+/// either (both would re-lock a held mutex and deadlock); the orders are
+/// inlined here under the one hold. A newer publish is never overwritten by
+/// an older completion: completions clear only their exact owner.
+#[cfg(target_os = "linux")]
+fn take_hide_generation(
+    epoch: &AtomicU64,
+    gate: &Mutex<Option<u64>>,
+    hide: &Mutex<Option<u64>>,
+) -> u64 {
+    let mut held = gate.lock().unwrap();
+    let next = epoch.fetch_add(1, Ordering::SeqCst) + 1;
+    *held = None;
+    let mut intent = hide.lock().unwrap();
+    *intent = hide_intent_next(*intent, next);
+    niri_trace!("hide take job={next}");
+    next
+}
+
+/// Whether a hide intent is still fresh: the stored
+/// job equals the live epoch. A newer lifecycle (show/mode/hide) advances
+/// the epoch and stales it automatically — no explicit invalidation needed.
+#[cfg(target_os = "linux")]
+fn hide_intent_fresh(hide: &Mutex<Option<u64>>, epoch: &AtomicU64) -> bool {
+    *hide.lock().unwrap() == Some(epoch.load(Ordering::SeqCst))
+}
+
+/// Releases a hide intent only for its exact owner:
+/// returns whether anything was cleared. A newer publish is never clobbered.
+#[cfg(target_os = "linux")]
+fn clear_hide_intent(hide: &Mutex<Option<u64>>, job: u64) -> bool {
+    let mut held = hide.lock().unwrap();
+    if *held == Some(job) {
+        *held = None;
+        true
+    } else {
+        false
+    }
+}
+
 #[tauri::command]
 fn toggle_panel(app: AppHandle) -> CommandResult {
+    // Pending-hide intent (Niri only): a fresh pending hide is
+    // logically hidden — the panel is still mapped while capture runs — so
+    // a second toggle reopens without consulting visibility (and without
+    // its blocking getter). Stale or absent intent falls through below.
+    #[cfg(target_os = "linux")]
+    {
+        let shell = app.state::<Shell>();
+        if niri_route_env(shell.places_windows) {
+            // Dormant shared-unit branch: explicit activation plus
+            // Niri only; the legacy toggle below stays untouched while dormant.
+            if let Some(routed) = route_unit_transition(&app, UnitTransition::Toggle) {
+                return routed;
+            }
+            let show = plan_toggle_route(
+                hide_intent_fresh(&shell.native_hide_job, &shell.native_epoch),
+                || window(&app, PANEL)?.is_visible().map_err(err),
+            )?;
+            return if show { show_panel(&app) } else { hide_panel(app) };
+        }
+    }
     if window(&app, PANEL)?.is_visible().map_err(err)? {
         hide_panel(app)
     } else {
@@ -241,12 +695,265 @@ fn toggle_panel(app: AppHandle) -> CommandResult {
 fn hide_panel(app: AppHandle) -> CommandResult {
     let panel = window(&app, PANEL)?;
     let shell = app.state::<Shell>();
-    if shell.full_screen.lock().unwrap().is_none() {
+    #[cfg(target_os = "linux")]
+    if niri_route_env(shell.places_windows) {
+        // Dormant shared-unit branch: logical close keeps the
+        // mapped RoseOnly surface; only hidden-rose truly unmaps. The
+        // legacy hide (anchor capture + worker) below stays while dormant.
+        if let Some(routed) = route_unit_transition(&app, UnitTransition::Close) {
+            return routed;
+        }
+        return hide_panel_niri(app, &panel);
+    }
+    // Hiding is the user's intent, so it is the only capture point: no panel
+    // Moved listener. Recording every move would misclassify programmatic
+    // placements (the default beside-the-Dot frame) as user moves and break
+    // Dot-following for never-moved panels. On native Wayland the compositor
+    // owns placement, so app coordinates are never authoritative there: the
+    // in-memory spot is preserved untouched. The spot lives in memory only
+    // and never touches the disk, so it cannot survive an app restart; a
+    // legacy `panel_points` value in an old file is ignored, never migrated.
+    if shell.places_windows && shell.full_screen.lock().unwrap().is_none() {
+        let visible = panel.is_visible().unwrap_or(false);
         if let Ok(rect) = rect_of(&panel) {
-            *shell.panel_spot.lock().unwrap() = Some((rect.x, rect.y));
+            if panel_capture_valid(true, false, rect.width, rect.height, visible) {
+                *shell.panel_spot.lock().unwrap() = Some((rect.x, rect.y));
+            }
         }
     }
     panel.hide().map_err(err)
+}
+
+/// Runs one hide capture-to-completion transaction:
+/// the production seam behind hide_panel_niri's pool work, with injected
+/// capture fetch and completion dispatch so tests drive the exact ordering
+/// without a runtime. Acquires native_io, re-checks freshness, captures
+/// whenever mapped float (tiled safely yields None — never skipped on a
+/// stale recorded mode alone), merges and fresh-commits the anchor, then
+/// ALWAYS runs `finish`: the completion itself re-verifies ownership, so a
+/// stale job still resolves its intent instead of stranding it.
+#[cfg(target_os = "linux")]
+fn run_hide_transaction(
+    shell: &Shell,
+    job: u64,
+    visible: bool,
+    snap_epoch: u64,
+    pre_take_epoch: u64,
+    capture: &mut impl FnMut() -> Option<CompactSpot>,
+    finish: &mut impl FnMut(),
+) {
+    let outcome = native_io_sequenced(&shell.native_io, &shell.native_epoch, job, || {
+        let fresh = decide_native_capture(visible, snap_epoch, pre_take_epoch, || capture());
+        let current_anchor = shell.native_compact.lock().unwrap().clone();
+        let remembered = merge_compact_spot(current_anchor, fresh);
+        commit_compact_anchor(
+            &shell.native_compact,
+            &shell.native_gate,
+            &shell.native_epoch,
+            job,
+            remembered,
+        )
+    });
+    match outcome {
+        Some(landed) => niri_trace!("hide pool job={job} anchor_landed={landed}"),
+        None => niri_trace!("hide pool job={job} stale-before-capture"),
+    }
+    finish();
+}
+
+/// Failed hide-delivery resolution: the ONE production
+/// seam behind BOTH the main-thread enqueue failure and the pool-join failure
+/// below — releases only the exact owner's intent and reports whether it did.
+/// An older failure can never clear a newer pending hide, and nothing is
+/// queued here, so no hide runs after this cleanup. Pool work never covers
+/// (no opacity-0), so a failed join leaves the panel as-mapped with nothing
+/// visual to unwind; the caller logs the job for correlation.
+#[cfg(target_os = "linux")]
+fn resolve_hide_delivery_failure(hide: &Mutex<Option<u64>>, job: u64) -> bool {
+    clear_hide_intent(hide, job)
+}
+
+/// Queues one hide completion on the main thread:
+/// unmaps plus visual reset only while still owning its generation AND its
+/// intent; anything else only releases a still-held own claim, never
+/// touching a newer lifecycle. The GTK handle resolves before any native
+/// lock; the gate→hide hold below (never the reverse anywhere)
+/// serializes against a concurrent show publish; only nonwaiting proxies
+/// and direct setters run under it — no getter waits, no socket, no queue
+/// waits. Fire-and-forget — queue errors mean shutdown.
+#[cfg(target_os = "linux")]
+fn queue_hide_completion(app: &AppHandle, panel: &WebviewWindow, job: u64) {
+    let (hidden, hidden_app) = (panel.clone(), app.clone());
+    if panel
+        .run_on_main_thread(move || {
+        let gtk = hidden.gtk_window().ok();
+        let shell = hidden_app.state::<Shell>();
+        let _gate = shell.native_gate.lock().unwrap();
+        let now = shell.native_epoch.load(Ordering::SeqCst);
+        let intent = *shell.native_hide_job.lock().unwrap();
+        match plan_hide_completion(now, job, intent) {
+            Some(effects) => {
+                for effect in effects {
+                    match effect {
+                        GateEffect::Unmap => {
+                            if let Err(error) = hidden.hide().map_err(err) {
+                                eprintln!("gentle-dot: panel hide failed: {error}");
+                            }
+                        }
+                        GateEffect::ResetVisuals => {
+                            if let Some(gtk_window) = gtk.as_ref() {
+                                gtk_window.set_opacity(GATED_OPACITY_SHOWN);
+                                gtk_window.set_accept_focus(true);
+                            }
+                            let _ = hidden.set_ignore_cursor_events(false);
+                        }
+                    }
+                }
+            }
+            None => {
+                niri_trace!("hide completion stale job={job} current={now}");
+            }
+        }
+        clear_hide_intent(&shell.native_hide_job, job);
+        })
+        .is_err()
+    {
+        // The main thread never got the completion: release only our own
+        // intent so a retry can proceed, never unmapping a newer lifecycle —
+        // nothing was queued, so no hide runs after this cleanup.
+        let shell = app.state::<Shell>();
+        resolve_hide_delivery_failure(&shell.native_hide_job, job);
+        eprintln!("gentle-dot: hide completion missed the main thread for job={job}");
+    }
+}
+
+/// Niri-native hide: publishes a versioned hide intent,
+/// captures the compact spot on the blocking pool, then completes the unmap
+/// on the main thread only while still owning its generation. The take plus
+/// intent publication serialize with shows/modes under the gate domain; the
+/// capture IPC runs on the pool under native_io with no state lock held
+/// (same hazard as the mode path). No Tauri getter runs under a
+/// native lock (visibility snapshots first); only brief nonwaiting stores
+/// run while held. Returns Ok once queued — the pool owns the causal
+/// capture-then-completion chain, never the caller.
+#[cfg(target_os = "linux")]
+fn hide_panel_niri(app: AppHandle, panel: &WebviewWindow) -> CommandResult {
+    use std::path::PathBuf;
+    let shell = app.state::<Shell>();
+    // Snapshot the blocking getter before any native lock: getters wait
+    // on the main thread, whose handlers take the mode lock. A racing show
+    // is detected below via the generation instead of re-querying under lock.
+    let snap_epoch = shell.native_epoch.load(Ordering::SeqCst);
+    let visible = snapshot_visible(|| panel.is_visible());
+    // Compare before our own bump: any intervening lifecycle invalidates the
+    // snapshot, and the shared helper stays fail-closed on stale — a negative
+    // or racing snapshot never infers a positive it never observed.
+    let current = shell.native_epoch.load(Ordering::SeqCst);
+    // Publish take + versioned intent atomically: one gate
+    // hold, so no show/mode can interleave between the bump and the marker.
+    let next = take_hide_generation(&shell.native_epoch, &shell.native_gate, &shell.native_hide_job);
+    let socket = std::env::var("NIRI_SOCKET").ok().filter(|path| !path.is_empty());
+    let socket_present = socket.is_some();
+    niri_trace!("hide capture queued job={next} visible={visible} socket={socket_present}");
+    // Pool owns capture-then-completion causally: the completion is queued
+    // only after the merge/commit resolve (or bounded failure), never as a
+    // second independent queue. Socketless skips capture inside the same
+    // path — still bounded, still fresh-checked. No UI wait on IO, mutex,
+    // join, recv, or socket — this returns once spawned.
+    let (pool_app, pool_panel) = (app.clone(), panel.clone());
+    let monitor_app = app.clone();
+    let join = tauri::async_runtime::spawn_blocking(move || {
+        let mut fetch = || {
+            let Some(path) = socket.as_ref().map(PathBuf::from) else {
+                return None;
+            };
+            let mut request = |wire: &str, timeout: Duration| {
+                crate::niri::Client::new(&path, timeout).request(wire)
+            };
+            match crate::niri::capture_compact_spot(std::process::id(), &mut request) {
+                Ok(found) => found,
+                Err(error) => {
+                    // Bounded secret-free diagnostic: kind only,
+                    // never window JSON or socket paths. The merge below keeps
+                    // the current anchor on None, so a failed capture never
+                    // invents a position.
+                    eprintln!("gentle-dot: hide capture failed kind={} job={next}", error.kind());
+                    None
+                }
+            }
+        };
+        let mut finish = || queue_hide_completion(&pool_app, &pool_panel, next);
+        let shell = pool_app.state::<Shell>();
+        run_hide_transaction(&shell, next, visible, snap_epoch, current, &mut fetch, &mut finish);
+    });
+    // Pool-join monitor: the handle only resolves Err on a pool
+    // panic/cancel — spawn itself always returns a handle, so no earlier
+    // Result is claimed. On failure release only our own intent and log; no
+    // visual cleanup is queued (pool work never covers, so the panel stays
+    // as-mapped). Fire-and-forget like every other queue here: at shutdown
+    // the Shell drops with the runtime, and any newer lifecycle already
+    // staled this intent via the epoch. NOTE: native_io is held across the
+    // capture socket deliberately (transaction ownership) — never
+    // across GTK getters, acknowledgments, or UI waits.
+    let _ = tauri::async_runtime::spawn(async move {
+        if let Err(error) = join.await {
+            let shell = monitor_app.state::<Shell>();
+            resolve_hide_delivery_failure(&shell.native_hide_job, next);
+            eprintln!("gentle-dot: hide pool failed job={next}: {error}");
+        }
+    });
+    Ok(())
+}
+
+/// Presents the rose beside the compact panel: the worker
+/// keeps the remembered anchor — a freshly remapped rose appears at the
+/// compositor default, never at the user's spot — and plans the joint pair in
+/// one pass with NO mover, so the rose lands beside the panel instead of
+/// staying centred. Best-effort: a missing sender only traces. Callers own the
+/// visibility predicates and never hold a state lock across this call.
+#[cfg(target_os = "linux")]
+fn present_rose_beside_panel(shell: &Shell) {
+    // No mover: the worker keeps the anchor (remap imposes it), never chases
+    // the fresh center-mapped rose (live trace c).
+    *shell.native_mover.lock().unwrap() = None;
+    if let Some(tx) = shell.native_restore.lock().unwrap().as_ref() {
+        restore_handoff(
+            tx,
+            &shell.native_epoch,
+            &shell.native_gate,
+            RestoreIntent::PreserveCompact,
+            &shell.native_intent,
+        );
+    } else {
+        niri_trace!("rose present joint queue sender=none");
+    }
+}
+
+/// Applies the expanded/compact rose policy and re-presents the rose beside
+/// the panel on return. The saved preference stays the
+/// single source of truth, so repeats are idempotent. Best-effort: a window
+/// or menu failure never fails a mode transition that already committed.
+#[cfg(target_os = "linux")]
+fn sync_rose_for_mode(app: &AppHandle, shell: &Shell) {
+    let expanded = *shell.native_expanded.lock().unwrap();
+    let wants_rose = !shell.rose_hidden.load(Ordering::SeqCst);
+    // The visibility toggle has nothing to do in fullscreen: hide it
+    // rather than let the user flip a rose that is deliberately hidden.
+    if let Some(item) = app.try_state::<RoseMenuItem>() {
+        let _ = item.0.set_enabled(!expanded);
+    }
+    let Ok(dot) = window(app, DOT) else {
+        return;
+    };
+    if rose_visible_for_mode(expanded, wants_rose) {
+        if let Err(error) = dot.show().map_err(err) {
+            eprintln!("gentle-dot: rose show on mode change failed: {error}");
+            return;
+        }
+        present_rose_beside_panel(shell);
+    } else if let Err(error) = dot.hide().map_err(err) {
+        eprintln!("gentle-dot: rose hide on mode change failed: {error}");
+    }
 }
 
 #[tauri::command]
@@ -254,10 +961,97 @@ fn rose_hidden(app: AppHandle) -> bool {
     rose_hidden_state(&app)
 }
 
+/// Dormant shared-unit state getter: logical enable/open for the
+/// future single Niri surface. PANEL-only capability, registered on all OS —
+/// off-Niri (and off-Linux) it returns disabled with no anchor in the payload.
+#[tauri::command]
+fn niri_unit_state(app: AppHandle) -> NiriUnitSnapshot {
+    #[cfg(target_os = "linux")]
+    {
+        let shell = app.state::<Shell>();
+        let socket_present = niri_socket_present();
+        return unit_snapshot_of(
+            &shell,
+            shell.places_windows,
+            platform::is_niri(&|key| std::env::var(key).ok()),
+            socket_present,
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = app;
+        NiriUnitSnapshot::disabled()
+    }
+}
+
+/// PANEL-only render-ready handshake: the panel committed the shared wrapper DOM
+/// for `revision` — never an anchor or position (untouched). Accepts ONLY the live
+/// enabled revision; stale or disabled acks change nothing. Reports acceptance so the panel
+/// can stop retrying; the reveal worker reads the stored generation via `unit_ready_for`.
+/// Registered on all OS; off-Linux always refuses (no Linux locks exist there).
+#[tauri::command]
+fn niri_unit_ready(app: AppHandle, revision: u64) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let shell = app.state::<Shell>();
+        let socket_present = niri_socket_present();
+        return ack_unit_ready(
+            &shell.native_gate,
+            &shell.native_unit,
+            &shell.native_epoch,
+            shell.places_windows,
+            platform::is_niri(&|key| std::env::var(key).ok()),
+            socket_present,
+            revision,
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, revision);
+        false
+    }
+}
+
+
 /// Hides or shows the Dot window and remembers the choice. Returns whether it is hidden.
 #[tauri::command]
 fn set_rose_hidden(app: AppHandle, hidden: bool) -> CommandResult<bool> {
     let shell = app.state::<Shell>();
+    // Dormant shared-unit branch (Linux only): the preference save
+    // is shared, but the commit owns rose state under the gate, the dot
+    // window is never touched, and positioning waits for the joint worker.
+    // Falls through to legacy when dormant (the save below is idempotent).
+    #[cfg(target_os = "linux")]
+    {
+        let wanted = unit_branch_wanted(
+            shell.native_unit.lock().unwrap().active,
+            shell.places_windows,
+            platform::is_niri(&|key| std::env::var(key).ok()),
+            niri_socket_present(),
+        );
+        if wanted {
+            // Fullscreen implies no rose — the toggle (already disabled in the
+            // tray via set_enabled(!expanded)) must not start a transition here
+            // either. Safe no-op reporting the
+            // current state: no preference write, no generation, no worker
+            // wake, matching the gated tray item.
+            let expanded = *shell.native_expanded.lock().unwrap();
+            if !shared_rose_toggle_allowed(expanded) {
+                niri_trace!("rose toggle refused while fullscreen");
+                return Ok(shell.rose_hidden.load(Ordering::SeqCst));
+            }
+            position::save_rose_hidden(&desktop_file(&shell.config), hidden).map_err(err)?;
+            if let Some(routed) = route_unit_transition(&app, UnitTransition::SetRoseHidden(hidden)) {
+                if routed.is_ok() {
+                    if let Some(item) = app.try_state::<RoseMenuItem>() {
+                        item.0.set_text(rose_menu_label(hidden)).map_err(err)?;
+                    }
+                    app.emit("dot://rose", serde_json::json!({ "hidden": hidden })).map_err(err)?;
+                }
+                return routed.map(|()| hidden);
+            }
+        }
+    }
     position::save_rose_hidden(&desktop_file(&shell.config), hidden).map_err(err)?;
     shell.rose_hidden.store(hidden, Ordering::SeqCst);
     let dot = window(&app, DOT)?;
@@ -266,6 +1060,46 @@ fn set_rose_hidden(app: AppHandle, hidden: bool) -> CommandResult<bool> {
     } else {
         dot.show().map_err(err)?;
     }
+    // Unit fix: unhide with a mapped app-placed non-fullscreen panel
+    // reanchors beside the rose synchronously. Visibility snapshots before
+    // any state lock; best-effort so a move failure never fails the
+    // unhide itself. Native Wayland never reaches the move (compositor owns
+    // placement); fullscreen keeps its frame.
+    let panel_visible = window(&app, PANEL)
+        .and_then(|panel| panel.is_visible().map_err(err))
+        .unwrap_or(false);
+    let full_screen = shell.full_screen.lock().unwrap().is_some();
+    if rose_unhide_reanchors(hidden, panel_visible, shell.places_windows, full_screen) {
+        if let Err(error) = place_panel_next_to_dot(&app) {
+            eprintln!("gentle-dot: rose reappear reanchor failed: {error}");
+        }
+    }
+    // Niri unhide with a visible compact panel (joint unit, Linux only,
+    // additive): wakes the single restore worker for a JOINT pass from the
+    // anchor (both destinations, same epoch) instead of a one-shot rose
+    // move. A freshly remapped rose is transiently absent from the IPC list
+    // (live trace a: `rose or panel window missing`); the worker retries it
+    // bounded inside its budget, while a one-shot here could only fail.
+    // Hide/fullscreen/expanded win via the pure decision; best-effort so a
+    // queue failure never fails the unhide itself.
+    #[cfg(target_os = "linux")]
+    {
+        let expanded = *shell.native_expanded.lock().unwrap();
+        let is_niri = platform::is_niri(&|key| std::env::var(key).ok());
+        let socket_present = niri_socket_present();
+        if rose_unhide_moves_rose(
+            hidden,
+            panel_visible,
+            shell.places_windows,
+            is_niri,
+            expanded,
+            full_screen,
+        ) {
+            if joint_unit_active(shell.places_windows, is_niri, socket_present) {
+                present_rose_beside_panel(&shell);
+            }
+        }
+    }
     if let Some(item) = app.try_state::<RoseMenuItem>() {
         item.0.set_text(rose_menu_label(hidden)).map_err(err)?;
     }
@@ -273,10 +1107,47 @@ fn set_rose_hidden(app: AppHandle, hidden: bool) -> CommandResult<bool> {
     Ok(hidden)
 }
 
-/// Fills the work area of the panel's display, or returns to the frame before (S26.2).
+/// Blocking-pool spawn for Niri mode work: the single
+/// production seam behind the async fullscreen command — the command and the
+/// tests share it, so the suite exercises the real offload rather than a
+/// test-only spawn. Thin by design: ordering and affinity live in the mode
+/// path itself, which keeps its sync signature.
+#[cfg(target_os = "linux")]
+fn spawn_niri_mode_blocking<F, T>(work: F) -> tauri::async_runtime::JoinHandle<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+}
+/// Fills the work area of the panel's display, or returns to the frame before.
 /// It stays an accessory window, never a separate macOS fullscreen Space. Returns the new state.
 #[tauri::command]
 fn set_panel_fullscreen(app: AppHandle, on: bool) -> CommandResult<bool> {
+    // Non-Niri dispatch only: the invoke router sends Niri-native
+    // invokes to the async twin below, so this keeps the ORIGINAL synchronous
+    // dispatch, order, and window affinity for every other backend.
+    set_panel_fullscreen_sync(app, on)
+}
+/// Niri-only async twin: same frontend command name
+/// via rename — registered in a SEPARATE handler from the sync original (never
+/// the same generated match), reachable only through the invoke router below.
+/// Awaits the blocking-pool offload so no socket IPC, getter, or cover-ack
+/// wait runs on the command handler; bool result and frontend errors are
+/// unchanged. Socketless Niri keeps the async bounded no-op policy: the mode
+/// path itself fails bounded (previous mode), never the legacy fake frame.
+#[cfg(target_os = "linux")]
+#[tauri::command(rename = "set_panel_fullscreen")]
+async fn set_panel_fullscreen_niri(app: AppHandle, on: bool) -> CommandResult<bool> {
+    let owned = app.clone();
+    spawn_niri_mode_blocking(move || set_panel_niri_mode(owned, on))
+        .await
+        .map_err(err)?
+}
+/// Legacy app-owned fullscreen frame (sync): the exact pre-20e body,
+/// kept verbatim for macOS/X11/other backends behind the sync command (unit
+/// 20e1) — same order, same window affinity, same return shape.
+fn set_panel_fullscreen_sync(app: AppHandle, on: bool) -> CommandResult<bool> {
     let panel = window(&app, PANEL)?;
     let shell = app.state::<Shell>();
     let mut full_screen = shell.full_screen.lock().unwrap();
@@ -301,6 +1172,86 @@ fn set_panel_fullscreen(app: AppHandle, on: bool) -> CommandResult<bool> {
     }
     Ok(full_screen.is_some())
 }
+/// Which restore handoff a mode transition wants:
+/// visible collapses hand off gated (cover → settle → reveal), hidden ones
+/// plain (the reveal never touches hidden windows). The transition records
+/// the want; the orchestration below performs it only after a fresh commit.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModeRestore {
+    Gated,
+    Plain,
+}
+/// Runs one mode transition plus its generation commit (units 20a1/20a2a,
+/// Linux only): the single orchestration the production mode path calls,
+/// with injectable setters/socket/handoff so tests execute this exact order
+/// — no test-only fantasy copy. The transition only RECORDS its restore
+/// want; the commit lands first, and `handoff` runs only after a fresh
+/// commit of a successful transition — so this op can never stale itself.
+/// `handoff` receives the expected generation and performs the atomic
+/// compare-and-handoff itself, returning whether it queued anything: a
+/// show/hide/mode interleaving between our commit and our handoff refuses
+/// instead of stealing the newer gate. Errors always propagate, never
+/// converted to stale-success.
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+fn execute_mode_transition(
+    was_expanded: bool,
+    on: bool,
+    pid: u32,
+    job: u64,
+    visible: bool,
+    epoch: &AtomicU64,
+    expanded: &Mutex<bool>,
+    set_resizable: &mut impl FnMut(bool) -> Result<(), String>,
+    set_compact_size: &mut impl FnMut() -> Result<(), String>,
+    request: &mut impl FnMut(&str, Duration) -> std::io::Result<serde_json::Value>,
+    handoff: &mut impl FnMut(ModeRestore, u64) -> bool,
+) -> CommandResult<bool> {
+    let mut proposed = was_expanded;
+    // Record only: no generation increment may run before the commit below —
+    // the old order handed off inside the transition, so a successful
+    // collapse self-staled and kept `native_expanded=true`.
+    let mut restore_wanted: Option<ModeRestore> = None;
+    let mut queue_restore = || {
+        restore_wanted = Some(if visible { ModeRestore::Gated } else { ModeRestore::Plain });
+    };
+    let outcome = run_native_mode_change(
+        &mut proposed,
+        on,
+        pid,
+        set_resizable,
+        set_compact_size,
+        request,
+        &mut queue_restore,
+    );
+    // Generation commit BEFORE any restore handoff: publish the transitioned
+    // mode only while still fresh; a superseded op never overwrites newer
+    // state (its compositor effects, if any, converge through the worker's
+    // actual-vs-desired reconcile). The invoke shape stays true/false
+    // actual final mode on every path.
+    let committed = commit_mode_if_fresh(expanded, job, epoch, proposed);
+    niri_trace!("mode exit on={on} now={committed} ok={}", outcome.is_ok());
+    match outcome {
+        Err(error) => Err(error),
+        Ok(_) => match restore_wanted {
+            None => Ok(committed),
+            Some(kind) => {
+                if handoff(kind, job) {
+                    Ok(committed)
+                } else {
+                    // Refused: a newer lifecycle published between our commit
+                    // and our handoff. Report a fresh read under the lock —
+                    // never the pre-interleave commit value — and queue
+                    // nothing into the newer lifecycle.
+                    let live = *expanded.lock().unwrap();
+                    niri_trace!("mode superseded job={job} live={live}");
+                    Ok(live)
+                }
+            }
+        },
+    }
+}
 
 /// Result of `shortcut_get`: the shortcut that opens the panel and the default one.
 #[derive(serde::Serialize)]
@@ -318,6 +1269,24 @@ struct ShortcutChoice {
 #[tauri::command]
 fn shortcut_get(app: AppHandle) -> ShortcutInfo {
     let shell = app.state::<Shell>();
+    #[cfg(target_os = "linux")]
+    if niri_route_env(shell.places_windows) {
+        // S19: the compositor owns the key — report the binding the snippet
+        // really has, so Settings shows the truth instead of a dead value.
+        // The default is the Niri binding default even when the effective
+        // binding is unknown: frontend Reset sends this default back, and
+        // other backends keep their own default below. Niri-only.
+        if let Some(bound) = crate::niri::config_file::read_toggle_binding() {
+            return ShortcutInfo {
+                shortcut: shortcut::normalize(&bound).unwrap_or(bound),
+                default: crate::niri::kdl_binds::DEFAULT_KEY.to_string(),
+            };
+        }
+        return ShortcutInfo {
+            shortcut: crate::niri::kdl_binds::DEFAULT_KEY.to_string(),
+            default: crate::niri::kdl_binds::DEFAULT_KEY.to_string(),
+        };
+    }
     let current = shell.shortcut.lock().unwrap().clone().unwrap_or_else(|| shell.config.shortcut.clone());
     ShortcutInfo {
         shortcut: shortcut::normalize(&current).unwrap_or(current),
@@ -330,6 +1299,14 @@ fn shortcut_get(app: AppHandle) -> ShortcutInfo {
 async fn shortcut_set(app: AppHandle, shortcut: String) -> CommandResult<ShortcutChoice> {
     tauri::async_runtime::spawn_blocking(move || {
         let shell = app.state::<Shell>();
+        #[cfg(target_os = "linux")]
+        if niri_route_env(shell.places_windows) {
+            // S19: the Settings field manages the Niri binding itself — mapped,
+            // upserted, backed up and validated — instead of always failing.
+            let saved = crate::niri::config_file::write_toggle_binding(&shortcut)
+                .map_err(|error| error.to_string())?;
+            return Ok(ShortcutChoice { shortcut: saved });
+        }
         if !shell.places_windows {
             return Err(DESKTOP_OWNS_SHORTCUTS.to_string());
         }
@@ -438,7 +1415,13 @@ fn keep_dot_size(dot: &WebviewWindow, current: Rect) -> CommandResult {
 fn place_panel(app: &AppHandle) -> CommandResult {
     let shell = app.state::<Shell>();
     let full_screen = shell.full_screen.lock().unwrap().is_some();
-    match panel_placement(shell.places_windows, full_screen, shell.rose_hidden.load(Ordering::SeqCst)) {
+    let remembered = *shell.panel_spot.lock().unwrap();
+    match panel_placement(
+        shell.places_windows,
+        full_screen,
+        shell.rose_hidden.load(Ordering::SeqCst),
+        remembered,
+    ) {
         Placement::Keep => Ok(()),
         Placement::BesideDot => place_panel_next_to_dot(app),
         Placement::Alone => place_panel_alone(app),
@@ -468,12 +1451,287 @@ fn place_panel_next_to_dot(app: &AppHandle) -> CommandResult {
     move_to(&panel, position)
 }
 
+/// Native mode transition with window constraints: expand
+/// releases fixed constraints before tiling (an unresizable GTK window
+/// advertises min=max=420x640 and Niri clamps the tile), compact re-pins them
+/// after the 420x640 size lands (pinning while large would freeze it). Order is
+/// expand: resizable(true) → tile → width → height; compact: float → size →
+/// resizable(false) → restore handoff. Same-compact sends nothing; same-
+/// expanded retries managed geometry best-effort. Setter failure stops with no
+/// IPC and no flip; tile failure rolls constraints back best-effort only while
+/// still compact; post-flip geometry errors report the honestly expanded mode
+/// with a diagnostic instead of a false compact state.
+#[cfg(target_os = "linux")]
+fn run_native_mode_change(
+    expanded: &mut bool,
+    on: bool,
+    pid: u32,
+    set_resizable: &mut impl FnMut(bool) -> Result<(), String>,
+    set_compact_size: &mut impl FnMut() -> Result<(), String>,
+    request: &mut impl FnMut(&str, Duration) -> std::io::Result<serde_json::Value>,
+    queue_restore: &mut impl FnMut(),
+) -> Result<bool, String> {
+    // Actual-mode reconcile: the recorded mode can lag
+    // compositor effects that landed on wire without a state commit — a
+    // superseded tile/float finishes regardless of generations. Consult the
+    // exact own panel once, bounded, under the caller's I/O ownership; a
+    // failed query surfaces exactly like the apply path below, while a
+    // missing/ambiguous panel degrades to the recorded behavior. Never a
+    // focused-window fallback (see own_panel).
+    if let Some(floating) = match request(crate::niri::WINDOWS_REQUEST, crate::niri::NATIVE_MODE_BUDGET) {
+        Ok(windows) => crate::niri::own_panel_window(&windows, pid).map(|panel| panel.floating),
+        Err(error) => return Err(error.to_string()),
+    } {
+        *expanded = !floating;
+    }
+    if !on {
+        // Collapse always ends with a restore queued: a pending show's reveal
+        // obligation transfers to this generation instead of stranding at
+        // opacity 0, and an already-compact panel settles immediately.
+        if !*expanded {
+            queue_restore();
+            return Ok(false);
+        }
+        let now = crate::niri::apply_native_mode(expanded, on, pid, request)
+            .map_err(|error| error.to_string())?;
+        set_compact_size()?;
+        set_resizable(false)?;
+        queue_restore();
+        return Ok(now);
+    }
+    // Expand below, working copy already reconciled: an actually-floating
+    // panel tiles even against a stale expanded record (never a blind
+    // geometry retry + commit over it); an actually-tiled panel takes the
+    // size-only retry without a redundant tile.
+    if *expanded {
+        return retry_managed_geometry(pid, request);
+    }
+    // Expand only below (collapse always returns above): tile with the
+    // reconciled working copy.
+    // Release fixed constraints before tiling; a setter failure stops
+    // here with no IPC and no flip.
+    set_resizable(true)?;
+    match crate::niri::apply_native_mode(expanded, on, pid, request) {
+            Ok(now) => Ok(now),
+            Err(error) => {
+                if *expanded {
+                    // Post-flip geometry failure: honestly expanded already —
+                    // report it with a diagnostic, never a false compact.
+                    eprintln!("gentle-dot: expand geometry failed after tiling: {error}");
+                    Ok(true)
+                } else {
+                    // Still compact: restore fixed constraints best-effort.
+                    let _ = set_resizable(false);
+                    Err(error.to_string())
+                }
+            }
+        }
+}
+
+/// Best-effort managed-geometry retry for an already-expanded panel: resolves the exact own window once, then re-sends width plus height
+/// inside one aggregate budget. Every failure — including a missing window —
+/// keeps the honestly expanded mode with a diagnostic instead of an error.
+#[cfg(target_os = "linux")]
+fn retry_managed_geometry(
+    pid: u32,
+    request: &mut impl FnMut(&str, Duration) -> std::io::Result<serde_json::Value>,
+) -> Result<bool, String> {
+    use std::time::Instant;
+    let start = Instant::now();
+    let remaining = || crate::niri::NATIVE_MODE_BUDGET.saturating_sub(start.elapsed());
+    let windows = match request(crate::niri::WINDOWS_REQUEST, remaining()) {
+        Ok(windows) => windows,
+        Err(error) => {
+            eprintln!("gentle-dot: managed geometry retry lookup failed: {error}");
+            return Ok(true);
+        }
+    };
+    let Some(panel) = crate::niri::own_panel_window(&windows, pid) else {
+        return Ok(true);
+    };
+    for wire in crate::niri::action_managed_geometry(panel.id) {
+        let handled = request(&wire, remaining())
+            .map(|reply| crate::niri::is_handled(&reply))
+            .unwrap_or(false);
+        if !handled {
+            eprintln!("gentle-dot: managed geometry retry failed for window {}", panel.id);
+            return Ok(true);
+        }
+    }
+    Ok(true)
+}
+
+/// Show-entry hide invalidation: the FIRST production
+/// step of show_panel_niri — before ANY branch read, show, focus, emit, or
+/// fail-closed return — so even the gated no-worker Err path stales a fresh
+/// pending hide whose completion could otherwise unmap the show. Conditional
+/// only: with no fresh intent nothing bumps and the gate is untouched (no
+/// unconditional double bump with the handoff below). Atomic under one
+/// gate→hide hold: the freshness check plus the bump/clear share it, so a
+/// concurrent handoff publish can neither slip between them nor lose its gate
+/// here. The bump alone stales the intent (fresh means stored == epoch); the
+/// old hide's own completion still resolves its stale marker, so nothing
+/// strands and no hide runs after this show without a newer user hide.
+#[cfg(target_os = "linux")]
+fn prepare_niri_show(
+    epoch: &AtomicU64,
+    gate: &Mutex<Option<u64>>,
+    hide: &Mutex<Option<u64>>,
+) -> Option<u64> {
+    let mut held = gate.lock().unwrap();
+    if *hide.lock().unwrap() != Some(epoch.load(Ordering::SeqCst)) {
+        return None;
+    }
+    let next = epoch.fetch_add(1, Ordering::SeqCst) + 1;
+    *held = None;
+    niri_trace!("show invalidate hide job={next}");
+    Some(next)
+}
+
 fn show_panel(app: &AppHandle) -> CommandResult {
+    #[cfg(target_os = "linux")]
+    if niri_route_env(app.state::<Shell>().places_windows) {
+        // Dormant shared-unit branch; legacy Niri show below stays.
+        if let Some(routed) = route_unit_transition(&app, UnitTransition::Open) {
+            return routed;
+        }
+        return show_panel_niri(app);
+    }
     place_panel(app)?;
     let panel = window(app, PANEL)?;
     panel.show().map_err(err)?;
     panel.set_focus().map_err(err)?;
     app.emit("dot://panel-shown", ()).map_err(err)
+}
+
+/// Niri-native show (the first-frame gate): every
+/// compact show hides its first frame behind opacity 0, then the existing
+/// worker reveals (opacity 1, focus, panel-shown) only after the settled IPC
+/// position verifies — visible-rose beside and hidden remembered/initial
+/// alike — so the first frame at opacity 1 never visibly slides from the
+/// anchor. Expanded keeps the direct show/focus/emit (tiling has no anchor
+/// to settle) — no workspace park, config rewrite, pre-map position, or
+/// fixed sleep anywhere. The window stays really mapped while
+/// gated (`hide()` still unmaps, and a toggle then hides/cancels); only
+/// focus plus the shown emit wait. During separate-window recovery the gate
+/// is disabled: show/focus/emit happen directly and positioning is best-effort,
+/// so a slow compositor can never turn opening into an invisible chat.
+#[cfg(target_os = "linux")]
+fn show_panel_niri(app: &AppHandle) -> CommandResult {
+    let shell = app.state::<Shell>();
+    // Invalidate a fresh pending hide FIRST: conditional take
+    // before ANY branch read, show, focus, emit, or fail-closed return — so
+    // even the gated no-worker Err below stales the hide whose completion
+    // could otherwise unmap this show. Bare shows bump nothing.
+    let _show_take =
+        prepare_niri_show(&shell.native_epoch, &shell.native_gate, &shell.native_hide_job);
+    // Brief state locks only; no Tauri getter runs while held.
+    let saved_some = shell.native_compact.lock().unwrap().is_some();
+    if !native_recovery_show_gated() {
+        let panel = window(app, PANEL)?;
+        panel.show().map_err(err)?;
+        panel.set_focus().map_err(err)?;
+        app.emit("dot://panel-shown", ()).map_err(err)?;
+        match shell.native_restore.lock().unwrap().as_ref() {
+            Some(tx) => {
+                let job = restore_handoff(
+                    tx,
+                    &shell.native_epoch,
+                    &shell.native_gate,
+                    RestoreIntent::PreserveCompact,
+                    &shell.native_intent,
+                )
+                .0;
+                niri_trace!("show queued job={job} sender=some");
+            }
+            // No entry-fresh hide can reach here: the entry take
+            // above already staled it, and a concurrent newer hide owns its
+            // own completion — taking again would only steal past it.
+            None => niri_trace!("show queue sender=none"),
+        }
+        return Ok(());
+    }
+    // Gated path: bump first so a concurrent hide (which bumps later) wins.
+    let tx = shell.native_restore.lock().unwrap().as_ref().cloned();
+    let Some(tx) = tx else {
+        // No worker can settle or reveal: fail closed for retry instead of
+        // showing at the unconfirmed anchor (same contract as the
+        // disconnected-queue cancel; the direct path stays expanded-only).
+        niri_trace!("show gated no-worker sender=none");
+        return Err("niri: restore worker unavailable; hidden for retry".to_owned());
+    };
+    let (job, queue) = gated_restore_handoff(
+        &tx,
+        &shell.native_epoch,
+        &shell.native_gate,
+        restore_intent_for_show(saved_some),
+        &shell.native_intent,
+    );
+    niri_trace!("show gated job={job}");
+    let panel = window(app, PANEL)?;
+    let (gated, gated_app) = (panel.clone(), app.clone());
+    panel
+        .run_on_main_thread(move || {
+            // Re-check inside: a hide/mode bump or newer show may have staled
+            // this map before the main thread ran it — then skip, so that
+            // lifecycle (hide or reveal) wins. Lock is brief, no getter held.
+            let shell = gated_app.state::<Shell>();
+            let current = shell.native_epoch.load(Ordering::SeqCst);
+            let gate = shell.native_gate.lock().unwrap();
+            let wanted = gate_reveal_fresh(job, current, *gate);
+            drop(gate);
+            if !wanted {
+                niri_trace!("show gated skip job={job} current={current}");
+                return;
+            }
+            // SAME closure, opacity 0 BEFORE show: no frame maps at full
+            // opacity. gtk_window is obtained INSIDE (never crosses threads).
+            match gated.gtk_window() {
+                Ok(gtk_window) => {
+                    gtk_window.set_opacity(GATED_OPACITY_HIDDEN);
+                    gtk_window.set_accept_focus(false);
+                }
+                Err(error) => eprintln!("gentle-dot: gated show lost opacity: {error}"),
+            }
+            // tao 0.37.1 aborts on `CursorIgnoreEvents(true)` before the
+            // native window exists (`event_loop.rs` unwraps the GDK window,
+            // `None` until realize; live RED: `/usr/bin/gentle-dot --toggle`
+            // SIGABRT on a never-yet-shown panel). `show()` and the cursor
+            // request share one FIFO channel and `Visible(true)` runs
+            // `show_all()` (synchronous realize) first, so the ignore request
+            // is only queued AFTER a successful show — never before it —
+            // while opacity 0 above still precedes every map. A failed show
+            // queues no ignore at all and releases only our own gate.
+            // Non-interactive until reveal; restored on reveal or hide/mode.
+            match gated.show().map_err(err) {
+                Ok(()) => {
+                    let _ = gated.set_ignore_cursor_events(true);
+                }
+                Err(error) => {
+                    // Never strand a gate on a hidden window: release only our
+                    // own job so the worker completion stales out cleanly.
+                    let shell = gated_app.state::<Shell>();
+                    let mut gate = shell.native_gate.lock().unwrap();
+                    if *gate == Some(job) {
+                        *gate = None;
+                    }
+                    eprintln!("gentle-dot: gated panel show failed: {error}");
+                }
+            }
+            // No focus, no panel-shown emit here: the worker reveal owns both.
+        })
+        .map_err(err)?;
+    if gated_needs_reveal_fallback(queue) {
+        // No consumer will ever complete this job: cancel the just-published
+        // gate (unmap plus opacity/interaction reset on the main thread, no
+        // focus, no emit) instead of revealing at the unconfirmed anchor.
+        // Queued after the map above, so the cleanup still lands second and
+        // never strands opacity 0; the user can reopen later for a retry.
+        eprintln!("gentle-dot: restore worker gone; hiding the ungated panel for retry");
+        cancel_gated_panel(app, job, "restore worker disconnected");
+        return Err("niri: restore worker disconnected".to_owned());
+    }
+    Ok(())
 }
 
 /// Snaps the Dot to the nearest edge and persists the position.
@@ -514,12 +1772,77 @@ fn spawn_snapper(app: AppHandle) -> mpsc::Sender<()> {
     tx
 }
 
+/// Single-surface Niri builder (Linux only): ONE transparent panel sized to the
+/// startup compact mode — never the separate DOT (no hidden dot consuming
+/// workspace/selection). The panel URL serves the unit surface (dot://unit +
+/// niri_unit_state drive it; no anchor bytes reach the UI). The startup map keeps
+/// opacity 0 until the RoseOnly shape lands, then restores opacity 1 with no
+/// focus and no emit; hidden rose stays parked unmapped. Errors propagate so a
+/// failed window setup never activates.
+/// Shared construction and activation must always use the same policy.
+#[cfg(target_os = "linux")]
+fn shared_surface_available() -> bool {
+    // Native GTK/Niri probes verified stable-id compact/managed sizing.
+    // Construction and activation share this policy; callers still require
+    // Niri, its socket, and compositor-owned positioning.
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn build_shared_windows(app: &AppHandle, rose_hidden: bool) -> tauri::Result<()> {
+    use crate::niri::unit_surface::UnitMode;
+    let startup = plan_shared_startup(rose_hidden);
+    let panel = WebviewWindowBuilder::new(app, PANEL, WebviewUrl::App(platform::panel_url(Os::CURRENT).into()))
+        .title(PANEL_TITLE)
+        .inner_size(f64::from(startup.size.0), f64::from(startup.size.1))
+        .transparent(true)
+        .decorations(false)
+        .always_on_top(true)
+        // Native GTK/WebKit pins a non-resizable first map to 200x200.
+        // Keep resizable from construction; min/max fix the compact size.
+        .resizable(true)
+        .min_inner_size(f64::from(startup.size.0), f64::from(startup.size.1))
+        .max_inner_size(f64::from(startup.size.0), f64::from(startup.size.1))
+        .skip_taskbar(true)
+        .disable_drag_drop_handler()
+        .visible(false)
+        .build()?;
+    if !startup.map {
+        return Ok(());
+    }
+    if let Ok(gtk_window) = panel.gtk_window() {
+        gtk_window.set_opacity(GATED_OPACITY_HIDDEN);
+        // Rose-only startup never takes keyboard focus: the chat is closed, so
+        // grabbing focus from whatever the user is typing in would be rude.
+        gtk_window.set_accept_focus(false);
+    }
+    panel.show()?;
+    // Pointer events must reach the rose, but only through its own input shape,
+    // so reset the cursor proxy BEFORE applying the shape (that proxy overwrites
+    // it), and only then reveal: no full-canvas frame is ever interactive.
+    let _ = panel.set_ignore_cursor_events(false);
+    if let Ok(gtk_window) = panel.gtk_window() {
+        crate::niri::unit_surface::reapply_input_shape(&gtk_window, UnitMode::RoseOnly, false);
+        gtk_window.set_opacity(GATED_OPACITY_SHOWN);
+    }
+    Ok(())
+}
+
 fn build_windows(
     app: &AppHandle,
     config: &DesktopConfig,
     places_windows: bool,
     rose_hidden: bool,
 ) -> tauri::Result<()> {
+    #[cfg(target_os = "linux")]
+    if shared_surface_available() && native_niri_mode(
+        places_windows,
+        platform::is_niri(&|key| std::env::var(key).ok()),
+        niri_socket_present(),
+    ) {
+        // Single shared surface: no DOT window at all on this path.
+        return build_shared_windows(app, rose_hidden);
+    }
     let dot = WebviewWindowBuilder::new(app, DOT, WebviewUrl::App("index.html?surface=dot".into()))
         .title(DOT_TITLE)
         .inner_size(DOT_SIZE.0, DOT_SIZE.1)
@@ -605,8 +1928,97 @@ fn tray_menu_ids(conversations: bool, computer_control: bool) -> Vec<&'static st
     ids
 }
 
+/// Whether a tray-build failure is the transient missing-watcher case
+/// (T2-B): a KSNI backend registers with `org.kde.StatusNotifierWatcher`
+/// at build time, and at login the watcher host may start after the
+/// autostarted app — ksni then reports `Watcher(ServiceUnknown(...))`
+/// (`failed to register to the StatusNotifierWatcher: ...`) or, once
+/// registered, `WontShow` (`no StatusNotifierHost exists`). tray-icon
+/// 0.25.1 exposes no `assume_sni_available`-style wait through Tauri's
+/// `TrayIconBuilder` (ksni has it; the wrapper always uses the failing
+/// default), so the app matches the wrapper's exact Display strings.
+/// Anything else — menu/icon failures, D-Bus connection errors — still
+/// aborts setup loudly, never retries silently. Pure so tests pin the
+/// boundary without an app.
+fn tray_watcher_transient(message: &str) -> bool {
+    message.contains("StatusNotifierWatcher") || message.contains("StatusNotifierHost")
+}
+
+/// Bounded tray rebuild attempts after a transient watcher-missing startup.
+const TRAY_RETRY_ATTEMPTS: u32 = 12;
+/// Delay between tray rebuild attempts: the watcher host starts seconds
+/// after login; twelve 10 s steps cover ~2 min without lingering.
+const TRAY_RETRY_DELAY: Duration = Duration::from_secs(10);
+
+/// One main-thread retry step's outcome (crosses the thread boundary below).
+enum RetryOutcome {
+    /// A tray is already present: nothing to rebuild (no duplicate menus).
+    Present,
+    /// The rebuild registered the tray.
+    Built,
+    /// The rebuild failed; carries the error text for the transient check.
+    Failed(String),
+}
+
+/// Rebuild the tray after a transient startup miss (T2-B). A plain thread
+/// owns the bounded wait, but every tray/menu call runs on the main thread
+/// via `run_on_main_thread` — never an off-GTK-thread tray call. The loop
+/// ends on the first success, on a non-transient error, when a tray is
+/// already present, after `TRAY_RETRY_ATTEMPTS`, or quietly when the main
+/// loop is gone (shutdown); every outcome logs, none leaks state.
+fn schedule_tray_retry(app: AppHandle, config: DesktopConfig, rose_hidden: bool) {
+    thread::spawn(move || {
+        for attempt in 1..=TRAY_RETRY_ATTEMPTS {
+            thread::sleep(TRAY_RETRY_DELAY);
+            let (done, done_rx) = mpsc::channel();
+            let step = {
+                let (app, config, done) = (app.clone(), config.clone(), done);
+                move || {
+                    let outcome = if app.tray_by_id(TRAY).is_some() {
+                        RetryOutcome::Present
+                    } else {
+                        match build_tray(&app, &config, rose_hidden) {
+                            Ok(_) => RetryOutcome::Built,
+                            Err(error) => RetryOutcome::Failed(error.to_string()),
+                        }
+                    };
+                    let _ = done.send(outcome);
+                }
+            };
+            // The main loop is gone (shutdown): stop quietly. Otherwise the
+            // step was accepted, so its send follows; a process exit reaps
+            // this thread with it.
+            if app.run_on_main_thread(step).is_err() {
+                return;
+            }
+            match done_rx.recv() {
+                Ok(RetryOutcome::Present) => return,
+                Ok(RetryOutcome::Built) => {
+                    eprintln!(
+                        "gentle-dot: tray registered on retry attempt {attempt} of {TRAY_RETRY_ATTEMPTS}"
+                    );
+                    return;
+                }
+                Ok(RetryOutcome::Failed(message)) if tray_watcher_transient(&message) => {
+                    eprintln!(
+                        "gentle-dot: tray watcher still missing (attempt {attempt} of {TRAY_RETRY_ATTEMPTS}): {message}"
+                    );
+                }
+                Ok(RetryOutcome::Failed(message)) => {
+                    eprintln!("gentle-dot: tray retry stopped: {message}");
+                    return;
+                }
+                Err(_) => return,
+            }
+        }
+        eprintln!(
+            "gentle-dot: tray retry gave up after {TRAY_RETRY_ATTEMPTS} attempts; the desktop stays usable without it"
+        );
+    });
+}
+
 fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tauri::Result<TrayIcon> {
-    let autostart = app.autolaunch().is_enabled().unwrap_or(false);
+    let autostart = autostart_checked(app);
     // The accelerator is only a label here; an unparsable one must not break the menu.
     let open = MenuItem::with_id(app, "open", "Open", true, Some(config.shortcut.as_str()))
         .or_else(|_| MenuItem::with_id(app, "open", "Open", true, None::<&str>))?;
@@ -657,6 +2069,30 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tau
         .tooltip("Gentle Dot")
         .menu(&menu)
         .show_menu_on_left_click(true)
+        .on_tray_icon_event(|tray, event| {
+            // Left-click activation exists only on the opt-in KSNI backend (Linux);
+            // everywhere else this is a no-op and the menu behavior is unchanged.
+            // The KSNI event carries an empty rect, so the panel keeps its existing
+            // placement instead of anchoring to the click coordinates.
+            if let tauri::tray::TrayIconEvent::Click {
+                button,
+                button_state,
+                ..
+            } = event
+            {
+                if tray_click_toggles_panel(
+                    Os::CURRENT,
+                    tray_left_click_toggles(),
+                    button,
+                    button_state,
+                ) {
+                    let app = tray.app_handle().clone();
+                    if let Err(error) = toggle_panel(app) {
+                        eprintln!("gentle-dot: cannot toggle the panel: {error}");
+                    }
+                }
+            }
+        })
         .on_menu_event(move |app, event| {
             let result = match event.id().as_ref() {
                 "open" => show_panel(app),
@@ -702,17 +2138,152 @@ fn open_in_browser(app: &AppHandle) -> CommandResult {
     app.opener().open_url(info.web_url, None::<&str>).map_err(err)
 }
 
+/// Initial "Launch at login" checkbox state. On Linux this is the truthful
+/// check (task 5): a candidate entry counts only with a resolving `Exec`, so
+/// a stale file never shows checked. Fail-closed: without a home directory
+/// there is nothing verifiable, so unchecked plus a log line.
+fn autostart_checked(app: &AppHandle) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = app;
+        // T2-C: the default niri-session brings up
+        // xdg-desktop-autostart.target, so the XDG entry alone launches the
+        // app there — no Niri block is required. The Niri side is read only
+        // to report a leftover pre-fix duplicate (reconciled by the next
+        // toggle); elsewhere only the XDG entry counts and Niri config is
+        // never read. Opt-in on both: nothing enables.
+        let niri_session = platform::is_niri(&|key| std::env::var(key).ok());
+        match (crate::autostart::autostart_dir(), crate::autostart::config_dir()) {
+            (Some(dir), Some(config)) if niri_session => {
+                let include = crate::autostart::niri_include_file(&config);
+                let niri = crate::autostart::read_niri_include(&include);
+                let state = crate::autostart::login_state(&dir, &crate::autostart::path_dirs(), niri.as_deref());
+                if state.niri {
+                    eprintln!(
+                        "gentle-dot: legacy managed Niri autostart block present; launch at login needs only the XDG entry and the toggle removes the duplicate"
+                    );
+                }
+                crate::autostart::checked_for(state, true)
+            }
+            (Some(dir), _) => {
+                // Non-Niri Linux keeps the XDG entry/plugin behavior: the
+                // Niri include is neither read nor required here.
+                crate::autostart::checked_for(crate::autostart::xdg_state(&dir, &crate::autostart::path_dirs()), false)
+            }
+            _ => {
+                eprintln!("gentle-dot: cannot read login autostart state: no home directory");
+                false
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Fail-closed with a log line: a failed re-read is never silently
+        // absorbed into an unchecked box.
+        match app.autolaunch().is_enabled() {
+            Ok(enabled) => enabled,
+            Err(error) => {
+                eprintln!("gentle-dot: cannot read login autostart state: {error}");
+                false
+            }
+        }
+    }
+}
+
 fn toggle_autostart(app: &AppHandle, menu: &Menu<tauri::Wry>) -> CommandResult {
-    let autolaunch = app.autolaunch();
-    if autolaunch.is_enabled().map_err(err)? {
-        autolaunch.disable().map_err(err)?;
-    } else {
-        autolaunch.enable().map_err(err)?;
+    // Linux (task 5): toggle against the truthful state, converge to the
+    // single stable entry, and verify the flip landed. The checkbox never
+    // silently absorbs an error: a failed refresh is a command error with
+    // the box untouched, surfaced by the existing error dialog.
+    #[cfg(target_os = "linux")]
+    {
+        // T2-C: XDG Autostart alone launches on every Linux session,
+        // including the default niri-session (xdg-desktop-autostart.target).
+        // On Niri the toggle additionally reconciles the pre-fix managed
+        // `spawn-at-startup` duplicate (removing only the owned block,
+        // preserving every non-managed rule) and never adds one. Other
+        // Linux toggles the XDG entry/plugin path alone. Nothing here runs
+        // except through this explicit toggle: no startup, setup, or import
+        // path touches either backend.
+        let dir = crate::autostart::autostart_dir()
+            .ok_or_else(|| "cannot toggle launch at login: no home directory".to_string())?;
+        let niri_session = platform::is_niri(&|key| std::env::var(key).ok());
+        let include = if niri_session {
+            Some(crate::autostart::niri_include_file(
+                &crate::autostart::config_dir()
+                    .ok_or_else(|| "cannot toggle launch at login: no home directory".to_string())?,
+            ))
+        } else {
+            None
+        };
+        let path_dirs = crate::autostart::path_dirs();
+        let state = match &include {
+            Some(file) => {
+                let niri = crate::autostart::read_niri_include(file);
+                crate::autostart::login_state(&dir, &path_dirs, niri.as_deref())
+            }
+            None => crate::autostart::xdg_state(&dir, &path_dirs),
+        };
+        let enabled = crate::autostart::checked_for(state, niri_session);
+        let autolaunch = app.autolaunch();
+        if enabled {
+            autolaunch.disable().map_err(err)?;
+            crate::autostart::remove_other_entries(&dir, None).map_err(err)?;
+            if let Some(file) = &include {
+                crate::autostart::remove_niri_block(file).map_err(err)?;
+            }
+        } else {
+            // The entry's Exec is the running binary: refuse to register a
+            // path that does not resolve, instead of writing a stale entry.
+            // On Niri the legacy managed block (if any) is reconciled away
+            // below — XDG alone is the supported launch, never a new block.
+            let exe = std::env::current_exe().map_err(err)?;
+            if !exe.is_absolute() || !exe.exists() {
+                return Err("cannot enable launch at login: the app path does not resolve".to_string());
+            }
+            autolaunch.enable().map_err(err)?;
+            let entries = crate::autostart::entry_files(&dir);
+            crate::autostart::remove_other_entries(&dir, Some(&entries[0])).map_err(err)?;
+            if let Some(file) = &include {
+                crate::autostart::remove_niri_block(file).map_err(err)?;
+            }
+        }
+        let fresh = match &include {
+            Some(file) => {
+                let fresh_niri = crate::autostart::read_niri_include(file);
+                crate::autostart::login_state(&dir, &crate::autostart::path_dirs(), fresh_niri.as_deref())
+            }
+            None => crate::autostart::xdg_state(&dir, &crate::autostart::path_dirs()),
+        };
+        if crate::autostart::checked_for(fresh, niri_session) == enabled {
+            let mut message =
+                "launch at login did not change: the autostart entry was not updated".to_string();
+            if niri_session && !fresh.missing().is_empty() {
+                message.push_str(&format!(" (missing {})", fresh.missing().join(" and ")));
+            }
+            return Err(message);
+        }
+        if let Some(item) = menu.get("autostart").and_then(|item| item.as_check_menuitem().cloned()) {
+            item.set_checked(crate::autostart::checked_for(fresh, niri_session)).map_err(err)?;
+        }
+        return Ok(());
     }
-    if let Some(item) = menu.get("autostart").and_then(|item| item.as_check_menuitem().cloned()) {
-        item.set_checked(autolaunch.is_enabled().unwrap_or(false)).map_err(err)?;
+    #[cfg(not(target_os = "linux"))]
+    {
+        let autolaunch = app.autolaunch();
+        if autolaunch.is_enabled().map_err(err)? {
+            autolaunch.disable().map_err(err)?;
+        } else {
+            autolaunch.enable().map_err(err)?;
+        }
+        // Truthful refresh here too: a failed re-read is an error for the
+        // existing dialog, never a silent unchecked box.
+        let fresh = autolaunch.is_enabled().map_err(err)?;
+        if let Some(item) = menu.get("autostart").and_then(|item| item.as_check_menuitem().cloned()) {
+            item.set_checked(fresh).map_err(err)?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn restart_daemon(app: AppHandle) {
@@ -762,18 +2333,135 @@ fn register_shortcut(app: &AppHandle, shortcut: &str) -> Option<String> {
     None
 }
 
-/// A launch of `gentle-dot` (usually `--toggle` from a desktop shortcut) reaches the running app.
-fn handle_launch(app: &AppHandle, args: &[String]) {
-    let result = match platform::launch_request(args) {
+/// Keyboard/CLI fullscreen-minimize toggle: the target of the managed Niri
+/// fullscreen binding and of `gentle-dot --fullscreen`. The Niri session flips the
+/// native mode; every other backend runs the exact legacy sync body with its
+/// order and window affinity. Best-effort like every other launch: the result
+/// is logged by the caller, never thrown.
+fn toggle_panel_fullscreen(app: AppHandle) -> CommandResult {
+    let shell = app.state::<Shell>();
+    #[cfg(target_os = "linux")]
+    if niri_fullscreen_offload(shell.places_windows, platform::is_niri(&|key| std::env::var(key).ok())) {
+        let on = !*shell.native_expanded.lock().unwrap();
+        return set_panel_niri_mode(app, on).map(|_| ());
+    }
+    let on = shell.full_screen.lock().unwrap().is_none();
+    set_panel_fullscreen_sync(app, on).map(|_| ())
+}
+
+/// Early single-instance launches (T2-A): the single-instance plugin is
+/// registered first, so its callback can fire while this first instance is
+/// still inside `setup` — before `Shell` is managed. Dispatching there
+/// through `app.state::<Shell>()` panics (`state() called before manage()`),
+/// the login exit-101 path: the autostarted app plus a shortcut spawn
+/// racing it. Early requests therefore queue in [`PendingLaunches`] and
+/// replay once setup is ready, never touching Shell state before it exists.
+///
+/// The queue lives in an `Arc` created in `run()` and moved into both the
+/// plugin callback and the setup closure — no global state, so tests drive
+/// the real type. `mark_ready_and_take` runs only after `manage(Shell)`
+/// (at the end of setup): either a request lands before the ready flip
+/// (queued under the same lock that flips it, so none is lost) or after it
+/// (Shell is present and it dispatches directly). Coalesced early launches
+/// keep fullscreen precedence, matching `platform::launch_request`.
+struct PendingLaunches {
+    inner: Mutex<PendingInner>,
+}
+
+struct PendingInner {
+    ready: bool,
+    queued: Vec<LaunchRequest>,
+}
+
+impl PendingLaunches {
+    fn new() -> Self {
+        PendingLaunches {
+            inner: Mutex::new(PendingInner { ready: false, queued: Vec::new() }),
+        }
+    }
+
+    /// Route one launch: `Some(request)` once setup is ready (dispatch it
+    /// now), `None` while setup is still running (queued for the end-of-
+    /// setup replay). The ready check and the push share one lock, so a
+    /// request can never slip between the final drain and the ready flip.
+    fn route(&self, request: LaunchRequest) -> Option<LaunchRequest> {
+        let mut held = self.inner.lock().unwrap();
+        if held.ready {
+            Some(request)
+        } else {
+            held.queued.push(request);
+            None
+        }
+    }
+
+    /// Flip to ready and fold everything queued so far (plus the app's own
+    /// initial request, if any) into the single request to dispatch.
+    /// `None` means nothing asked for anything: setup stays quiet, as today.
+    fn mark_ready_and_take(&self, own: Option<LaunchRequest>) -> Option<LaunchRequest> {
+        let queued = {
+            let mut held = self.inner.lock().unwrap();
+            held.ready = true;
+            std::mem::take(&mut held.queued)
+        };
+        let mut requests = queued;
+        requests.extend(own);
+        fold_launch_requests(&requests)
+    }
+
+    /// Queued-but-unreplayed request count. Test pin for the no-lost-request
+    /// handoff; unused in production builds.
+    #[allow(dead_code)]
+    fn pending_count(&self) -> usize {
+        self.inner.lock().unwrap().queued.len()
+    }
+}
+
+/// Fold several launch requests into the one that runs: fullscreen wins
+/// (the rarer, deliberate request, same as `platform::launch_request`),
+/// then toggle, then show. Pure so tests pin it without an app.
+fn fold_launch_requests(requests: &[LaunchRequest]) -> Option<LaunchRequest> {
+    if requests.contains(&LaunchRequest::Fullscreen) {
+        Some(LaunchRequest::Fullscreen)
+    } else if requests.contains(&LaunchRequest::Toggle) {
+        Some(LaunchRequest::Toggle)
+    } else if requests.contains(&LaunchRequest::Show) {
+        Some(LaunchRequest::Show)
+    } else {
+        None
+    }
+}
+
+/// Run one launch request with Shell present. The single-instance callback
+/// and the end-of-setup replay share it, so early and late launches keep
+/// identical semantics.
+fn dispatch_launch(app: &AppHandle, request: LaunchRequest) {
+    let result = match request {
         LaunchRequest::Toggle => toggle_panel(app.clone()),
         LaunchRequest::Show => show_panel(app),
+        LaunchRequest::Fullscreen => toggle_panel_fullscreen(app.clone()),
     };
     if let Err(error) = result {
         eprintln!("gentle-dot: cannot show the panel: {error}");
     }
 }
 
+/// A launch of `gentle-dot` (usually `--toggle` or `--fullscreen` from a desktop
+/// shortcut) reaches the running app: ready setups dispatch at once, early
+/// ones replay at the end of setup (see [`PendingLaunches`]).
+fn handle_launch(app: &AppHandle, pending: &PendingLaunches, args: &[String]) {
+    if std::env::var_os("GENTLE_DOT_NIRI_TRACE").is_some() {
+        eprintln!("[niri:launch] callback entered");
+    }
+    // Pre-ready launches queue for the end-of-setup replay instead of
+    // touching Shell state that does not exist yet (T2-A).
+    if let Some(request) = pending.route(platform::launch_request(args)) {
+        dispatch_launch(app, request);
+    }
+}
+
 pub fn run() {
+    let launch_trace = std::env::var_os("GENTLE_DOT_NIRI_TRACE").is_some();
+    if launch_trace { eprintln!("[niri:launch] run entered pid={}", std::process::id()); }
     // GNOME on Wayland: run under XWayland so the Dot can place itself, stay on top, and snap.
     // This must happen before GTK starts.
     #[cfg(target_os = "linux")]
@@ -781,41 +2469,98 @@ pub fn run() {
         std::env::set_var("GDK_BACKEND", backend);
     }
     let places_windows = !platform::compositor_places_windows(|key| std::env::var(key).ok());
+    if launch_trace { eprintln!("[niri:launch] config begin"); }
     let config = config::load_config();
+    if launch_trace { eprintln!("[niri:launch] builder begin"); }
+    // Early-launch queue (T2-A): shared by the single-instance callback and
+    // the end-of-setup replay below. No global state — both closures hold a
+    // clone of this Arc.
+    let pending = Arc::new(PendingLaunches::new());
+    let pending_callback = pending.clone();
     tauri::Builder::default()
         // First, so a second launch forwards its arguments and exits before anything else starts.
-        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| handle_launch(app, &args)))
+        .plugin(tauri_plugin_single_instance::init(move |app, args, _cwd| {
+            handle_launch(app, &pending_callback, &args)
+        }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
+        .plugin({
+            // Login autostart (task 5): on Linux the entry identity is pinned
+            // to the stable binary name instead of the plugin default
+            // `package_info().name` (the productName "Gentle Dot"), so
+            // enables land on one `gentle-dot.desktop` with an absolute
+            // `Exec`. Other platforms keep the previous default identity.
+            #[cfg(target_os = "linux")]
+            let autostart_plugin =
+                tauri_plugin_autostart::Builder::new().app_name(crate::autostart::STABLE_APP_NAME);
+            #[cfg(not(target_os = "linux"))]
+            let autostart_plugin = tauri_plugin_autostart::Builder::new();
+            autostart_plugin.build()
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![
-            connection_info,
-            toggle_panel,
-            hide_panel,
-            set_dot_state,
-            rose_hidden,
-            set_rose_hidden,
-            set_panel_fullscreen,
-            shortcut_get,
-            shortcut_set,
-            connector_command,
-            computer::computer_endpoint,
-            computer::computer_permissions,
-            computer::computer_request_permission,
-            computer::computer_stop,
-            computer::computer_status,
-            computer::computer_set_yolo,
-            computer::computer_working_ready,
-            voice::voice_status,
-            voice::voice_start,
-            voice::voice_stop,
-            voice::voice_cancel,
-            voice::voice_model_status,
-            voice::voice_model_download,
-            voice::voice_model_cancel,
-            voice::voice_model_remove
-        ])
+        .invoke_handler({
+            // Dual dispatch: two SEPARATE generated handlers share
+            // one frontend command name — never one generated match, so no
+            // duplicate match-entry collision. Niri-native fullscreen invokes
+            // route async-only; everything else keeps the original sync
+            // handler exactly (macOS default, Linux X11/Hyprland, all other
+            // commands). Non-Linux builds compile the sync handler only.
+            let legacy_handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+                connection_info,
+                toggle_panel,
+                hide_panel,
+                set_dot_state,
+                rose_hidden,
+                set_rose_hidden,
+                niri_unit_state,
+                niri_unit_ready,
+                set_panel_fullscreen,
+                shortcut_get,
+                shortcut_set,
+                connector_command,
+                computer::computer_endpoint,
+                computer::computer_permissions,
+                computer::computer_request_permission,
+                computer::computer_stop,
+                computer::computer_status,
+                computer::computer_set_yolo,
+                computer::computer_working_ready,
+                voice::voice_status,
+                voice::voice_start,
+                voice::voice_stop,
+                voice::voice_cancel,
+                voice::voice_model_status,
+                voice::voice_model_download,
+                voice::voice_model_cancel,
+                voice::voice_model_remove
+            ];
+            #[cfg(target_os = "linux")]
+            let niri_handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool =
+                tauri::generate_handler![set_panel_fullscreen_niri];
+            move |invoke| {
+                // Unit 20f: exact command-name short-circuit FIRST — unrelated
+                // commands never touch app state or the environment here.
+                // Runtime branch on the live invoke for fullscreen only:
+                // command name plus native placement signals, no lock held
+                // across either handler call.
+                #[cfg(target_os = "linux")]
+                if invoke.message.command() == "set_panel_fullscreen"
+                    && plan_fullscreen_dispatch(
+                        invoke.message.command(),
+                        invoke
+                            .message
+                            .webview()
+                            .app_handle()
+                            .state::<Shell>()
+                            .places_windows,
+                        platform::is_niri(&|key| std::env::var(key).ok()),
+                    ) == FullscreenDispatch::AsyncNiri
+                {
+                    return niri_handler(invoke);
+                }
+                legacy_handler(invoke)
+            }
+        })
         .setup(move |app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -850,17 +2595,79 @@ pub fn run() {
                     }
                 }
             });
-            let rose_hidden = position::load_rose_hidden(&desktop_file(&config));
+            let rose_hidden =
+                position::load_rose_hidden_or(&desktop_file(&config), default_rose_hidden());
+            #[cfg(target_os = "linux")]
+            let (native_restore, native_receiver): (Option<mpsc::SyncSender<()>>, Option<mpsc::Receiver<()>>) =
+                if native_restore_planned(
+                    places_windows,
+                    platform::is_niri(&|key| std::env::var(key).ok()),
+                ) {
+                    // Channel only: the worker thread starts after `manage`
+                    // below, so its first state read cannot panic and no
+                    // pre-registration wake is lost (capacity-1 + epoch).
+                    let (tx, rx) = mpsc::sync_channel::<()>(1);
+                    (Some(tx), Some(rx))
+                } else {
+                    (None, None)
+                };
+            #[cfg(target_os = "linux")]
+            niri_trace!("setup places_windows={places_windows} worker={}", if native_restore.is_some() { "some" } else { "none" });
             app.manage(Shell {
                 config: config.clone(),
                 daemon,
                 snap: spawn_snapper(handle.clone()),
                 places_windows,
                 rose_hidden: AtomicBool::new(rose_hidden),
+                // Session-only memory, always starting empty: a hidden panel
+                // reopens at the in-memory spot remembered by this run, or at
+                // the default anchor when absent. Nothing is restored from the
+                // disk and nothing is written back; a legacy `panel_points`
+                // value in an old file is ignored without migration, and
+                // native Wayland ignores this entirely.
                 panel_spot: Mutex::new(None),
                 full_screen: Mutex::new(None),
+                #[cfg(target_os = "linux")]
+                native_expanded: Mutex::new(false),
+                #[cfg(target_os = "linux")]
+                native_compact: Mutex::new(None),
+                #[cfg(target_os = "linux")]
+                native_epoch: AtomicU64::new(0),
+                #[cfg(target_os = "linux")]
+                native_restore: Mutex::new(native_restore),
+                #[cfg(target_os = "linux")]
+                native_gate: Mutex::new(None),
+                native_intent: Mutex::new(None),
+                native_unit: Mutex::new(NiriUnitState::dormant()),
+                #[cfg(target_os = "linux")]
+                native_mover: Mutex::new(None),
+                #[cfg(target_os = "linux")]
+                native_suppress_until: Mutex::new(None),
+                #[cfg(target_os = "linux")]
+                cover_cancelled: Mutex::new(None),
+                #[cfg(target_os = "linux")]
+                native_hide_job: Mutex::new(None),
+                #[cfg(target_os = "linux")]
+                native_io: Mutex::new(()),
+                native_work_area: Mutex::new(None),
+                native_unit_cache: Mutex::new(None),
                 shortcut: Mutex::new(None),
             });
+            // State is registered: the worker's first state read is now safe.
+            // Before any window, shortcut, or initial show can queue work.
+            #[cfg(target_os = "linux")]
+            let follow_planned = native_receiver.is_some();
+            #[cfg(target_os = "linux")]
+            if let Some(rx) = native_receiver {
+                spawn_restore_worker(handle.clone(), rx);
+            }
+            // Native follow shares the restore worker as its single writer:
+            // the subscriber only wakes it after a debounced owned-dot
+            // signal and exits with the restore channel on shutdown.
+            #[cfg(target_os = "linux")]
+            if follow_planned {
+                spawn_follow_worker(handle.clone());
+            }
             let (voice_input, voice_model) = voice::start(&handle);
             app.manage(voice_input);
             app.manage(voice_model);
@@ -868,7 +2675,45 @@ pub fn run() {
             register_panic_shortcut(&handle);
 
             build_windows(&handle, &config, places_windows, rose_hidden)?;
-            build_tray(&handle, &config, rose_hidden)?;
+            // A missing tray watcher at login (T2-B) no longer aborts setup:
+            // the desktop stays usable and a bounded main-thread retry
+            // rebuilds the tray when the host arrives. Any other tray failure
+            // still aborts, as before.
+            match build_tray(&handle, &config, rose_hidden) {
+                Ok(_) => {}
+                Err(error) if tray_watcher_transient(&error.to_string()) => {
+                    eprintln!(
+                        "gentle-dot: no tray watcher at startup, continuing without the tray: {error}"
+                    );
+                    schedule_tray_retry(handle.clone(), config.clone(), rose_hidden);
+                }
+                Err(error) => return Err(error.into()),
+            }
+            // Final shared-surface activation (Linux only): LAST
+            // setup step — single surface mapped/parked above, worker+follow
+            // spawned, env live. Unreadiness keeps `active` FALSE (legacy Niri
+            // paths serve, with the windows they still own on that path).
+            #[cfg(target_os = "linux")]
+            {
+                let is_niri = platform::is_niri(&|key| std::env::var(key).ok());
+                let socket_present = niri_socket_present();
+                if shared_surface_available() && native_niri_mode(places_windows, is_niri, socket_present) {
+                    let shell = handle.state::<Shell>();
+                    if !activate_shared_unit(
+                        &shell.native_gate,
+                        &shell.native_unit,
+                        &shell.native_epoch,
+                        shell.places_windows,
+                        is_niri,
+                        socket_present,
+                        follow_planned,
+                        follow_planned,
+                        true,
+                    ) {
+                        eprintln!("gentle-dot: shared surface stayed dormant; serving legacy Niri windows");
+                    }
+                }
+            }
             if places_windows {
                 let bound = register_shortcut(&handle, &config.shortcut);
                 if let Some(bound) = &bound {
@@ -883,14 +2728,42 @@ pub fn run() {
                     }
                 });
             } else {
+                // Native Wayland: the compositor places the windows and owns the
+                // keys. Only Niri gets the managed snippet — every other native
+                // Wayland session (Hyprland and friends) keeps the message and
+                // an untouched config.
+                #[cfg(target_os = "linux")]
+                if platform::is_niri(&|key| std::env::var(key).ok()) {
+                    // First-run repair: make the user's Niri config include
+                    // our snippet and bind the toggle, so the shortcut works
+                    // without hand-editing. Best-effort and logged: a refused or
+                    // unreadable config never blocks startup (the snippet path
+                    // backs up, validates and restores on its own).
+                    match crate::niri::config_file::ensure_first_run() {
+                        Ok(report) => eprintln!("gentle-dot: niri bindings {report:?}"),
+                        Err(error) => eprintln!("gentle-dot: niri bindings left untouched: {error}"),
+                    }
+                } else {
+                    eprintln!(
+                        "gentle-dot: native Wayland: the desktop places the windows and owns shortcuts; bind `gentle-dot --toggle` (docs/linux-testing.md)"
+                    );
+                }
+                #[cfg(not(target_os = "linux"))]
                 eprintln!(
                     "gentle-dot: native Wayland: the desktop places the windows and owns shortcuts; bind `gentle-dot --toggle` (docs/linux-testing.md)"
                 );
             }
             // Started by the shortcut while not running: open the panel right away.
+            // Second-instance launches that raced setup replay here with the
+            // same semantics (fullscreen precedence); a quiet setup — no
+            // queue, no own toggle — stays quiet, as before.
             let args: Vec<String> = std::env::args().collect();
-            if platform::launch_request(&args) == LaunchRequest::Toggle {
-                handle_launch(&handle, &args);
+            let own = (platform::launch_request(&args) == LaunchRequest::Toggle)
+                .then_some(LaunchRequest::Toggle);
+            if let Some(request) = pending.mark_ready_and_take(own) {
+                // Shell, windows, and (where present) the tray are built
+                // above, so dispatching here is state-safe by construction.
+                dispatch_launch(&handle, request);
             }
             Ok(())
         })
@@ -899,104 +2772,2220 @@ pub fn run() {
         .run(|app, event| {
             if let RunEvent::Exit = event {
                 app.state::<Shell>().daemon.stop();
+                // Disconnect the restore worker: its wait then ends instead of
+                // lingering on its handle clone past shutdown.
+                #[cfg(target_os = "linux")]
+                let _restore_taken = app.state::<Shell>().native_restore.lock().unwrap().take();
             }
         });
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tray_hides_new_conversation_in_the_single_chat() {
-        assert_eq!(
-            tray_menu_ids(false, false),
-            vec!["open", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
-        );
-    }
-
-    #[test]
-    fn tray_shows_new_conversation_with_the_conversations_list() {
-        assert_eq!(
-            tray_menu_ids(true, false),
-            vec!["open", "new", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
-        );
-    }
-
-    #[test]
-    fn tray_offers_stop_computer_control_where_it_exists() {
-        assert_eq!(
-            tray_menu_ids(false, true),
-            vec!["open", "browser", "rose", "computer-stop", "computer-yolo", "-", "restart", "autostart", "-", "quit"]
-        );
-    }
-
-    #[test]
-    fn the_rose_item_offers_the_opposite_of_its_state() {
-        assert_eq!(rose_menu_label(false), "Hide the rose");
-        assert_eq!(rose_menu_label(true), "Show the rose");
-    }
-
-    #[test]
-    fn shortcut_and_tray_open_place_the_panel_without_the_rose_when_it_is_hidden() {
-        // `toggle_panel` (the shortcut) and the tray's Open both go through `show_panel`.
-        assert_eq!(panel_placement(true, false, false), Placement::BesideDot);
-        assert_eq!(panel_placement(true, false, true), Placement::Alone);
-        // Full screen keeps its frame; native Wayland leaves placement to the compositor.
-        assert_eq!(panel_placement(true, true, true), Placement::Keep);
-        assert_eq!(panel_placement(true, true, false), Placement::Keep);
-        assert_eq!(panel_placement(false, false, true), Placement::Keep);
-    }
-
-    #[test]
-    fn the_shortcut_and_connector_commands_are_registered_and_granted_to_the_panel_only() {
-        let build = include_str!("../build.rs");
-        let capabilities: serde_json::Value =
-            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
-        for command in ["shortcut_get", "shortcut_set", "connector_command"] {
-            assert!(build.contains(&format!("\"{command}\",")), "{command} is missing from build.rs");
-            let permission = format!("allow-{}", command.replace('_', "-"));
-            let windows: Vec<&serde_json::Value> = capabilities["capabilities"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|c| c["permissions"].as_array().unwrap().iter().any(|p| p == permission.as_str()))
-                .flat_map(|c| c["windows"].as_array().unwrap())
-                .collect();
-            assert_eq!(windows, ["panel"], "{permission}");
+/// Queues the collapse cover on the main thread and returns its ack channel.
+/// The guard is epoch-only — no gate is published
+/// yet, since the restore handoff runs after the transition — so a stale
+/// job plans nothing and still acks, and the waiter never hangs. Opacity 0
+/// covers the already-mapped collapsing window, so `ignore(true)` never
+/// touches the pre-realize abort arm: the show-before-ignore crash fix is
+/// untouched.
+#[cfg(target_os = "linux")]
+fn dispatch_collapse_cover(app: &AppHandle, panel: &WebviewWindow, job: u64) -> mpsc::Receiver<()> {
+    let (ack_tx, ack_rx) = mpsc::channel();
+    let (cover, cover_app) = (panel.clone(), app.clone());
+    let _ = panel.run_on_main_thread(move || {
+        let done = || {
+            let _ = ack_tx.send(());
+        };
+        let shell = cover_app.state::<Shell>();
+        let cancelled = *shell.cover_cancelled.lock().unwrap();
+        if !cover_apply_allowed(job, shell.native_epoch.load(Ordering::SeqCst), cancelled) {
+            done();
+            return;
         }
-    }
+        if let Ok(gtk_window) = cover.gtk_window() {
+            gtk_window.set_opacity(GATED_OPACITY_HIDDEN);
+            gtk_window.set_accept_focus(false);
+        }
+        let _ = cover.set_ignore_cursor_events(true);
+        done();
+    });
+    ack_rx
+}
 
-    #[test]
-    fn only_the_glow_overlay_may_acknowledge_the_working_rings() {
-        let build = include_str!("../build.rs");
-        assert!(build.contains("\"computer_working_ready\","), "computer_working_ready is missing from build.rs");
-        let capabilities: serde_json::Value =
-            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
-        let windows: Vec<&serde_json::Value> = capabilities["capabilities"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|c| c["permissions"].as_array().unwrap().iter().any(|p| p == "allow-computer-working-ready"))
-            .flat_map(|c| c["windows"].as_array().unwrap())
-            .collect();
-        assert_eq!(windows, [computer::GLOW_WINDOW]);
-    }
+/// Production finish: thin wrapper reading live state.
+/// The (generation, gate) snapshot is coherent: every publisher bumps under
+/// the gate lock, so loading the epoch INSIDE the same hold admits no
+/// publish between the two reads. Brief hold, never across waits.
+#[cfg(target_os = "linux")]
+fn finish_collapse_cover(
+    app: &AppHandle,
+    cover_dispatched: bool,
+    job: u64,
+    outcome_err: bool,
+    handoff_queued: bool,
+) {
+    let shell = app.state::<Shell>();
+    let (current, held) = {
+        let held = shell.native_gate.lock().unwrap();
+        (shell.native_epoch.load(Ordering::SeqCst), *held)
+    };
+    finish_collapse_cover_with(
+        cover_dispatched,
+        job,
+        outcome_err,
+        handoff_queued,
+        current,
+        held,
+        &mut |cleanup| apply_cover_cleanup(app, job, cleanup),
+    );
+}
 
-    #[test]
-    fn the_windows_listen_for_the_assistant_ready_event() {
-        let desktop = include_str!("../../../../packages/ui/src/desktop.ts");
-        let app = include_str!("../../../../packages/ui/src/App.tsx");
-        let quoted = format!("\"{ASSISTANT_READY}\"");
-        assert!(desktop.contains(&quoted), "desktop.ts does not accept {quoted}");
-        assert!(app.contains(&format!("onDesktopEvent({quoted}")), "App.tsx does not listen for {quoted}");
-    }
-
-    #[test]
-    fn conversations_flag_reads_like_the_daemon() {
-        assert!(conversations_on(Some("1")));
-        assert!(!conversations_on(None));
-        assert!(!conversations_on(Some("0")));
-        assert!(!conversations_on(Some("true")));
+/// Applies a planned cover cleanup: queues the
+/// dedicated delivery below, which re-evaluates visual ownership at
+/// execution and releases only our own stale gate in the same hold — a newer
+/// show's gate stays covered until its own settle→reveal. Thin production
+/// applier: no state lock held here, never across the Tauri getter or the
+/// main-thread queue.
+#[cfg(target_os = "linux")]
+fn apply_cover_cleanup(app: &AppHandle, job: u64, cleanup: CoverCleanup) {
+    niri_trace!("cover cleanup apply job={job} plan={cleanup:?}");
+    if let Ok(panel) = window(app, PANEL) {
+        queue_cover_cleanup(app, &panel, job);
     }
 }
+
+/// Dedicated cover-cleanup delivery: the queued GTK
+/// callback re-evaluates visual ownership AT EXECUTION under one brief gate
+/// hold — atomic w.r.t. gate publication, since every publisher takes the
+/// same lock. Lock audit: `gtk_window()` is a
+/// BLOCKING wry window getter, so the handle is fetched BEFORE the hold and
+/// only synchronous GTK setters plus the nonblocking cursor proxy run under
+/// it; the hold takes no other lock, runs no socket IPC, and queues nothing
+/// further, so no cycle, wait, or callback reentry exists. No focus/emit /
+/// show and no unmap: opacity plus input reset on the existing mapped cover
+/// only. A queued successful handoff never reaches this path (the planner
+/// yields None there), and generic show/hide reset semantics
+/// (`queue_gate_reset`, `cancel_gated_panel`, reveal) are untouched.
+#[cfg(target_os = "linux")]
+fn queue_cover_cleanup(app: &AppHandle, panel: &WebviewWindow, job: u64) {
+    let (reset, reset_app) = (panel.clone(), app.clone());
+    let _ = panel.run_on_main_thread(move || {
+        // Blocking Tauri getter FIRST: `gtk_window()` round-trips
+        // the wry runtime and must never run under the gate hold, where it
+        // would stall every gate publisher.
+        let handle = reset.gtk_window().ok();
+        let shell = reset_app.state::<Shell>();
+        run_cover_cleanup_locked(job, &shell.native_epoch, &shell.native_gate, &mut || {
+            if let Some(gtk_window) = handle.as_ref() {
+                gtk_window.set_opacity(GATED_OPACITY_SHOWN);
+                gtk_window.set_accept_focus(true);
+            }
+            let _ = reset.set_ignore_cursor_events(false);
+        });
+    });
+}
+
+/// Covered-collapse ack routing: the ONLY path from a
+/// dispatched cover into the transition. Acked runs the float/size IPC plus
+/// commit plus handoff with the cover confirmed; Timeout NEVER runs IPC — it
+/// cancels the late cover through shared state, and the shared tail finish
+/// (which sees outcome Err + nothing queued) owns cleanup while this surfaces
+/// a bounded error with the mode untouched; Stale runs no IPC and reports the
+/// live mode, and the same tail finish owns its cleanup. `transition` is
+/// injectable so tests run this exact routing with fakes — no test-only copy.
+#[cfg(target_os = "linux")]
+fn route_covered_collapse(
+    ack: CoverAck,
+    job: u64,
+    live_expanded: bool,
+    mark: &Mutex<Option<u64>>,
+    transition: &mut impl FnMut() -> CommandResult<bool>,
+) -> CommandResult<bool> {
+    match ack {
+        CoverAck::Acked => {
+            niri_trace!("mode cover acked job={job}");
+            transition()
+        }
+        CoverAck::Timeout => {
+            niri_trace!("mode cover ack timeout job={job}");
+            // Cover NOT confirmed: fail closed BEFORE any float/size IPC.
+            // The shared-state high-water mark (never a local flag) stops the
+            // late cover from re-covering after cleanup, and can never recede
+            // for an older overlapping timeout.
+            cancel_cover_at(mark, job);
+            Err("niri: cover acknowledgment timed out; mode unchanged".to_owned())
+        }
+        CoverAck::Stale => {
+            niri_trace!("mode cover stale job={job}");
+            Ok(live_expanded)
+        }
+    }
+}
+
+/// Captures the compact anchor before a mode change:
+/// the ACTUAL production seam behind set_panel_niri_mode — always resolves the
+/// ACTUAL floating spot subject to visible/epoch freshness under native_io,
+/// never to the recorded mode flag. capture_compact_spot already returns None
+/// for tiled/missing/ambiguous panels (exact pid+title, no focus fallback), so
+/// no extra query runs; hidden or stale snapshots run zero wire. Merges and
+/// fresh-commits exactly like the hide hook; tiled, hidden, missing, or failed
+/// captures preserve the current anchor (bounded failure policy: no inferred
+/// mode, no reveal). No AppHandle: state plus an injected request closure, so
+/// tests drive the real wire sequence through this same body.
+#[cfg(target_os = "linux")]
+fn capture_mode_anchor(
+    shell: &Shell,
+    job: u64,
+    pid: u32,
+    visible: bool,
+    snap_epoch: u64,
+    pre_take_epoch: u64,
+    request: &mut impl FnMut(&str, Duration) -> std::io::Result<serde_json::Value>,
+) {
+    // Hidden panels skip IPC fail-closed (a hidden native window must not
+    // overwrite compact memory); mode effects below keep existing behavior.
+    let mut capture_mark = "skipped";
+    // Capture runs under I/O ownership: a superseded op
+    // skips its wire entirely, and capture never interleaves a worker
+    // pass mid-transaction. Stale still merges to the current anchor
+    // below, whose commit refuses anyway.
+    let fresh = native_io_sequenced(&shell.native_io, &shell.native_epoch, job, || {
+        decide_native_capture(visible, snap_epoch, pre_take_epoch, || {
+            match crate::niri::capture_compact_spot(pid, &mut *request) {
+                Ok(found) => {
+                    capture_mark = if found.is_some() { "some" } else { "none" };
+                    found
+                }
+                Err(error) => {
+                    capture_mark = "err";
+                    niri_trace!("mode capture wire err={} job={job}", error.kind());
+                    None
+                }
+            }
+        })
+    })
+    .flatten();
+    // Synchronized commit: the value merges lock-free, but
+    // the generation recheck plus the write share the compact lock, so a
+    // superseded op never overwrites a newer anchor.
+    let current_anchor = shell.native_compact.lock().unwrap().clone();
+    let remembered = merge_compact_spot(current_anchor, fresh);
+    let remembered_mark = if remembered.is_some() { "some" } else { "none" };
+    if commit_compact_anchor(&shell.native_compact, &shell.native_gate, &shell.native_epoch, job, remembered) {
+        niri_trace!("mode capture job={job} capture={capture_mark} remembered={remembered_mark}");
+    } else {
+        niri_trace!("mode capture drop stale job={job} capture={capture_mark}");
+    }
+}
+
+/// Size-classed shared spot: resolves the ACTUAL own
+/// floating panel from immutable wire geometry — exact pid+title, never a
+/// focused-window fallback. Pair (500x640) and panel-only (420x640) read the
+/// client top-left; rose-only (72x72) translates the rose origin back to the
+/// panel anchor; tiled, missing, ambiguous, null-position, non-finite,
+/// unknown-output, or unrecognized-size panels yield `Ok(None)` so the caller
+/// preserves its remembered spot. The output query runs only for recognized
+/// compact sizes. Aggregate budget mirrors `capture_compact_spot`.
+#[cfg(target_os = "linux")]
+fn capture_shared_spot(
+    pid: u32,
+    remembered: Option<&CompactSpot>,
+    request: &mut impl FnMut(&str, Duration) -> std::io::Result<serde_json::Value>,
+) -> std::io::Result<Option<CompactSpot>> {
+    use crate::niri::unit_restore::{PAIR_WINDOW, PANEL_WINDOW, ROSE_WINDOW};
+    let start = std::time::Instant::now();
+    let windows =
+        request(crate::niri::WINDOWS_REQUEST, crate::niri::NATIVE_MODE_BUDGET.saturating_sub(start.elapsed()))?;
+    let Some(panel) = crate::niri::own_panel_window(&windows, pid) else {
+        return Ok(None);
+    };
+    if !panel.floating {
+        return Ok(None);
+    }
+    if panel.size != PANEL_WINDOW && panel.size != PAIR_WINDOW && panel.size != ROSE_WINDOW {
+        return Ok(None);
+    }
+    let workspaces = request(
+        crate::niri::WORKSPACES_REQUEST,
+        crate::niri::NATIVE_MODE_BUDGET.saturating_sub(start.elapsed()),
+    )?;
+    let Some(output) =
+        crate::niri::workspace_output(&workspaces, panel.workspace).filter(|name| !name.is_empty())
+    else {
+        return Ok(None);
+    };
+    if panel.size == ROSE_WINDOW {
+        let Some(rose) = panel.pos else {
+            return Ok(None);
+        };
+        // Config-independent guard: the translated panel anchor
+        // is refused while this process has completed no commanded
+        // placement, or when it echoes the remembered one — so a fresh-map
+        // rose at the window-rule base can never seed a bogus anchor
+        // (observed job1 2036,-228). No output geometry is consulted.
+        let candidate = crate::niri::unit_restore::capture_from_rose_surface(&output, rose);
+        if candidate.as_ref().is_some_and(|spot| shared_capture_is_transient(remembered, spot)) {
+            niri_trace!("shared capture reject transient rose pos={rose:?}");
+            return Ok(None);
+        }
+        return Ok(candidate);
+    }
+    // Same guard for pair/panel sizes: the translated candidate is refused
+    // under the same placement-state rule — never by coordinate matching.
+    let candidate = crate::niri::compact_spot(&panel, Some(output));
+    if candidate.as_ref().is_some_and(|spot| shared_capture_is_transient(remembered, spot)) {
+        if let Some((x, y)) = panel.pos {
+            niri_trace!("shared capture reject transient panel pos=({x},{y})");
+        }
+        return Ok(None);
+    }
+    Ok(candidate)
+}
+
+/// Shared-boundary anchor capture: the ACTUAL
+/// production seam behind the shared route — resolves the current visible
+/// floating compact spot BEFORE any cover/resize/mode effect, from immutable
+/// wire geometry under I/O ownership, never from the recorded expanded flag
+/// (the stored mode already flips before the worker tiles). `uncovered` must
+/// come from a fresh main-thread visibility/opacity snapshot: toolkit-visible
+/// stays true under opacity 0, so covered/transient windows run zero wire.
+/// Epochs must agree (no concurrent bump across the snapshot); the
+/// merge+commit refuses stale jobs, so tiled, hidden, failed, racing, or
+/// superseded captures preserve the remembered anchor. Updates ONLY
+/// `native_compact`. No AppHandle: state plus an injected request closure, so
+/// tests drive the real wire sequence through this same body.
+#[cfg(target_os = "linux")]
+fn capture_shared_transition_anchor(
+    shell: &Shell,
+    job: u64,
+    pid: u32,
+    visible: bool,
+    uncovered: bool,
+    snap_epoch: u64,
+    pre_take_epoch: u64,
+    request: &mut impl FnMut(&str, Duration) -> std::io::Result<serde_json::Value>,
+) {
+    let fresh = native_io_sequenced(&shell.native_io, &shell.native_epoch, job, || {
+        if !visible || !uncovered || snap_epoch != pre_take_epoch {
+            niri_trace!("shared capture skip visible={visible} uncovered={uncovered} job={job}");
+            return None;
+        }
+        let remembered_anchor = shell.native_compact.lock().unwrap().clone();
+        match capture_shared_spot(pid, remembered_anchor.as_ref(), request) {
+            Ok(found) => {
+                niri_trace!(
+                    "shared capture wire job={job} found={}",
+                    if found.is_some() { "some" } else { "none" },
+                );
+                found
+            }
+            Err(error) => {
+                niri_trace!("shared capture wire err={} job={job}", error.kind());
+                None
+            }
+        }
+    })
+    .flatten();
+    let remembered =
+        merge_compact_spot(shell.native_compact.lock().unwrap().clone(), fresh);
+    if commit_compact_anchor(&shell.native_compact, &shell.native_gate, &shell.native_epoch, job, remembered.clone()) {
+        niri_trace!(
+            "shared capture job={job} remembered={}",
+            if remembered.is_some() { "some" } else { "none" },
+        );
+    } else {
+        niri_trace!("shared capture drop stale job={job}");
+    }
+}
+
+/// Fresh main-thread cover snapshot: reads toolkit
+/// visibility plus the GTK opacity gate in ONE main-thread closure with no
+/// state lock held, awaited bounded. Opacity 0 (covered) still reports
+/// toolkit-visible, so callers must consult opacity, not visibility alone.
+/// `None` on queue failure or timeout — callers preserve, never infer. The
+/// caller must hold no state lock: the closure itself takes brief ones, and
+/// awaiting it while holding one would deadlock a sync GTK-main command.
+#[cfg(target_os = "linux")]
+fn snapshot_shared_cover(panel: &WebviewWindow, budget: Duration) -> Option<(bool, f64)> {
+    let (tx, rx) = mpsc::channel();
+    let queried = panel.clone();
+    if panel
+        .run_on_main_thread(move || {
+            let visible = queried.is_visible().unwrap_or(false);
+            let opacity = queried.gtk_window().map(|window| window.opacity()).unwrap_or(GATED_OPACITY_SHOWN);
+            let _ = tx.send((visible, opacity));
+        })
+        .is_err()
+    {
+        return None;
+    }
+    rx.recv_timeout(budget).ok()
+}
+
+#[cfg(target_os = "linux")]
+fn clamp_anchor_to_work_area(
+    area: Option<crate::niri::calibration::WorkAreaEstimate>,
+    anchor: CompactSpot,
+    rose_visible: bool,
+) -> CompactSpot {
+    use crate::niri::calibration::{clamp_unit_inside, pair_size};
+    let Some(area) = area else {
+        return anchor;
+    };
+    let panel = (f64::from(PANEL_SIZE.0 as i32), f64::from(PANEL_SIZE.1 as i32));
+    let rose = rose_visible.then_some((f64::from(DOT_SIZE.0 as i32), f64::from(DOT_SIZE.1 as i32)));
+    let unit = pair_size(panel, rose, f64::from(PANEL_GAP));
+    match clamp_unit_inside(area, unit, (anchor.x, anchor.y), f64::from(EDGE_MARGIN)) {
+        // Only the PLANNED target moves; the remembered anchor keeps its value,
+        // so a later drag back inside the screen needs no repair.
+        Some((x, y)) => CompactSpot { output: anchor.output, x, y },
+        None => anchor,
+    }
+}
+
+/// Niri-native expanded/compact switch (position-independent): expanded
+/// is a normal managed tiling window, compact is floating. Socket budgets are
+/// 250 ms per phase with the remainder passed per request, with no worker
+/// thread and no retries: capture 250 + reconcile 250 + apply/retry 250 for a
+/// nominal 750 ms on a capturing collapse (500 without capture), PLUS the
+/// collapse-cover ack wait (250 ms) and the native_io ownership wait (an
+/// unbounded pool queue — never UI-blocking, never a state lock over wire).
+/// No end-to-end aggregate is claimed: the ownership lock sits outside every
+/// socket budget. No state lock is held across socket IPC
+/// or main-thread waits: snapshot, one atomic generation take,
+/// acknowledged cover, transition under I/O ownership (never state locks),
+/// generation commit. Collapse
+/// hands the restore worker off only after the float lands, so the mode
+/// transition always completes before restore processing. Missing/ambiguous
+/// windows or a missing socket are a bounded no-op returning the previous
+/// mode; action wire errors surface as command errors with the mode untouched.
+/// Never the legacy workarea frame, never `SetFixed`, never a
+/// focused-window fallback. Capture before expanding and the restore worker
+/// are S2b-2 below.
+#[cfg(target_os = "linux")]
+fn set_panel_niri_mode(app: AppHandle, on: bool) -> CommandResult<bool> {
+    use std::path::PathBuf;
+    // Snapshot the blocking getter before any native lock (same deadlock
+    // as the hide path): missing windows read as hidden, skipping capture.
+    let snap_epoch = app.state::<Shell>().native_epoch.load(Ordering::SeqCst);
+    let visible = snapshot_visible(|| {
+        window(&app, PANEL).and_then(|panel| panel.is_visible().map_err(err))
+    });
+    let shell = app.state::<Shell>();
+    // Brief state reads only: every guard drops before any socket IPC or
+    // main-thread wait below (the old flow held `native_expanded`
+    // across the capture plus the whole transition's socket I/O).
+    let was_expanded = *shell.native_expanded.lock().unwrap();
+    let places_windows = shell.places_windows;
+    let pre_epoch = shell.native_epoch.load(Ordering::SeqCst);
+    // Socket-level half of the native gate, through the unit-tested predicate:
+    // Niri-native without a usable socket is a bounded no-op returning the
+    // previous mode. (The dispatch above already keeps socket-less Niri out of
+    // the legacy fake-fullscreen frame.)
+    let socket = std::env::var("NIRI_SOCKET").ok().filter(|path| !path.is_empty());
+    niri_trace!("mode enter on={on} was={was_expanded} visible={visible} snap_epoch={snap_epoch} socket={}", socket.is_some());
+    if !native_niri_mode(
+        places_windows,
+        platform::is_niri(&|key| std::env::var(key).ok()),
+        socket.is_some(),
+    ) {
+        niri_trace!("mode skip reason=gate");
+        return Ok(was_expanded);
+    }
+    // The predicate held, so a usable socket is present; re-bind it for the
+    // client below, staying a bounded no-op on any drift instead of panicking.
+    let Some(socket) = socket else {
+        return Ok(was_expanded);
+    };
+    // Dormant shared-unit branch: explicit activation only; the
+    // legacy mode engine below (capture → cover → worker) stays untouched
+    // while dormant. The commit owns the expanded flag under the gate so it
+    // pairs with the unit snapshot; the anchor is preserved (no capture).
+    if unit_branch_wanted(
+        shell.native_unit.lock().unwrap().active,
+        places_windows,
+        platform::is_niri(&|key| std::env::var(key).ok()),
+        niri_socket_present(),
+    ) {
+        if let Some(routed) = route_unit_transition(&app, UnitTransition::SetExpanded(on)) {
+            return routed.map(|()| on);
+        }
+    }
+    // One generation owns this whole op (units 20a/20f1): EVERY valid native
+    // command publishes cancellation FIRST via the take below — even a
+    // same-mode no-op — so a cached-compact shortcut can never skip
+    // cancelling an in-flight tile (wire effects land regardless of
+    // generations; only commits and reveals are generation-gated). The
+    // actual-mode reconcile inside the transition then decides wire versus
+    // silent against the compositor, never the possibly-stale record alone.
+    // Bump plus gate-clear is atomic under the brief gate lock, never across
+    // waits, so rapid toggles/show/hide serialize on generations and no older
+    // job can reveal or steal a newer gate. Expanding unwinds the orphaned
+    // gated first frame here (the take above staled its reveal): restore
+    // opacity/interaction on the still-mapped window instead of stranding it
+    // at opacity 0. Collapsing owns its visuals through cover → settle →
+    // reveal below, so it queues no pre-bump reset that would only no-op
+    // against its own later handoff.
+    let job = mode_take_generation(&shell.native_epoch, &shell.native_gate);
+    if on {
+        if let Ok(mode_panel) = window(&app, PANEL) {
+            queue_gate_reset(&app, &mode_panel, job);
+        }
+    }
+    let pid = std::process::id();
+    let path = PathBuf::from(socket);
+    let mut request = |wire: &str, timeout: Duration| crate::niri::Client::new(&path, timeout).request(wire);
+    // Capture the compact spot before leaving it: ALWAYS resolves
+    // the actual floating geometry — the recorded flag is not proof — subject
+    // to visible/epoch freshness; tiled, hidden, missing, or failed captures
+    // preserve the current anchor with no inferred mode and no reveal.
+    capture_mode_anchor(&shell, job, pid, visible, snap_epoch, pre_epoch, &mut request);
+    // Window constraint setters are nonwaiting proxies (Tauri user-event queue
+    // into tao's channel); only getters block, and none run under the lock.
+    let mut set_resizable = |resizable: bool| {
+        window(&app, PANEL).and_then(|panel| panel.set_resizable(resizable).map_err(err))
+    };
+    let mut set_compact_size = || {
+        window(&app, PANEL).and_then(|panel| {
+            panel.set_size(LogicalSize::new(PANEL_SIZE.0, PANEL_SIZE.1)).map_err(err)
+        })
+    };
+    // Explicit collapse to base: EVERY valid `!on`
+    // request resets the session anchor to the compositor base — independent
+    // of the recorded `was_expanded` the transition reconciles against, so
+    // an explicit collapse from an already-compact record still resets the
+    // base the user asked for. Native validity was established above (early
+    // return), so only the request direction decides here; freshness gates
+    // the commit below, never the intent. The reset lands only after a
+    // successful mode commit: a superseded or failed collapse must not
+    // clear an anchor a newer lifecycle just wrote. Outside collapse the
+    // anchor is untouched (only user-mover and hide/expand capture write
+    // it). The worker settles the explicit base in a later unit (20g2);
+    // until then a base-less job fails explicitly instead of adopting an
+    // arbitrary compositor position.
+    let collapse_requested = !on;
+    if collapse_requested {
+        niri_trace!("mode collapse requested visible={visible}");
+    }
+    // The real epoch-incrementing handoff, run through the orchestration
+    // (units 20a1/20a2a/20c; defined before the cover dispatch so the routed
+    // transition can borrow it, invoked only after commit): gated for visible
+    // collapses, plain for hidden ones, both atomic compare-and-handoff on the
+    // expected generation — a newer lifecycle interleaving after our commit
+    // refuses instead of stealing its gate. Returns whether the worker will
+    // actually complete it (Sent/Coalesced only): a missing sender or a
+    // disconnected queue returns false so the cover cleanup below can tell a
+    // queued restore from a stranded cover — never on the Ok bool alone.
+    let mut handoff_queued = false;
+    // Mode-request intent (requirement S15/S17): `!on` keeps the remembered
+    // compact spot so leaving expanded/fullscreen returns the pair to where
+    // the user left it; only a request with nothing remembered falls back to
+    // the calibrated upper-right base. Native validity was established above
+    // (early return).
+    let anchored = shell.native_compact.lock().unwrap().is_some();
+    let mode_intent = restore_intent_for_mode_request(on, true, anchored);
+    let mut do_handoff = |kind: ModeRestore, expected: u64| -> bool {
+        let queued = match kind {
+            ModeRestore::Gated => {
+                if let Some(tx) = shell.native_restore.lock().unwrap().as_ref().cloned() {
+                    match gated_handoff_if_expected(
+                        &tx,
+                        &shell.native_epoch,
+                        &shell.native_gate,
+                        expected,
+                        mode_intent,
+                        &shell.native_intent,
+                    ) {
+                        Some((gated_job, queue)) => {
+                            niri_trace!("mode collapse gated job={gated_job} queue={queue:?}");
+                            if !queue_reaches_worker(queue) {
+                                cancel_gated_panel(&app, gated_job, "restore worker disconnected");
+                                false
+                            } else {
+                                true
+                            }
+                        }
+                        None => {
+                            niri_trace!("mode queue refuse stale expected={expected}");
+                            false
+                        }
+                    }
+                } else {
+                    niri_trace!("mode queue sender=none");
+                    false
+                }
+            }
+            ModeRestore::Plain => {
+                if let Some(tx) = shell.native_restore.lock().unwrap().as_ref() {
+                    match plain_handoff_if_expected(
+                        &tx,
+                        &shell.native_epoch,
+                        &shell.native_gate,
+                        expected,
+                        mode_intent,
+                        &shell.native_intent,
+                    ) {
+                        Some((plain_job, queue)) => {
+                            niri_trace!("mode collapse plain job={plain_job} queue={queue:?}");
+                            queue_reaches_worker(queue)
+                        }
+                        None => {
+                            niri_trace!("mode queue refuse stale expected={expected}");
+                            false
+                        }
+                    }
+                } else {
+                    niri_trace!("mode queue sender=none");
+                    false
+                }
+            }
+        };
+        handoff_queued = queued;
+        queued
+    };
+    // Composed apply under I/O ownership: the whole transition —
+    // wire, commit, handoff — serializes against worker passes. Superseded
+    // before the first wire runs no IPC and reports the live mode exactly
+    // like a refused handoff, queueing nothing. Shared by the routed cover
+    // below and the direct path alike.
+    let mut run_transition = || {
+        match native_io_sequenced(&shell.native_io, &shell.native_epoch, job, || {
+            execute_mode_transition(
+                was_expanded,
+                on,
+                pid,
+                job,
+                visible,
+                &shell.native_epoch,
+                &shell.native_expanded,
+                &mut set_resizable,
+                &mut set_compact_size,
+                &mut request,
+                &mut do_handoff,
+            )
+        }) {
+            Some(outcome) => outcome,
+            None => Ok(*shell.native_expanded.lock().unwrap()),
+        }
+    };
+    // Ordered cover (units 20a/20a2a/20d1/20f3): dispatch the opacity-0 cover,
+    // then AWAIT its acknowledgment with no lock held. Only an ACKED cover
+    // runs the float/size socket transition below — an unconfirmed cover
+    // (timeout) or a superseded one (stale) runs NO mode IPC. No fixed sleep
+    // and no gate published yet; the restore handoff runs after commit, so
+    // the mode transition always completes before any restore processing. A
+    // dispatched cover arms the shared tail finish below: a failed
+    // transition with a possibly-applied cover and no successor must reset
+    // visuals explicitly.
+    let mut cover_dispatched = false;
+    let mut cover_route: Option<CommandResult<bool>> = None;
+    // Cover is an explicit requested-compact + visible decision,
+    // never the anchor-reset predicate: a stale-while-covering snapshot still
+    // refuses the transition below, and hidden requests keep the honest
+    // previous-mode path with no cover queued.
+    if collapse_cover_wanted(on, visible) {
+        if shell.native_restore.lock().unwrap().is_some() {
+            if let Ok(cover_panel) = window(&app, PANEL) {
+                let cover_ack = dispatch_collapse_cover(&app, &cover_panel, job);
+                cover_dispatched = true;
+                let live = *shell.native_expanded.lock().unwrap();
+                cover_route = Some(route_covered_collapse(
+                    await_cover_ack(&cover_ack, job, &shell.native_epoch, COLLAPSE_COVER_ACK),
+                    job,
+                    live,
+                    &shell.cover_cancelled,
+                    &mut || run_transition(),
+                ));
+            }
+        } else {
+            niri_trace!("mode collapse queue sender=none");
+        }
+    }
+    // A routed cover already ran (or refused) its transition inside the
+    // routing above; every other path transitions here. The shared tail
+    // finish below owns cleanup for all of them.
+    let outcome = match cover_route {
+        Some(routed) => routed,
+        None => run_transition(),
+    };
+    if collapse_requested && outcome.is_ok() && !anchored {
+        // Nothing remembered: the base is the only place to land, so the
+        // anchor reset here is a no-op that also clears a stale mover. A
+        // remembered spot is never discarded on a mode change.
+        let live = shell.native_epoch.load(Ordering::SeqCst);
+        let anchor_cleared = commit_compact_anchor(
+            &shell.native_compact,
+            &shell.native_gate,
+            &shell.native_epoch,
+            live,
+            None,
+        );
+        let mover_cleared =
+            clear_mover_if_fresh(&shell.native_mover, &shell.native_gate, &shell.native_epoch, live);
+        niri_trace!("mode collapse anchor=reset-to-default visible={visible} anchor_cleared={anchor_cleared} mover_cleared={mover_cleared}");
+    }
+    if outcome.is_ok() {
+        // S5/S9: the extended mode hides the rose and its visibility toggle;
+        // returning re-presents the rose beside the panel instead of leaving
+        // it wherever the compositor dropped the remap.
+        sync_rose_for_mode(&app, &shell);
+    }
+    // Unified cover cleanup (units 20c/20d): every dispatched cover with no
+    // queued restore routes through the ONE shared finish — errors, refused
+    // handoffs, and missing/disconnected senders alike — so a mapped covered
+    // panel can never strand at opacity 0. A queued handoff never resets here
+    // (the reveal owns visuals until settle); a newer gated show is never
+    // uncovered (its stale reset deliberately no-ops). Outcome errors still
+    // propagate, never converted to stale-success.
+    finish_collapse_cover(&app, cover_dispatched, job, outcome.is_err(), handoff_queued);
+    outcome
+}
+
+/// Idle poll quantum for the native follow subscription (Linux only): a
+/// quiet tick re-checks shutdown without spinning.
+#[cfg(target_os = "linux")]
+const FOLLOW_IDLE_POLL: Duration = Duration::from_secs(1);
+/// One-shot budget for the follow connect and dot-id resolve (Linux only).
+#[cfg(target_os = "linux")]
+const FOLLOW_CONNECT_BUDGET: Duration = Duration::from_millis(250);
+/// Reconnect backoff bounds (Linux only): 500 ms doubling to a 5 s cap, so a
+/// dead compositor never hot-spins; shutdown exits instead of retrying.
+#[cfg(target_os = "linux")]
+const FOLLOW_RECONNECT_BASE: Duration = Duration::from_millis(500);
+#[cfg(target_os = "linux")]
+const FOLLOW_RECONNECT_CAP: Duration = Duration::from_secs(5);
+
+/// Queues a main-thread reset of the gate visuals (experimental, Linux only):
+/// opacity 1 plus interactive again, only while `expected` is still the
+/// current generation — a stale reset (a newer show owns the visuals) writes
+/// nothing. Callers own the generation explicitly: expand unwinds the gate
+/// its take orphaned, cover-timeout and failed-collapse unwind their own
+/// possibly-applied cover, and collapse success never queues one (the reveal
+/// owns visuals there). Same shared plan as the hide closure.
+/// Fire-and-forget — queue errors mean shutdown.
+#[cfg(target_os = "linux")]
+fn queue_gate_reset(app: &AppHandle, panel: &WebviewWindow, expected: u64) {
+    let (reset, reset_app) = (panel.clone(), app.clone());
+    let _ = panel.run_on_main_thread(move || {
+        let now = reset_app.state::<Shell>().native_epoch.load(Ordering::SeqCst);
+        if !plan_gate_effects(now, expected, false).contains(&GateEffect::ResetVisuals) {
+            return;
+        }
+        if let Ok(gtk_window) = reset.gtk_window() {
+            gtk_window.set_opacity(GATED_OPACITY_SHOWN);
+            gtk_window.set_accept_focus(true);
+        }
+        let _ = reset.set_ignore_cursor_events(false);
+    });
+}
+
+/// Reveals a gated Niri show only after the worker confirms the settled
+/// intended geometry (experimental, Linux only): opacity 1 plus focus plus
+/// the panel-shown emit run on the main thread. The caller guarantees
+/// settlement — this never runs for deadline expiry, unresolvable geometry,
+/// or errors — and the gate contract still applies: current epoch plus held
+/// gate only, so a stale hide stays hidden and never refocuses or emits.
+/// GTK commit timing stays pixel-unverified.
+#[cfg(target_os = "linux")]
+fn reveal_gated_panel(app: &AppHandle, job: u64) {
+    let shell = app.state::<Shell>();
+    let current = shell.native_epoch.load(Ordering::SeqCst);
+    // Take the gate only while still ours: a newer show overwrote it, a
+    // hide/mode cleared it — both keep owning their own outcome.
+    let ours = {
+        let mut gate = shell.native_gate.lock().unwrap();
+        if *gate == Some(job) {
+            *gate = None;
+            true
+        } else {
+            false
+        }
+    };
+    if !settled_reveal_eligible(true, job, current, ours.then_some(job)) {
+        niri_trace!("reveal skip job={job} current={current} ours={ours}");
+        return;
+    }
+    let panel = match window(app, PANEL) {
+        Ok(panel) => panel,
+        Err(error) => {
+            eprintln!("gentle-dot: gated reveal lost the panel: {error}");
+            return;
+        }
+    };
+    let (reveal, reveal_app) = (panel.clone(), app.clone());
+    niri_trace!("reveal queue job={job} settled");
+    if panel
+        .run_on_main_thread(move || {
+            // Final freshness on the main thread: a hide landing after the
+            // worker take keeps the window hidden — never refocus or emit.
+            // No native lock is held for any getter or action below.
+            let now = reveal_app.state::<Shell>().native_epoch.load(Ordering::SeqCst);
+            if !restore_job_fresh(job, now) {
+                niri_trace!("reveal stale job={job} now={now}");
+                return;
+            }
+            // A hidden window here means the gate map never landed (or ran
+            // late): converge visible instead of stranding the show.
+            if !reveal.is_visible().unwrap_or(false) {
+                niri_trace!("reveal remap job={job}");
+                if let Err(error) = reveal.show().map_err(err) {
+                    eprintln!("gentle-dot: gated reveal show failed: {error}");
+                    return;
+                }
+            }
+            if let Ok(gtk_window) = reveal.gtk_window() {
+                gtk_window.set_opacity(GATED_OPACITY_SHOWN);
+                gtk_window.set_accept_focus(true);
+            }
+            let _ = reveal.set_ignore_cursor_events(false);
+            if let Err(error) = reveal.set_focus().map_err(err) {
+                eprintln!("gentle-dot: gated reveal focus failed: {error}");
+            }
+            if let Err(error) = reveal_app.emit("dot://panel-shown", ()).map_err(err) {
+                eprintln!("gentle-dot: gated reveal emit failed: {error}");
+            }
+        })
+        .is_err()
+    {
+        eprintln!("gentle-dot: gated reveal missed the main thread");
+    }
+}
+
+/// Cancels a gated Niri show whose worker could not confirm the settled
+/// intended geometry (experimental, Linux only): deadline expiry,
+/// unresolvable geometry, wire errors, missing socket, or a disconnected
+/// queue. Takes the gate only while still ours and fresh — stale lifecycles
+/// keep owning their own outcome and are never touched — then unmaps plus
+/// resets opacity/interaction on the main thread through the shared guarded
+/// plan, with no focus and no panel-shown emit. The window therefore never
+/// sticks at opacity 0 and never appears at the unconfirmed default anchor;
+/// the gate is released so a later reopen can retry. Fire-and-forget: queue
+/// errors mean shutdown.
+#[cfg(target_os = "linux")]
+fn cancel_gated_panel(app: &AppHandle, job: u64, reason: &str) {
+    let shell = app.state::<Shell>();
+    let current = shell.native_epoch.load(Ordering::SeqCst);
+    let ours = {
+        let mut gate = shell.native_gate.lock().unwrap();
+        if *gate == Some(job) {
+            *gate = None;
+            true
+        } else {
+            false
+        }
+    };
+    if !ours || !restore_job_fresh(job, current) {
+        niri_trace!("cancel skip job={job} current={current} ours={ours} reason={reason}");
+        return;
+    }
+    let panel = match window(app, PANEL) {
+        Ok(panel) => panel,
+        Err(error) => {
+            eprintln!("gentle-dot: gated cancel lost the panel: {error}");
+            return;
+        }
+    };
+    niri_trace!("cancel queue job={job} reason={reason}");
+    let (hidden, hidden_app) = (panel.clone(), app.clone());
+    if panel
+        .run_on_main_thread(move || {
+            let now = hidden_app.state::<Shell>().native_epoch.load(Ordering::SeqCst);
+            for effect in plan_gate_effects(now, job, true) {
+                match effect {
+                    GateEffect::Unmap => {
+                        if let Err(error) = hidden.hide().map_err(err) {
+                            eprintln!("gentle-dot: gated cancel hide failed: {error}");
+                        }
+                    }
+                    GateEffect::ResetVisuals => {
+                        if let Ok(gtk_window) = hidden.gtk_window() {
+                            gtk_window.set_opacity(GATED_OPACITY_SHOWN);
+                            gtk_window.set_accept_focus(true);
+                        }
+                        let _ = hidden.set_ignore_cursor_events(false);
+                    }
+                }
+            }
+        })
+        .is_err()
+    {
+        eprintln!("gentle-dot: gated cancel missed the main thread");
+    }
+}
+
+/// Spawns the single native restore worker: one thread per
+/// app instance, woken through the coalesced capacity-1 handoff. The channel
+/// is created before `manage` and this spawn runs only after it: the first
+/// wait reads Shell state, which panics before registration. The receiver
+/// disconnects when the exit handler takes the Shell sender, so this thread
+/// then returns and drops its handle clone instead of keeping shutdown alive.
+#[cfg(target_os = "linux")]
+fn spawn_restore_worker(app: AppHandle, rx: mpsc::Receiver<()>) {    thread::spawn(move || {
+        loop {
+            let job = {
+                let shell = app.state::<Shell>();
+                restore_take(&rx, &shell.native_epoch)
+            };
+            let Some(job) = job else {
+                niri_trace!("worker end reason=disconnected");
+                return;
+            };
+            niri_trace!("worker begin job={job}");
+            let outcome = run_restore_job(&app, job);
+            niri_trace!("worker end job={job} ok={}", outcome.is_ok());
+            if let Err(error) = outcome {
+                eprintln!("gentle-dot: native panel restore failed: {error}");
+            }
+        }
+    });
+}
+
+/// Spawns the native follow subscriber (Linux only): one thread per app
+/// instance alongside the restore worker, alive exactly while the restore
+/// channel exists. It NEVER moves windows itself — the restore worker stays
+/// the single writer — it only wakes that worker after a debounced owned-dot
+/// signal. No output-extent clamp is applied: no `Outputs` geometry is
+/// verified against Niri 26.04 in this tree, so the same-output guard inside
+/// the shared `plan_beside_rose` is the only bound — explicitly deferred,
+/// never faked with GTK coordinates.
+#[cfg(target_os = "linux")]
+fn spawn_follow_worker(app: AppHandle) {
+    thread::spawn(move || follow_loop(&app));
+}
+
+/// Native follow loop (Linux only): subscribes to the compositor event
+/// stream on a dedicated connection (Niri stops reading requests on it, so
+/// one-shot queries keep their own), tracks BOTH owned ids from exact
+/// pid+title signals (rose AND panel), and after `FOLLOW_DEBOUNCE` of quiet
+/// on either side wakes the single restore worker — whose unit path
+/// re-resolves fresh dot/panel geometry and moves exactly one side with the
+/// exact-id AdjustFixed `plan_unit_move` (dot-priority) + settle-verify, with
+/// reveal skipping when no gate is held. Both event forms arm the debounce
+/// (live drags arrive as `WindowOpenedOrChanged`); other pids/titles never
+/// arm. Anti-feedback is local: a wake for one side suppresses the other
+/// side's echoes for 2× quiet (the worker's own move), so follow never
+/// chases itself, while genuine later drags still arm after the window.
+#[cfg(target_os = "linux")]
+fn follow_loop(app: &AppHandle) {
+    use std::path::PathBuf;
+    use std::time::Instant;
+    let pid = std::process::id();
+    let mut failures: u32 = 0;
+    'outer: loop {
+        // Shutdown bound: the Exit handler takes the restore sender, so a
+        // missing sender ends this thread instead of retrying forever.
+        if app.state::<Shell>().native_restore.lock().unwrap().is_none() {
+            niri_trace!("follow end reason=shutdown");
+            return;
+        }
+        let socket = std::env::var("NIRI_SOCKET").ok().filter(|path| !path.is_empty());
+        let Some(socket) = socket else {
+            if !follow_backoff(app, &mut failures) {
+                return;
+            }
+            continue;
+        };
+        let path = PathBuf::from(socket);
+        // Resolve both owned ids from fresh compositor geometry (exact
+        // pid+title each, never a guess); stream signals refresh them below.
+        let mut dot_id = follow_resolve_dot(&path, pid);
+        let mut panel_id = follow_resolve_panel(&path, pid);
+        let mut stream = match crate::niri::EventStream::connect(&path, FOLLOW_CONNECT_BUDGET) {
+            Ok(stream) => {
+                failures = 0;
+                stream
+            }
+            Err(error) => {
+                niri_trace!("follow connect err={} failures={failures}", error.kind());
+                if !follow_backoff(app, &mut failures) {
+                    return;
+                }
+                continue;
+            }
+        };
+        niri_trace!("follow subscribed");
+        let mut pending_dot: Option<Instant> = None;
+        let mut pending_panel: Option<Instant> = None;
+        // Last observed layer-surface set for environment-change cache
+        // invalidation: re-seeded per connection, never polled.
+        let mut last_layers: Option<Vec<crate::niri::unit_restore::LayerIdentity>> = None;
+        // Local anti-feedback: a wake for one side mutes the other's echoes
+        // (the worker's own AdjustFixed) for 2× quiet. Genuine later drags
+        // re-arm after the window; no shared state, no worker coupling.
+        let mut ignore_dot_until: Option<Instant> = None;
+        let mut ignore_panel_until: Option<Instant> = None;
+        // Shared-route workspace follow: our window's workspace, the last
+        // full workspace list (normalized `{"Workspaces": [...]}`), and
+        // the one in-flight follow target. Task-local only: no Shell field,
+        // no lock, seeded from the stream's upfront state, never polled.
+        let mut follow_workspaces: Option<serde_json::Value> = None;
+        let mut follow_own_workspace: Option<u64> = None;
+        let mut follow_in_flight: Option<u64> = None;
+        loop {
+            if app.state::<Shell>().native_restore.lock().unwrap().is_none() {
+                niri_trace!("follow end reason=shutdown");
+                return;
+            }
+            let now = Instant::now();
+            let wait = crate::niri::follow_wait(pending_dot, now, FOLLOW_IDLE_POLL)
+                .min(crate::niri::follow_wait(pending_panel, now, FOLLOW_IDLE_POLL));
+            match stream.next_line(wait) {
+                Err(error) => {
+                    niri_trace!("follow stream err={} failures={failures}", error.kind());
+                    if !follow_backoff(app, &mut failures) {
+                        return;
+                    }
+                    continue 'outer;
+                }
+                Ok(None) => {
+                    // Quiet tick: el lado que debe fija el MOVER (quién movió
+                    // el usuario) y despierta al único worker para una pasada
+                    // CONJUNTA desde el ancla. Ambas supresiones (local + la
+                    // compartida de nuestros propios moves) mutean los ecos.
+                    let now = Instant::now();
+                    let dot_due = pending_dot.is_some_and(|last| crate::niri::debounce_due(last, now));
+                    let panel_due = pending_panel.is_some_and(|last| crate::niri::debounce_due(last, now));
+                    if dot_due || panel_due {
+                        // Shared single surface: the compositor moves the one
+                        // window natively — no mover write, no worker wake, no
+                        // echo corrections. Legacy joint follow stays below.
+                        let shell = app.state::<Shell>();
+                        if shared_route_wanted(
+                            shell.native_unit.lock().unwrap().active,
+                            shell.places_windows,
+                            platform::is_niri(&|key| std::env::var(key).ok()),
+                            niri_socket_present(),
+                        ) {
+                            pending_dot = None;
+                            pending_panel = None;
+                            continue;
+                        }
+                        let dot_at = pending_dot;
+                        let panel_at = pending_panel;
+                        pending_dot = None;
+                        pending_panel = None;
+                        let quiet2 = Some(now + crate::niri::FOLLOW_DEBOUNCE * 2);
+                        ignore_dot_until = quiet2;
+                        ignore_panel_until = quiet2;
+                        // A covered job's probe positions are owned effects,
+                        // never user drags: its mover must not be overwritten
+                        // by the panel origin or the proportion probe.
+                        let covered = app.state::<Shell>().native_gate.lock().unwrap().is_some();
+                        if !covered {
+                            if let Some(mover) = joint_mover_from_signals(dot_due, panel_due, dot_at, panel_at) {
+                                *app.state::<Shell>().native_mover.lock().unwrap() = Some(mover);
+                            }
+                        }
+                        if !follow_wake_panel(app) {
+                            niri_trace!("follow end reason=worker-gone");
+                            return;
+                        }
+                    }
+                }
+                Ok(Some(line)) => {
+                    let event: serde_json::Value = match serde_json::from_str(&line) {
+                        Ok(event) => event,
+                        Err(_) => continue,
+                    };
+                    let now = Instant::now();
+                    // Environment-change invalidation: a layer-set
+                    // change or config reload may move the work area while
+                    // our window stays legal, so drop the cached calibration
+                    // here (gate-domain, live-worker-guarded); the next
+                    // transition re-probes once and re-fills the entry.
+                    // Shared-route only: legacy/non-Niri paths stay untouched.
+                    {
+                        let shell = app.state::<Shell>();
+                        if shared_route_wanted(
+                            shell.native_unit.lock().unwrap().active,
+                            shell.places_windows,
+                            platform::is_niri(&|key| std::env::var(key).ok()),
+                            niri_socket_present(),
+                        ) {
+                            let live = || app.state::<Shell>().native_restore.lock().unwrap().is_some();
+                            note_environment_event(&shell.native_gate, &shell.native_unit_cache, &event, &mut last_layers, &live);
+                        }
+                    }
+                    // Shared-route workspace follow: the owned single surface
+                    // follows the active workspace of its own output via one
+                    // explicit move (Niri 26.04 has no sticky window). Same
+                    // output, so the per-output calibration cache stays valid
+                    // and is never invalidated here; the remembered anchor,
+                    // the mover, and the pipeline generations stay untouched.
+                    // Seeding runs on EVERY event outside the shared gate, so
+                    // the owned id, own workspace, and workspaces list are
+                    // current by the time the gate opens; only the DECISION
+                    // and the MOVE stay inside it.
+                    {
+                        // Live owned id only (exact pid+title, never a guess).
+                        if let Some((id, _)) = crate::niri::panel_opened_signal(&event, pid, PANEL_TITLE) {
+                            panel_id = Some(id);
+                        }
+                        if let Some(closed) = crate::niri::window_closed_id(&event) {
+                            if panel_id == Some(closed) {
+                                panel_id = None;
+                                follow_own_workspace = None;
+                                follow_in_flight = None;
+                            }
+                        }
+                        if let Some(id) = panel_id {
+                            if let Some(workspace) = crate::niri::window_workspace_in_event(&event, id) {
+                                follow_own_workspace = workspace;
+                                if follow_in_flight.is_some() && follow_own_workspace == follow_in_flight {
+                                    follow_in_flight = None;
+                                }
+                            }
+                        }
+                        if let Some(list) = event
+                            .get("WorkspacesChanged")
+                            .and_then(|inner| inner.get("workspaces"))
+                            .cloned()
+                        {
+                            follow_workspaces = Some(serde_json::json!({"Workspaces": list}));
+                            if follow_in_flight.is_some() && follow_own_workspace == follow_in_flight {
+                                follow_in_flight = None;
+                            }
+                        }
+                        if let Some(activated) = crate::niri::workspace_activated_id(&event) {
+                            if let Some(cached) = follow_workspaces.as_mut() {
+                                let output = crate::niri::workspace_output(cached, Some(activated));
+                                if let (Some(output), Some(list)) =
+                                    (output, cached.get_mut("Workspaces").and_then(|v| v.as_array_mut()))
+                                {
+                                    for entry in list.iter_mut() {
+                                        let same_output =
+                                            entry.get("output").and_then(serde_json::Value::as_str) == Some(output.as_str());
+                                        let is_new = entry.get("id").and_then(serde_json::Value::as_u64) == Some(activated);
+                                        if same_output {
+                                            if let Some(fields) = entry.as_object_mut() {
+                                                fields.insert("is_active".to_owned(), serde_json::Value::Bool(is_new));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Bounded re-resolve: the connect-time resolve races
+                        // window creation, so when the owned id is still
+                        // unknown on an activation, try the same exact-id
+                        // lookup once — one attempt per activation, no
+                        // polling, no loop.
+                        if panel_id.is_none() && crate::niri::workspace_activated_id(&event).is_some() {
+                            panel_id = follow_resolve_panel(&path, pid);
+                        }
+                    }
+                    {
+                        let shell = app.state::<Shell>();
+                        let shared = shared_route_wanted(
+                            shell.native_unit.lock().unwrap().active,
+                            shell.places_windows,
+                            platform::is_niri(&|key| std::env::var(key).ok()),
+                            niri_socket_present(),
+                        );
+                        drop(shell);
+                        // Activations only: one decision per activation, never
+                        // per unrelated event — and a skip always traces its
+                        // missing input, so silence is impossible.
+                        if shared && crate::niri::workspace_activated_id(&event).is_some() {
+                            let active_on_output = follow_workspaces.as_ref().and_then(|workspaces| {
+                                let output = crate::niri::workspace_output(workspaces, follow_own_workspace)?;
+                                crate::niri::active_workspace_on_output(workspaces, &output)
+                            });
+                            if let Some(target) = crate::niri::follow_workspace_target(
+                                follow_own_workspace,
+                                active_on_output,
+                                panel_id.is_some(),
+                                follow_in_flight,
+                            ) {
+                                let id = panel_id.expect("owned id checked by the predicate");
+                                let wire = crate::niri::action_move_to_workspace(id, target);
+                                follow_in_flight = Some(target);
+                                match crate::niri::Client::new(&path, FOLLOW_CONNECT_BUDGET).request(&wire) {
+                                    Ok(reply) if crate::niri::is_handled(&reply) => {
+                                        niri_trace!("follow workspace move id={id} target={target}");
+                                    }
+                                    Ok(reply) => {
+                                        eprintln!("gentle-dot: follow workspace move rejected target={target} reply={reply}");
+                                    }
+                                    Err(error) => {
+                                        eprintln!("gentle-dot: follow workspace move failed target={target}: {error}");
+                                    }
+                                }
+                            } else if let Some(reason) = crate::niri::follow_skip_reason(
+                                follow_own_workspace,
+                                active_on_output,
+                                panel_id.is_some(),
+                                follow_in_flight,
+                            ) {
+                                niri_trace!("follow workspace skip reason={reason} own={follow_own_workspace:?} active={active_on_output:?} owned={} in_flight={follow_in_flight:?}", panel_id.is_some());
+                            }
+                        }
+                    }
+                    // Remap/discovery carries pid+title per side: refresh the
+                    // tracked id, and arm only on a real position — a null
+                    // layout is transient drag state, never an anchor — and
+                    // never while muted (local quiet OR our own joint pass).
+                    let shared = *app.state::<Shell>().native_suppress_until.lock().unwrap();
+                    let dot_muted = crate::niri::suppress_active(now, ignore_dot_until)
+                        || crate::niri::suppress_active(now, shared);
+                    let panel_muted = crate::niri::suppress_active(now, ignore_panel_until)
+                        || crate::niri::suppress_active(now, shared);
+                    if let Some((id, pos)) = crate::niri::dot_opened_signal(&event, pid, DOT_TITLE) {
+                        dot_id = Some(id);
+                        if pos.is_some() && !dot_muted {
+                            pending_dot = Some(now);
+                        }
+                        continue;
+                    }
+                    if let Some((id, pos)) = crate::niri::panel_opened_signal(&event, pid, PANEL_TITLE) {
+                        panel_id = Some(id);
+                        if pos.is_some() && !panel_muted {
+                            pending_panel = Some(now);
+                        }
+                        continue;
+                    }
+                    if let Some(id) = crate::niri::window_closed_id(&event) {
+                        if dot_id == Some(id) {
+                            dot_id = None;
+                            pending_dot = None;
+                        }
+                        if panel_id == Some(id) {
+                            panel_id = None;
+                            pending_panel = None;
+                        }
+                        continue;
+                    }
+                    if let Some(id) = dot_id {
+                        if !dot_muted {
+                            match crate::niri::dot_layout_signal(&event, id) {
+                                Some(Some(_)) => pending_dot = Some(now),
+                                // Null layout or other windows: transient or
+                                // cross-side — never arm, never anchor.
+                                Some(None) | None => {}
+                            }
+                        }
+                    }
+                    if let Some(id) = panel_id {
+                        if !panel_muted {
+                            match crate::niri::panel_layout_signal(&event, id) {
+                                Some(Some(_)) => pending_panel = Some(now),
+                                Some(None) | None => {}
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Resolves the owned dot id from fresh compositor geometry (Linux only):
+/// exact pid+rose-title, `None` when missing or ambiguous — never a guess.
+#[cfg(target_os = "linux")]
+fn follow_resolve_dot(path: &std::path::Path, pid: u32) -> Option<u64> {
+    let windows = crate::niri::Client::new(path, FOLLOW_CONNECT_BUDGET)
+        .request(crate::niri::WINDOWS_REQUEST)
+        .ok()?;
+    crate::niri::own_dot_window(&windows, pid).map(|dot| dot.id)
+}
+
+/// Resolves the owned panel id from fresh compositor geometry (UNIDAD bidir,
+/// Linux only): exact pid+panel-title, `None` when missing or ambiguous.
+#[cfg(target_os = "linux")]
+fn follow_resolve_panel(path: &std::path::Path, pid: u32) -> Option<u64> {
+    let windows = crate::niri::Client::new(path, FOLLOW_CONNECT_BUDGET)
+        .request(crate::niri::WINDOWS_REQUEST)
+        .ok()?;
+    crate::niri::own_panel_window(&windows, pid).map(|panel| panel.id)
+}
+
+/// Capped reconnect backoff (Linux only): 500 ms doubling to a 5 s cap, so a
+/// dead compositor never hot-spins. Returns false when the restore channel is
+/// gone (shutdown or worker exit): the caller ends the thread instead of
+/// retrying — no runaway retries.
+#[cfg(target_os = "linux")]
+fn follow_backoff(app: &AppHandle, failures: &mut u32) -> bool {
+    if app.state::<Shell>().native_restore.lock().unwrap().is_none() {
+        return false;
+    }
+    let shift = (*failures).min(4);
+    let delay = (FOLLOW_RECONNECT_BASE * (1 << shift)).min(FOLLOW_RECONNECT_CAP);
+    *failures = failures.saturating_add(1);
+    thread::sleep(delay);
+    app.state::<Shell>().native_restore.lock().unwrap().is_some()
+}
+
+/// Debounced follow wake (Linux only): snapshots visibility with no native
+/// lock held, then filters (hide/expanded/hidden/fullscreen win) and
+/// signals the single restore worker WITHOUT bumping the generation — no new
+/// gated job, no reveal: the worker's unit path moves exactly one side to the
+/// fresh geometry with the exact-id AdjustFixed plan and verifies settle;
+/// compact panel to the fresh dot anchor with the exact-id AdjustFixed plan
+/// and verifies settle; its reveal skips without a gate. Returns false only
+/// when the worker is gone (caller exits); a full channel just coalesces,
+/// since the worker always re-resolves fresh geometry.
+#[cfg(target_os = "linux")]
+fn follow_wake_panel(app: &AppHandle) -> bool {
+    let shell = app.state::<Shell>();
+    // Blocking getter first, no native lock held; missing windows read hidden.
+    let visible = window(app, PANEL).and_then(|panel| panel.is_visible().map_err(err)).unwrap_or(false);
+    let rose_hidden = shell.rose_hidden.load(Ordering::SeqCst);
+    let expanded = *shell.native_expanded.lock().unwrap();
+    let fullscreen = shell.full_screen.lock().unwrap().is_some();
+    if !crate::niri::follow_wake_eligible(rose_hidden, expanded, visible, fullscreen) {
+        niri_trace!("follow wake skip rose_hidden={rose_hidden} expanded={expanded} visible={visible} fullscreen={fullscreen}");
+        return true;
+    }
+    let tx = shell.native_restore.lock().unwrap().as_ref().cloned();
+    match tx {
+        None => false,
+        Some(tx) => match tx.try_send(()) {
+            Ok(()) => {
+                niri_trace!("follow wake sent");
+                true
+            }
+            Err(mpsc::TrySendError::Full(_)) => {
+                niri_trace!("follow wake coalesced");
+                true
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => false,
+        },
+    }
+}
+
+/// User-drag anchor commit (Linux only): the observed drag spot lands under
+/// gate/epoch, separately from restore (which only returns its preserved
+/// `remembered`). Thin over `commit_compact_anchor` (same gate domain).
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn commit_dragged_anchor(
+    compact: &Mutex<Option<CompactSpot>>,
+    gate: &Mutex<Option<u64>>,
+    epoch: &AtomicU64,
+    job: u64,
+    observed: Option<CompactSpot>,
+) -> bool {
+    commit_compact_anchor(compact, gate, epoch, job, observed)
+}
+
+/// Injectable native ops behind the shared driver (Linux only): production
+/// binds AppHandle/window/socket/state, tests bind scripted fakes — the driver
+/// runs the same tested sequence either way. Every method runs outside state
+/// locks; `&self` borrows compose inside the sequence closures.
+#[cfg(target_os = "linux")]
+trait SharedUnitOps {
+    fn cover(&self) -> bool;
+    fn resize(&self, size: (i32, i32)) -> bool;
+    fn set_resizable(&self, resizable: bool) -> bool;
+    fn hide(&self) -> bool;
+    fn show(&self) -> bool;
+    fn request(&self, wire: &str, timeout: Duration) -> std::io::Result<serde_json::Value>;
+    fn render_ready(&self) -> bool;
+    fn commit(&self, spot: Option<CompactSpot>);
+    /// Last covered calibration for the live output, if any. Test doubles
+    /// use the default (`None`: every transition probes, as before).
+    fn cached(&self) -> Option<crate::niri::unit_restore::CachedCalibration> {
+        None
+    }
+    /// Stores a fresh probe measurement. Only invoked on a revealed job;
+    /// production additionally refuses stale generations under the gate.
+    fn commit_cache(&self, _cache: crate::niri::unit_restore::CachedCalibration) {}
+    /// Drops the stored calibration after a verified cache miss. Only
+    /// invoked for jobs that set the miss flag; production refuses stale
+    /// generations under the gate, so a superseded job never clears a newer
+    /// entry. Test doubles use the default (no stored entry to drop).
+    fn clear_cache(&self) {}
+    fn reveal(&self, mode: crate::niri::unit_surface::UnitMode, open: bool);
+    fn cancel(&self, reason: &'static str);
+    fn managed_fullscreen(&self, pid: u32) -> bool;
+}
+
+/// Drives one shared job through injected ops (Linux only): the production
+/// callsite and the adapter test share this exact path. Mapped-only:
+/// the sequence never unmaps; a both-hidden close (open=false AND
+/// rose_hidden=true) ends covered (commit, no reveal) while a close with
+/// the rose wanted reveals the 72x72 rose; fullscreen runs the exact-id
+/// tiling prologue first; otherwise the ordered socket sequence decides.
+/// Revealed+open commits then reveals; Revealed+closed-with-rose commits
+/// then reveals the rose; Revealed+both-hidden commits and stays covered;
+/// Cancelled cancels exact-owned; Silent touches nothing.
+#[cfg(target_os = "linux")]
+fn drive_shared_unit_job(
+    ops: &impl SharedUnitOps,
+    pid: u32,
+    anchor: Option<&CompactSpot>,
+    mode: crate::niri::unit_restore::UnitRestoreMode,
+    keep_mapped: bool,
+    open: bool,
+    rose_hidden: bool,
+    gap: i32,
+    margin: f64,
+    budget: Duration,
+    fresh: impl Fn() -> bool,
+    steps: &mut Vec<&'static str>,
+) -> SharedOutcome {
+    use crate::niri::unit_restore::UnitRestoreMode as R;
+    if !fresh() || !keep_mapped {
+        return SharedOutcome::Silent;
+    }
+    if mode == R::Fullscreen {
+        steps.push("managed");
+        if !ops.managed_fullscreen(pid) {
+            ops.cancel("unit tiling rejected");
+            return SharedOutcome::Cancelled("unit tiling rejected");
+        }
+    }
+    let cached = ops.cached();
+    let mut cache_out = None;
+    let mut cache_clear = false;
+    let outcome = run_shared_unit_sequence_cached(pid, anchor, mode, rose_hidden, gap, margin, budget, fresh,
+        &mut || ops.cover(), &mut || ops.set_resizable(true), &mut |size| ops.resize(size),
+        &mut || ops.hide(), &mut || ops.show(),
+        &mut |wire, timeout| ops.request(wire, timeout),
+        &mut || ops.render_ready(), steps, cached, &mut cache_out, &mut cache_clear);
+    match outcome {
+        SharedOutcome::Revealed(remembered) => {
+            ops.commit(remembered.clone());
+            if let Some(cache) = cache_out {
+                ops.commit_cache(cache);
+            } else if cache_clear {
+                // Miss without a refresh (the Outputs query failed): drop
+                // the stale entry rather than keep it.
+                ops.clear_cache();
+            }
+            // Corrected close: only both-hidden stays covered at opacity 0
+            // (no reveal call); a close with the rose wanted reveals the
+            // rose-only surface, opens reveal as before. The saved rose
+            // preference is never flipped here.
+            if shared_job_reveals(open, rose_hidden) {
+                if let Some(surface) = shared_surface_mode(mode) { ops.reveal(surface, open); }
+            }
+            SharedOutcome::Revealed(remembered)
+        }
+        SharedOutcome::Silent => SharedOutcome::Silent,
+        SharedOutcome::Cancelled(reason) => {
+            if cache_clear {
+                // A verified miss must never leave its stale entry behind
+                // for the next job to reuse.
+                ops.clear_cache();
+            }
+            ops.cancel(reason);
+            SharedOutcome::Cancelled(reason)
+        }
+    }
+}
+
+/// Production native ops (Linux only): AppHandle-bound SharedUnitOps. Snapshots
+/// resolve before construction; every method runs outside state locks.
+/// Whether the shared surface may take keyboard focus: chat-open only.
+/// Rose-only must never be focusable, so workspace-return focus memory lands
+/// on the user's window; chat-open must be focusable so typing works at once.
+#[cfg(target_os = "linux")]
+fn shared_reveal_focusable(open: bool) -> bool {
+    open
+}
+
+#[cfg(target_os = "linux")]
+struct SharedNativeOps {
+    app: AppHandle,
+    panel: WebviewWindow,
+    path: PathBuf,
+    job: u64,
+    surface: crate::niri::unit_surface::UnitMode,
+}
+
+#[cfg(target_os = "linux")]
+impl SharedNativeOps {
+    /// Apply the whole GTK size policy as one current-generation UI operation.
+    /// A worker must not leave a late widget pin behind a newer managed mode.
+    fn apply_size_policy(&self, size: Option<(i32,i32)>) -> bool {
+        let (panel, app, job) = (self.panel.clone(),self.app.clone(),self.job);
+        let (tx,rx) = std::sync::mpsc::channel();
+        if self.panel.run_on_main_thread(move || {
+            let shell = app.state::<Shell>();
+            if !restore_job_fresh(job,shell.native_epoch.load(Ordering::SeqCst)) { return; }
+            let Ok(gtk_window) = panel.gtk_window() else { return; };
+            let logical = size.map(|(w,h)| LogicalSize::new(f64::from(w),f64::from(h)));
+            let min = panel.set_min_size(logical).is_ok();
+            let max = panel.set_max_size(logical).is_ok();
+            let applied = if let Some((w,h)) = size {
+                let ask = panel.set_size(LogicalSize::new(f64::from(w),f64::from(h))).is_ok();
+                gtk_window.set_size_request(w,h);
+                ask
+            } else {
+                let released = panel.set_resizable(true).is_ok();
+                // Widget requests are independent of Tao's min/max fields.
+                gtk_window.set_size_request(-1,-1);
+                gtk_window.set_geometry_hints(None::<&gtk::Widget>,None,gtk::gdk::WindowHints::empty());
+                released
+            };
+            gtk_window.queue_resize();
+            if !(min && max && applied) { return; }
+            gtk::glib::idle_add_once(move || {
+                let shell = app.state::<Shell>();
+                if restore_job_fresh(job,shell.native_epoch.load(Ordering::SeqCst)) {
+                    let _ = tx.send(());
+                }
+            });
+        }).is_err() { return false; }
+        let shell = self.app.state::<Shell>();
+        matches!(await_cover_ack(&rx,self.job,&shell.native_epoch,COLLAPSE_COVER_ACK),CoverAck::Acked)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl SharedUnitOps for SharedNativeOps {
+    fn cover(&self) -> bool {
+        let (ack_tx, ack_rx) = mpsc::channel();
+        let (cover, cover_app, surface, job) = (self.panel.clone(), self.app.clone(), self.surface, self.job);
+        let queued = self.panel.run_on_main_thread(move || {
+            let done = || {
+                let _ = ack_tx.send(());
+            };
+            let shell = cover_app.state::<Shell>();
+            let cancelled = *shell.cover_cancelled.lock().unwrap();
+            if !cover_apply_allowed(job, shell.native_epoch.load(Ordering::SeqCst), cancelled) {
+                done();
+                return;
+            }
+            if let Ok(gtk_window) = cover.gtk_window() {
+                gtk_window.set_opacity(GATED_OPACITY_HIDDEN);
+                gtk_window.set_accept_focus(false);
+                crate::niri::unit_surface::apply_input_shape(&gtk_window, surface, false, true);
+            }
+            let _ = cover.set_ignore_cursor_events(true);
+            let _ = ack_tx.send(());
+        });
+        if queued.is_err() {
+            eprintln!("gentle-dot: shared cover missed the main thread job={job}");
+            return false;
+        }
+        let shell = self.app.state::<Shell>();
+        matches!(await_cover_ack(&ack_rx, job, &shell.native_epoch, COLLAPSE_COVER_ACK), CoverAck::Acked)
+    }
+    fn resize(&self, size: (i32, i32)) -> bool {
+        let result = self.apply_size_policy(Some(size));
+        niri_trace!("shared resize {size:?} ack={result} job={}",self.job);
+        result
+    }
+    fn set_resizable(&self, resizable: bool) -> bool {
+        if !resizable { return self.panel.set_resizable(false).is_ok(); }
+        let result = self.apply_size_policy(None);
+        niri_trace!("shared release constraints ack={result} job={}",self.job);
+        result
+    }
+    fn hide(&self) -> bool {
+        let ok = self.panel.hide().is_ok();
+        niri_trace!("shared hide ok={ok} job={}", self.job);
+        ok
+    }
+    fn show(&self) -> bool {
+        let ok = self.panel.show().is_ok();
+        niri_trace!("shared show ok={ok} job={}", self.job);
+        ok
+    }
+    fn request(&self, wire: &str, timeout: Duration) -> std::io::Result<serde_json::Value> {
+        let shell = self.app.state::<Shell>();
+        let _hold = shell.native_io.lock().unwrap();
+        if !restore_job_fresh(self.job, shell.native_epoch.load(Ordering::SeqCst)) {
+            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "niri: restore superseded"));
+        }
+        crate::niri::Client::new(&self.path, timeout).request(wire)
+    }
+    fn render_ready(&self) -> bool {
+        let shell = self.app.state::<Shell>();
+        unit_ready_for(&shell.native_gate, &shell.native_unit, &shell.native_epoch, self.job)
+    }
+    fn commit(&self, spot: Option<CompactSpot>) {
+        if let Some(spot) = spot {
+            let shell = self.app.state::<Shell>();
+            let _ = commit_compact_anchor(&shell.native_compact, &shell.native_gate, &shell.native_epoch, self.job, Some(spot));
+        }
+    }
+    fn cached(&self) -> Option<crate::niri::unit_restore::CachedCalibration> {
+        self.app.state::<Shell>().native_unit_cache.lock().unwrap().clone()
+    }
+    fn commit_cache(&self, cache: crate::niri::unit_restore::CachedCalibration) {
+        // Gate-domain write like the anchor commit: a superseded or
+        // cancelled job never stores its measurement.
+        let shell = self.app.state::<Shell>();
+        let _domain = shell.native_gate.lock().unwrap();
+        if !restore_job_fresh(self.job, shell.native_epoch.load(Ordering::SeqCst)) {
+            return;
+        }
+        *shell.native_unit_cache.lock().unwrap() = Some(cache);
+    }
+    fn clear_cache(&self) {
+        // Gate-domain clear like the commit above: only the fresh job that
+        // observed the mismatch may drop the entry it used.
+        let shell = self.app.state::<Shell>();
+        let _domain = shell.native_gate.lock().unwrap();
+        if !restore_job_fresh(self.job, shell.native_epoch.load(Ordering::SeqCst)) {
+            return;
+        }
+        *shell.native_unit_cache.lock().unwrap() = None;
+    }
+    fn reveal(&self, mode: crate::niri::unit_surface::UnitMode, open: bool) {
+        // Keep GTK resizable; compact min/max pin the size without resetting
+        // the WebKit content frame to GTK's non-resizable natural size.
+        let (reveal, queue, app, job) = (self.panel.clone(), self.panel.clone(), self.app.clone(), self.job);
+        niri_trace!("shared reveal queue job={job} open={open}");
+        if queue.run_on_main_thread(move || {
+            let shell = app.state::<Shell>();
+            if !restore_job_fresh(job, shell.native_epoch.load(Ordering::SeqCst)) {
+                return;
+            }
+            if !unit_ready_for(&shell.native_gate, &shell.native_unit, &shell.native_epoch, job) {
+                return;
+            }
+            if !reveal.is_visible().unwrap_or(false) {
+                if let Err(error) = reveal.show().map_err(err) {
+                    eprintln!("gentle-dot: shared reveal show failed: {error}");
+                    return;
+                }
+            }
+            if let Ok(gtk_window) = reveal.gtk_window() {
+                gtk_window.set_opacity(GATED_OPACITY_SHOWN);
+                // Rose-only stays unfocusable so it can never steal focus;
+                // chat-open becomes focusable so typing works immediately.
+                gtk_window.set_accept_focus(shared_reveal_focusable(open));
+            }
+            let _ = reveal.set_ignore_cursor_events(false);
+            if let Ok(gtk_window) = reveal.gtk_window() {
+                crate::niri::unit_surface::reapply_input_shape(&gtk_window, mode, false);
+            }
+            if open {
+                if let Err(error) = reveal.set_focus().map_err(err) {
+                    eprintln!("gentle-dot: shared reveal focus failed: {error}");
+                }
+                if let Err(error) = app.emit("dot://panel-shown", ()).map_err(err) {
+                    eprintln!("gentle-dot: shared reveal emit failed: {error}");
+                }
+            }
+        }).is_err() {
+            eprintln!("gentle-dot: shared reveal missed the main thread job={job}");
+        }
+    }
+    fn cancel(&self, reason: &'static str) {
+        cancel_gated_panel(&self.app, self.job, reason);
+    }
+    fn managed_fullscreen(&self, pid: u32) -> bool {
+        if !self.set_resizable(true) {
+            return false;
+        }
+        let query = |wire: &str| self.request(wire, NATIVE_RESTORE_PASS);
+        let Ok(windows) = query(crate::niri::WINDOWS_REQUEST) else { return false };
+        let Some(panel) = crate::niri::own_panel_window(&windows, pid) else { return false };
+        if let Some(wire) = crate::niri::reconcile_action(&panel, true) {
+            if !query(&wire).is_ok_and(|reply| crate::niri::is_handled(&reply)) { return false; }
+        }
+        let Ok(windows) = query(crate::niri::WINDOWS_REQUEST) else { return false };
+        let Some(current) = crate::niri::own_panel_window(&windows, pid) else { return false };
+        for wire in crate::niri::action_managed_geometry(current.id) {
+            if !query(&wire).is_ok_and(|reply| crate::niri::is_handled(&reply)) { return false; }
+        }
+        true
+    }
+}
+
+/// Production shared job (Linux only): resolves SINGLE PANEL outside state
+/// locks, snapshots logical state in sequential brief holds, drives the shared
+/// sequence through native ops, and maps the outcome. Legacy paths untouched.
+#[cfg(target_os = "linux")]
+fn run_shared_unit_job(app: &AppHandle, job: u64) -> CommandResult {
+    let shell = app.state::<Shell>();
+    let panel = window(app, PANEL).map_err(|error| { cancel_gated_panel(app, job, "unit panel missing"); error })?;
+    let open = shell.native_unit.lock().unwrap().open;
+    let rose_hidden = shell.rose_hidden.load(Ordering::SeqCst);
+    let expanded = *shell.native_expanded.lock().unwrap();
+    let anchor = shell.native_compact.lock().unwrap().clone();
+    let mode = shared_restore_mode(open, rose_hidden, expanded);
+    let keep_mapped = matches!(unit_window_for(open, rose_hidden, expanded), UnitWindow::KeepMapped);
+    let socket = std::env::var("NIRI_SOCKET").ok().filter(|path| !path.is_empty());
+    let Some(path) = socket else {
+        cancel_gated_panel(app, job, "unit socket missing");
+        return Err("niri: shared unit socket missing; hidden for retry".to_owned());
+    };
+    let ops = SharedNativeOps {
+        app: app.clone(),
+        panel,
+        path: PathBuf::from(path),
+        job,
+        surface: shared_surface_mode(mode).unwrap_or(crate::niri::unit_surface::UnitMode::Pair),
+    };
+    let mut steps: Vec<&'static str> = Vec::new();
+    let fresh = || restore_job_fresh(job, app.state::<Shell>().native_epoch.load(Ordering::SeqCst));
+    let outcome = drive_shared_unit_job(&ops, std::process::id(), anchor.as_ref(), mode,
+        keep_mapped, open, rose_hidden, PANEL_GAP, f64::from(EDGE_MARGIN), NATIVE_RESTORE_JOB, fresh, &mut steps);
+    niri_trace!("shared unit job={job} steps={steps:?} outcome={outcome:?}");
+    match outcome {
+        SharedOutcome::Revealed(_) | SharedOutcome::Silent => Ok(()),
+        SharedOutcome::Cancelled(reason) => Err(format!("niri: shared unit {reason}; hidden for retry")),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_restore_job(app: &AppHandle, job: u64) -> CommandResult {
+    let shell = app.state::<Shell>();
+    // Early shared route: explicit activation AND Niri, before old two-window
+    // logic. Dormant while `active` is FALSE, so legacy paths stay identical.
+    #[cfg(target_os = "linux")]
+    {
+        let active = shell.native_unit.lock().unwrap().active;
+        let socket_present = niri_socket_present();
+        if shared_route_wanted(active, shell.places_windows, platform::is_niri(&|key| std::env::var(key).ok()), socket_present) {
+            return run_shared_unit_job(app, job);
+        }
+    }
+    // Single injected toolkit effect (seam): the expanded-branch
+    // constraint release; everything else in the pass is state or socket.
+    let mut set_resizable_panel = |resizable: bool| {
+        window(app, PANEL).and_then(|panel| panel.set_resizable(resizable).map_err(err))
+    };
+    let socket = std::env::var("NIRI_SOCKET").ok();
+    let inner = run_restore_job_inner(&shell, job, &mut set_resizable_panel, socket.as_deref());
+    // Freshness and gate ownership for the `Ok(false)` arm; `Ok(true)` reveals
+    // and `Err` always attempts the guarded cancel (which no-ops when stale).
+    let (fresh_now, ours) = match &inner {
+        Ok(false) => {
+            let shell = app.state::<Shell>();
+            let current = shell.native_epoch.load(Ordering::SeqCst);
+            let ours = *shell.native_gate.lock().unwrap() == Some(job);
+            (restore_job_fresh(job, current), ours)
+        }
+        _ => (false, false),
+    };
+    let owns_fresh_gate = fresh_now && ours;
+    // D1/D2: no unconditional stranded recovery — a fresh unsettled job with
+    // no gate of its own is an ordinary gateless follower and routes Silent
+    // below (Ok, no hide), never hide/error. Owned-gate failures still
+    // cancel through the guarded path; stale callbacks plan no effects.
+    match plan_restore_completion(&inner, owns_fresh_gate) {
+        RestoreCompletion::Reveal => {
+            reveal_gated_panel(app, job);
+            Ok(())
+        }
+        RestoreCompletion::Cancel => match inner {
+            // Unsettled but not an error: hide only while this job still owns
+            // a fresh gate (a gated show awaiting settle); stale and ungated
+            // jobs stay silent so later reopens can retry.
+            Ok(false) => {
+                cancel_gated_panel(app, job, "spot unconfirmed");
+                Err("niri: panel spot unconfirmed; hidden for retry".to_owned())
+            }
+            Err(error) => {
+                cancel_gated_panel(app, job, &error);
+                Err(error)
+            }
+            Ok(true) => unreachable!("Reveal routes separately"),
+        },
+        RestoreCompletion::Silent => Ok(()),
+    }
+}
+
+/// Inner restore body: `Ok(true)` only for a confirmed
+/// settled intended geometry (beside-rose done, remembered-spot done,
+/// hidden default-anchor settled, expanded done); `Ok(false)` where there is
+/// nothing to settle (stale cancel, missing socket); `Err` for deadline
+/// expiry, unresolvable geometry, and wire failures. The move arm sends once,
+/// then loops back to verify the settled IPC position before completing; only
+/// transient null positions retry, never invalid sizes or wrong outputs.
+/// Compact jobs require generation-owned intent and a remembered anchor.
+/// Equal compositor frames never establish the base; explicit bootstrap and
+/// collapse fail until base calibration is implemented. Missing windows
+/// (mv347ejs leg 3) retry bounded by time AND by the pass cap, secret-free,
+/// and a stale deadline never unmaps a newer show (guarded cancel no-ops).
+/// The socket path is injected: production resolves the env once
+/// in run_restore_job above; tests pass an explicit path, so no test mutates
+/// the process environment. The production loop is still the body tests call.
+#[cfg(target_os = "linux")]
+fn run_restore_job_inner(shell: &Shell, job: u64, set_resizable_panel: &mut impl FnMut(bool) -> CommandResult<()>, socket: Option<&str>) -> CommandResult<bool> {
+    use std::path::PathBuf;
+    use std::time::Instant;
+    let start = Instant::now();
+    let fresh = || restore_job_fresh(job, shell.native_epoch.load(Ordering::SeqCst));
+    let remaining = || NATIVE_RESTORE_JOB.saturating_sub(start.elapsed());
+    let pass = || remaining().min(NATIVE_RESTORE_PASS);
+    let Some(socket) = socket.filter(|path| !path.is_empty()) else {
+        niri_trace!("worker job={job} end reason=no-socket");
+        return Ok(false);
+    };
+    let path = PathBuf::from(socket);
+    let pid = std::process::id();
+    let request =
+        |wire: &str, timeout: Duration| crate::niri::Client::new(&path, timeout).request(wire);
+    let desired = *shell.native_expanded.lock().unwrap();
+    let mut needs_base = false;
+    let mut preserve_calibration_anchor = false;
+    if !desired {
+        let Some(intent) = resolve_job_intent(
+            job, &shell.native_epoch, &shell.native_gate, &shell.native_intent,
+        ) else {
+            return if fresh() {
+                Err("niri: restore intent unavailable; hidden for retry".to_owned())
+            } else {
+                Ok(false)
+            };
+        };
+        match intent {
+            RestoreIntent::PreserveCompact => {
+                if shell.native_compact.lock().unwrap().is_none() {
+                    return Err("niri: compact anchor unavailable; hidden for retry".to_owned());
+                }
+                // A remembered point is not a measured work area. Without bounds
+                // a beside-rose target can be clamped by Niri and never settle.
+                // Probe only under our cover and preserve the session anchor.
+                if *shell.native_gate.lock().unwrap() == Some(job)
+                    && shell.native_work_area.lock().unwrap().is_none()
+                {
+                    needs_base = true;
+                    preserve_calibration_anchor = true;
+                }
+            }
+            RestoreIntent::BootstrapBase | RestoreIntent::CollapseToBase => {
+                if *shell.native_gate.lock().unwrap() != Some(job) {
+                    return Err("niri: base calibration requires owned cover; hidden for retry".to_owned());
+                }
+                needs_base = true;
+            }
+        }
+    }
+    // Per-job snapshot alongside `desired`: a visible rose recomputes the
+    // beside target from the fresh IPC dot anchor on every pass and never
+    // reads the session-remembered spot; a hidden rose restores it below.
+    let beside = !desired && !shell.rose_hidden.load(Ordering::SeqCst);
+    niri_trace!("worker job={job} start desired={desired} beside={beside}");
+    let mut passes: usize = 0;
+    let mut moved = false;
+    // Missing-window bound (mv347ejs leg 3): consecutive misses end the job
+    // by time AND by pass count, never an infinite spin.
+    let mut missing_streak: usize = 0;
+    // Settle confirmation (experimental gate): the move wire sends once per
+    // job; afterwards passes only re-query, never re-move, until the IPC
+    // position reads settled or the deadline clips the wait.
+    loop {
+        let pass_no = passes;
+        passes += 1;
+        if !fresh() {
+            niri_trace!("worker job={job} end reason=cancel pass={pass_no} desired={desired}");
+            return Ok(false);
+        }
+        if remaining().is_zero() {
+            niri_trace!("worker job={job} end reason=deadline pass={pass_no} desired={desired}");
+            return Err("niri: restore deadline exceeded; hidden for retry".to_owned());
+        }
+        // I/O ownership: this pass holds native_io across its
+        // queries, planning, and actions — mode wire and worker wire
+        // serialize instead of interleaving mid-transaction. Dropped before
+        // every sleep, getter wait, and callback delivery below (returns
+        // auto-drop); never native_expanded, whose job-start snapshot is
+        // re-validated here against a committed-but-not-handed-off flip.
+        let _io = shell.native_io.lock().unwrap();
+        if !fresh() || *shell.native_expanded.lock().unwrap() != desired {
+            niri_trace!("worker job={job} end reason=cancel pass={pass_no} desired={desired}");
+            return Ok(false);
+        }
+        // Fresh resolve every pass; missing windows and query errors retry
+        // mapping readiness within budget, worker-thread sleeps only.
+        let windows = match request(crate::niri::WINDOWS_REQUEST, pass()) {
+            Ok(windows) => windows,
+            Err(error) => {
+                if pass_no < NIRI_TRACE_PASS_CAP {
+                    niri_trace!("worker job={job} pass={pass_no} query=windows err={} desired={desired}", error.kind());
+                }
+                drop(_io);
+                thread::sleep(clipped_poll(remaining()));
+                continue;
+            }
+        };
+        let Some(panel) = crate::niri::own_panel_window(&windows, pid) else {
+            // Missing-window (mv347ejs leg 3): bounded retry by time AND by
+            // pass count (secret-free counter, never window JSON/titles).
+            // A racing hide already bumped the epoch, so the next loop top
+            // exits stale-silent before any unmap; the guarded cancel below
+            // no-ops when stale, so a deadline here can never unmap a newer
+            // show nor open any dialog — hide+reset only, no focus/emit.
+            missing_streak += 1;
+            if pass_no < NIRI_TRACE_PASS_CAP {
+                niri_trace!("worker job={job} pass={pass_no} reason=missing-window desired={desired} streak={missing_streak}");
+            }
+            if !crate::niri::missing_window_should_retry(start.elapsed(), NATIVE_RESTORE_JOB, missing_streak) {
+                niri_trace!("worker job={job} end reason=missing-window-giveup pass={pass_no} streak={missing_streak}");
+                return Err("niri: restore deadline exceeded; hidden for retry".to_owned());
+            }
+            drop(_io);
+            thread::sleep(clipped_poll(remaining()));
+            continue;
+        };
+        missing_streak = 0;
+        if pass_no < NIRI_TRACE_PASS_CAP {
+            let reconcile = if crate::niri::reconcile_action(&panel, desired).is_some() { "some" } else { "none" };
+            niri_trace!("worker job={job} pass={pass_no} {} reconcile={reconcile}", format_trace_panel(panel.id, panel.floating, panel.pos, panel.size, None, None, None));
+        }
+        if desired {
+            // A remapped widget starts with initial fixed constraints again:
+            // release before any expanded action or Niri clamps small like the
+            // first expand. Nonwaiting proxy, safe on this thread.
+            set_resizable_panel(true)?;
+        }
+        if let Some(action) = crate::niri::reconcile_action(&panel, desired) {
+            // Freshness under the pass I/O hold: a take landing
+            // mid-wire is caught here before acting.
+            if !fresh() {
+                niri_trace!("worker job={job} end reason=cancel pass={pass_no}");
+                return Ok(false);
+            }
+            match request(&action, pass()) {
+                Ok(reply) => {
+                    let handled = crate::niri::is_handled(&reply);
+                    niri_trace!("worker job={job} pass={pass_no} action=reconcile handled={handled}");
+                    if !handled {
+                        return Err("niri: unexpected action response".to_owned());
+                    }
+                }
+                Err(error) => {
+                    niri_trace!("worker job={job} pass={pass_no} action=reconcile err={}", error.kind());
+                    return Err(error.to_string());
+                }
+            }
+            if !desired {
+                continue; // refloated: re-query positions after configure below.
+            }
+        }
+        if desired {
+            // Managed geometry for the freshly resolved window: tiling alone
+            // keeps small sizes on clamped remaps, and already-tiled remaps
+            // need it too. Same pass budget, no deadline reset.
+            let windows = match request(crate::niri::WINDOWS_REQUEST, pass()) {
+                Ok(windows) => windows,
+                Err(error) => {
+                    if pass_no < NIRI_TRACE_PASS_CAP {
+                        niri_trace!("worker job={job} pass={pass_no} query=windows-geometry err={}", error.kind());
+                    }
+                    drop(_io);
+                    thread::sleep(clipped_poll(remaining()));
+                    continue;
+                }
+            };
+            let Some(current) = crate::niri::own_panel_window(&windows, pid) else {
+                if pass_no < NIRI_TRACE_PASS_CAP {
+                    niri_trace!("worker job={job} pass={pass_no} reason=missing-window-geometry");
+                }
+                drop(_io);
+                thread::sleep(clipped_poll(remaining()));
+                continue;
+            };
+            for wire in crate::niri::action_managed_geometry(current.id) {
+                // Freshness under the pass I/O hold: a take landing
+                // mid-wire is caught here before acting.
+                if !fresh() {
+                    niri_trace!("worker job={job} end reason=cancel pass={pass_no}");
+                    return Ok(false);
+                }
+                match request(&wire, pass()) {
+                    Ok(reply) => {
+                        let handled = crate::niri::is_handled(&reply);
+                        niri_trace!("worker job={job} pass={pass_no} action=geometry id={} handled={handled}", current.id);
+                        if !handled {
+                            return Err("niri: unexpected action response".to_owned());
+                        }
+                    }
+                    Err(error) => {
+                        niri_trace!("worker job={job} pass={pass_no} action=geometry id={} err={}", current.id, error.kind());
+                        return Err(error.to_string());
+                    }
+                }
+            }
+            niri_trace!("worker job={job} end reason=restore-done pass={pass_no} mode=expanded");
+            return Ok(true);
+        }
+        if needs_base {
+            // Wait for compact configure: unmapped/expanded-size geometry
+            // cannot establish a compact work-area anchor.
+            if panel.pos.is_none() || panel.size != (PANEL_SIZE.0 as i32, PANEL_SIZE.1 as i32) {
+                drop(_io);
+                thread::sleep(clipped_poll(remaining()));
+                continue;
+            }
+            let mut calibration_request = |wire: &str, timeout| request(wire, timeout);
+            let base = crate::niri::base::calibrate(
+                pid, beside, PANEL_GAP, f64::from(EDGE_MARGIN), remaining(), fresh,
+                &mut calibration_request,
+            ).map_err(err)?;
+            let Some((base, work)) = base else { return Ok(false) };
+            {
+                // State commit is gate-owned, after all probe I/O. No state
+                // lock spans a socket call or a GTK/getter wait.
+                let gate = shell.native_gate.lock().unwrap();
+                if !fresh() || *gate != Some(job) {
+                    return Ok(false);
+                }
+                if !preserve_calibration_anchor {
+                    *shell.native_compact.lock().unwrap() = Some(base);
+                }
+                *shell.native_work_area.lock().unwrap() = Some(work);
+                *shell.native_mover.lock().unwrap() = None;
+            }
+            needs_base = false;
+            // Probe positions invalidate this pass's Windows snapshot.
+            // Resolve again before planning the final panel/rose pair.
+            continue;
+        }
+        if beside {
+            // JOINT unit (estructural): UN SOLO DATO = ancla panel
+            // (`native_compact`, sesión); la rosa deriva beside-panel
+            // (derecha-centrada, PANEL_GAP). Cada pass calcula AMBOS
+            // destinos desde el ancla y mueve ambas ventanas en la misma
+            // pasada (hasta dos AdjustFixed exact-id, un solo hold del lock
+            // de modo, misma época) — nada de perseguir. La dirección sale
+            // del ancla + quién movió el usuario (`native_mover`,
+            // EventStream), nunca de prioridad fija al dot (traza b). Un
+            // remapeo (rosa al centro exacto 1244, ventana ausente) es
+            // transitorio: reintento acotado, nunca fallo one-shot (a, c).
+            // Los movimientos propios NUNCA reescriben el ancla: solo el
+            // mover del usuario o la captura explícita hide/expand la
+            // escriben — anti-ping-pong por construcción. Reveal gateado
+            // solo tras settle verificado.
+            let dot = match crate::niri::own_dot_window(&windows, pid) {
+                Some(dot) => dot,
+                None => {
+                    if pass_no < NIRI_TRACE_PASS_CAP {
+                        niri_trace!("worker job={job} pass={pass_no} reason=missing-dot-remap-retry");
+                    }
+                    drop(_io);
+                    thread::sleep(clipped_poll(remaining()));
+                    continue;
+                }
+            };
+            let workspaces = match request(crate::niri::WORKSPACES_REQUEST, pass()) {
+                Ok(workspaces) => workspaces,
+                Err(error) => {
+                    if pass_no < NIRI_TRACE_PASS_CAP {
+                        niri_trace!("worker job={job} pass={pass_no} query=workspaces err={}", error.kind());
+                    }
+                    drop(_io);
+                    thread::sleep(clipped_poll(remaining()));
+                    continue;
+                }
+            };
+            let output = crate::niri::workspace_output(&workspaces, panel.workspace);
+            let dot_output = crate::niri::workspace_output(&workspaces, dot.workspace);
+            // El ancla SOLO cambia por movimiento del usuario (mover fijado
+            // por el follow) o queda; establecer desde el panel cuando aún
+            // no hay ancla (el panel manda, la rosa se une — nunca al revés).
+            // Rosa-dir fix: el mover se retiene para filtrar la pasada (la
+            // rosa nunca se mueve en un wake-Dot) y un mover irresoluble con
+            // geometría fresca NUNCA cae al ancla vieja: reintento acotado
+            // dentro del presupuesto (el panel jamás va a un destino
+            // anterior al movimiento que disparó el wake; el deadline cierra
+            // con retry en reapertura).
+            let mover = shell.native_mover.lock().unwrap().take();
+            if let Some(m) = mover {
+                match crate::niri::anchor_from_mover(
+                    m,
+                    &dot,
+                    dot_output.as_deref(),
+                    &panel,
+                    output.as_deref(),
+                    PANEL_GAP,
+                ) {
+                    Some(fresh_anchor) => {
+                        // Synchronized commit: a mover taken
+                        // before a collapse reset must not resurrect an anchor
+                        // after it. Refusal exits stale — a superseded job
+                        // never acts on newer state.
+                        if commit_compact_anchor(
+                            &shell.native_compact,
+                            &shell.native_gate,
+                            &shell.native_epoch,
+                            job,
+                            Some(fresh_anchor),
+                        ) {
+                            niri_trace!("worker job={job} pass={pass_no} anchor=user-{m:?}");
+                        } else {
+                            niri_trace!("worker job={job} end reason=cancel pass={pass_no}");
+                            return Ok(false);
+                        }
+                    }
+                    None => {
+                        // Put-back under the same gate→mover domain:
+                        // the mover carries no epoch and the follow overwrites
+                        // it constantly, so a superseded job drops it instead
+                        // of resurrecting it over a newer lifecycle.
+                        let _ = restore_mover_if_fresh(
+                            &shell.native_mover,
+                            &shell.native_gate,
+                            &shell.native_epoch,
+                            job,
+                            m,
+                        );
+                        if pass_no < NIRI_TRACE_PASS_CAP {
+                            niri_trace!("worker job={job} pass={pass_no} reason=mover-anchor-retry");
+                        }
+                        drop(_io);
+                        thread::sleep(clipped_poll(remaining()));
+                        continue;
+                    }
+                }
+            }
+            let saved = shell.native_compact.lock().unwrap().clone();
+            let Some(saved) = saved else {
+                return if fresh() {
+                    Err("niri: compact anchor unavailable; hidden for retry".to_owned())
+                } else {
+                    Ok(false)
+                };
+            };
+            // S7: the plan targets the clamped anchor so the whole pair stays on
+            // screen; the remembered anchor itself is never rewritten here.
+            let area = *shell.native_work_area.lock().unwrap();
+            let anchor = clamp_anchor_to_work_area(area, saved, beside);
+            if pass_no < NIRI_TRACE_PASS_CAP {
+                niri_trace!("worker job={job} pass={pass_no} joint anchor=({},{}) area={area:?} panel_pos={:?} dot_pos={:?} dot_size={:?} panel_output={output:?} dot_output={dot_output:?}", anchor.x, anchor.y, panel.pos, dot.pos, dot.size);
+            }
+            let joint = crate::niri::joint_moves_for_mover(
+                mover,
+                crate::niri::plan_joint_moves(&anchor, &dot, dot_output.as_deref(), &panel, output.as_deref(), PANEL_GAP),
+            );
+            match joint {
+                crate::niri::JointMove::Settled => {
+                    niri_trace!("worker job={job} end reason=joint-settled pass={pass_no} {}", format_trace_panel(panel.id, panel.floating, panel.pos, panel.size, output.as_deref(), Some((0, 0)), None));
+                    return Ok(true);
+                }
+                crate::niri::JointMove::Moves { panel: panel_move, rose: rose_move } => {
+                    if moved {
+                        if pass_no < NIRI_TRACE_PASS_CAP {
+                            niri_trace!("worker job={job} pass={pass_no} reason=await-settle");
+                        }
+                        drop(_io);
+                        thread::sleep(clipped_poll(remaining()));
+                        continue;
+                    }
+                    // Freshness under the pass I/O hold: a take
+                    // landing mid-wire is caught here before acting.
+                    if !fresh() {
+                        niri_trace!("worker job={job} end reason=cancel pass={pass_no}");
+                        return Ok(false);
+                    }
+                    for (id, dx, dy) in [panel_move, rose_move].into_iter().flatten() {
+                        match request(&crate::niri::action_move_floating(id, dx, dy), pass()) {
+                            Ok(reply) => {
+                                let handled = crate::niri::is_handled(&reply);
+                                niri_trace!("worker job={job} pass={pass_no} action=joint id={id} handled={handled}");
+                                if !handled {
+                                    return Err("niri: unexpected action response".to_owned());
+                                }
+                            }
+                            Err(error) => {
+                                niri_trace!("worker job={job} pass={pass_no} action=joint id={id} err={}", error.kind());
+                                return Err(error.to_string());
+                            }
+                        }
+                    }
+                    moved = true;
+                    *shell.native_suppress_until.lock().unwrap() =
+                        Some(std::time::Instant::now() + crate::niri::FOLLOW_DEBOUNCE * 2);
+                    niri_trace!("worker job={job} pass={pass_no} action=joint-sent");
+                    continue;
+                }
+                crate::niri::JointMove::Wait if panel.pos.is_none() || dot.pos.is_none() => {
+                    // Null positions must never plan or act: release, sleep,
+                    // and re-query the full pass before touching anything —
+                    // follow anchor updates don't bump the epoch, so a
+                    // freshness check alone cannot catch stale geometry.
+                    if pass_no < NIRI_TRACE_PASS_CAP {
+                        niri_trace!("worker job={job} pass={pass_no} reason=null-pos-retry");
+                    }
+                    drop(_io);
+                    thread::sleep(clipped_poll(remaining()));
+                    continue;
+                }
+                crate::niri::JointMove::Wait => {
+                    niri_trace!("worker job={job} end reason=settled-elsewhere pass={pass_no}");
+                    return Err("niri: joint geometry unresolvable; hidden for retry".to_owned());
+                }
+            }
+        }
+        let saved = shell.native_compact.lock().unwrap().clone();
+        let Some(saved) = saved else {
+            return if fresh() {
+                Err("niri: compact anchor unavailable; hidden for retry".to_owned())
+            } else {
+                Ok(false)
+            };
+        };
+        let area = *shell.native_work_area.lock().unwrap();
+        let saved = clamp_anchor_to_work_area(area, saved, !shell.rose_hidden.load(Ordering::SeqCst));
+        let workspaces = match request(crate::niri::WORKSPACES_REQUEST, pass()) {
+            Ok(workspaces) => workspaces,
+            Err(error) => {
+                if pass_no < NIRI_TRACE_PASS_CAP {
+                    niri_trace!("worker job={job} pass={pass_no} query=workspaces err={}", error.kind());
+                }
+                drop(_io);
+                thread::sleep(clipped_poll(remaining()));
+                continue;
+            }
+        };
+        let output = crate::niri::workspace_output(&workspaces, panel.workspace);
+        match plan_compact_restore(Some(&saved), &panel, output.as_deref()) {
+            Some((_, 0, 0)) => {
+                niri_trace!("worker job={job} end reason=restore-done pass={pass_no} {}", format_trace_panel(panel.id, panel.floating, panel.pos, panel.size, output.as_deref(), Some((0, 0)), None));
+                return Ok(true); // settled home: no move needed.
+            }
+            Some((id, dx, dy)) => {
+                if moved {
+                    // The move is accepted (`Handled`): an animation may still
+                    // be in flight, so re-query without re-moving. Never
+                    // assume the wire effect landed; the deadline above clips.
+                    if pass_no < NIRI_TRACE_PASS_CAP {
+                        niri_trace!("worker job={job} pass={pass_no} reason=await-settle");
+                    }
+                    drop(_io);
+                    thread::sleep(clipped_poll(remaining()));
+                    continue;
+                }
+                if pass_no < NIRI_TRACE_PASS_CAP {
+                    niri_trace!("worker job={job} pass={pass_no} {}", format_trace_panel(id, panel.floating, panel.pos, panel.size, output.as_deref(), Some((dx, dy)), None));
+                }
+                if !fresh() {
+                    niri_trace!("worker job={job} end reason=cancel pass={pass_no}");
+                    return Ok(false);
+                }
+                match request(&crate::niri::action_move_floating(id, dx, dy), pass()) {
+                    Ok(reply) => {
+                        let handled = crate::niri::is_handled(&reply);
+                        niri_trace!("worker job={job} pass={pass_no} action=move handled={handled}");
+                        if !handled {
+                            return Err("niri: unexpected action response".to_owned());
+                        }
+                    }
+                    Err(error) => {
+                        niri_trace!("worker job={job} pass={pass_no} action=move err={}", error.kind());
+                        return Err(error.to_string());
+                    }
+                }
+                // `Handled` only accepts the move: loop back and verify the
+                // settled IPC position before the reveal may run.
+                moved = true;
+                niri_trace!("worker job={job} pass={pass_no} action=move-sent");
+                continue;
+            }
+            // Settled elsewhere: fail closed. Transient nulls retry above.
+            None if panel.pos.is_none() => {
+                if pass_no < NIRI_TRACE_PASS_CAP {
+                    niri_trace!("worker job={job} pass={pass_no} reason=null-pos-retry");
+                }
+                drop(_io);
+                thread::sleep(clipped_poll(remaining()))
+            }
+            None => {
+                niri_trace!("worker job={job} end reason=settled-elsewhere pass={pass_no}");
+                return Err("niri: compact geometry unresolvable; hidden for retry".to_owned());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "shell/tests.rs"]
+mod tests;

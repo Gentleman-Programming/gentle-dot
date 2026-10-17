@@ -1,0 +1,81 @@
+// Gentle Dot on Niri: window rules required for the intended desktop behavior.
+//
+// Default binding Alt+Space is the app's default: on its first run under Niri
+// the app adds the include line and this binding itself (with a backup and a
+// `niri validate` check, best effort, never blocking startup). This repair heals
+// existing matching window rules but never creates missing rule blocks: check
+// and install the rules below even if the shortcut already works. No fullscreen
+// binding is managed: only the toggle shortcut is added or updated.
+//
+// Niri does not let apps place their own windows, so these rules open the rose
+// and the panel floating on their first map instead of tiling them. Titles are
+// matched narrowly and anchored (`^...$`) because the native Wayland app-id has
+// not been observed and must not be guessed; if a future build reports a stable
+// app-id, prefer matching on that instead of title.
+//
+// The panel position below is a FALLBACK near the upper-right tray area, not the
+// exact tray icon geometry: the selected tray backend supplies no icon rectangle,
+// so exact anchoring has not been established. The app restores compact shared-
+// surface positions through Niri IPC; validate retention, expanded mode, focus,
+// and workspace following on your session with docs/linux-testing.md.
+//
+// Installation (preserve any existing bindings and managed autostart block):
+//   1. If no snippet exists, copy this file next to your Niri config (for
+//      example `~/.config/niri/gentle-dot.kdl`). If it already exists, merge
+//      only the missing window-rule blocks; never overwrite the file blindly.
+//      Add this include to `config.kdl` only if it is not already present:
+//        include "./gentle-dot.kdl"
+//      Check it parses with `niri validate --config ~/.config/niri/config.kdl`.
+//   2. Pick the right `spawn` line below: `/usr/bin/gentle-dot` for the package
+//      install, or your absolute `~/.local/bin/gentle-dot` path when built from
+//      source (`~` is not expanded inside `spawn`, so write it out in full).
+//   3. Check the binding does not conflict: search your config for `Alt+Space`
+//      first; if it is taken, change the key here.
+//   4. Reload Niri (it reloads the config on save). Rules apply on first map,
+//      so restart the app for already-open windows to pick them up.
+//
+// `gentle-dot --toggle` reaches the running app through single-instance (D-Bus
+// on Linux) and toggles the panel; any other second launch shows it. Syntax
+// validated with `niri validate` on Niri 26.04; that checks syntax only, not
+// runtime behavior (tray clicks, focus, exact placement).
+
+window-rule {
+    match title="^Gentle Dot$"
+    open-floating true
+    // Never auto-focus on map: the rose must not steal keyboard focus.
+    open-focused false
+    border { off; }
+    focus-ring { off; }
+    shadow { off; }
+}
+
+window-rule {
+    match title="^Gentle Dot Panel$"
+    open-floating true
+    // Never auto-focus on map: the rose-only pose must not steal keyboard
+    // focus. Opening the chat still focuses via explicit client activation.
+    open-focused false
+    // Fallback only: just inside the top-right corner, near the tray area.
+    default-floating-position x=24 y=12 relative-to="top-right"
+    border { off; }
+    focus-ring { off; }
+    shadow { off; }
+}
+
+binds {
+    // Package install (.deb or Arch package).
+    Alt+Space hotkey-overlay-title="Gentle Dot" { spawn "/usr/bin/gentle-dot" "--toggle"; }
+    // Built from source with scripts/linux/setup-*.sh: use this line INSTEAD of
+    // the one above, with your username filled in.
+    // Alt+Space hotkey-overlay-title="Gentle Dot" { spawn "/home/<you>/.local/bin/gentle-dot" "--toggle"; }
+}
+
+// Launch at login (managed by the app's "Launch at login" toggle, never by
+// copying this file: a fresh copy autostarts nothing). Enabling appends
+// exactly one stanza below, between its markers, with the running binary:
+//   // gentle-dot:autostart begin (managed - do not edit)
+//   spawn-at-startup "/usr/bin/gentle-dot"
+//   // gentle-dot:autostart end
+// Disabling removes those three lines and keeps everything else in this
+// file byte-identical. Do not add your own `spawn-at-startup` here: the
+// toggle would leave two launchers behind.

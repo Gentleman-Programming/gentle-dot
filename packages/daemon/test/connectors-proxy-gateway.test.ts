@@ -223,18 +223,26 @@ describe("connectors through the daemon's proxy (regression, S25.4)", () => {
 		expect(notion.calls()).toEqual(["notion-create-pages"]);
 		expect(app.asked).toHaveLength(asked + 3);
 
-		// The next engine launch gets a new key; the old one no longer works.
+		// The next engine launch gets a new key. The one before it keeps working for exactly one launch,
+		// so a call in flight when the engine restarted is not cut off with a 401.
 		const restarted = d.supervisor.pid;
 		send({ type: "connector_mode", connectorId: "notion", mode: "read_only" });
 		await waitFor(() => d.supervisor.pid !== restarted && d.supervisor.state === "ready");
 		const newKey = JSON.parse(mcpText()).mcpServers.notion.headers.Authorization;
 		expect(newKey).not.toBe(oldKey);
-		const stale = await fetch(`http://127.0.0.1:${d.port}/mcp/notion`, {
-			method: "POST",
-			headers: { authorization: oldKey, "content-type": "application/json" },
-			body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
-		});
-		expect(stale.status).toBe(401);
+		const pingWith = (key: string) =>
+			fetch(`http://127.0.0.1:${d.port}/mcp/notion`, {
+				method: "POST",
+				headers: { authorization: key, "content-type": "application/json" },
+				body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
+			});
+		expect((await pingWith(oldKey)).status).toBe(200);
+		// One launch later it is gone: a key never survives two of them.
+		const again = d.supervisor.pid;
+		send({ type: "connector_mode", connectorId: "notion", mode: "read_write" });
+		await waitFor(() => d.supervisor.pid !== again && d.supervisor.state === "ready");
+		expect((await pingWith(oldKey)).status).toBe(401);
+		expect((await pingWith(newKey)).status).toBe(200);
 	});
 
 	it("refuses a sending action when the app quits while asking, and then stops (S35.2)", async () => {
