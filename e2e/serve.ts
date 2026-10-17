@@ -20,6 +20,11 @@ mkdirSync(dataDir, { recursive: true });
 writeFileSync(join(dataDir, "token"), `${E2E_TOKEN}\n`, { mode: 0o600 });
 
 if (!conversations) {
+	// This process's environment is what the conversations daemon inherits when it is spawned, so
+	// its history settings must be set before that: setting them afterwards leaves it paging with
+	// the 100-message default, and a reload then never offers "Show earlier".
+	process.env.GENTLE_DOT_ROTATE_COMPACTIONS = "2";
+	process.env.GENTLE_DOT_HISTORY_PAGE = "4";
 	const child = spawn(process.execPath, [fileURLToPath(import.meta.url)], {
 		env: { ...process.env, E2E_CONVERSATIONS: "1", GENTLE_DOT_PORT: String(E2E_CONVERSATIONS_PORT) },
 		stdio: "inherit",
@@ -49,9 +54,6 @@ if (conversations) {
 	process.env.GENTLE_DOT_CONVERSATIONS = "1";
 } else {
 	delete process.env.GENTLE_DOT_CONVERSATIONS;
-	// Rotate after two compactions and send short history pages, so one test can cross a rotation.
-	process.env.GENTLE_DOT_ROTATE_COMPACTIONS = "2";
-	process.env.GENTLE_DOT_HISTORY_PAGE = "4";
 }
 // A non-literal specifier keeps the daemon sources out of this tsconfig project.
 const cli = "../packages/daemon/src/cli.ts";
