@@ -25,7 +25,7 @@ use super::keys::{parse_combo, KeyCombo};
 use super::rate::{RateLimiter, MAX_ACTIONS_PER_SECOND};
 use super::risk::{assess, Act};
 use super::working::{NoPreparation, Preparation};
-use super::{Clock, Desktop, Dialogs, InputEvent, MouseButton};
+use super::{BackendPolicy, Clock, Desktop, Dialogs, GLOBAL_CONFIRM_REASON, GLOBAL_TARGET, InputEvent, MouseButton};
 use base64::Engine as _;
 use serde_json::{json, Map, Value};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -58,6 +58,15 @@ screenshot. Every action returns a fresh screenshot. Use `batch` for a predictab
 type, press tab, type, press return) so it runs in one call; end the batch whenever you must see the screen \
 before deciding the next step. The user must allow a session, risky actions ask the user to confirm, and \
 some apps (System Settings, password managers) are off limits.";
+
+/// What `initialize` tells the agent in global mode (T2, S5): the same catalog drives
+/// the Linux desktop as a whole, with no reliable per-app exclusion and no Mac permissions.
+const GLOBAL_INSTRUCTIONS: &str = "Controls this Linux desktop as a whole: input reaches whatever is under the \
+pointer or focused, and there is no reliable per-app exclusion. Take a screenshot first; x and y are pixels of the \
+latest screenshot. Every action returns a fresh screenshot. Use `batch` for a predictable sequence (click a field, \
+type, press tab, type, press return) so it runs in one call; end the batch whenever you must see the screen \
+before deciding the next step. The user must allow a session, every mutating action asks the user to confirm \
+outside yolo mode, and risky targets cannot be fenced off per app.";
 
 pub struct HttpRequest<'a> {
     pub method: &'a str,
@@ -334,6 +343,8 @@ pub struct Helper {
     glow: Box<dyn Fn(Mark) + Send + Sync>,
     /// The working rings around each call that captures or acts (S1, S5).
     working: Arc<dyn Preparation>,
+    /// `Targeted` unless a backend opts into `DesktopGlobal` (T2, S5).
+    policy: BackendPolicy,
 }
 
 impl Helper {
@@ -356,7 +367,20 @@ impl Helper {
             actions: Mutex::new(None),
             glow: Box::new(|_| {}),
             working: Arc::new(NoPreparation),
+            policy: BackendPolicy::Targeted,
         }
+    }
+
+    /// The backend policy this helper enforces.
+    pub fn policy(&self) -> BackendPolicy {
+        self.policy
+    }
+
+    /// Drives the desktop under `policy`. `Targeted` stays the default; only an
+    /// explicit backend opts into `DesktopGlobal`, never production Linux yet (T5).
+    pub fn with_policy(mut self, policy: BackendPolicy) -> Self {
+        self.policy = policy;
+        self
     }
 
     /// Prepares each call that captures or acts with `working` (S1, S5).
@@ -416,8 +440,17 @@ impl Helper {
             "protocolVersion": version,
             "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {"name": "gentle-dot-computer", "version": env!("CARGO_PKG_VERSION")},
-            "instructions": INSTRUCTIONS,
+            "instructions": self.instructions(),
         })
+    }
+
+    /// The `initialize` instructions for this helper's policy: the Mac catalog text, or the
+    /// desktop-global Linux one that promises no per-app exclusion (T2, S5).
+    fn instructions(&self) -> &'static str {
+        match self.policy {
+            BackendPolicy::Targeted => INSTRUCTIONS,
+            BackendPolicy::DesktopGlobal => GLOBAL_INSTRUCTIONS,
+        }
     }
 
     fn tools_call(&self, params: &Value) -> Result<Value, (i64, String)> {
@@ -493,12 +526,23 @@ impl Helper {
                 | Tool::Key { .. }
         );
         if sees && !permissions.screenshots_supported {
+            // The Linux backend reports the same capability flags, but its errors must not
+            // promise macOS versions or permission grant flows that do not exist there.
+            if self.policy == BackendPolicy::DesktopGlobal {
+                return Err("Screenshots are unavailable on this Linux desktop, so computer control cannot see it.".into());
+            }
             return Err("Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.".into());
         }
         if sees && !permissions.screen_recording {
+            if self.policy == BackendPolicy::DesktopGlobal {
+                return Err("Screen capture is not available on this Linux desktop, so computer control cannot see it.".into());
+            }
             return Err(format!("{NEEDS_PERMISSION} Screen Recording permission. {GRANT_IT}"));
         }
         if acts && !permissions.accessibility {
+            if self.policy == BackendPolicy::DesktopGlobal {
+                return Err("Input is not available on this Linux desktop, so computer control cannot act.".into());
+            }
             return Err(format!("{NEEDS_PERMISSION} Accessibility permission. {GRANT_IT}"));
         }
         Ok(())
@@ -536,14 +580,24 @@ impl Helper {
     }
 
     /// The app owning the window under `at`, refused when blocked or unknown. Its name, for messages.
+    /// Global mode skips this lookup on purpose (T2, S5): without per-app attribution the
+    /// desktop itself is the only target it may name.
     fn pointer_target(&self, at: Point) -> Result<String, String> {
+        if self.policy == BackendPolicy::DesktopGlobal {
+            let _ = at;
+            return Ok(GLOBAL_TARGET.into());
+        }
         let app = self.desktop.window_owner_at(at).ok_or(UNKNOWN_TARGET)?;
         self.refuse_blocked(&app).map(|()| app.name)
     }
 
     /// The frontmost app and the app owning the focused element (they differ for a
     /// non-activating panel), each refused when blocked. The one receiving the keys, for messages.
+    /// Global mode skips both lookups on purpose (T2, S5): keys go to the desktop as a whole.
     fn keyboard_target(&self) -> Result<String, String> {
+        if self.policy == BackendPolicy::DesktopGlobal {
+            return Ok(GLOBAL_TARGET.into());
+        }
         let front = self.desktop.frontmost_app().ok_or("Cannot tell which app is in front.")?;
         self.refuse_blocked(&front)?;
         match self.desktop.focused_app().filter(|focused| focused.pid != front.pid) {
@@ -553,6 +607,13 @@ impl Helper {
     }
 
     fn confirm_if_risky(&self, risk: Option<String>, action: &str, target: &str) -> Result<(), String> {
+        // No Accessibility feed exists in global mode, so nothing classifies an action as
+        // safe: every confirmation caller here is mutating input, and each one asks.
+        // Yolo still skips only this step; grant, Stop, and expiry live outside it.
+        let risk = match (self.policy, risk) {
+            (BackendPolicy::DesktopGlobal, None) => Some(GLOBAL_CONFIRM_REASON.into()),
+            (_, risk) => risk,
+        };
         let Some(reason) = risk else {
             return Ok(());
         };
@@ -572,7 +633,12 @@ impl Helper {
         let capture = self.desktop.capture()?;
         let geometry = capture.geometry;
         *latest = Some(geometry);
-        let front = self.desktop.frontmost_app().map(|app| app.name);
+        // Global mode cannot tell which app a screenshot shows, so it names none rather
+        // than repeating whatever the backend last reported.
+        let front = match self.policy {
+            BackendPolicy::Targeted => self.desktop.frontmost_app().map(|app| app.name),
+            BackendPolicy::DesktopGlobal => None,
+        };
         let meta = json!({
             "imageWidth": geometry.image_width,
             "imageHeight": geometry.image_height,
@@ -766,11 +832,19 @@ impl Helper {
                 Ok((format!("{action} in {target}: done."), SETTLE_MS))
             }
             Tool::OpenApp { name } => {
-                if let Some(label) = blocked_name(&name) {
-                    return Err(format!("Gentle Dot does not control {label}. The app was not opened."));
+                // No blocklist exists to check against in global mode (T2, S5); the grant,
+                // the confirmation below, and Stop still apply.
+                if self.policy == BackendPolicy::Targeted {
+                    if let Some(label) = blocked_name(&name) {
+                        return Err(format!("Gentle Dot does not control {label}. The app was not opened."));
+                    }
                 }
                 let action = format!("Open {name}");
-                self.confirm_if_risky(assess(Act::Other, intent), &action, "macOS")?;
+                let target = match self.policy {
+                    BackendPolicy::Targeted => "macOS",
+                    BackendPolicy::DesktopGlobal => GLOBAL_TARGET,
+                };
+                self.confirm_if_risky(assess(Act::Other, intent), &action, target)?;
                 self.still_running(epoch)?;
                 self.desktop.open_app(&name)?;
                 Ok((format!("{action}: done."), OPEN_APP_SETTLE_MS))
@@ -862,6 +936,10 @@ mod tests {
     }
 
     fn rig_with(allow: bool, confirm: bool) -> Rig {
+        rig_with_policy(allow, confirm, BackendPolicy::Targeted)
+    }
+
+    fn rig_with_policy(allow: bool, confirm: bool, policy: BackendPolicy) -> Rig {
         let desktop = Arc::new(FakeDesktop::default());
         let dialogs = Arc::new(FakeDialogs::new(allow, confirm));
         let clock = Arc::new(FakeClock::new(NOW));
@@ -879,7 +957,8 @@ mod tests {
         let helper =
             Helper::new(desktop.clone(), dialogs.clone(), clock.clone(), control.clone(), TOKEN.into(), OWN_PID)
                 .with_glow(move |mark| seen.lock().unwrap().push((mark, posted.events().len())))
-                .with_working(working.clone());
+                .with_working(working.clone())
+                .with_policy(policy);
         Rig { helper, desktop, dialogs, clock, control, states, marks, working }
     }
 
@@ -2219,5 +2298,218 @@ mod tests {
         }
 
 
+    }
+
+    // --- Desktop-global policy (T2, S3-S5): fake-backend checks through the Helper MCP
+    // interface. The default stays application-targeted; only an explicit global helper
+    // drives the desktop as a whole, with grant, approval, Stop, and expiry intact.
+
+    fn global_rig_with(allow: bool, confirm: bool) -> Rig {
+        rig_with_policy(allow, confirm, BackendPolicy::DesktopGlobal)
+    }
+
+    fn global_ready(rig: &Rig) {
+        // No app owns any point and none is frontmost: there is no per-app target to find.
+        *rig.desktop.owner_at.lock().unwrap() = Box::new(|_| None);
+        *rig.desktop.frontmost.lock().unwrap() = None;
+        assert!(!is_error(&rig.call("screenshot", json!({}))));
+    }
+
+    #[test]
+    fn the_default_policy_is_targeted_and_still_refuses_unknown_targets() {
+        let rig = rig();
+        assert_eq!(rig.helper.policy(), BackendPolicy::Targeted);
+        rig.ready();
+        *rig.desktop.owner_at.lock().unwrap() = Box::new(|_| None);
+        let result = rig.call("click", json!({"x": 10, "y": 10}));
+        assert!(is_error(&result));
+        assert!(first_text(&result).contains("which app"), "{result}");
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn global_input_names_the_desktop_not_a_fabricated_app() {
+        let rig = global_rig_with(true, true);
+        global_ready(&rig);
+        let result = rig.call("click", json!({"x": 10, "y": 10}));
+        assert!(!is_error(&result), "{result}");
+        assert!(first_text(&result).contains(super::super::GLOBAL_TARGET), "{result}");
+        let asked = rig.dialogs.confirmations.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1);
+        assert!(asked[0].contains(super::super::GLOBAL_TARGET), "{asked:?}");
+        assert!(!asked[0].contains("Safari"), "{asked:?}");
+        assert_eq!(rig.desktop.events().len(), 1);
+    }
+
+    #[test]
+    fn global_harmless_input_still_asks_outside_yolo() {
+        // Without Accessibility nothing classifies as safe, so every mutating action asks.
+        let rig = global_rig_with(true, true);
+        global_ready(&rig);
+        for (name, args) in [
+            ("click", json!({"x": 10, "y": 10})),
+            ("move", json!({"x": 10, "y": 10})),
+            ("type", json!({"text": "ok"})),
+            ("key", json!({"combo": "tab"})),
+        ] {
+            assert!(!is_error(&rig.call(name, args)), "{name}");
+        }
+        assert_eq!(rig.dialogs.confirmations.lock().unwrap().len(), 4);
+        assert_eq!(rig.desktop.events().len(), 4);
+    }
+
+    #[test]
+    fn a_declined_global_action_sends_zero_input() {
+        let rig = global_rig_with(true, false);
+        global_ready(&rig);
+        let result = rig.call("click", json!({"x": 10, "y": 10}));
+        assert!(is_error(&result));
+        assert!(first_text(&result).contains("declined"), "{result}");
+        assert!(rig.desktop.events().is_empty());
+        assert_eq!(rig.desktop.captures.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn global_yolo_skips_only_the_action_confirmation() {
+        // The grant still applies first.
+        let rig = global_rig_with(false, false);
+        assert_eq!(rig.helper.policy(), BackendPolicy::DesktopGlobal);
+        assert!(first_text(&rig.call("screenshot", json!({}))).contains("not allowed"));
+        *rig.dialogs.allow.lock().unwrap() = true;
+        yolo_on(&rig);
+        global_ready(&rig);
+        let confirmations = rig.dialogs.confirmations.lock().unwrap().len();
+        assert!(!is_error(&rig.call("click", json!({"x": 10, "y": 10}))));
+        assert_eq!(rig.dialogs.confirmations.lock().unwrap().len(), confirmations);
+        // Stop still guards: nothing is posted, and the next call re-asks the grant.
+        rig.control.end(Reason::Stopped);
+        let events = rig.desktop.events().len();
+        let result = rig.call("click", json!({"x": 10, "y": 10}));
+        assert!(first_text(&result).contains("screenshot"), "{result}");
+        assert_eq!(rig.desktop.events().len(), events);
+        assert_eq!(rig.dialogs.grants.load(Ordering::SeqCst), 3);
+        // Expiry still re-asks as well.
+        rig.clock.advance(SESSION_MS);
+        let result = rig.call("click", json!({"x": 10, "y": 10}));
+        assert!(first_text(&result).contains("screenshot"), "{result}");
+        assert_eq!(rig.desktop.events().len(), events);
+        assert_eq!(rig.dialogs.grants.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn global_stopped_and_stale_operations_send_zero_events() {
+        let rig = global_rig_with(true, true);
+        global_ready(&rig);
+        let queued_at = rig.control.epoch();
+        rig.control.end(Reason::Panic);
+        let result = rig.helper.call_tool_from(queued_at, "click", &json!({"x": 10, "y": 10})).unwrap();
+        assert!(is_error(&result));
+        assert!(first_text(&result).contains("stopped"), "{result}");
+        assert!(rig.desktop.events().is_empty());
+        assert_eq!(rig.dialogs.grants.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_global_screenshot_names_no_app() {
+        let rig = global_rig_with(true, true);
+        global_ready(&rig);
+        // Even when the backend reports a frontmost app, global mode names none: it
+        // cannot know which app a screenshot shows, so it must not say.
+        *rig.desktop.frontmost.lock().unwrap() = Some(app(200, "com.apple.Safari", "Safari"));
+        let result = rig.call("screenshot", json!({}));
+        let content = result["content"].as_array().unwrap();
+        assert!(content.iter().any(|c| c["type"] == "image"));
+        let meta = content.iter().rfind(|c| c["type"] == "text").unwrap();
+        let meta: Value = serde_json::from_str(meta["text"].as_str().unwrap()).unwrap();
+        assert!(meta["frontApp"].is_null(), "{meta}");
+    }
+
+    #[test]
+    fn the_linux_grant_copy_says_desktop_global_without_per_app_exclusion() {
+        // Integration with a real consent dialog waits for the backend (T5).
+        assert!(super::super::GLOBAL_GRANT_TEXT.contains("Linux desktop"));
+        assert!(super::super::GLOBAL_GRANT_TEXT.contains("no reliable per-app exclusion"));
+        assert!(super::super::GLOBAL_GRANT_TEXT.contains("30 minutes"));
+        assert_eq!(
+            BackendPolicy::DesktopGlobal.describe(),
+            "desktop-global control without reliable per-app exclusion"
+        );
+        assert_eq!(BackendPolicy::Targeted.describe(), "application-targeted control");
+    }
+
+    #[test]
+    fn global_drag_scroll_and_open_app_ask_outside_yolo() {
+        let rig = global_rig_with(true, true);
+        global_ready(&rig);
+        assert!(!is_error(&rig.call("drag", json!({"fromX": 10, "fromY": 20, "toX": 30, "toY": 40}))));
+        assert!(!is_error(&rig.call("scroll", json!({"x": 5, "y": 6, "dx": 0, "dy": 120}))));
+        assert!(!is_error(&rig.call("open_app", json!({"name": "Mail"}))));
+        let asked = rig.dialogs.confirmations.lock().unwrap().clone();
+        assert_eq!(asked.len(), 3, "{asked:?}");
+        assert!(asked.iter().all(|m| m.contains(super::super::GLOBAL_TARGET)), "{asked:?}");
+        assert_eq!(rig.desktop.events().len(), 2);
+        assert_eq!(*rig.desktop.opened.lock().unwrap(), vec!["Mail".to_string()]);
+    }
+
+    #[test]
+    fn declined_global_mutations_post_nothing() {
+        let rig = global_rig_with(true, false);
+        global_ready(&rig);
+        let captures = rig.desktop.captures.load(Ordering::SeqCst);
+        for (name, args) in [
+            ("drag", json!({"fromX": 10, "fromY": 10, "toX": 20, "toY": 20})),
+            ("scroll", json!({"x": 5, "y": 6, "dx": 0, "dy": 10})),
+            ("type", json!({"text": "hello"})),
+            ("key", json!({"combo": "tab"})),
+            ("open_app", json!({"name": "Mail"})),
+        ] {
+            let result = rig.call(name, args);
+            assert!(is_error(&result), "{name}");
+            assert!(first_text(&result).contains("declined"), "{name}: {result}");
+        }
+        assert_eq!(rig.dialogs.confirmations.lock().unwrap().len(), 5);
+        assert!(rig.desktop.events().is_empty());
+        assert!(rig.desktop.opened.lock().unwrap().is_empty());
+        assert_eq!(rig.desktop.captures.load(Ordering::SeqCst), captures);
+    }
+
+    #[test]
+    fn global_initialize_names_the_linux_desktop() {
+        let rig = global_rig_with(true, true);
+        let body = rig.rpc("initialize", json!({"protocolVersion": "2025-03-26"}));
+        assert_eq!(body["result"]["protocolVersion"], "2025-03-26");
+        let instructions = body["result"]["instructions"].as_str().unwrap().to_string();
+        assert!(instructions.contains("Linux desktop"), "{instructions}");
+        assert!(instructions.contains("no reliable per-app exclusion"), "{instructions}");
+        assert!(!instructions.contains("this Mac"), "{instructions}");
+        assert!(!instructions.contains("off limits"), "{instructions}");
+    }
+
+    #[test]
+    fn targeted_initialize_still_names_this_mac() {
+        let rig = rig();
+        let body = rig.rpc("initialize", json!({}));
+        let instructions = body["result"]["instructions"].as_str().unwrap().to_string();
+        assert!(instructions.contains("Controls this Mac"), "{instructions}");
+        assert!(instructions.contains("off limits"), "{instructions}");
+    }
+
+    #[test]
+    fn global_permission_errors_claim_no_mac_permission() {
+        let rig = global_rig_with(true, true);
+        rig.desktop.permissions.lock().unwrap().screenshots_supported = false;
+        let message = first_text(&rig.call("screenshot", json!({})));
+        assert!(message.contains("Linux"), "{message}");
+        assert!(!message.contains("macOS"), "{message}");
+        rig.desktop.permissions.lock().unwrap().screenshots_supported = true;
+        rig.desktop.permissions.lock().unwrap().screen_recording = false;
+        let message = first_text(&rig.call("screenshot", json!({})));
+        assert!(!message.contains("Screen Recording"), "{message}");
+        rig.desktop.permissions.lock().unwrap().screen_recording = true;
+        rig.desktop.permissions.lock().unwrap().accessibility = false;
+        let message = first_text(&rig.call("key", json!({"combo": "tab"})));
+        assert!(!message.contains("Accessibility"), "{message}");
+        assert!(message.contains("Linux"), "{message}");
+        assert_eq!(rig.dialogs.grants.load(Ordering::SeqCst), 0);
     }
 }

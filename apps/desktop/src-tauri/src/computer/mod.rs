@@ -127,6 +127,45 @@ pub trait Clock: Send + Sync {
 
 pub struct SystemClock;
 
+/// Which desktop a `mcp::Helper` drives (T2, S3-S5). This is an explicit backend
+/// policy, never a fabricated app identity: the Mac path keeps resolving a per-app
+/// target, while stock Wayland (Niri first) has no Accessibility equivalent, so the
+/// whole desktop is the only truthful target and per-app blocking is unavailable.
+/// No Wayland backend exists yet; `DesktopGlobal` is exercised by fake-backend tests
+/// only, and the Linux consent UI that must use `GLOBAL_GRANT_TEXT` lands in T5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackendPolicy {
+    /// macOS: every pointer/key action resolves and checks its per-app target (default).
+    #[default]
+    Targeted,
+    /// Linux/Wayland: input goes to the desktop as a whole, with no reliable per-app
+    /// exclusion. Sessions, Stop, rate limits, and per-action approval still apply.
+    DesktopGlobal,
+}
+
+/// The truthful target named in global-mode confirmations and results.
+pub const GLOBAL_TARGET: &str = "the Linux desktop";
+
+/// Why global input always asks outside Yolo: without Accessibility there is no signal
+/// for `risk` to classify, so every mutating action is confirmed rather than assumed safe.
+pub const GLOBAL_CONFIRM_REASON: &str =
+    "global desktop control cannot tell which app receives it, and there is no reliable per-app exclusion";
+
+/// Grant copy for the future Linux consent UI (T5): desktop-global, 30 minutes, no
+/// per-app exclusion promised. Not wired to any dialog until a backend exists.
+pub const GLOBAL_GRANT_TEXT: &str = "Allow Gentle Dot to see and control this Linux desktop for 30 minutes? \
+There is no reliable per-app exclusion: every visible app can receive input.";
+
+impl BackendPolicy {
+    /// One line for logs and the pending consent UI, naming what the user authorizes.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            BackendPolicy::Targeted => "application-targeted control",
+            BackendPolicy::DesktopGlobal => "desktop-global control without reliable per-app exclusion",
+        }
+    }
+}
+
 impl Clock for SystemClock {
     fn now_ms(&self) -> u64 {
         std::time::SystemTime::now()
