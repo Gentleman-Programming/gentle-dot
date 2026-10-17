@@ -54,6 +54,25 @@ function Activities({ activities }: { activities: Activity[] }) {
 	);
 }
 
+/** The nearest scrollable ancestor, which is `.chat-body` wherever the chat is shown. */
+function scrollContainer(from: HTMLElement | null): HTMLElement | null {
+	for (let el = from?.parentElement ?? null; el; el = el.parentElement) {
+		const { overflowY } = getComputedStyle(el);
+		if (overflowY === "auto" || overflowY === "scroll") return el;
+	}
+	return null;
+}
+
+/**
+ * Scrolls to the newest content. `scrollIntoView` aligns the last element with the container's
+ * edge, leaving its bottom padding unscrolled, so the container is sent to its true end instead.
+ */
+function scrollToNewest(from: HTMLElement | null): void {
+	const container = scrollContainer(from);
+	if (container) container.scrollTop = container.scrollHeight;
+	else from?.scrollIntoView?.({ block: "end" });
+}
+
 interface MessageListProps {
 	messages: ChatMessage[];
 	/** Messages waiting for the assistant, shown after the running answer. */
@@ -70,10 +89,27 @@ export function MessageList({ messages, queued = [], hasEarlier = false, onShowE
 	// Earlier pages are added on top, so only the newest message moves the view.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: scroll whenever the newest content grows
 	useEffect(() => {
-		end.current?.scrollIntoView?.({ block: "end" });
+		scrollToNewest(end.current);
 	}, [last?.id, last?.text, last?.activities.length, last?.note, queued.length]);
+	const hasContent = messages.length > 0 || queued.length > 0;
+	// The shell keeps this chat mounted while its panel is closed, where the chat body is not laid
+	// out and no scroll request can move it: without re-scrolling once it becomes visible, opening
+	// the app lands on the oldest message instead of the newest.
+	useEffect(() => {
+		if (!hasContent || typeof ResizeObserver === "undefined") return;
+		const container = scrollContainer(end.current);
+		if (!container) return;
+		let visible = container.clientHeight > 0;
+		const observer = new ResizeObserver(() => {
+			const shown = container.clientHeight > 0;
+			if (shown && !visible) scrollToNewest(end.current);
+			visible = shown;
+		});
+		observer.observe(container);
+		return () => observer.disconnect();
+	}, [hasContent]);
 
-	if (messages.length === 0 && queued.length === 0) {
+	if (!hasContent) {
 		return (
 			<div className="empty">
 				<p>Hi! What can I do for you?</p>
