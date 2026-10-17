@@ -1,0 +1,100 @@
+# The Windows verification channel (odd/tasks/windows-port.md, W3).
+#
+# The desktop shell is developed on macOS and Linux, where `cfg!(target_os = "windows")`
+# never compiles. This workflow is the only place a Windows build is ever exercised, so a
+# change that only touches a Windows arm still has to face a real `x86_64-pc-windows-msvc`
+# toolchain and the real WebView2 before it can be called done.
+#
+# Scope note: this workflow covers Windows only. The macOS and Linux checks are still the
+# commands in the README (`pnpm typecheck && pnpm lint && pnpm test`, plus `cargo test` in
+# apps/desktop/src-tauri) run on a developer machine; broadening CI to those platforms is a
+# separate decision, not part of the Windows port.
+name: Windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A superseded push does not need to finish: the newer commit is what matters.
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The Rust shell is built by cargo, but its build script (apps/desktop/src-tauri/build.rs)
+  # records the node and PATH it finds at build time. Nothing here needs them for `cargo test`,
+  # so the job stays honest about what it actually verifies.
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The daemon, the protocol, and the UI. These are supposed to be platform-neutral already,
+  # so this job is expected to pass. If it does not, it found real POSIX assumptions that
+  # W4 and W5 exist to remove -- and this job going green is how those units are accepted.
+  typescript:
+    name: TypeScript (daemon, protocol, UI)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # No `version` input: package.json declares `packageManager: pnpm@11.5.0`.
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      # Not a convenience: `pnpm install` cannot succeed on Windows without it. The
+      # gentle-pi postinstall builds its package-local Gentle AI binary **from source** on
+      # Windows and requires Go 1.25.10 or newer, while the windows-latest image ships Go
+      # 1.24.13. On Darwin and Linux the same postinstall downloads a pinned release archive,
+      # so this requirement only shows up here. `stable` is the honest range: the constraint is
+      # "or newer", not an exact version.
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Test
+        run: pnpm test
+
+  # Non-blocking on purpose, and the reason is concrete, not decorative: the shell does not
+  # compile on Windows yet. `src/daemon.rs` and `src/app_channel.rs` use `std::os::unix` and
+  # `std::os::fd` unconditionally (a Unix socketpair on fd 3), which W6 gates and W7 replaces.
+  #
+  # It runs anyway because the failure output is the input to that work: it tells us exactly
+  # which modules need a Windows arm, instead of us guessing. Measured on Windows 11: 57 errors,
+  # 46 of them in `daemon.rs` (26 in production, 20 in its test module), one in `app_channel.rs`
+  # and one in `voice/app.rs`.
+  #
+  # REMOVE `continue-on-error` when the job can compile and run on Windows. That is W6 for the
+  # compilation and W7 for the channel, and it is not W7 alone: the job used to fail before a
+  # single line of this crate compiled, because `tauri-build` needs `icons/icon.ico` (W8).
+  rust:
+    name: Rust shell (expected to fail until W6 and W7)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      # WebView2 ships with the windows-latest image, so no extra setup step is needed for it.
+      - name: cargo test
+        working-directory: apps/desktop/src-tauri
+        run: cargo test

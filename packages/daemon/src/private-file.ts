@@ -18,6 +18,9 @@ export function writePrivateFile(path: string, text: string, mode = 0o600): void
 	const fd = openSync(temp, "wx", mode);
 	try {
 		const owner = fstatSync(fd).uid;
+		// On Windows `process.getuid` is undefined, so `self` is undefined and this ownership check is
+		// skipped in silence; privacy there comes from the ACL of the profile directory the data folder
+		// lives in rather than from a per-file mode (odd/tasks/windows-port.md).
 		const self = process.getuid?.();
 		if (self !== undefined && owner !== self)
 			throw new Error(`${temp} was created as uid ${owner}, not the daemon's ${self}.`);

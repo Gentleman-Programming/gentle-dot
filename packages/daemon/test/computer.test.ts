@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ConnectorInfo, ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8,6 +8,7 @@ import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { oauthOptions } from "./fake-oauth.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { expectPosixMode } from "./support/posix-modes.ts";
 
 const HELPER = "http://127.0.0.1:51234/mcp";
 const KEY = "s3cr3t-Computer-Key-0123456789abcdef";
@@ -183,7 +184,7 @@ describe("computer control registration (S24.7)", () => {
 			exposure: "direct",
 			timeout: 300,
 		});
-		expect(statSync(mcpFile).mode & 0o777).toBe(0o600);
+		expectPosixMode(mcpFile, 0o600);
 		// The engine restarts to read it, and its guard lets the computer's tools run without cards.
 		await restarted(d, pid);
 		await waitFor(() => policy().builtin?.includes("computer"));

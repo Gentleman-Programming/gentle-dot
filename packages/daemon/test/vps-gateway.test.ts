@@ -18,6 +18,7 @@ import { fakeApp } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { oauthOptions } from "./fake-oauth.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { expectPosixMode } from "./support/posix-modes.ts";
 
 const PIN = "731942";
 const SIGNED_IN_TOKEN = "access-token-1";
@@ -229,10 +230,10 @@ describe("server mode: the engine as another user (S25.8)", () => {
 		const { d, dataDir, handedOver, engineAccesses, send, find } = await setup();
 		await waitFor(() => d.supervisor.state === "ready");
 		// The engine may pass through the data folder to its own folders, but not list it.
-		expect(statSync(dataDir).mode & 0o777).toBe(0o711);
-		expect(statSync(join(dataDir, "token")).mode & 0o777).toBe(0o600);
+		expectPosixMode(dataDir, 0o711);
+		expectPosixMode(join(dataDir, "token"), 0o600);
 		// The engine reads its identity prompt by name.
-		expect(statSync(join(dataDir, "identity.md")).mode & 0o777).toBe(0o644);
+		expectPosixMode(join(dataDir, "identity.md"), 0o644);
 		for (const dir of ENGINE_DIRS) expect(statSync(join(dataDir, dir)).isDirectory(), dir).toBe(true);
 		// Only at start, for files an older version left as root; from then on the engine's user makes them.
 		expect(handedOver).toHaveLength(1);
@@ -288,7 +289,7 @@ describe("server mode: connector secrets encrypted at rest (S25.8)", () => {
 		await waitFor(() => existsSync(file) && readFileSync(file, "utf8").includes("connector/notion"));
 		const text = readFileSync(file, "utf8");
 		expect(text).not.toContain(SIGNED_IN_TOKEN);
-		expect(statSync(file).mode & 0o777).toBe(0o600);
+		expectPosixMode(file, 0o600);
 		expect(s.mcpText()).not.toContain(SIGNED_IN_TOKEN);
 		const ids = await new FileSecretSource({ file, key: s.key }).list();
 		expect(ids).toEqual(expect.arrayContaining(["integrity/connectors"]));
@@ -348,7 +349,7 @@ describe("server mode: the web PIN (S25.8)", () => {
 		expect(await s.find("pin_status", (m) => m.pin.set)).toMatchObject({ pin: { set: true } });
 		const stored = readFileSync(join(s.dataDir, "web-pin.json"), "utf8");
 		expect(stored).not.toContain(PIN);
-		expect(statSync(join(s.dataDir, "web-pin.json")).mode & 0o777).toBe(0o600);
+		expectPosixMode(join(s.dataDir, "web-pin.json"), 0o600);
 		// A second window learns it is set; nobody can set it again.
 		const other = await connect(s.d);
 		expect(other.ready).toMatchObject({ pin: { set: true } });
@@ -483,7 +484,7 @@ describe("with the desktop app's channel, server mode changes nothing (S25.2)", 
 		);
 		expect(existsSync(join(s.dataDir, "web-pin.json"))).toBe(false);
 		// The data folder stays 0700 and nothing is handed over outside server mode.
-		expect(statSync(s.dataDir).mode & 0o777).toBe(0o700);
+		expectPosixMode(s.dataDir, 0o700);
 		expect(s.handedOver).toEqual([]);
 	});
 });

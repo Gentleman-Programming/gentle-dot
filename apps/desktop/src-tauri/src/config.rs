@@ -4,7 +4,12 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_PORT: u16 = 4317;
-pub const DEFAULT_SHORTCUT: &str = "Alt+Space";
+
+/// The panel shortcut a fresh install binds, per platform (Windows avoids `Alt+Space`, its
+/// window-menu key). See [`crate::platform::Os::default_shortcut`].
+pub fn default_shortcut() -> &'static str {
+    crate::platform::Os::CURRENT.default_shortcut()
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DesktopConfig {
@@ -56,18 +61,35 @@ pub fn parse_config(
         .as_str()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or(DEFAULT_SHORTCUT)
+        .unwrap_or_else(|| default_shortcut())
         .to_string();
     DesktopConfig { data_dir, port, shortcut }
 }
 
+/// Nothing names a home folder, so there is nowhere to keep the app's data.
+pub const NO_HOME: &str =
+    "Gentle Dot cannot find your home folder, so there is nowhere to keep its data. Set GENTLE_DOT_DATA_DIR to a folder and start it again.";
+
+/// The data dir. `GENTLE_DOT_DATA_DIR` wins and needs no home unless its value names one with
+/// `~`; otherwise the home comes from [`crate::platform::home_dir`], and a home that cannot be
+/// resolved is an error rather than a relative `.gentle-dot` resolved against the working
+/// directory — which is what made the app miss its own token on Windows (W22).
+pub fn resolve_data_dir(os: crate::platform::Os, env: impl Fn(&str) -> Option<String>) -> Result<PathBuf, String> {
+    match env("GENTLE_DOT_DATA_DIR").filter(|value| !value.is_empty()) {
+        Some(dir) if !dir.starts_with('~') => Ok(PathBuf::from(dir)),
+        _ => {
+            let home = crate::platform::home_dir(os, &env).ok_or_else(|| NO_HOME.to_string())?;
+            Ok(data_dir(env, &home))
+        }
+    }
+}
+
 /// Reads the real environment and `<data dir>/config.json`.
-pub fn load_config() -> DesktopConfig {
+pub fn load_config() -> Result<DesktopConfig, String> {
     let env = |key: &str| std::env::var(key).ok();
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    let dir = data_dir(env, &home);
+    let dir = resolve_data_dir(crate::platform::Os::CURRENT, &env)?;
     let file = std::fs::read_to_string(dir.join("config.json")).ok();
-    parse_config(dir, file.as_deref(), env)
+    Ok(parse_config(dir, file.as_deref(), &env))
 }
 
 pub const INVALID_CONFIG: &str =
@@ -158,9 +180,31 @@ mod tests {
     }
 
     #[test]
+    fn the_data_dir_never_falls_back_to_a_relative_path() {
+        use crate::platform::Os;
+        let windows = |pairs: &'static [(&'static str, &'static str)]| resolve_data_dir(Os::Windows, env_of(pairs));
+        assert_eq!(windows(&[("USERPROFILE", r"C:\Users\me")]), Ok(PathBuf::from(r"C:\Users\me\.gentle-dot")));
+        assert_eq!(
+            windows(&[("HOMEDRIVE", "C:"), ("HOMEPATH", r"\Users\me")]),
+            Ok(PathBuf::from(r"C:\Users\me\.gentle-dot"))
+        );
+        // The W22 bug: a Windows GUI launch has no HOME. That is an error, never `.gentle-dot`.
+        assert_eq!(windows(&[]), Err(NO_HOME.to_string()));
+        assert_eq!(windows(&[("HOME", r"C:\Users\me")]), Err(NO_HOME.to_string()));
+        // An explicit absolute dir needs no home; a `~` value still does.
+        assert_eq!(windows(&[("GENTLE_DOT_DATA_DIR", r"D:\dot")]), Ok(PathBuf::from(r"D:\dot")));
+        assert_eq!(
+            resolve_data_dir(Os::Linux, env_of(&[("HOME", "/home/me"), ("GENTLE_DOT_DATA_DIR", "~/dot")])),
+            Ok(PathBuf::from("/home/me/dot"))
+        );
+        assert_eq!(resolve_data_dir(Os::Linux, env_of(&[])), Err(NO_HOME.to_string()));
+        assert_eq!(resolve_data_dir(Os::MacOs, env_of(&[("HOME", "/Users/me")])), Ok(PathBuf::from("/Users/me/.gentle-dot")));
+    }
+
+    #[test]
     fn defaults_without_file() {
         let config = parse_config(dir(), None, env_of(&[]));
-        assert_eq!(config, DesktopConfig { data_dir: dir(), port: DEFAULT_PORT, shortcut: DEFAULT_SHORTCUT.into() });
+        assert_eq!(config, DesktopConfig { data_dir: dir(), port: DEFAULT_PORT, shortcut: default_shortcut().into() });
     }
 
     #[test]
@@ -180,10 +224,10 @@ mod tests {
     fn invalid_values_fall_back() {
         let config = parse_config(dir(), Some(r#"{ "port": 70000, "shortcut": 3 }"#), env_of(&[("GENTLE_DOT_PORT", "abc")]));
         assert_eq!(config.port, DEFAULT_PORT);
-        assert_eq!(config.shortcut, DEFAULT_SHORTCUT);
+        assert_eq!(config.shortcut, default_shortcut());
         let config = parse_config(dir(), Some(r#"{ "port": "5001", "shortcut": "  " }"#), env_of(&[]));
         assert_eq!(config.port, DEFAULT_PORT);
-        assert_eq!(config.shortcut, DEFAULT_SHORTCUT);
+        assert_eq!(config.shortcut, default_shortcut());
     }
 
     #[test]
@@ -191,7 +235,7 @@ mod tests {
         let config = parse_config(dir(), Some("{ not json"), env_of(&[]));
         assert_eq!(config.port, DEFAULT_PORT);
         let config = parse_config(dir(), Some("[1, 2]"), env_of(&[]));
-        assert_eq!(config.shortcut, DEFAULT_SHORTCUT);
+        assert_eq!(config.shortcut, default_shortcut());
     }
 
     #[test]

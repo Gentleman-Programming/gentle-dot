@@ -20,6 +20,7 @@ import { APPROVAL_GUARD } from "../src/connectors.ts";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import { type ConnectorPolicy, POLICY_ENV, PROPOSE_TOOL } from "../src/extensions/approval-guard.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { expectPosixLstatMode } from "./support/posix-modes.ts";
 
 const SHIM = "gentle-dot-child-guard.ts";
 
@@ -85,7 +86,7 @@ describe("subagents in the assistant's engine (S25.4)", () => {
 		expect(env().GENTLE_PI_AGENTS).toBe("1");
 		// The guard comes from the daemon's own install, never from a path in the environment.
 		expect(readFileSync(shim, "utf8")).toContain(`import guard from ${JSON.stringify(APPROVAL_GUARD)};`);
-		expect(lstatSync(shim).mode & 0o777).toBe(0o600);
+		expectPosixLstatMode(shim, 0o600);
 	});
 
 	it("keeps subagents off with GENTLE_DOT_SUBAGENTS=off", async () => {

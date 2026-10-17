@@ -14,7 +14,7 @@ https://github.com/user-attachments/assets/0c0f4d2d-7e0e-4c35-961a-8816d95a390c
 
 
 <p>
-<img src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Web-D7A0B8?style=for-the-badge&labelColor=1A1218" alt="Platform">
+<img src="https://img.shields.io/badge/macOS%20%C2%B7%20Windows%20%C2%B7%20Linux%20%C2%B7%20Web-D7A0B8?style=for-the-badge&labelColor=1A1218" alt="Platform">
 <img src="https://img.shields.io/badge/status-early%20preview-F095C8?style=for-the-badge&labelColor=1A1218" alt="Status: early preview">
 <a href="LICENSE"><img src="https://img.shields.io/badge/MIT-D7A0B8?style=for-the-badge&labelColor=1A1218" alt="License: MIT"></a>
 </p>
@@ -50,7 +50,7 @@ Assistants live in a browser tab you have to go find, forget you between chats, 
 
 ### Always one key away
 
-A glowing rose sits on your desktop. Click it, press your shortcut (**`⌥ Space`** unless you pick another), or use the menu bar, and the chat opens over whatever you are doing. Hide the rose if you prefer, or open the chat full screen with **`⌘⇧F`**. The same chat runs in the browser, on your machine or on your own server.
+A glowing rose sits on your desktop. Click it, press your shortcut (**`⌥ Space`** on macOS and Linux, **`Ctrl+Shift+Space`** on Windows, unless you pick another), or use the menu bar, and the chat opens over whatever you are doing. Hide the rose if you prefer, or open the chat full screen with **`⌘⇧F`**. The same chat runs in the browser, on your machine or on your own server.
 
 ---
 
@@ -94,7 +94,7 @@ Attach files with the paperclip, drag and drop, or paste. Images go straight to 
 
 | Component | What it does |
 | :--- | :--- |
-| **Self-contained installers** | A macOS DMG and Linux `.deb` and Arch packages carry their own Node, engine, and Engram |
+| **Self-contained installers** | A macOS DMG, Linux `.deb` and Arch packages, and a Windows NSIS or MSI carry their own Node, engine, and Engram |
 | **Stable signing** | A self-signed identity keeps macOS permissions across updates |
 | **Isolated engine** | The assistant runs its own engine and home folder; it never touches your own agent setup |
 | **Web and server** | The same interface in the browser, and a Docker setup for your own VPS behind HTTPS, where the assistant runs as its own user, connector secrets are encrypted, and connector changes need your PIN |
@@ -106,7 +106,7 @@ Attach files with the paperclip, drag and drop, or paste. Images go straight to 
 
 ## Get started
 
-There are no published releases yet: build the installer for your system. You need Node.js 24 and pnpm; the macOS app also needs Rust and the Xcode command line tools, and the Linux packages need Docker.
+There are no published releases yet: build the installer for your system. You need Node.js 24 and pnpm; the macOS app also needs Rust and the Xcode command line tools, the Linux packages need Docker, and the Windows installers need Rust with the MSVC toolchain, the Visual Studio Build Tools (C++ workload), WebView2, and Go 1.25.10 or newer.
 
 ```sh
 pnpm install
@@ -117,9 +117,12 @@ pnpm package:mac
 # Linux: a .deb (amd64 also builds the Arch package)
 pnpm package:linux --arch arm64
 pnpm package:linux --arch amd64
+
+# Windows 10/11 (x86_64): stages the runtime and writes a self-contained NSIS and MSI
+pnpm package:windows            # add --check to verify both payloads, which needs 7-Zip
 ```
 
-Then follow **[docs/install.md](docs/install.md)**: opening an unsigned app on macOS 15 and later goes through **System Settings → Privacy & Security → Open Anyway**, and the guide covers permissions, where your data lives, and uninstalling.
+Then follow **[docs/install.md](docs/install.md)**: opening an unsigned app on macOS 15 and later goes through **System Settings → Privacy & Security → Open Anyway**, the Windows installers are unsigned too so Windows shows its own warning, and the guide covers permissions, where your data lives, and uninstalling. Windows support is in progress: it builds and runs, but connectors that need a secret or an approval, voice, and computer control are not there yet. See **[docs/install.md](docs/install.md)** for the Windows section and **[docs/windows-testing.md](docs/windows-testing.md)** for the tester checklist.
 
 Prefer to run it from the source?
 
@@ -151,7 +154,7 @@ A small Node daemon starts the agent engine (Gentle Shell, `gentle-shell --mode 
 
 What already holds: computer control's grant, panic stop, blocklist, rate limit, and risky-action confirmations are enforced by the desktop app, not the agent, and the agent's processes do not inherit the app's macOS permissions. Connectors are reached only through the assistant's own proxy, which hides what their mode does not allow, and that holds for its subagents too: they are back on, reach connectors through the same proxy and approvals, and run with the same file checks as the assistant (set `GENTLE_DOT_SUBAGENTS=off` to turn them off). Approving a connector's action and changing a connector (its mode, connecting, removing, importing) happen only in the desktop app that started the assistant, in native dialogs, over a private channel the agent cannot open; in the browser those controls are read-only. Credentials are typed in the app, never in the chat. On macOS, connector tokens, client secrets, and sign-ins live in the Keychain, in items the signed app creates, and reach the assistant only in memory over that private channel; they are never written to a file, and tokens from older versions move there once. Without the app, connectors that need a token stop working instead of falling back to a file. The connector settings file is signed with a key kept in the Keychain: if anything changes it while Gentle Dot is closed, the app sets it aside at the next start, starts with no connectors, and tells you.
 
-What does not yet: the agent has a shell, and its shell commands (and its subagents') are checked on a best-effort basis only. Started without the app (from a terminal, or in the browser-only setup), the assistant cannot check that signature and loads the settings as they are, with token-based connectors locked. The app cannot yet tell its own Keychain items from ones another program of yours planted. On Linux, connector secrets live in your desktop keyring (Secret Service); while it is unlocked, any program running as you, the assistant's shell included, can read them. See [docs/install.md](docs/install.md).
+What does not yet: the agent has a shell, and its shell commands (and its subagents') are checked on a best-effort basis only. Started without the app (from a terminal, or in the browser-only setup), the assistant cannot check that signature and loads the settings as they are, with token-based connectors locked. The app cannot yet tell its own Keychain items from ones another program of yours planted. On Linux, connector secrets live in your desktop keyring (Secret Service); while it is unlocked, any program running as you, the assistant's shell included, can read them. On Windows, connector secrets live in a DPAPI-protected file, `%LOCALAPPDATA%\Gentle Dot\secrets.dat`, and any program running as you, the assistant's shell included, can read it. See [docs/install.md](docs/install.md).
 
 <div align="right"><a href="#top">Back to top</a></div>
 
@@ -164,6 +167,7 @@ What does not yet: the agent has a shell, and its shell commands (and its subage
 | **[Install](docs/install.md)** | Installers, first open, permissions, data, uninstall |
 | **[Design](docs/design.md)** | Architecture, protocol, desktop shell, computer control, voice, attachments |
 | **[Linux testing](docs/linux-testing.md)** | GNOME and Hyprland setup and the tester checklist |
+| **[Windows testing](docs/windows-testing.md)** | Windows 10 and 11 build-from-source and the tester checklist |
 | **[Deploy to a VPS](docs/deploy-vps.md)** | Docker and HTTPS on your own server |
 | **[Desktop app](apps/desktop/README.md)** | The Tauri shell and platform notes |
 

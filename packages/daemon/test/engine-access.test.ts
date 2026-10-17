@@ -1,21 +1,14 @@
 // How the root daemon reaches the engine's files in server mode (S25.8, B1): synchronously, as the
 // engine's user, and never while it writes a file of its own. The root-only half of these checks runs
 // in the container (vps-root.test.ts); here, the rules that hold for any user.
-import {
-	existsSync,
-	lstatSync,
-	readdirSync,
-	readFileSync,
-	statSync,
-	symlinkSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { engineAccess, insideEngineAccess } from "../src/engine-access.ts";
 import { writePrivateFile } from "../src/private-file.ts";
 import { tempDir } from "./helpers.ts";
+import { expectPosixMode } from "./support/posix-modes.ts";
 
 const own = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
 const SRC = fileURLToPath(new URL("../src/", import.meta.url));
@@ -56,7 +49,7 @@ describe("the daemon's own files", () => {
 		expect(readFileSync(target, "utf8")).toBe("keep");
 		expect(lstatSync(join(dir, "state.json")).isFile()).toBe(true);
 		expect(readFileSync(join(dir, "state.json"), "utf8")).toBe("new\n");
-		expect(statSync(join(dir, "state.json")).mode & 0o777).toBe(0o600);
+		expectPosixMode(join(dir, "state.json"), 0o600);
 		expect(readdirSync(dir).sort()).toEqual(["state.json", "target"]);
 	});
 

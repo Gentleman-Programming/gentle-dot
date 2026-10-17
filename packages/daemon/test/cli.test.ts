@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { createServer, type Socket, connect as unixConnect } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { expectPosixMode } from "./support/posix-modes.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 
@@ -35,7 +36,7 @@ describe("gentle-dot command", () => {
 		const token = readFileSync(join(dataDir, "token"), "utf8").trim();
 		expect(output).not.toContain(token);
 		expect(output).toContain(`the access key is in ${join(dataDir, "token")}`);
-		expect(statSync(dataDir).mode & 0o777).toBe(0o700);
+		expectPosixMode(dataDir, 0o700);
 	});
 
 	it.skipIf((process.getuid?.() ?? 0) === 0)(

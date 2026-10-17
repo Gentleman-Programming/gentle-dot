@@ -1,12 +1,4 @@
-import {
-	existsSync,
-	mkdirSync,
-	readdirSync,
-	readFileSync,
-	realpathSync,
-	statSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
@@ -17,6 +9,7 @@ import {
 	PRIVATE_ENGRAM_PORT,
 } from "../src/isolation.ts";
 import { FAKE_AGENT, tempDir } from "./helpers.ts";
+import { expectPosixMode } from "./support/posix-modes.ts";
 
 const daemons: DotDaemon[] = [];
 afterEach(async () => {
@@ -142,7 +135,7 @@ describe("isolatedAgentEnv temporary folder", () => {
 		const dataDir = tempDir();
 		const env = isolatedAgentEnv({ HOME: tempDir() }, dataDir);
 		expect(env.TMPDIR).toBe(join(dataDir, "home", ".cache", "tmp"));
-		expect(statSync(env.TMPDIR ?? "").mode & 0o777).toBe(0o700);
+		expectPosixMode(env.TMPDIR ?? "", 0o700);
 	});
 
 	it("keeps the user's own TMPDIR", () => {
