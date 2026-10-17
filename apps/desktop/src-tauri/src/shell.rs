@@ -1928,6 +1928,95 @@ fn tray_menu_ids(conversations: bool, computer_control: bool) -> Vec<&'static st
     ids
 }
 
+/// Whether a tray-build failure is the transient missing-watcher case
+/// (T2-B): a KSNI backend registers with `org.kde.StatusNotifierWatcher`
+/// at build time, and at login the watcher host may start after the
+/// autostarted app — ksni then reports `Watcher(ServiceUnknown(...))`
+/// (`failed to register to the StatusNotifierWatcher: ...`) or, once
+/// registered, `WontShow` (`no StatusNotifierHost exists`). tray-icon
+/// 0.25.1 exposes no `assume_sni_available`-style wait through Tauri's
+/// `TrayIconBuilder` (ksni has it; the wrapper always uses the failing
+/// default), so the app matches the wrapper's exact Display strings.
+/// Anything else — menu/icon failures, D-Bus connection errors — still
+/// aborts setup loudly, never retries silently. Pure so tests pin the
+/// boundary without an app.
+fn tray_watcher_transient(message: &str) -> bool {
+    message.contains("StatusNotifierWatcher") || message.contains("StatusNotifierHost")
+}
+
+/// Bounded tray rebuild attempts after a transient watcher-missing startup.
+const TRAY_RETRY_ATTEMPTS: u32 = 12;
+/// Delay between tray rebuild attempts: the watcher host starts seconds
+/// after login; twelve 10 s steps cover ~2 min without lingering.
+const TRAY_RETRY_DELAY: Duration = Duration::from_secs(10);
+
+/// One main-thread retry step's outcome (crosses the thread boundary below).
+enum RetryOutcome {
+    /// A tray is already present: nothing to rebuild (no duplicate menus).
+    Present,
+    /// The rebuild registered the tray.
+    Built,
+    /// The rebuild failed; carries the error text for the transient check.
+    Failed(String),
+}
+
+/// Rebuild the tray after a transient startup miss (T2-B). A plain thread
+/// owns the bounded wait, but every tray/menu call runs on the main thread
+/// via `run_on_main_thread` — never an off-GTK-thread tray call. The loop
+/// ends on the first success, on a non-transient error, when a tray is
+/// already present, after `TRAY_RETRY_ATTEMPTS`, or quietly when the main
+/// loop is gone (shutdown); every outcome logs, none leaks state.
+fn schedule_tray_retry(app: AppHandle, config: DesktopConfig, rose_hidden: bool) {
+    thread::spawn(move || {
+        for attempt in 1..=TRAY_RETRY_ATTEMPTS {
+            thread::sleep(TRAY_RETRY_DELAY);
+            let (done, done_rx) = mpsc::channel();
+            let step = {
+                let (app, config, done) = (app.clone(), config.clone(), done);
+                move || {
+                    let outcome = if app.tray_by_id(TRAY).is_some() {
+                        RetryOutcome::Present
+                    } else {
+                        match build_tray(&app, &config, rose_hidden) {
+                            Ok(_) => RetryOutcome::Built,
+                            Err(error) => RetryOutcome::Failed(error.to_string()),
+                        }
+                    };
+                    let _ = done.send(outcome);
+                }
+            };
+            // The main loop is gone (shutdown): stop quietly. Otherwise the
+            // step was accepted, so its send follows; a process exit reaps
+            // this thread with it.
+            if app.run_on_main_thread(step).is_err() {
+                return;
+            }
+            match done_rx.recv() {
+                Ok(RetryOutcome::Present) => return,
+                Ok(RetryOutcome::Built) => {
+                    eprintln!(
+                        "gentle-dot: tray registered on retry attempt {attempt} of {TRAY_RETRY_ATTEMPTS}"
+                    );
+                    return;
+                }
+                Ok(RetryOutcome::Failed(message)) if tray_watcher_transient(&message) => {
+                    eprintln!(
+                        "gentle-dot: tray watcher still missing (attempt {attempt} of {TRAY_RETRY_ATTEMPTS}): {message}"
+                    );
+                }
+                Ok(RetryOutcome::Failed(message)) => {
+                    eprintln!("gentle-dot: tray retry stopped: {message}");
+                    return;
+                }
+                Err(_) => return,
+            }
+        }
+        eprintln!(
+            "gentle-dot: tray retry gave up after {TRAY_RETRY_ATTEMPTS} attempts; the desktop stays usable without it"
+        );
+    });
+}
+
 fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tauri::Result<TrayIcon> {
     let autostart = autostart_checked(app);
     // The accelerator is only a label here; an unparsable one must not break the menu.
@@ -2057,22 +2146,21 @@ fn autostart_checked(app: &AppHandle) -> bool {
     #[cfg(target_os = "linux")]
     {
         let _ = app;
-        // D5: the Niri side runs only on Niri. Niri never runs XDG
-        // Autostart, so there checked needs BOTH the valid desktop entry
-        // AND the managed Niri block; elsewhere only the XDG entry counts
-        // and Niri config is never read. Opt-in on both: nothing enables.
+        // T2-C: the default niri-session brings up
+        // xdg-desktop-autostart.target, so the XDG entry alone launches the
+        // app there — no Niri block is required. The Niri side is read only
+        // to report a leftover pre-fix duplicate (reconciled by the next
+        // toggle); elsewhere only the XDG entry counts and Niri config is
+        // never read. Opt-in on both: nothing enables.
         let niri_session = platform::is_niri(&|key| std::env::var(key).ok());
         match (crate::autostart::autostart_dir(), crate::autostart::config_dir()) {
             (Some(dir), Some(config)) if niri_session => {
-                // Dual state (task 6): a half state logs which side is
-                // missing and reads unchecked.
                 let include = crate::autostart::niri_include_file(&config);
                 let niri = crate::autostart::read_niri_include(&include);
                 let state = crate::autostart::login_state(&dir, &crate::autostart::path_dirs(), niri.as_deref());
-                if !state.enabled() && (state.xdg || state.niri) {
+                if state.niri {
                     eprintln!(
-                        "gentle-dot: launch at login is only half set up (missing {}); showing unchecked",
-                        state.missing().join(" and ")
+                        "gentle-dot: legacy managed Niri autostart block present; launch at login needs only the XDG entry and the toggle removes the duplicate"
                     );
                 }
                 crate::autostart::checked_for(state, true)
@@ -2109,13 +2197,14 @@ fn toggle_autostart(app: &AppHandle, menu: &Menu<tauri::Wry>) -> CommandResult {
     // the box untouched, surfaced by the existing error dialog.
     #[cfg(target_os = "linux")]
     {
-        // Dual toggle (task 6) gated by D5: the XDG entry alone never
-        // launches on Niri, so there enable writes it AND the managed
-        // `spawn-at-startup` block in the Niri include, and disable removes
-        // both. Other Linux toggles the XDG entry/plugin path alone and
-        // never creates or touches Niri config. Nothing here runs except
-        // through this explicit toggle: no startup, setup, or import path
-        // touches either backend.
+        // T2-C: XDG Autostart alone launches on every Linux session,
+        // including the default niri-session (xdg-desktop-autostart.target).
+        // On Niri the toggle additionally reconciles the pre-fix managed
+        // `spawn-at-startup` duplicate (removing only the owned block,
+        // preserving every non-managed rule) and never adds one. Other
+        // Linux toggles the XDG entry/plugin path alone. Nothing here runs
+        // except through this explicit toggle: no startup, setup, or import
+        // path touches either backend.
         let dir = crate::autostart::autostart_dir()
             .ok_or_else(|| "cannot toggle launch at login: no home directory".to_string())?;
         let niri_session = platform::is_niri(&|key| std::env::var(key).ok());
@@ -2146,6 +2235,8 @@ fn toggle_autostart(app: &AppHandle, menu: &Menu<tauri::Wry>) -> CommandResult {
         } else {
             // The entry's Exec is the running binary: refuse to register a
             // path that does not resolve, instead of writing a stale entry.
+            // On Niri the legacy managed block (if any) is reconciled away
+            // below — XDG alone is the supported launch, never a new block.
             let exe = std::env::current_exe().map_err(err)?;
             if !exe.is_absolute() || !exe.exists() {
                 return Err("cannot enable launch at login: the app path does not resolve".to_string());
@@ -2154,7 +2245,7 @@ fn toggle_autostart(app: &AppHandle, menu: &Menu<tauri::Wry>) -> CommandResult {
             let entries = crate::autostart::entry_files(&dir);
             crate::autostart::remove_other_entries(&dir, Some(&entries[0])).map_err(err)?;
             if let Some(file) = &include {
-                crate::autostart::ensure_niri_block(file, &exe).map_err(err)?;
+                crate::autostart::remove_niri_block(file).map_err(err)?;
             }
         }
         let fresh = match &include {
@@ -2258,19 +2349,113 @@ fn toggle_panel_fullscreen(app: AppHandle) -> CommandResult {
     set_panel_fullscreen_sync(app, on).map(|_| ())
 }
 
-/// A launch of `gentle-dot` (usually `--toggle` or `--fullscreen` from a desktop
-/// shortcut) reaches the running app.
-fn handle_launch(app: &AppHandle, args: &[String]) {
-    if std::env::var_os("GENTLE_DOT_NIRI_TRACE").is_some() {
-        eprintln!("[niri:launch] callback entered");
+/// Early single-instance launches (T2-A): the single-instance plugin is
+/// registered first, so its callback can fire while this first instance is
+/// still inside `setup` — before `Shell` is managed. Dispatching there
+/// through `app.state::<Shell>()` panics (`state() called before manage()`),
+/// the login exit-101 path: the autostarted app plus a shortcut spawn
+/// racing it. Early requests therefore queue in [`PendingLaunches`] and
+/// replay once setup is ready, never touching Shell state before it exists.
+///
+/// The queue lives in an `Arc` created in `run()` and moved into both the
+/// plugin callback and the setup closure — no global state, so tests drive
+/// the real type. `mark_ready_and_take` runs only after `manage(Shell)`
+/// (at the end of setup): either a request lands before the ready flip
+/// (queued under the same lock that flips it, so none is lost) or after it
+/// (Shell is present and it dispatches directly). Coalesced early launches
+/// keep fullscreen precedence, matching `platform::launch_request`.
+struct PendingLaunches {
+    inner: Mutex<PendingInner>,
+}
+
+struct PendingInner {
+    ready: bool,
+    queued: Vec<LaunchRequest>,
+}
+
+impl PendingLaunches {
+    fn new() -> Self {
+        PendingLaunches {
+            inner: Mutex::new(PendingInner { ready: false, queued: Vec::new() }),
+        }
     }
-    let result = match platform::launch_request(args) {
+
+    /// Route one launch: `Some(request)` once setup is ready (dispatch it
+    /// now), `None` while setup is still running (queued for the end-of-
+    /// setup replay). The ready check and the push share one lock, so a
+    /// request can never slip between the final drain and the ready flip.
+    fn route(&self, request: LaunchRequest) -> Option<LaunchRequest> {
+        let mut held = self.inner.lock().unwrap();
+        if held.ready {
+            Some(request)
+        } else {
+            held.queued.push(request);
+            None
+        }
+    }
+
+    /// Flip to ready and fold everything queued so far (plus the app's own
+    /// initial request, if any) into the single request to dispatch.
+    /// `None` means nothing asked for anything: setup stays quiet, as today.
+    fn mark_ready_and_take(&self, own: Option<LaunchRequest>) -> Option<LaunchRequest> {
+        let queued = {
+            let mut held = self.inner.lock().unwrap();
+            held.ready = true;
+            std::mem::take(&mut held.queued)
+        };
+        let mut requests = queued;
+        requests.extend(own);
+        fold_launch_requests(&requests)
+    }
+
+    /// Queued-but-unreplayed request count. Test pin for the no-lost-request
+    /// handoff; unused in production builds.
+    #[allow(dead_code)]
+    fn pending_count(&self) -> usize {
+        self.inner.lock().unwrap().queued.len()
+    }
+}
+
+/// Fold several launch requests into the one that runs: fullscreen wins
+/// (the rarer, deliberate request, same as `platform::launch_request`),
+/// then toggle, then show. Pure so tests pin it without an app.
+fn fold_launch_requests(requests: &[LaunchRequest]) -> Option<LaunchRequest> {
+    if requests.contains(&LaunchRequest::Fullscreen) {
+        Some(LaunchRequest::Fullscreen)
+    } else if requests.contains(&LaunchRequest::Toggle) {
+        Some(LaunchRequest::Toggle)
+    } else if requests.contains(&LaunchRequest::Show) {
+        Some(LaunchRequest::Show)
+    } else {
+        None
+    }
+}
+
+/// Run one launch request with Shell present. The single-instance callback
+/// and the end-of-setup replay share it, so early and late launches keep
+/// identical semantics.
+fn dispatch_launch(app: &AppHandle, request: LaunchRequest) {
+    let result = match request {
         LaunchRequest::Toggle => toggle_panel(app.clone()),
         LaunchRequest::Show => show_panel(app),
         LaunchRequest::Fullscreen => toggle_panel_fullscreen(app.clone()),
     };
     if let Err(error) = result {
         eprintln!("gentle-dot: cannot show the panel: {error}");
+    }
+}
+
+/// A launch of `gentle-dot` (usually `--toggle` or `--fullscreen` from a desktop
+/// shortcut) reaches the running app: ready setups dispatch at once, early
+/// ones replay at the end of setup (see [`PendingLaunches`]).
+fn handle_launch(app: &AppHandle, pending: &PendingLaunches, args: &[String]) {
+    if std::env::var_os("GENTLE_DOT_NIRI_TRACE").is_some() {
+        eprintln!("[niri:launch] callback entered");
+    }
+    // Pre-ready launches queue for the end-of-setup replay instead of
+    // touching Shell state that does not exist yet (T2-A).
+    if let Some(request) = pending.route(platform::launch_request(args)) {
+        dispatch_launch(app, request);
     }
 }
 
@@ -2287,9 +2472,16 @@ pub fn run() {
     if launch_trace { eprintln!("[niri:launch] config begin"); }
     let config = config::load_config();
     if launch_trace { eprintln!("[niri:launch] builder begin"); }
+    // Early-launch queue (T2-A): shared by the single-instance callback and
+    // the end-of-setup replay below. No global state — both closures hold a
+    // clone of this Arc.
+    let pending = Arc::new(PendingLaunches::new());
+    let pending_callback = pending.clone();
     tauri::Builder::default()
         // First, so a second launch forwards its arguments and exits before anything else starts.
-        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| handle_launch(app, &args)))
+        .plugin(tauri_plugin_single_instance::init(move |app, args, _cwd| {
+            handle_launch(app, &pending_callback, &args)
+        }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin({
             // Login autostart (task 5): on Linux the entry identity is pinned
@@ -2483,7 +2675,20 @@ pub fn run() {
             register_panic_shortcut(&handle);
 
             build_windows(&handle, &config, places_windows, rose_hidden)?;
-            build_tray(&handle, &config, rose_hidden)?;
+            // A missing tray watcher at login (T2-B) no longer aborts setup:
+            // the desktop stays usable and a bounded main-thread retry
+            // rebuilds the tray when the host arrives. Any other tray failure
+            // still aborts, as before.
+            match build_tray(&handle, &config, rose_hidden) {
+                Ok(_) => {}
+                Err(error) if tray_watcher_transient(&error.to_string()) => {
+                    eprintln!(
+                        "gentle-dot: no tray watcher at startup, continuing without the tray: {error}"
+                    );
+                    schedule_tray_retry(handle.clone(), config.clone(), rose_hidden);
+                }
+                Err(error) => return Err(error.into()),
+            }
             // Final shared-surface activation (Linux only): LAST
             // setup step — single surface mapped/parked above, worker+follow
             // spawned, env live. Unreadiness keeps `active` FALSE (legacy Niri
@@ -2549,9 +2754,16 @@ pub fn run() {
                 );
             }
             // Started by the shortcut while not running: open the panel right away.
+            // Second-instance launches that raced setup replay here with the
+            // same semantics (fullscreen precedence); a quiet setup — no
+            // queue, no own toggle — stays quiet, as before.
             let args: Vec<String> = std::env::args().collect();
-            if platform::launch_request(&args) == LaunchRequest::Toggle {
-                handle_launch(&handle, &args);
+            let own = (platform::launch_request(&args) == LaunchRequest::Toggle)
+                .then_some(LaunchRequest::Toggle);
+            if let Some(request) = pending.mark_ready_and_take(own) {
+                // Shell, windows, and (where present) the tray are built
+                // above, so dispatching here is state-safe by construction.
+                dispatch_launch(&handle, request);
             }
             Ok(())
         })

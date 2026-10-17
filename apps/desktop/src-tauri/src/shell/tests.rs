@@ -4600,3 +4600,104 @@ fn visible_rose_recalculates_beside_dot_task4() {
     );
     assert_eq!(panel_placement(true, false, true, None), Placement::Alone);
 }
+
+#[test]
+fn early_launches_fold_with_fullscreen_precedence() {
+    // T2-A: several launches racing setup replay as one request.
+    // Fullscreen wins (the rarer, deliberate request, same rule as
+    // `platform::launch_request` within one launch), then toggle, then show.
+    assert_eq!(fold_launch_requests(&[]), None);
+    assert_eq!(fold_launch_requests(&[LaunchRequest::Show]), Some(LaunchRequest::Show));
+    assert_eq!(fold_launch_requests(&[LaunchRequest::Toggle]), Some(LaunchRequest::Toggle));
+    assert_eq!(
+        fold_launch_requests(&[LaunchRequest::Show, LaunchRequest::Toggle]),
+        Some(LaunchRequest::Toggle)
+    );
+    assert_eq!(
+        fold_launch_requests(&[LaunchRequest::Toggle, LaunchRequest::Show, LaunchRequest::Fullscreen]),
+        Some(LaunchRequest::Fullscreen)
+    );
+    assert_eq!(fold_launch_requests(&[LaunchRequest::Fullscreen]), Some(LaunchRequest::Fullscreen));
+}
+
+#[test]
+fn early_launches_queue_until_ready_then_replay_once() {
+    // T2-A regression: a second launch arriving before `manage(Shell)`
+    // must not touch Shell state (the login `state() called before
+    // manage()` panic). Pre-ready requests queue; readiness replays the
+    // fold exactly once and drains; post-ready requests dispatch now.
+    let pending = PendingLaunches::new();
+    assert_eq!(pending.route(LaunchRequest::Show), None);
+    assert_eq!(pending.route(LaunchRequest::Toggle), None);
+    assert_eq!(pending.pending_count(), 2);
+    assert_eq!(pending.mark_ready_and_take(None), Some(LaunchRequest::Toggle));
+    assert_eq!(pending.pending_count(), 0);
+    assert_eq!(pending.mark_ready_and_take(None), None);
+    assert_eq!(pending.route(LaunchRequest::Fullscreen), Some(LaunchRequest::Fullscreen));
+    assert_eq!(pending.pending_count(), 0);
+}
+
+#[test]
+fn own_initial_toggle_folds_with_queued_launches() {
+    // T2-A: the setup-end replay combines the queued second-instance
+    // requests with the app's own initial `--toggle`; quiet setup (no
+    // queue, no own request) stays quiet, as today.
+    let pending = PendingLaunches::new();
+    assert_eq!(pending.route(LaunchRequest::Show), None);
+    assert_eq!(
+        pending.mark_ready_and_take(Some(LaunchRequest::Toggle)),
+        Some(LaunchRequest::Toggle)
+    );
+    let pending = PendingLaunches::new();
+    assert_eq!(pending.route(LaunchRequest::Fullscreen), None);
+    assert_eq!(
+        pending.mark_ready_and_take(Some(LaunchRequest::Toggle)),
+        Some(LaunchRequest::Fullscreen)
+    );
+    let pending = PendingLaunches::new();
+    assert_eq!(pending.mark_ready_and_take(None), None);
+}
+
+#[test]
+fn concurrent_early_launches_are_never_lost() {
+    // T2-A: the enqueue/ready handoff shares one lock, so concurrent
+    // pre-ready launches cannot slip between the final drain and the ready
+    // flip. Real threads, joined before readiness: fully deterministic.
+    let pending = std::sync::Arc::new(PendingLaunches::new());
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let pending = pending.clone();
+        handles.push(std::thread::spawn(move || {
+            for _ in 0..25 {
+                assert_eq!(pending.route(LaunchRequest::Toggle), None);
+            }
+        }));
+    }
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    assert_eq!(pending.pending_count(), 200);
+    assert_eq!(pending.mark_ready_and_take(None), Some(LaunchRequest::Toggle));
+    assert_eq!(pending.pending_count(), 0);
+}
+
+#[test]
+fn tray_retry_only_for_a_missing_watcher() {
+    // T2-B regression: the exact login failure — the KSNI watcher host
+    // starts after the autostarted app, so registration reports
+    // ServiceUnknown. Only that transient (plus ksni's no-host `WontShow`)
+    // retries; anything else still aborts setup loudly.
+    assert!(tray_watcher_transient("tray icon error: failed to register to the StatusNotifierWatcher: org.freedesktop.DBus.Error.ServiceUnknown: The name is not activatable"));
+    assert!(tray_watcher_transient("tray icon error: no StatusNotifierHost exists"));
+    assert!(!tray_watcher_transient("tray icon error: D-Bus connection error: connection failed"));
+    assert!(!tray_watcher_transient("tray icon error: failed to create menu: invalid id"));
+    assert!(!tray_watcher_transient(""));
+}
+
+#[test]
+fn tray_retry_stays_bounded() {
+    // T2-B: the retry must end on its own — success, a non-transient
+    // error, or exhausting the attempts — never linger past shutdown.
+    assert!((1..=48).contains(&TRAY_RETRY_ATTEMPTS));
+    assert!(TRAY_RETRY_DELAY >= Duration::from_secs(1));
+}

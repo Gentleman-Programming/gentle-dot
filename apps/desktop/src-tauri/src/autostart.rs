@@ -20,6 +20,15 @@
 //! enable/disable semantics are preserved, and nothing here writes outside
 //! the caller's explicit directory (tests use temp dirs, never the real
 //! home, and never mutate process-global environment).
+//!
+//! Niri note (T2-C): the default `niri-session` brings up
+//! `graphical-session.target` and `xdg-desktop-autostart.target`, so the
+//! XDG entry above launches the app on Niri with no extra mechanism — the
+//! older "Niri never runs XDG Autostart entries" claim was false for that
+//! session. The managed `spawn-at-startup` block below is a pre-fix
+//! duplicate: the toggle reconciles (removes) it while preserving every
+//! non-managed rule, and never adds one. It stays only as the documented
+//! alternative for bare-niri/custom sessions without XDG Autostart.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -131,13 +140,16 @@ pub fn remove_other_entries(autostart_dir: &Path, keep: Option<&Path>) -> std::i
     Ok(())
 }
 
-/// Managed Niri login-launch block: Niri never runs XDG Autostart entries,
-/// so the toggle also maintains exactly this `spawn-at-startup` stanza in
-/// the opt-in Niri include. Only lines between the two markers are owned:
-/// user window rules outside them are preserved byte-identical. The block
-/// is only ever added or removed by the explicit toggle path — never at
-/// startup, setup, or import — so copying the template alone never
-/// autostarts anything.
+/// Managed Niri login-launch block (pre-fix duplicate, T2-C): older builds
+/// maintained exactly this `spawn-at-startup` stanza in the opt-in Niri
+/// include under the false "Niri never runs XDG Autostart entries" claim.
+/// The default niri-session runs XDG Autostart, so the toggle reconciles
+/// (removes) this block instead of requiring or adding it. Only lines
+/// between the two markers are owned: user window rules outside them are
+/// preserved byte-identical. The block is only ever removed by the explicit
+/// toggle path — never added at startup, setup, or import — so copying the
+/// template alone never autostarts anything. Kept as the documented
+/// alternative for bare-niri sessions without XDG Autostart.
 pub const NIRI_BEGIN: &str = "// gentle-dot:autostart begin (managed - do not edit)";
 pub const NIRI_END: &str = "// gentle-dot:autostart end";
 
@@ -193,7 +205,9 @@ pub fn strip_managed_block(contents: &str) -> (String, bool) {
 
 /// Adds (or replaces) the managed block for `exe` in the include file,
 /// preserving user content. Creates parent dirs; an absent file starts
-/// from empty. Toggle-only: never called at startup or setup.
+/// from empty. Legacy helper, kept for the bare-niri `spawn-at-startup`
+/// alternative and existing consumers: the toggle no longer calls it.
+/// Never called at startup or setup.
 pub fn ensure_niri_block(include_file: &Path, exe: &Path) -> std::io::Result<()> {
     let existing = fs::read_to_string(include_file).unwrap_or_default();
     let (mut kept, _) = strip_managed_block(&existing);
@@ -223,9 +237,12 @@ pub fn remove_niri_block(include_file: &Path) -> std::io::Result<bool> {
     Ok(removed)
 }
 
-/// Truthful login-launch state on Niri: enabled needs BOTH the valid XDG
-/// desktop entry AND the managed Niri block. A half state reads disabled
-/// and [`LoginState::missing`] names the gap for the toggle error.
+/// Truthful login-launch state (T2-C): enabled is the valid XDG desktop
+/// entry alone — the default niri-session runs XDG Autostart, so no Niri
+/// block is required. The `niri` side reports whether a pre-fix managed
+/// duplicate is still present, so the toggle can reconcile it; it never
+/// gates the checkbox. [`LoginState::missing`] names the gap for the
+/// toggle error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoginState {
     pub xdg: bool,
@@ -234,25 +251,27 @@ pub struct LoginState {
 
 impl LoginState {
     pub fn enabled(&self) -> bool {
-        self.xdg && self.niri
+        self.xdg
     }
 
+    /// The missing requirement: only the XDG entry gates login launch.
+    /// A leftover managed block is reconciled by the toggle, not reported
+    /// here.
     pub fn missing(&self) -> Vec<&'static str> {
         let mut gaps = Vec::new();
         if !self.xdg {
             gaps.push("XDG desktop entry");
-        }
-        if !self.niri {
-            gaps.push("Niri spawn-at-startup");
         }
         gaps
     }
 }
 
 /// Reads the dual state: `autostart_dir` from disk plus the already-read
-/// Niri include contents (`None` where the file is absent/unreadable).
-/// Pure over its inputs for deterministic tests; the toggle path supplies
-/// real reads, tests supply temp dirs and inline strings.
+/// Niri include contents (`None` where the file is absent/unreadable). The
+/// Niri side only reports a leftover pre-fix duplicate for toggle
+/// reconciliation — it never gates `enabled`. Pure over its inputs for
+/// deterministic tests; the toggle path supplies real reads, tests supply
+/// temp dirs and inline strings.
 pub fn login_state(
     autostart_dir: &Path,
     path_dirs: &[PathBuf],
@@ -264,17 +283,13 @@ pub fn login_state(
     }
 }
 
-/// Whether login launch reads enabled for this session (D5, S14): on Niri
-/// both the valid XDG entry AND the managed block are required; elsewhere
-/// only the XDG entry counts and Niri config is never consulted. Pure over
-/// its inputs; the shell supplies `platform::is_niri` for the flag, so
-/// tests pin the matrix without windows or environment.
-pub fn checked_for(state: LoginState, is_niri: bool) -> bool {
-    if is_niri {
-        state.enabled()
-    } else {
-        state.xdg
-    }
+/// Whether login launch reads enabled for this session (T2-C): the valid
+/// XDG entry alone, on Niri and elsewhere — Niri config is never required.
+/// The `is_niri` flag stays so the shell keeps gating its legacy-block
+/// reconciliation (and only that) on the live session; tests pin the
+/// matrix without windows or environment.
+pub fn checked_for(state: LoginState, _is_niri: bool) -> bool {
+    state.xdg
 }
 
 /// XDG-only login state for non-Niri Linux (D5): the Niri include file is
@@ -566,10 +581,13 @@ mod tests {
     }
 
     #[test]
-    fn login_state_needs_both_backends_and_names_the_gap() {
-        // Niri never runs XDG autostart, so enabled means BOTH the valid
-        // desktop entry AND the managed Niri block; a half state reads
-        // disabled and names exactly which side is missing.
+    fn login_state_needs_only_the_xdg_entry_on_niri() {
+        // Corrected T2-C behavior (the old both-required reading rested on
+        // the false "Niri never runs XDG Autostart" claim): the default
+        // niri-session brings up xdg-desktop-autostart.target, so the valid
+        // XDG entry alone launches the app and reads enabled. The managed
+        // block is a pre-fix duplicate the toggle reconciles away, never a
+        // requirement — and it alone never reads enabled either.
         let home = scratch("login-state");
         let bin = scratch("login-state-bin");
         let exe = bin.join("gentle-dot");
@@ -578,13 +596,13 @@ mod tests {
         let block = niri_spawn_block(&exe);
         let none = login_state(&home, &dirs, None);
         assert!(!none.enabled());
-        assert_eq!(none.missing(), vec!["XDG desktop entry", "Niri spawn-at-startup"]);
+        assert_eq!(none.missing(), vec!["XDG desktop entry"]);
         write_entry(&home, "gentle-dot.desktop", &plugin_entry(STABLE_APP_NAME, exe.to_str().unwrap()));
-        let half = login_state(&home, &dirs, None);
-        assert!(!half.enabled(), "XDG alone must not read enabled on Niri");
-        assert_eq!(half.missing(), vec!["Niri spawn-at-startup"]);
+        let xdg_only = login_state(&home, &dirs, None);
+        assert!(xdg_only.enabled(), "XDG alone launches on default niri-session");
+        assert!(xdg_only.missing().is_empty());
         let niri_only = login_state(&scratch("login-empty"), &dirs, Some(&block));
-        assert!(!niri_only.enabled(), "Niri block alone must not read enabled");
+        assert!(!niri_only.enabled(), "legacy block alone is not the supported state");
         assert_eq!(niri_only.missing(), vec!["XDG desktop entry"]);
         let full = login_state(&home, &dirs, Some(&block));
         assert!(full.enabled());
@@ -613,15 +631,16 @@ mod tests {
 
     #[test]
     fn login_checked_matrix_niri_vs_other_linux() {
-        // D5/S14: Niri needs both backends; other Linux needs only the XDG
-        // entry and never touches Niri config. The shell gates on
-        // `platform::is_niri` (pinned by the structural test above); this
-        // pins the decision itself without windows or environment.
+        // T2-C: every Linux session needs only the XDG entry — Niri
+        // included, whose default session runs XDG Autostart. The shell
+        // still gates on `platform::is_niri` (pinned by the structural test
+        // above) to reconcile the legacy managed block; this pins the
+        // enabled decision itself without windows or environment.
         let both = LoginState { xdg: true, niri: true };
         assert!(checked_for(both, true));
         assert!(checked_for(both, false));
         let xdg_only = LoginState { xdg: true, niri: false };
-        assert!(!checked_for(xdg_only, true), "XDG alone must not read enabled on Niri");
+        assert!(checked_for(xdg_only, true), "XDG alone reads enabled on Niri");
         assert!(checked_for(xdg_only, false), "XDG alone reads enabled off Niri");
         let niri_only = LoginState { xdg: false, niri: true };
         assert!(!checked_for(niri_only, true));
@@ -630,8 +649,7 @@ mod tests {
         assert!(!checked_for(neither, true));
         assert!(!checked_for(neither, false));
         // XDG-only read through the real entry check: a valid entry reads
-        // enabled off Niri (and still needs its block on Niri); a stale
-        // host reads disabled everywhere.
+        // enabled everywhere; a stale host reads disabled everywhere.
         let home = scratch("checked-xdg");
         let bin = scratch("checked-xdg-bin");
         let exe = bin.join("gentle-dot");
@@ -639,23 +657,26 @@ mod tests {
         let dirs = vec![bin];
         write_entry(&home, "gentle-dot.desktop", &plugin_entry(STABLE_APP_NAME, exe.to_str().unwrap()));
         assert!(checked_for(xdg_state(&home, &dirs), false));
-        assert!(!checked_for(xdg_state(&home, &dirs), true), "Niri still needs its block");
+        assert!(checked_for(xdg_state(&home, &dirs), true));
         std::fs::remove_file(home.join("gentle-dot.desktop")).unwrap();
         assert!(!checked_for(xdg_state(&home, &dirs), false));
     }
 
     #[test]
-    fn shell_toggle_manages_both_backends_without_silent_fallback() {
-        // The toggle wires both backends (XDG via the plugin plus the
-        // managed Niri block) and never absorbs state errors silently.
+    fn shell_toggle_reconciles_the_legacy_niri_block_without_adding_one() {
+        // T2-C: the toggle reconciles the pre-fix duplicate (enable removes
+        // the legacy managed Niri block while keeping the XDG entry, disable
+        // removes both) and never adds a new mandatory block — XDG Autostart
+        // alone launches on the default niri-session. State errors are never
+        // absorbed silently.
         let shell = include_str!("shell.rs");
         assert!(
-            shell.contains("ensure_niri_block"),
-            "toggle-enable must add the managed Niri block"
+            !shell.contains("ensure_niri_block"),
+            "the toggle must never add a managed Niri block"
         );
         assert!(
             shell.contains("remove_niri_block"),
-            "toggle-disable must remove the managed Niri block"
+            "the toggle must reconcile the legacy managed duplicate"
         );
         assert!(
             !shell.contains("is_enabled().unwrap_or(false)"),
