@@ -17,7 +17,6 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -31,7 +30,10 @@ import {
 	fillPkgbuild,
 	formatDuration,
 	formatSize,
+	gitMountArgs,
 	parsePackageArgs,
+	readGitCommonDir,
+	scratchPrefix,
 } from "./linux-lib.mjs";
 
 const REPO = fileURLToPath(new URL("../..", import.meta.url));
@@ -72,6 +74,9 @@ function buildDeb({ arch, engramVersion, ksniTray }, scratch, timings) {
 	);
 	const volumes = cacheVolumes(arch).flatMap(({ name, target }) => ["-v", `${name}:${target}`]);
 	const env = dockerEnvArgs({ engramVersion, ksniTray });
+	// A linked worktree's .git file points outside /src, so its clone metadata travels
+	// read-only at the same absolute path; a normal checkout resolves to no extra mount.
+	const gitProvenance = gitMountArgs({ repoRoot: REPO, gitCommonDir: readGitCommonDir(REPO) });
 	timed(timings, `.deb for ${arch} (stage the runtime, tauri build)`, () =>
 		docker([
 			"run",
@@ -82,6 +87,7 @@ function buildDeb({ arch, engramVersion, ksniTray }, scratch, timings) {
 			platform,
 			"-v",
 			`${REPO}:/src:ro`,
+			...gitProvenance,
 			"-v",
 			`${scratch}:/out`,
 			...volumes,
@@ -138,8 +144,9 @@ function main() {
 	const version = JSON.parse(
 		readFileSync(join(REPO, "apps", "desktop", "src-tauri", "tauri.conf.json"), "utf8"),
 	).version;
-	// Docker Desktop shares the system temp folder with containers.
-	const scratch = mkdtempSync(join(tmpdir(), `gentle-dot-linux-${arch}-`));
+	// Heavy per-build scratch stays on this volume under the ignored build/ directory.
+	mkdirSync(join(REPO, "build"), { recursive: true });
+	const scratch = mkdtempSync(scratchPrefix(REPO, arch));
 	const started = Date.now();
 	const timings = [];
 	say(`Gentle Dot ${version} for linux/${arch}${options.ksniTray ? " with ksni-tray" : ""}; scratch ${scratch}`);

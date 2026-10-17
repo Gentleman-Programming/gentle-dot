@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	archPackageFileName,
@@ -9,10 +10,12 @@ import {
 	debFileName,
 	fillPkgbuild,
 	formatDuration,
+	gitMountArgs,
 	packageFileFor,
 	parseCargoCheckArgs,
 	parseCheckArgs,
 	parsePackageArgs,
+	scratchPrefix,
 } from "../linux-lib.mjs";
 
 const SHA = "a".repeat(64);
@@ -130,6 +133,23 @@ describe("fillPkgbuild", () => {
 		expect(() => fillPkgbuild("pkgname=x\n", { version: "0.1.0", arch: "amd64", sha256: SHA })).toThrow(
 			/pkgver/,
 		);
+	});
+});
+
+describe("worktree packaging support", () => {
+	it("mounts the clone's common Git directory only for a linked worktree", () => {
+		expect(gitMountArgs({ repoRoot: "/repo", gitCommonDir: "/repo/.git" })).toEqual([]);
+		expect(gitMountArgs({ repoRoot: "/repo" })).toEqual([]);
+		expect(gitMountArgs({ repoRoot: "/repo", gitCommonDir: "/elsewhere/.git" })).toEqual([
+			"-v",
+			"/elsewhere/.git:/elsewhere/.git:ro",
+		]);
+	});
+
+	it("keeps heavy build scratch inside the ignored build/ directory, never /tmp", () => {
+		const prefix = scratchPrefix("/repo", "amd64");
+		expect(prefix.startsWith(["/repo", "build", ""].join(sep))).toBe(true);
+		expect(prefix).not.toContain(`${sep}tmp`);
 	});
 });
 

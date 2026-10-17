@@ -23,6 +23,11 @@ git ls-files -z --cached --others --exclude-standard -- . ':!:.codegraph' ':!:.a
 	tar --null --files-from=- --ignore-failed-read -cf - 2>/dev/null | tar -xf - -C /work
 cp -a /src/.git /work/.git
 cd /work
+# A linked worktree's .git file points at the clone's admin directory, which the host
+# mounts read-only at the same absolute path; fail here, not in a later packaging step,
+# when that provenance is missing, and record which revision the copy carries.
+git rev-parse HEAD >/dev/null
+echo "source revision: $(git rev-parse --short HEAD)"
 
 step "pnpm install"
 pnpm install --frozen-lockfile --store-dir /pnpm-store
