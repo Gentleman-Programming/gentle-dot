@@ -128,7 +128,9 @@ const REPEATABLE_METHODS = new Set([
 	"tools/list",
 	"resources/list",
 	"resources/templates/list",
+	"resources/read",
 	"prompts/list",
+	"prompts/get",
 ]);
 
 interface Upstream {
