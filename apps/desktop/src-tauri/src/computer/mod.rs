@@ -14,6 +14,8 @@ pub mod glow;
 #[cfg(test)]
 mod fake;
 pub mod keys;
+#[cfg(target_os = "linux")]
+pub mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 pub mod mcp;

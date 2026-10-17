@@ -67,6 +67,12 @@ core-foundation = "0.10"
 # dependency is already linked by tao on Linux.
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus-secret-service = "4.1"
+# Native Wayland transport (T3a, S1-S4): `computer::linux` talks to a stock
+# compositor through `wayland-client`'s pure-Rust backend (no libwayland).
+# Linux only, so default and macOS builds never pull it. Protocol extension
+# crates (wlr/virtual-keyboard/screencopy binders) arrive with T3b/T4, which bind
+# globals; T3a only discovers them, so it needs the core client alone.
+wayland-client = "0.31"
 # First-visible-frame gate (experimental, Niri compact only): `WidgetExt::set_opacity`
 # on the `gtk_window()` inside a main-thread closure. Tauri 2.12.1 does not re-export
 # its transitive gtk 0.18.2, so this direct Linux-only pin reuses the locked version

@@ -22,9 +22,10 @@ Explicit desktop-global consent; no compositor patches and no external MCP serve
 
 ## Tasks
 
-- T1 [S1-S6] route=parent commit=pending: reconcile design and inspect local bridge/application seams.
-- T2 [S3-S5] route=worker commit=pending: explicit desktop-global policy and truthful permissions/consent, preserving native macOS mode; deterministic RED/GREEN checks.
-- T3 [S1-S4] route=worker commit=pending: Wayland capability discovery, capture and geometry with bounded waits.
+- T1 [S1-S6] route=parent commit=056abb6 done: reconcile design and inspect local bridge/application seams.
+- T2 [S3-S5] route=worker commit=056abb6 done: explicit desktop-global policy and truthful permissions/consent, preserving native macOS mode; deterministic RED/GREEN checks.
+- T3a [S1-S4] route=worker commit=pending: Linux-only Wayland dependencies, bounded connection/registry dispatch and capability discovery; no live input or production startup.
+- T3b [S1-S4] route=worker commit=pending: capture buffers, encoding and output geometry using the bounded transport.
 - T4 [S1-S5] route=worker commit=pending: pointer and keyboard input with cancellation/held-input cleanup.
 - T5 [S1-S5] route=worker commit=pending: app integration, tool catalog, session lifecycle, Stop, Yolo and truthful UI.
 - T6 [S3-S6] route=verify commit=pending: independent safety/portability verification, docs and functional checks.
@@ -81,3 +82,5 @@ Explicit desktop-global consent; no compositor patches and no external MCP serve
 - L15: Stock Niri has ScreenCast but no implemented RemoteDesktop/InputCapture/EIS in the reviewed code. Protocol input works globally. Reference bridge app-under-point returns None and session lifecycle is no-op; neither supplies macOS security parity.
 - L16 (T2, first policy slice): explicit `BackendPolicy` seam (`computer/mod.rs`: `Targeted` default, `DesktopGlobal`; `GLOBAL_TARGET`, `GLOBAL_CONFIRM_REASON`, `GLOBAL_GRANT_TEXT`). `Helper::with_policy` opts in; default preserves Mac unknown-target refusal and schemas untouched. Global mode names only the Linux desktop (no fabricated pid/app, screenshot `frontApp` null), skips only per-app attribution/blocklist, forces per-action confirmation outside Yolo (AX unavailable), and keeps grant/rate/epoch/Stop/expiry. Linux consent UI pending T5; no backend, no Wayland connection yet. Fake-backend RED/GREEN through the Helper MCP interface; `computer::` suite 183 passed.
 - L17 (T2 verifier follow-up): policy-aware `initialize` instructions (`GLOBAL_INSTRUCTIONS`: Linux desktop as a whole, no reliable per-app exclusion, no Mac claims; Targeted text byte-identical) and policy-aware `check_permissions` errors (global names no macOS 14 / Screen Recording / Accessibility). Fixed the `keyboard_target` early-return newline and ordered the new imports locally. Extended fake-backend tests: drag/scroll/open_app ask outside Yolo, declined mutations post nothing (events/opened/captures unchanged), global initialize truthfulness, targeted initialize unchanged. `computer::` suite 188 passed.
+
+- L18: T2 committed as 056abb6; 188 computer tests, full Rust library 757 passed / 6 ignored. Independent verifier findings corrected; native review review-f682b0af8a12e44d approved and acknowledged. Slice 428 diff lines including specification, 345 source/test diff lines. Subsequent work split into T3a transport and T3b capture, each separate reviewable commit. No native-control push before user test.
