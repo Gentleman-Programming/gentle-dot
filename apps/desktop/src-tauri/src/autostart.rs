@@ -316,14 +316,29 @@ pub fn autostart_dir() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("autostart"))
 }
 
-/// The host config dir (`~/.config`), or `None` where no home resolves.
+/// The host config dir (`$XDG_CONFIG_HOME`, else `~/.config`), or `None` where neither resolves.
 /// Thin runtime wrapper: tests inject temp dirs into [`niri_include_file`]
 /// instead, so they never touch the real home.
 #[cfg(target_os = "linux")]
 pub fn config_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map(|home| Path::new(&home).join(".config"))
+    config_home(
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
+}
+
+/// Where the user's configuration lives, from the two variables the XDG spec names. An empty or
+/// relative value is ignored, as the spec says, so a stray one cannot move the app's files.
+#[cfg(target_os = "linux")]
+fn config_home(xdg: Option<&std::ffi::OsStr>, home: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    if let Some(dir) = xdg.filter(|dir| !dir.is_empty()) {
+        let path = Path::new(dir);
+        if path.is_absolute() {
+            return Some(path.to_path_buf());
+        }
+    }
+    home.filter(|home| !home.is_empty())
+        .map(|home| Path::new(home).join(".config"))
 }
 
 /// Host `$PATH` entries for bare-name `Exec` resolution. Thin runtime
@@ -353,6 +368,33 @@ mod tests {
         let path = dir.join(file);
         std::fs::write(&path, contents).unwrap();
         path
+    }
+
+    /// The XDG spec: `$XDG_CONFIG_HOME` wins when it is set and absolute; a relative or empty
+    /// value is ignored, and without either variable there is no config dir at all.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn config_home_follows_the_xdg_spec() {
+        use std::ffi::OsStr;
+        let xdg = OsStr::new("/tmp/xdg-home");
+        let home = OsStr::new("/home/someone");
+        let xdg_dir = Some(PathBuf::from("/tmp/xdg-home"));
+        let fallback = Some(PathBuf::from("/home/someone/.config"));
+        assert_eq!(config_home(Some(xdg), Some(home)), xdg_dir);
+        assert_eq!(config_home(None, Some(home)), fallback);
+        assert_eq!(config_home(Some(OsStr::new("")), Some(home)), fallback);
+        assert_eq!(
+            config_home(Some(OsStr::new("relative")), Some(home)),
+            fallback
+        );
+        // Independent of the home: the variable alone still resolves.
+        assert_eq!(config_home(Some(xdg), None), xdg_dir);
+        assert_eq!(config_home(None, None), None);
+        // An unusable value is ignored even with no home, and an empty home is no home.
+        assert_eq!(config_home(Some(OsStr::new("")), None), None);
+        assert_eq!(config_home(Some(OsStr::new("relative")), None), None);
+        assert_eq!(config_home(None, Some(OsStr::new(""))), None);
+        assert_eq!(config_home(Some(xdg), Some(OsStr::new(""))), xdg_dir);
     }
 
     /// auto-launch 0.6 `build_xdg_autostart_data` byte shape (private there,
