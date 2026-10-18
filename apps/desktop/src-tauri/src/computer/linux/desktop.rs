@@ -37,10 +37,13 @@
 //! Truthfulness: the Niri runtime gate reuses the centralized
 //! [`platform::is_niri`](crate::platform::is_niri) (no adapter-local
 //! predicate); off-Niri the adapter refuses before any socket I/O.
-//! `list_apps`/`open_app` fail explicitly as unsupported in this slice
-//! (never a faked empty list, never a spawned shell); Accessibility,
-//! frontmost, focused and window-owner queries report unknown under the
-//! explicit desktop-global policy (never fabricated identities); `activate`
+//! `list_apps`/`open_app` fan out to the injected [`Backend`]: the concrete
+//! Linux backend answers them from Niri's window inventory and GIO's
+//! trusted desktop-entry launcher (T5a, S7), while a backend that configures
+//! neither keeps the truthful unsupported refusal (never a faked empty list,
+//! never a spawned shell); Accessibility, frontmost, focused and
+//! window-owner queries report unknown under the explicit desktop-global
+//! policy (never fabricated identities); `activate`
 //! is a no-op until capabilities, UI and cancel are integrated later. Key
 //! and text map the existing [`KeyCombo`] through the native keyboard API
 //! without touching the Mac parser.
@@ -294,6 +297,28 @@ pub trait Backend: Send + Sync {
         deadline: Instant,
         cancel: &CancelHandle,
     ) -> Result<(), String>;
+    /// The running managed applications this backend can name
+    /// (`list_apps`, T5a/S7). The default is a truthful unsupported refusal,
+    /// so a backend that configures no inventory source returns no faked
+    /// empty list. `deadline` is the caller's total budget and `cancel` its
+    /// cooperative handle.
+    fn list_apps(&self, deadline: Instant, cancel: &CancelHandle) -> Result<Vec<AppInfo>, String> {
+        let _ = (deadline, cancel);
+        Err("list_apps is unsupported by this backend: no running-app inventory source \
+             is configured (refusing instead of returning a faked empty list)"
+            .to_owned())
+    }
+    /// Launch an installed desktop entry by exact id or unambiguous display
+    /// name (`open_app`, T5a/S7). The default is a truthful unsupported
+    /// refusal, so a backend that configures no launcher never spawns a
+    /// shell. A successful return is the launcher's acknowledgement only,
+    /// never proof that a window appeared or gained focus.
+    fn open_app(&self, name: &str, deadline: Instant, cancel: &CancelHandle) -> Result<(), String> {
+        let _ = (name, deadline, cancel);
+        Err("open_app is unsupported by this backend: no trusted launcher is configured \
+             (refusing instead of spawning a shell)"
+            .to_owned())
+    }
 }
 
 /// Registry of in-flight operation [`CancelHandle`]s, owned by the adapter.
@@ -535,17 +560,21 @@ impl<B: Backend> Desktop for LinuxDesktop<B> {
     }
 
     fn list_apps(&self) -> Result<Vec<AppInfo>, String> {
-        Err("list_apps is unsupported on the Linux desktop in this slice: \
-             no Accessibility inventory exists to list (refusing instead of \
-             returning a faked empty list)"
-            .to_owned())
+        self.gate("list_apps")?;
+        let guard = self.ops.register();
+        let deadline = Instant::now() + OP_BUDGET;
+        self.backend
+            .list_apps(deadline, &guard.handle)
+            .map_err(|detail| format!("list_apps failed: {detail}"))
     }
 
     fn open_app(&self, name: &str) -> Result<(), String> {
-        let _ = name;
-        Err("open_app is unsupported on the Linux desktop in this slice: \
-             no trusted launcher exists yet (refusing instead of spawning a shell)"
-            .to_owned())
+        self.gate("open_app")?;
+        let guard = self.ops.register();
+        let deadline = Instant::now() + OP_BUDGET;
+        self.backend
+            .open_app(name, deadline, &guard.handle)
+            .map_err(|detail| format!("open_app failed: {detail}"))
     }
 
     fn element_at(&self, _at: Point) -> Vec<AxElement> {

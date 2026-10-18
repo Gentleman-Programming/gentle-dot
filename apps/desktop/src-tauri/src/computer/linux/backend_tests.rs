@@ -175,6 +175,28 @@ fn focused_request_null_and_err_roundtrip_truthfully() {
 }
 
 #[test]
+fn windows_request_roundtrips_into_the_running_app_inventory() {
+    // The exact production composition for `list_apps` (`request_on` +
+    // `decode_reply` + the running-apps parse) against a fake socket pair:
+    // one `"Windows"` line in, one `{"Ok": {"Windows": [...]}}` line out,
+    // no compositor.
+    let (client_end, peer_end) = UnixStream::pair().expect("test socketpair");
+    let responder = respond_once(
+        peer_end,
+        r#"{"Ok":{"Windows":[{"id":1,"app_id":"org.gnome.TextEditor","pid":42,"is_focused":true,"title":"notes.txt"},{"id":2,"app_id":"org.gnome.TextEditor","pid":42,"is_focused":false}]}}
+"#,
+    );
+    let reply = crate::niri::request_on(client_end, super::apps::WINDOWS_REQUEST, Duration::from_secs(5))
+        .expect("fake windows roundtrip succeeds");
+    let request = responder.join().expect("responder ends");
+    assert_eq!(request, b"\"Windows\"\n");
+    let apps = super::apps::parse_running_apps(&reply).expect("windows reply parses");
+    assert_eq!(apps.len(), 1, "two windows of one app are one entry");
+    assert_eq!(apps[0].name, "org.gnome.TextEditor");
+    assert!(apps[0].active, "one focused window marks the app active");
+}
+
+#[test]
 fn focused_selection_matches_strictly_with_no_fallback() {
     let monitors = vec![dp1(), hdmi()];
     assert_eq!(select_focused(&monitors, Some("DP-1")).unwrap().registry_name, 7);
@@ -378,10 +400,21 @@ fn adapter_over_the_real_backend_fails_closed_with_no_compositor() {
         "input must fail truthfully: {posted}"
     );
     assert_eq!(linux.active_operations(), 0, "refused calls leak no registry entry");
-    // Unsupported stays unsupported even over the real backend: no fake
-    // list, no shell spawn, no per-app story.
-    assert!(linux.list_apps().unwrap_err().contains("unsupported"));
-    assert!(linux.open_app("Terminal").unwrap_err().contains("unsupported"));
+    // The real backend now answers these from Niri/GIO, but with no
+    // compositor and no configured socket both fail closed: no faked list,
+    // no shell spawn. Which truthful refusal fires first depends on the
+    // session (gate closed or the absent socket), so both are accepted.
+    let list = linux.list_apps().unwrap_err();
+    assert!(
+        list.contains("Niri") || list.contains("niri") || list.contains("socket") || list.contains("unsupported"),
+        "list_apps must fail truthfully: {list}"
+    );
+    let open = linux.open_app("Terminal").unwrap_err();
+    assert!(
+        open.contains("Niri") || open.contains("unsupported") || open.contains("desktop entry"),
+        "open_app must fail truthfully: {open}"
+    );
+    assert_eq!(linux.active_operations(), 0, "refused list/open leak no registry entry");
     assert!(linux.frontmost_app().is_none());
     let cancel = CancelHandle::new();
     assert!(!cancel.is_cancelled());

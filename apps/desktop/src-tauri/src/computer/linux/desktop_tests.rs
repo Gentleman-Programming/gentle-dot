@@ -22,7 +22,7 @@ use super::normalize::{downscale_rgb_bilinear, normalize_bgra_to_rgb, normalized
 use super::outputs::Monitor;
 use super::transport::{connection_from_stream, CancelHandle};
 use crate::computer::coords::Point;
-use crate::computer::{Desktop, FocusTarget, InputEvent, MouseButton};
+use crate::computer::{AppInfo, Desktop, FocusTarget, InputEvent, MouseButton};
 use wayland_client::Connection;
 
 /// A 32x24 output at the origin.
@@ -130,6 +130,12 @@ struct FakeBackend {
     focused_window: Mutex<Result<Option<FocusedWindow>, String>>,
     focus_calls: Mutex<Vec<u64>>,
     focus_reply: Mutex<Result<(), String>>,
+    /// Canned `list_apps` result. Defaults to the backend seam's truthful
+    /// unsupported refusal, so an unconfigured fake stays unsupported.
+    apps: Mutex<Result<Vec<AppInfo>, String>>,
+    /// Canned `open_app` result, plus every name the adapter asked to open.
+    open_reply: Mutex<Result<(), String>>,
+    opened: Mutex<Vec<String>>,
     captures: AtomicUsize,
     /// When set, `capture` returns a raw-buffer JPEG instead of the fused
     /// normalized image: the adapter must refuse it (pins the fused-path
@@ -156,6 +162,13 @@ impl FakeBackend {
             focused_window: Mutex::new(Ok(None)),
             focus_calls: Mutex::new(Vec::new()),
             focus_reply: Mutex::new(Ok(())),
+            apps: Mutex::new(Err("list_apps is unsupported by this backend: no running-app \
+                 inventory source is configured (refusing instead of returning a faked empty list)"
+                .to_owned())),
+            open_reply: Mutex::new(Err("open_app is unsupported by this backend: no trusted \
+                 launcher is configured (refusing instead of spawning a shell)"
+                .to_owned())),
+            opened: Mutex::new(Vec::new()),
             captures: AtomicUsize::new(0),
             return_raw: false,
             block_capture: false,
@@ -323,6 +336,17 @@ impl Backend for Arc<FakeBackend> {
     fn focus_window(&self, id: u64) -> Result<(), String> {
         self.focus_calls.lock().unwrap().push(id);
         self.focus_reply.lock().unwrap().clone()
+    }
+
+    fn list_apps(&self, deadline: Instant, _cancel: &CancelHandle) -> Result<Vec<AppInfo>, String> {
+        self.deadlines.lock().unwrap().push(deadline);
+        self.apps.lock().unwrap().clone()
+    }
+
+    fn open_app(&self, name: &str, deadline: Instant, _cancel: &CancelHandle) -> Result<(), String> {
+        self.deadlines.lock().unwrap().push(deadline);
+        self.opened.lock().unwrap().push(name.to_owned());
+        self.open_reply.lock().unwrap().clone()
     }
 }
 
@@ -609,6 +633,13 @@ fn cancel_all_reaches_an_in_flight_capture() {
         focused_window: Mutex::new(Ok(None)),
         focus_calls: Mutex::new(Vec::new()),
         focus_reply: Mutex::new(Ok(())),
+        apps: Mutex::new(Err("list_apps is unsupported by this backend: no running-app \
+             inventory source is configured (refusing instead of returning a faked empty list)"
+            .to_owned())),
+        open_reply: Mutex::new(Err("open_app is unsupported by this backend: no trusted \
+             launcher is configured (refusing instead of spawning a shell)"
+            .to_owned())),
+        opened: Mutex::new(Vec::new()),
         captures: AtomicUsize::new(0),
         return_raw: false,
         block_capture: true,
@@ -649,6 +680,13 @@ fn raw_buffer_backends_are_refused() {
         focused_window: Mutex::new(Ok(None)),
         focus_calls: Mutex::new(Vec::new()),
         focus_reply: Mutex::new(Ok(())),
+        apps: Mutex::new(Err("list_apps is unsupported by this backend: no running-app \
+             inventory source is configured (refusing instead of returning a faked empty list)"
+            .to_owned())),
+        open_reply: Mutex::new(Err("open_app is unsupported by this backend: no trusted \
+             launcher is configured (refusing instead of spawning a shell)"
+            .to_owned())),
+        opened: Mutex::new(Vec::new()),
         captures: AtomicUsize::new(0),
         return_raw: true,
         block_capture: false,
@@ -710,6 +748,8 @@ fn focus_queries_refuse_off_niri_before_any_io() {
 #[test]
 fn unsupported_and_unknown_surfaces_stay_truthful() {
     let (linux, _) = desktop(true, Ok(Some("DP-1".into())), vec![dp1()]);
+    // A backend that configures neither capability still refuses, and never
+    // fakes an empty list or a shell spawn.
     assert!(linux.list_apps().unwrap_err().contains("unsupported"));
     assert!(!linux.list_apps().unwrap_err().contains("[]"));
     assert!(linux.open_app("Terminal").unwrap_err().contains("unsupported"));
@@ -720,4 +760,32 @@ fn unsupported_and_unknown_surfaces_stay_truthful() {
     assert!(linux.window_owner_at(Point { x: 1.0, y: 1.0 }).is_none());
     // No Linux activation yet: a silent no-op, never a fake success story.
     linux.activate(1234);
+}
+
+#[test]
+fn list_and_open_app_fan_out_to_the_injected_backend() {
+    let (linux, backend) = desktop(true, Ok(Some("DP-1".into())), vec![dp1()]);
+    let apps = vec![AppInfo {
+        name: "org.gnome.TextEditor".into(),
+        bundle_id: None,
+        active: true,
+    }];
+    *backend.apps.lock().unwrap() = Ok(apps.clone());
+    assert_eq!(linux.list_apps().unwrap(), apps);
+    assert_eq!(linux.active_operations(), 0, "the fan-out unregisters");
+
+    *backend.open_reply.lock().unwrap() = Ok(());
+    linux.open_app("org.gnome.TextEditor").unwrap();
+    assert_eq!(*backend.opened.lock().unwrap(), vec!["org.gnome.TextEditor".to_owned()]);
+    assert_eq!(linux.active_operations(), 0);
+
+    // A backend refusal surfaces truthfully, never a silent success.
+    *backend.open_reply.lock().unwrap() = Err("no installed desktop entry matches `Nope`".into());
+    assert!(linux.open_app("Nope").unwrap_err().contains("no installed desktop entry"));
+
+    // Off Niri the adapter gate refuses before the backend is asked at all.
+    let (off_niri, off_backend) = desktop(false, Ok(None), vec![dp1()]);
+    assert!(off_niri.list_apps().unwrap_err().contains("Niri"));
+    assert!(off_niri.open_app("Terminal").unwrap_err().contains("Niri"));
+    assert!(off_backend.opened.lock().unwrap().is_empty());
 }

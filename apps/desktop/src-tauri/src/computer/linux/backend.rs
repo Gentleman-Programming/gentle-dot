@@ -29,11 +29,14 @@
 //! predicate exists.
 //!
 //! Truthfulness: capability gates run before any Wayland I/O and name the
-//! missing protocol; list/open/activate behavior stays in the adapter
-//! (explicit unsupported); AX/frontmost/owner stay unknown; per-app
-//! blocking is never claimed. Every failure is a truthful error, never
-//! silent success. No production startup, no UI, no `Control::end` wiring,
-//! no CLI, no Niri changes.
+//! missing protocol. `list_apps` derives the running managed applications
+//! from Niri's bounded `Windows` inventory (T5a/S7), and `open_app` launches
+//! an exact installed desktop entry through GIO's platform launcher; a
+//! configured-less backend keeps the truthful unsupported refusal. AX/
+//! frontmost/owner stay unknown; per-app blocking is never claimed, and a
+//! launch acknowledgement is never reported as a verified window. Every
+//! failure is a truthful error, never silent success. No production
+//! startup, no UI, no `Control::end` wiring, no CLI, no Niri changes.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -50,7 +53,7 @@ use super::outputs::Monitor;
 use super::transport::{
     connect_bounded, connection_from_stream, resolve_socket_path, CancelHandle,
 };
-use crate::computer::MouseButton;
+use crate::computer::{AppInfo, MouseButton};
 use crate::niri::Client;
 
 /// Bound for one `connect` inside [`Backend::open`](super::desktop::Backend::open):
@@ -203,6 +206,30 @@ impl Backend for WaylandBackend {
         let cancel = CancelHandle::new();
         let stream = connect_bounded(&path, deadline, &cancel).map_err(|error| error.to_string())?;
         connection_from_stream(stream).map_err(|error| error.to_string())
+    }
+
+    fn list_apps(&self, deadline: Instant, cancel: &CancelHandle) -> Result<Vec<AppInfo>, String> {
+        if !self.is_niri() {
+            return Err("niri windows refused: the centralized Niri gate is closed \
+                 in this session (no Wayland I/O attempted)"
+                .to_owned());
+        }
+        if cancel.is_cancelled() {
+            return Err("niri windows query cancelled before it started".to_owned());
+        }
+        // The bounded single request keeps the documented two-second bound,
+        // never stretched past the caller's total budget.
+        let timeout = deadline.saturating_duration_since(Instant::now()).min(NIRI_TIMEOUT);
+        if timeout.is_zero() {
+            return Err("niri windows query refused: the operation deadline elapsed".to_owned());
+        }
+        super::apps::query_running_apps(&self.niri_socket, timeout)
+    }
+
+    fn open_app(&self, name: &str, _deadline: Instant, _cancel: &CancelHandle) -> Result<(), String> {
+        // GIO's platform launcher starts the selected entry's own trusted
+        // `Exec`; the name is only compared, never compiled into a command.
+        super::apps::launch_installed_app(name)
     }
 
     fn discover(

@@ -6,8 +6,10 @@
 //!
 //! Discovery, enumeration, capture, pointer and keyboard input only, plus
 //! the first internal adapter slice ([`desktop`]: selection, cancellation
-//! and fan-out over an injected backend) and bounded screenshot
-//! normalization ([`normalize`]): this module binds no output beyond the
+//! and fan-out over an injected backend), bounded screenshot
+//! normalization ([`normalize`]), and the app surface ([`apps`]: the Niri
+//! running-window inventory and the GIO trusted desktop-entry launcher,
+//! T5a/S7): this module binds no output beyond the
 //! selected one, starts no backend, performs no production startup or UI
 //! work, and wires no helper. Keyboard operations
 //! ([`keyboard`]) bind only the virtual-keyboard manager, one `wl_seat`,
@@ -20,6 +22,7 @@
 //! discovery and enumeration are tested, while sweeps against a real
 //! compositor are still untested.
 
+pub mod apps;
 pub mod backend;
 pub mod capabilities;
 pub mod capture;
@@ -42,6 +45,9 @@ pub mod working;
 
 #[cfg(all(test, target_os = "linux"))]
 mod working_tests;
+
+#[cfg(test)]
+mod apps_tests;
 
 #[cfg(test)]
 mod backend_tests;
