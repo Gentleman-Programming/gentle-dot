@@ -3,6 +3,14 @@
 //! guards in order: rate limit, permissions, session grant, blocklist, risky-action
 //! confirmation; then it acts and returns a fresh screenshot (S24.2–S24.4).
 //!
+//! A successful post means the input was delivered to the compositor, never that the screen
+//! changed: the helper has no consumption signal and never claims the effect it did not
+//! observe (S4, S5). On this Linux desktop keyboard input is additionally pinned to the
+//! window that held the focus when the action started; a dialog that steals the focus is
+//! undone by window id, and every typed fragment and synthesized Return is re-checked
+//! against that same window immediately before it is posted, so a focus that moves
+//! mid-typing stops the rest instead of sending it to the wrong window.
+//!
 //! `batch` (S24.8) runs up to 20 actions in one call. Each step takes the single tool's path
 //! (`perform`) and counts as one action for the rate limit; a full window delays the step
 //! instead of refusing it. Coordinates refer to the screenshot taken before the batch, and one
@@ -25,7 +33,7 @@ use super::keys::{parse_combo, KeyCombo};
 use super::rate::{RateLimiter, MAX_ACTIONS_PER_SECOND};
 use super::risk::{assess, Act};
 use super::working::{NoPreparation, Preparation};
-use super::{BackendPolicy, Clock, Desktop, Dialogs, GLOBAL_CONFIRM_REASON, GLOBAL_TARGET, InputEvent, MouseButton};
+use super::{BackendPolicy, Clock, Desktop, Dialogs, FocusTarget, GLOBAL_CONFIRM_REASON, GLOBAL_TARGET, InputEvent, MouseButton};
 use base64::Engine as _;
 use serde_json::{json, Map, Value};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -53,6 +61,22 @@ const NEEDS_SCREENSHOT: &str = "Take a screenshot first: coordinates are pixels 
 const UNKNOWN_TARGET: &str = "Cannot tell which app is under that point, so the action was refused. \
 Take a new screenshot and try again.";
 
+/// Global-mode keyboard refusals (T4, S4/S5). Each one names what to do instead of typing
+/// into whatever happens to hold the focus.
+const NO_FOCUS_WINDOW: &str = "Cannot tell which window has the keyboard focus on this Linux desktop, so nothing was typed. \
+Click the window you want to receive the input and try again.";
+const OWN_FOCUS_WINDOW: &str = "Gentle Dot's own window has the keyboard focus, so nothing was typed. \
+Click the window you want to receive the input and try again.";
+const NO_WINDOW_OWNER: &str = "The focused window does not report its process, so Gentle Dot cannot rule out its own \
+window. Nothing was typed; click the window you want and try again.";
+const INVALID_OWNER_PID: &str = "The focused window reports an invalid owner process, so Gentle Dot cannot rule out its own \
+window. Nothing was typed; click the window you want and try again.";
+/// Neutral reasons the captured target is no longer the focused window. A caller that already
+/// posted some events adds its own delivery claim instead of asserting that nothing happened.
+const FOCUS_MOVED_REASON: &str = "the keyboard focus moved to another window";
+const FOCUS_LOST_REASON: &str = "the keyboard focus could not be read";
+const FOCUS_OWNER_CHANGED: &str = "the focused window no longer belongs to the process this action captured";
+
 const INSTRUCTIONS: &str = "Controls this Mac. Take a screenshot first; x and y are pixels of the latest \
 screenshot. Every action returns a fresh screenshot. Use `batch` for a predictable sequence (click a field, \
 type, press tab, type, press return) so it runs in one call; end the batch whenever you must see the screen \
@@ -61,12 +85,14 @@ some apps (System Settings, password managers) are off limits.";
 
 /// What `initialize` tells the agent in global mode (T2, S5): the same catalog drives
 /// the Linux desktop as a whole, with no reliable per-app exclusion and no Mac permissions.
-const GLOBAL_INSTRUCTIONS: &str = "Controls this Linux desktop as a whole: input reaches whatever is under the \
-pointer or focused, and there is no reliable per-app exclusion. Take a screenshot first; x and y are pixels of the \
-latest screenshot. Every action returns a fresh screenshot. Use `batch` for a predictable sequence (click a field, \
-type, press tab, type, press return) so it runs in one call; end the batch whenever you must see the screen \
-before deciding the next step. The user must allow a session, every mutating action asks the user to confirm \
-outside yolo mode, and risky targets cannot be fenced off per app.";
+const GLOBAL_INSTRUCTIONS: &str = "Controls this Linux desktop as a whole: pointer input reaches whatever is under \
+the point, keyboard input reaches the window that held the focus when the call started, and there is no reliable \
+per-app exclusion. Take a screenshot first; x and y are pixels of the latest screenshot. Every action returns a \
+fresh screenshot. A successful action means the input was delivered, not that the screen changed, so verify with \
+a new screenshot. Use `batch` for a predictable sequence (click a field, type, press tab, type, press return) so \
+it runs in one call; end the batch whenever you must see the screen before deciding the next step. The user must \
+allow a session, every mutating action asks the user to confirm outside yolo mode, and risky targets cannot be \
+fenced off per app.";
 
 pub struct HttpRequest<'a> {
     pub method: &'a str,
@@ -180,9 +206,9 @@ fn tools() -> Value {
          "inputSchema": schema(json!({"fromX": x, "fromY": y, "toX": x, "toY": y}), &["fromX", "fromY", "toX", "toY"])},
         {"name": "scroll", "description": "Scroll at a point. dy > 0 scrolls down and dx > 0 scrolls right, in pixels.",
          "inputSchema": schema(json!({"x": x, "y": y, "dx": {"type": "integer"}, "dy": {"type": "integer"}}), &["x", "y", "dx", "dy"])},
-        {"name": "type", "description": "Type text into the frontmost app. A newline presses Return.",
+        {"name": "type", "description": "Type text into the focused window of the frontmost app. A newline presses Return.",
          "inputSchema": schema(json!({"text": {"type": "string"}}), &["text"])},
-        {"name": "key", "description": "Press a key combo in the frontmost app, for example `cmd+shift+t`, `return`, or `esc`.",
+        {"name": "key", "description": "Press a key combo in the focused window of the frontmost app, for example `cmd+shift+t`, `return`, or `esc`.",
          "inputSchema": schema(json!({"combo": {"type": "string"}}), &["combo"])},
         {"name": "open_app", "description": "Open or bring forward an app by name or bundle id.",
          "inputSchema": schema(json!({"name": {"type": "string"}}), &["name"])},
@@ -485,7 +511,7 @@ impl Helper {
         if !self.control.is_active(self.clock.now_ms()) {
             // The screenshot of an ended session no longer describes the screen.
             *latest = None;
-            if !self.with_dialog(|| self.dialogs.ask_grant()) {
+            if !self.with_dialog(|| self.dialogs.ask_grant())? {
                 return Err(NOT_ALLOWED.into());
             }
             self.control.grant(self.clock.now_ms());
@@ -550,8 +576,22 @@ impl Helper {
         Ok(())
     }
 
-    /// Runs a dialog, then brings back the app that was in front (a dialog activates Gentle Dot).
-    fn with_dialog(&self, dialog: impl FnOnce() -> bool) -> bool {
+    /// Runs a dialog that takes the focus (a dialog activates Gentle Dot), then brings the
+    /// keyboard focus back to the exact window it was on. Global mode restores the window id;
+    /// macOS keeps its pid-based frontmost restore. Returns the answer, or why focus could
+    /// not be restored, so a caller never posts after losing its target.
+    fn with_dialog(&self, dialog: impl FnOnce() -> bool) -> Result<bool, String> {
+        if self.policy == BackendPolicy::DesktopGlobal {
+            let before = self.desktop.focused_window()?;
+            let answer = dialog();
+            if let Some(before) = before {
+                let now = self.desktop.focused_window()?;
+                if now.as_ref().map(|window| window.window_id) != Some(before.window_id) {
+                    self.desktop.focus_window(&before)?;
+                }
+            }
+            return Ok(answer);
+        }
         let before = self.desktop.frontmost_app();
         let answer = dialog();
         if let Some(before) = before {
@@ -559,7 +599,7 @@ impl Helper {
                 self.desktop.activate(before.pid);
             }
         }
-        answer
+        Ok(answer)
     }
 
     fn still_running(&self, epoch: u64) -> Result<(), String> {
@@ -624,10 +664,84 @@ impl Helper {
             return Ok(());
         }
         let message = format!("{action} in {target}.\n\nThis needs your OK because of {reason}.");
-        if self.with_dialog(|| self.dialogs.confirm(&message)) {
+        if self.with_dialog(|| self.dialogs.confirm(&message))? {
             Ok(())
         } else {
             Err(format!("The user declined: {action} in {target}. Nothing was done."))
+        }
+    }
+
+    /// The external window a keyboard action must target in global mode. Refuses Gentle Dot's
+    /// own window by pid and refuses a window whose owner is unknown, never matching an app
+    /// name. `Ok(None)` under the application-targeted policy, which keeps its own path.
+    fn keyboard_focus(&self) -> Result<Option<FocusTarget>, String> {
+        if self.policy != BackendPolicy::DesktopGlobal {
+            return Ok(None);
+        }
+        let window = self.desktop.focused_window()?.ok_or_else(|| NO_FOCUS_WINDOW.to_string())?;
+        self.usable_focus(&window)?;
+        Ok(Some(window))
+    }
+
+    /// Whether `window` may receive keyboard input: never Gentle Dot's own window (by pid,
+    /// never by name or app id), and never a window whose owner is absent or non-positive
+    /// (pid 0 or negative is not a real process).
+    fn usable_focus(&self, window: &FocusTarget) -> Result<(), String> {
+        match window.pid {
+            Some(pid) if pid == self.own_pid => Err(OWN_FOCUS_WINDOW.to_string()),
+            Some(pid) if pid > 0 => Ok(()),
+            Some(_) => Err(INVALID_OWNER_PID.to_string()),
+            None => Err(NO_WINDOW_OWNER.to_string()),
+        }
+    }
+
+    /// Global mode: why the focus is no longer the exact window this action captured, or
+    /// `Ok(())`. The window id and the captured owner pid must both still match, so an id
+    /// reused by another process never silently passes. The reason is neutral because a
+    /// caller may already have posted some events.
+    fn focus_mismatch(&self, focus: &FocusTarget) -> Result<(), String> {
+        match self.desktop.focused_window()? {
+            Some(window) if window.window_id == focus.window_id => match (window.pid, focus.pid) {
+                (Some(now), Some(captured)) if now == captured => self.usable_focus(&window),
+                _ => Err(FOCUS_OWNER_CHANGED.to_string()),
+            },
+            Some(_) => Err(FOCUS_MOVED_REASON.to_string()),
+            None => Err(FOCUS_LOST_REASON.to_string()),
+        }
+    }
+
+    /// Validates the captured target immediately before one post. `sent` is how many events
+    /// of this action were already delivered, so a partial delivery is reported truthfully
+    /// instead of claiming that nothing happened. The check and the post are separate IPC
+    /// calls, so a focus that moves between them is not pinned by the compositor.
+    fn check_target_before_post(
+        &self,
+        focus: Option<&FocusTarget>,
+        target: &str,
+        sent: usize,
+    ) -> Result<(), String> {
+        let Some(focus) = focus else { return Ok(()) };
+        if let Err(reason) = self.focus_mismatch(focus) {
+            return Err(if sent == 0 {
+                format!("Nothing was sent in {target}: {reason}. Click the window you want and try again.")
+            } else {
+                format!(
+                    "{sent} keyboard event(s) were sent in {target}, then the input stopped: {reason}. \
+The rest was not sent; click the window you want and try again."
+                )
+            });
+        }
+        Ok(())
+    }
+
+    /// The success line for a posted input. Global mode may claim delivery only: it has no
+    /// signal that the screen changed, and never verifies that text appeared. Targeted mode
+    /// keeps its exact wording.
+    fn global_claim(&self, done: String) -> String {
+        if self.policy == BackendPolicy::DesktopGlobal {
+            format!("{done} The input was delivered; the screen was not verified.")
+        } else {
+            done
         }
     }
 
@@ -764,7 +878,7 @@ impl Helper {
                 self.confirm_if_risky(assess(Act::Click(&chain), intent), &action, &target)?;
                 self.post(epoch, InputEvent::Click { at, button, count })?;
                 (self.glow)(Mark::Click(at));
-                Ok((format!("{action} in {target}: done."), SETTLE_MS))
+                Ok((self.global_claim(format!("{action} in {target}: done.")), SETTLE_MS))
             }
             Tool::Move { x, y } => {
                 let at = map(latest, (x, y))?;
@@ -773,7 +887,7 @@ impl Helper {
                 self.confirm_if_risky(assess(Act::Other, intent), &action, &target)?;
                 self.post(epoch, InputEvent::Move(at))?;
                 (self.glow)(Mark::Move(at));
-                Ok((format!("{action}: done."), SETTLE_MS))
+                Ok((self.global_claim(format!("{action}: done.")), SETTLE_MS))
             }
             Tool::Drag { from, to } => {
                 let (start, end) = (map(latest, from)?, map(latest, to)?);
@@ -785,7 +899,7 @@ impl Helper {
                 self.confirm_if_risky(assess(Act::Drag(&from_chain, &to_chain), intent), &action, &target)?;
                 self.post(epoch, InputEvent::Drag { from: start, to: end })?;
                 (self.glow)(Mark::Drag { from: start, to: end });
-                Ok((format!("{action}: done."), SETTLE_MS))
+                Ok((self.global_claim(format!("{action}: done.")), SETTLE_MS))
             }
             Tool::Scroll { x, y, dx, dy } => {
                 let at = map(latest, (x, y))?;
@@ -794,44 +908,55 @@ impl Helper {
                 self.confirm_if_risky(assess(Act::Other, intent), &action, &target)?;
                 self.post(epoch, InputEvent::Scroll { at, dx, dy })?;
                 (self.glow)(Mark::Scroll(at));
-                Ok((format!("{action}: done."), SETTLE_MS))
+                Ok((self.global_claim(format!("{action}: done.")), SETTLE_MS))
             }
             Tool::Type { text: typed } => {
                 let target = self.keyboard_target()?;
+                let focus = self.keyboard_focus()?;
                 let typed = typed.replace("\r\n", "\n").replace('\r', "\n");
-                let focus = self.desktop.focused_element();
+                let element = self.desktop.focused_element();
                 let action = format!("Type {} characters", typed.chars().count());
-                self.confirm_if_risky(assess(Act::Type(&typed, focus.as_ref()), intent), &action, &target)?;
+                self.confirm_if_risky(assess(Act::Type(&typed, element.as_ref()), intent), &action, &target)?;
                 let return_key = parse_combo("return")?;
+                // Every synthesized Return and every text chunk is re-checked against the
+                // SAME captured window immediately before it is posted, so a focus that moves
+                // mid-typing stops the rest instead of sending it to the wrong window.
+                let mut sent = 0usize;
                 for (i, line) in typed.split('\n').enumerate() {
                     if i > 0 {
+                        self.check_target_before_post(focus.as_ref(), &target, sent)?;
                         self.post(epoch, InputEvent::Key(return_key))?;
+                        sent += 1;
                     }
                     for chunk in chunks(line) {
+                        self.check_target_before_post(focus.as_ref(), &target, sent)?;
                         self.post(epoch, InputEvent::Text(chunk))?;
+                        sent += 1;
                     }
                 }
                 // The glow marks posted input only; an empty text posts none.
                 if !typed.is_empty() {
                     (self.glow)(Mark::Key);
                 }
-                Ok((format!("{action} in {target}: done."), SETTLE_MS))
+                Ok((self.global_claim(format!("{action} in {target}: done.")), SETTLE_MS))
             }
             Tool::Key { combo } => {
                 let target = self.keyboard_target()?;
-                let focus = self.desktop.focused_element();
+                let focus = self.keyboard_focus()?;
+                let element = self.desktop.focused_element();
                 let act = if combo.is_return() {
-                    Act::Return(focus.as_ref())
+                    Act::Return(element.as_ref())
                 } else if combo.is_space() {
-                    Act::Space(focus.as_ref())
+                    Act::Space(element.as_ref())
                 } else {
                     Act::Other
                 };
                 let action = format!("Press {}", combo.key);
                 self.confirm_if_risky(assess(act, intent), &action, &target)?;
+                self.check_target_before_post(focus.as_ref(), &target, 0)?;
                 self.post(epoch, InputEvent::Key(combo))?;
                 (self.glow)(Mark::Key);
-                Ok((format!("{action} in {target}: done."), SETTLE_MS))
+                Ok((self.global_claim(format!("{action} in {target}: done.")), SETTLE_MS))
             }
             Tool::OpenApp { name } => {
                 // No blocklist exists to check against in global mode (T2, S5); the grant,
@@ -875,6 +1000,7 @@ mod tests {
     use super::super::risk::{AxElement, Focus};
     use super::super::session::{Reason, StateEvent, SESSION_MS};
     use super::super::{InputEvent, MouseButton};
+    use super::super::FocusTarget;
     use super::*;
     use serde_json::json;
     use std::sync::atomic::Ordering;
@@ -2314,6 +2440,9 @@ mod tests {
         // No app owns any point and none is frontmost: there is no per-app target to find.
         *rig.desktop.owner_at.lock().unwrap() = Box::new(|_| None);
         *rig.desktop.frontmost.lock().unwrap() = None;
+        // The external editor window is the keyboard target global input is
+        // pinned to; without it global keyboard input must refuse (fail closed).
+        *rig.desktop.focused_window.lock().unwrap() = Some(editor_window());
         assert!(!is_error(&rig.call("screenshot", json!({}))));
     }
 
@@ -2512,6 +2641,8 @@ mod tests {
         assert!(!first_text(&result).contains("Screen Recording"), "{result:?}");
         rig.desktop.permissions.lock().unwrap().screen_recording = true;
         rig.desktop.permissions.lock().unwrap().accessibility = false;
+        // A valid external keyboard target is focused, so only the permission flag is under test.
+        *rig.desktop.focused_window.lock().unwrap() = Some(editor_window());
         let result = rig.call("key", json!({"combo": "tab"}));
         assert!(!is_error(&result), "Accessibility must not gate global input: {result}");
         assert!(!first_text(&result).contains("Accessibility"), "{result:?}");
@@ -2539,5 +2670,270 @@ mod tests {
         rig.desktop.permissions.lock().unwrap().screen_recording = false;
         let result = rig.call("screenshot", json!({}));
         assert!(!is_error(&result), "global seeing must not be blocked by Screen Recording: {result}");
+    }
+
+    // --- Focus safety (T4, S4/S5): the keyboard target is a window, not an app pid.
+
+    fn editor_window() -> FocusTarget {
+        FocusTarget {
+            window_id: 10,
+            pid: Some(200),
+            title: Some("Text Editor".into()),
+            app_id: Some("org.gnome.TextEditor".into()),
+        }
+    }
+
+    fn other_window_of_the_same_process() -> FocusTarget {
+        FocusTarget { window_id: 11, pid: Some(200), title: Some("Editor Help".into()), app_id: None }
+    }
+
+    fn own_chat_window() -> FocusTarget {
+        FocusTarget { window_id: 99, pid: Some(OWN_PID), title: Some("Gentle Dot".into()), app_id: Some("gentle-dot".into()) }
+    }
+
+    /// A global rig with the external editor window focused.
+    fn focus_rig(allow: bool, confirm: bool) -> Rig {
+        let rig = global_rig_with(allow, confirm);
+        global_ready(&rig);
+        *rig.desktop.focused_window.lock().unwrap() = Some(editor_window());
+        rig
+    }
+
+    /// Every dialog moves the keyboard focus to `target`, as a real one does.
+    fn dialogs_move_focus_to(rig: &Rig, target: FocusTarget) {
+        let desktop = rig.desktop.clone();
+        *rig.dialogs.during.lock().unwrap() = Some(Box::new(move || {
+            *desktop.focused_window.lock().unwrap() = Some(target.clone());
+        }));
+    }
+
+    #[test]
+    fn a_confirm_dialog_steals_focus_and_the_same_window_is_restored_before_typing() {
+        let rig = focus_rig(true, true);
+        dialogs_move_focus_to(&rig, own_chat_window());
+        let result = rig.call("type", json!({"text": "PRUEBA-NATIVA-OK"}));
+        assert!(!is_error(&result), "{result}");
+        // Input is posted only after the exact original window (id 10) is focused again,
+        // never the chat and never merely "some window of the same pid".
+        assert_eq!(rig.desktop.events(), vec![InputEvent::Text("PRUEBA-NATIVA-OK".into())]);
+        assert_eq!(*rig.desktop.focus_restores.lock().unwrap(), vec![10]);
+        assert_eq!(rig.desktop.focused_window.lock().unwrap().as_ref().unwrap().window_id, 10);
+    }
+
+    #[test]
+    fn the_grant_dialog_restores_the_target_window_before_typing() {
+        let rig = global_rig_with(true, true);
+        *rig.desktop.owner_at.lock().unwrap() = Box::new(|_| None);
+        *rig.desktop.frontmost.lock().unwrap() = None;
+        *rig.desktop.focused_window.lock().unwrap() = Some(editor_window());
+        dialogs_move_focus_to(&rig, own_chat_window());
+        // The very first call: the grant dialog opens before any screenshot and steals focus.
+        let result = rig.call("type", json!({"text": "hi"}));
+        assert!(!is_error(&result), "{result}");
+        assert_eq!(rig.dialogs.grants.load(Ordering::SeqCst), 1);
+        assert_eq!(rig.dialogs.confirmations.lock().unwrap().len(), 1);
+        assert_eq!(*rig.desktop.focus_restores.lock().unwrap(), vec![10, 10]);
+        assert_eq!(rig.desktop.events(), vec![InputEvent::Text("hi".into())]);
+    }
+
+    #[test]
+    fn a_failed_focus_restore_sends_zero_input() {
+        let rig = focus_rig(true, true);
+        dialogs_move_focus_to(&rig, own_chat_window());
+        *rig.desktop.focus_failure.lock().unwrap() = Some("niri: no such window".into());
+        let result = rig.call("type", json!({"text": "nope"}));
+        assert!(is_error(&result));
+        assert!(!first_text(&result).contains("done"), "{result}");
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn a_stop_during_a_dialog_sends_zero_input() {
+        let rig = focus_rig(true, true);
+        let control = rig.control.clone();
+        *rig.dialogs.during.lock().unwrap() = Some(Box::new(move || control.end(Reason::Stopped)));
+        let result = rig.call("type", json!({"text": "nope"}));
+        assert!(is_error(&result));
+        assert!(first_text(&result).contains("stopped"), "{result}");
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn an_own_window_already_focused_is_never_a_keyboard_target() {
+        let rig = focus_rig(true, true);
+        *rig.desktop.focused_window.lock().unwrap() = Some(own_chat_window());
+        let result = rig.call("type", json!({"text": "nope"}));
+        assert!(is_error(&result));
+        assert!(!first_text(&result).contains("done"), "{result}");
+        assert!(first_text(&result).to_lowercase().contains("focus"), "{result}");
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn moving_to_another_window_before_the_post_sends_zero_input() {
+        // The restore is accepted but ignored by the compositor: the pre-post check
+        // must still see the wrong window and refuse instead of typing blind.
+        let rig = focus_rig(true, true);
+        rig.desktop.focus_ignores.store(true, Ordering::SeqCst);
+        dialogs_move_focus_to(&rig, other_window_of_the_same_process());
+        let result = rig.call("type", json!({"text": "nope"}));
+        assert!(is_error(&result));
+        assert!(!first_text(&result).contains("done"), "{result}");
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn two_windows_of_one_process_are_not_interchangeable() {
+        let rig = focus_rig(true, true);
+        // The dialog moves focus to a second window of the same process; a pid-only
+        // restore would consider the job done and type into the wrong window.
+        dialogs_move_focus_to(&rig, other_window_of_the_same_process());
+        let result = rig.call("key", json!({"combo": "tab"}));
+        assert!(!is_error(&result), "{result}");
+        assert_eq!(*rig.desktop.focus_restores.lock().unwrap(), vec![10]);
+        assert_eq!(rig.desktop.focused_window.lock().unwrap().as_ref().unwrap().window_id, 10);
+        assert_eq!(rig.desktop.events(), vec![InputEvent::Key(parse_combo("tab").unwrap())]);
+    }
+
+    #[test]
+    fn key_and_drag_never_report_an_unverified_success() {
+        // A refused keyboard route is a truthful error, never a "done".
+        let rig = focus_rig(true, true);
+        *rig.desktop.focused_window.lock().unwrap() = Some(own_chat_window());
+        let key = rig.call("key", json!({"combo": "tab"}));
+        assert!(is_error(&key));
+        assert!(!first_text(&key).contains("done"), "{key}");
+        assert!(rig.desktop.events().is_empty());
+        // A delivered drag claims delivery only; the visible effect is not verified.
+        let rig = focus_rig(true, true);
+        let result = rig.call("drag", json!({"fromX": 10, "fromY": 10, "toX": 20, "toY": 20}));
+        assert!(!is_error(&result), "{result}");
+        let text = first_text(&result);
+        assert!(text.contains("delivered"), "{text}");
+        assert!(text.contains("not verified"), "{text}");
+        assert_eq!(rig.desktop.events().len(), 1);
+    }
+
+    #[test]
+    fn global_keyboard_input_without_a_focus_window_refuses() {
+        // No window focus can be named: keyboard input fails closed instead of
+        // typing into whatever happens to be focused.
+        let rig = global_rig_with(true, true);
+        global_ready(&rig);
+        *rig.desktop.focused_window.lock().unwrap() = None;
+        let result = rig.call("type", json!({"text": "nope"}));
+        assert!(is_error(&result));
+        assert!(!first_text(&result).contains("done"), "{result}");
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn a_window_without_an_owner_pid_is_not_a_keyboard_target() {
+        // Niri can report a window with no pid (for example a portal window): the
+        // owner cannot be ruled out, so keyboard input fails closed.
+        let rig = focus_rig(true, true);
+        *rig.desktop.focused_window.lock().unwrap() = Some(FocusTarget {
+            window_id: 21,
+            pid: None,
+            title: Some("Portal".into()),
+            app_id: None,
+        });
+        let result = rig.call("type", json!({"text": "nope"}));
+        assert!(is_error(&result));
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn a_batch_keyboard_step_refuses_when_the_target_is_own() {
+        // Batch steps take the same path as single calls: the pointer step runs, the
+        // keyboard step that follows it never posts.
+        let rig = focus_rig(true, true);
+        *rig.desktop.focused_window.lock().unwrap() = Some(own_chat_window());
+        let result = rig.call(
+            "batch",
+            batch(json!([
+                {"tool": "move", "x": 10, "y": 10},
+                {"tool": "type", "text": "nope"},
+            ])),
+        );
+        assert!(is_error(&result));
+        assert!(first_text(&result).contains("step 2"), "{result}");
+        assert_eq!(rig.desktop.events(), vec![InputEvent::Move(Point { x: 20.0, y: 20.0 })]);
+    }
+
+    #[test]
+    fn typing_stops_before_the_synthesized_return_when_the_focus_moves_mid_typing() {
+        // The first line's text is delivered, then the focus moves: the Return that
+        // would follow (and the next line) must never be posted.
+        let rig = focus_rig(true, true);
+        let desktop = rig.desktop.clone();
+        *rig.desktop.on_post.lock().unwrap() = Some(Box::new(move |count| {
+            if count == 1 {
+                *desktop.focused_window.lock().unwrap() = Some(other_window_of_the_same_process());
+            }
+        }));
+        let result = rig.call("type", json!({"text": "aaaa\nbbbb"}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(rig.desktop.events(), vec![InputEvent::Text("aaaa".into())]);
+        let message = first_text(&result);
+        assert!(message.contains("was sent") || message.contains("were sent"), "{message}");
+        assert!(!message.contains("done"), "{message}");
+    }
+
+    #[test]
+    fn typing_stops_before_the_next_chunk_when_the_focus_moves_mid_typing() {
+        // 25 characters are two chunks of at most 20; only the first may be posted.
+        let rig = focus_rig(true, true);
+        let desktop = rig.desktop.clone();
+        *rig.desktop.on_post.lock().unwrap() = Some(Box::new(move |count| {
+            if count == 1 {
+                *desktop.focused_window.lock().unwrap() = Some(own_chat_window());
+            }
+        }));
+        let result = rig.call("type", json!({"text": "a".repeat(25)}));
+        assert!(is_error(&result), "{result}");
+        let events = rig.desktop.events();
+        assert_eq!(events.len(), 1, "only the first chunk may be posted: {events:?}");
+        assert!(matches!(events[0], InputEvent::Text(_)));
+        assert!(!first_text(&result).contains("done"), "{result}");
+    }
+
+    #[test]
+    fn a_zero_or_negative_owner_pid_is_not_a_keyboard_target() {
+        for pid in [0, -1, i32::MIN] {
+            let rig = focus_rig(true, true);
+            *rig.desktop.focused_window.lock().unwrap() = Some(FocusTarget {
+                window_id: 21,
+                pid: Some(pid),
+                title: Some("Bad owner".into()),
+                app_id: None,
+            });
+            let result = rig.call("type", json!({"text": "nope"}));
+            assert!(is_error(&result), "pid {pid}: {result}");
+            assert!(!first_text(&result).contains("done"), "pid {pid}: {result}");
+            assert!(rig.desktop.events().is_empty(), "pid {pid} must send zero input");
+        }
+    }
+
+    #[test]
+    fn a_same_window_id_with_a_changed_owner_is_refused_mid_typing() {
+        // The compositor reuses the id for a window of another process: the captured
+        // owner must not silently pass on the id alone.
+        let rig = focus_rig(true, true);
+        let desktop = rig.desktop.clone();
+        *rig.desktop.on_post.lock().unwrap() = Some(Box::new(move |count| {
+            if count == 1 {
+                *desktop.focused_window.lock().unwrap() = Some(FocusTarget {
+                    window_id: 10,
+                    pid: Some(777),
+                    title: Some("Reused id".into()),
+                    app_id: None,
+                });
+            }
+        }));
+        let result = rig.call("type", json!({"text": "a".repeat(25)}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(rig.desktop.events().len(), 1, "the second chunk must not be posted");
+        assert!(first_text(&result).contains("process this action captured"), "{result}");
     }
 }

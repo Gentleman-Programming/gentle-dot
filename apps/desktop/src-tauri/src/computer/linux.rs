@@ -26,6 +26,7 @@ pub mod capture;
 pub mod desktop;
 #[cfg(target_os = "linux")]
 pub mod dialogs;
+pub mod focus;
 #[cfg(all(test, target_os = "linux"))]
 mod dialogs_tests;
 pub mod geometry;
@@ -50,6 +51,9 @@ mod capture_tests;
 
 #[cfg(test)]
 mod desktop_tests;
+
+#[cfg(test)]
+mod focus_tests;
 
 #[cfg(test)]
 mod geometry_tests;

@@ -175,6 +175,24 @@ impl Backend for WaylandBackend {
         })
     }
 
+    fn focused_window(&self) -> Result<Option<super::focus::FocusedWindow>, String> {
+        if !self.is_niri() {
+            return Err("niri focused window refused: the centralized Niri gate is closed \
+                 in this session (no Wayland I/O attempted)"
+                .to_owned());
+        }
+        super::focus::query_focused_window(&self.niri_socket, NIRI_TIMEOUT)
+    }
+
+    fn focus_window(&self, id: u64) -> Result<(), String> {
+        if !self.is_niri() {
+            return Err("niri focus window refused: the centralized Niri gate is closed \
+                 in this session (no Wayland I/O attempted)"
+                .to_owned());
+        }
+        super::focus::focus_window(&self.niri_socket, id, NIRI_TIMEOUT)
+    }
+
     fn open(&self) -> Result<Connection, String> {
         // One fresh exclusive connection per call; never cloned, never
         // retained past the phase that asked for it.

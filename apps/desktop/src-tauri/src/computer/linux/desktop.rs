@@ -44,6 +44,15 @@
 //! is a no-op until capabilities, UI and cancel are integrated later. Key
 //! and text map the existing [`KeyCombo`] through the native keyboard API
 //! without touching the Mac parser.
+//!
+//! Focus targeting (T4, S4/S5): [`Desktop::focused_window`] and
+//! [`Desktop::focus_window`] expose Niri's `FocusedWindow` query and
+//! `FocusWindow` action through [`super::focus`], reusing the existing
+//! bounded [`Client`](crate::niri::Client) path. The window id is the
+//! identity and the reply's pid only excludes Gentle Dot's own window;
+//! per-app blocking is still never claimed. The check and the post are
+//! separate IPC calls, so this seam does not pin a target against a focus
+//! that moves between them.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -59,7 +68,7 @@ use crate::computer::blocklist::AppIdentity;
 use crate::computer::coords::Point;
 use crate::computer::keys::KeyCombo;
 use crate::computer::risk::{AxElement, Focus};
-use crate::computer::{AppInfo, Capture, Desktop, MouseButton, Permissions};
+use crate::computer::{AppInfo, Capture, Desktop, FocusTarget, MouseButton, Permissions};
 
 /// Total budget for one [`Desktop`] call, shared by every phase inside it
 /// (discover, collect, capture/input, normalization). One deadline for the
@@ -218,6 +227,13 @@ pub trait Backend: Send + Sync {
     /// The Niri focused-output connector name (`None` when Niri reports no
     /// focused output).
     fn focused_output(&self) -> Result<Option<String>, String>;
+    /// The window Niri reports as focused (`None` when none is focused). The
+    /// window id is the target identity; the pid, when present, only excludes
+    /// our own window. A bounded single request, never an unbounded poll.
+    fn focused_window(&self) -> Result<Option<super::focus::FocusedWindow>, String>;
+    /// Focus the window with `id` again. The reply must report `Handled`; any
+    /// other reply is a truthful error, never a guessed success.
+    fn focus_window(&self, id: u64) -> Result<(), String>;
     /// Open one fresh exclusive Wayland connection. Called once per
     /// protocol phase; never retained, never cloned by the adapter.
     fn open(&self) -> Result<Connection, String>;
@@ -556,6 +572,30 @@ impl<B: Backend> Desktop for LinuxDesktop<B> {
     fn activate(&self, _pid: i32) {
         // No Linux activation until capabilities, UI and cancel are
         // integrated later; deliberately a silent no-op (never a fake).
+    }
+
+    fn focused_window(&self) -> Result<Option<FocusTarget>, String> {
+        self.gate("focus")?;
+        let _guard = self.ops.register();
+        let window = self
+            .backend
+            .focused_window()
+            .map_err(|detail| format!("focus failed: {detail}"))?;
+        Ok(window.map(|window| FocusTarget {
+            window_id: window.id,
+            pid: window.pid,
+            title: window.title,
+            app_id: window.app_id,
+        }))
+    }
+
+    fn focus_window(&self, target: &FocusTarget) -> Result<(), String> {
+        self.gate("focus")?;
+        let _guard = self.ops.register();
+        // The exact window id, never a pid or first-window fallback.
+        self.backend
+            .focus_window(target.window_id)
+            .map_err(|detail| format!("focus restore failed: {detail}"))
     }
 }
 

@@ -16,12 +16,13 @@ use super::desktop::{
     key_combo_string, parse_focused_output_name, select_focused, select_for_point,
     LinuxDesktop, OperationRegistry, PointerAction, Backend, FOCUSED_OUTPUT_REQUEST, OP_BUDGET,
 };
+use super::focus::FocusedWindow;
 use super::geometry::OutputGeometry;
 use super::normalize::{downscale_rgb_bilinear, normalize_bgra_to_rgb, normalized_target};
 use super::outputs::Monitor;
 use super::transport::{connection_from_stream, CancelHandle};
 use crate::computer::coords::Point;
-use crate::computer::{Desktop, InputEvent, MouseButton};
+use crate::computer::{Desktop, FocusTarget, InputEvent, MouseButton};
 use wayland_client::Connection;
 
 /// A 32x24 output at the origin.
@@ -126,6 +127,9 @@ struct FakeBackend {
     pointer_calls: Mutex<Vec<(String, u32)>>,
     combos: Mutex<Vec<String>>,
     texts: Mutex<Vec<String>>,
+    focused_window: Mutex<Result<Option<FocusedWindow>, String>>,
+    focus_calls: Mutex<Vec<u64>>,
+    focus_reply: Mutex<Result<(), String>>,
     captures: AtomicUsize,
     /// When set, `capture` returns a raw-buffer JPEG instead of the fused
     /// normalized image: the adapter must refuse it (pins the fused-path
@@ -149,6 +153,9 @@ impl FakeBackend {
             pointer_calls: Mutex::new(Vec::new()),
             combos: Mutex::new(Vec::new()),
             texts: Mutex::new(Vec::new()),
+            focused_window: Mutex::new(Ok(None)),
+            focus_calls: Mutex::new(Vec::new()),
+            focus_reply: Mutex::new(Ok(())),
             captures: AtomicUsize::new(0),
             return_raw: false,
             block_capture: false,
@@ -307,6 +314,15 @@ impl Backend for Arc<FakeBackend> {
         self.deadlines.lock().unwrap().push(deadline);
         self.texts.lock().unwrap().push(text.to_owned());
         Ok(())
+    }
+
+    fn focused_window(&self) -> Result<Option<FocusedWindow>, String> {
+        self.focused_window.lock().unwrap().clone()
+    }
+
+    fn focus_window(&self, id: u64) -> Result<(), String> {
+        self.focus_calls.lock().unwrap().push(id);
+        self.focus_reply.lock().unwrap().clone()
     }
 }
 
@@ -590,6 +606,9 @@ fn cancel_all_reaches_an_in_flight_capture() {
         pointer_calls: Mutex::new(Vec::new()),
         combos: Mutex::new(Vec::new()),
         texts: Mutex::new(Vec::new()),
+        focused_window: Mutex::new(Ok(None)),
+        focus_calls: Mutex::new(Vec::new()),
+        focus_reply: Mutex::new(Ok(())),
         captures: AtomicUsize::new(0),
         return_raw: false,
         block_capture: true,
@@ -627,6 +646,9 @@ fn raw_buffer_backends_are_refused() {
         pointer_calls: Mutex::new(Vec::new()),
         combos: Mutex::new(Vec::new()),
         texts: Mutex::new(Vec::new()),
+        focused_window: Mutex::new(Ok(None)),
+        focus_calls: Mutex::new(Vec::new()),
+        focus_reply: Mutex::new(Ok(())),
         captures: AtomicUsize::new(0),
         return_raw: true,
         block_capture: false,
@@ -639,6 +661,50 @@ fn raw_buffer_backends_are_refused() {
         "adapter must demand the fused path, got: {err}"
     );
     assert_eq!(linux.active_operations(), 0);
+}
+
+#[test]
+fn focused_window_maps_the_backend_reply_to_the_adapter_target() {
+    let (linux, backend) = desktop(true, Ok(Some("DP-1".into())), vec![dp1()]);
+    *backend.focused_window.lock().unwrap() = Ok(Some(FocusedWindow {
+        id: 17,
+        pid: Some(991),
+        title: Some("Editor".into()),
+        app_id: Some("org.gnome.TextEditor".into()),
+    }));
+    let target = linux.focused_window().unwrap().expect("the focused window maps through");
+    assert_eq!(target.window_id, 17);
+    assert_eq!(target.pid, Some(991));
+    assert_eq!(target.title.as_deref(), Some("Editor"));
+    assert_eq!(linux.active_operations(), 0, "guard must unregister");
+    // `None` is "cannot tell", not an error: the caller decides to fail closed.
+    *backend.focused_window.lock().unwrap() = Ok(None);
+    assert!(linux.focused_window().unwrap().is_none());
+    // A query failure surfaces truthfully instead of turning into "no window".
+    *backend.focused_window.lock().unwrap() = Err("niri socket gone".into());
+    assert!(linux.focused_window().unwrap_err().contains("niri socket gone"));
+}
+
+#[test]
+fn focus_restore_targets_the_exact_window_id() {
+    let (linux, backend) = desktop(true, Ok(Some("DP-1".into())), vec![dp1()]);
+    let target = FocusTarget { window_id: 17, pid: Some(991), title: None, app_id: None };
+    linux.focus_window(&target).unwrap();
+    assert_eq!(*backend.focus_calls.lock().unwrap(), vec![17]);
+    assert_eq!(linux.active_operations(), 0);
+    // A backend refusal surfaces truthfully, never a silent success.
+    *backend.focus_reply.lock().unwrap() = Err("no such window".into());
+    let err = linux.focus_window(&target).unwrap_err();
+    assert!(err.contains("no such window"), "{err}");
+}
+
+#[test]
+fn focus_queries_refuse_off_niri_before_any_io() {
+    let (linux, backend) = desktop(false, Ok(Some("DP-1".into())), vec![dp1()]);
+    assert!(linux.focused_window().unwrap_err().contains("Niri"));
+    let target = FocusTarget { window_id: 17, pid: None, title: None, app_id: None };
+    assert!(linux.focus_window(&target).unwrap_err().contains("Niri"));
+    assert_eq!(backend.opens.load(Ordering::SeqCst), 0, "gate must precede any Wayland I/O");
 }
 
 #[test]
