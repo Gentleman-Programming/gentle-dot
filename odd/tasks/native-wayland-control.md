@@ -24,8 +24,9 @@ Explicit desktop-global consent; no compositor patches and no external MCP serve
 
 - T1 [S1-S6] route=parent commit=056abb6 done: reconcile design and inspect local bridge/application seams.
 - T2 [S3-S5] route=worker commit=056abb6 done: explicit desktop-global policy and truthful permissions/consent, preserving native macOS mode; deterministic RED/GREEN checks.
-- T3a [S1-S4] route=worker commit=pending: Linux-only Wayland dependencies, bounded connection/registry dispatch and capability discovery; no live input or production startup.
-- T3b [S1-S4] route=worker commit=pending: capture buffers, encoding and output geometry using the bounded transport.
+- T3a [S1-S4] route=worker commit=5093697 done: Linux-only Wayland dependencies, bounded connection/registry dispatch and capability discovery; no live input or production startup.
+- T3b1 [S1-S4] route=worker commit=pending: output geometry and coordinate/transform validation using bounded dispatch.
+- T3b2 [S1-S4] route=worker commit=pending: capture buffers and encoding using bounded transport and validated output geometry.
 - T4 [S1-S5] route=worker commit=pending: pointer and keyboard input with cancellation/held-input cleanup.
 - T5 [S1-S5] route=worker commit=pending: app integration, tool catalog, session lifecycle, Stop, Yolo and truthful UI.
 - T6 [S3-S6] route=verify commit=pending: independent safety/portability verification, docs and functional checks.
@@ -84,3 +85,5 @@ Explicit desktop-global consent; no compositor patches and no external MCP serve
 - L17 (T2 verifier follow-up): policy-aware `initialize` instructions (`GLOBAL_INSTRUCTIONS`: Linux desktop as a whole, no reliable per-app exclusion, no Mac claims; Targeted text byte-identical) and policy-aware `check_permissions` errors (global names no macOS 14 / Screen Recording / Accessibility). Fixed the `keyboard_target` early-return newline and ordered the new imports locally. Extended fake-backend tests: drag/scroll/open_app ask outside Yolo, declined mutations post nothing (events/opened/captures unchanged), global initialize truthfulness, targeted initialize unchanged. `computer::` suite 188 passed.
 
 - L18: T2 committed as 056abb6; 188 computer tests, full Rust library 757 passed / 6 ignored. Independent verifier findings corrected; native review review-f682b0af8a12e44d approved and acknowledged. Slice 428 diff lines including specification, 345 source/test diff lines. Subsequent work split into T3a transport and T3b capture, each separate reviewable commit. No native-control push before user test.
+
+- L19: T3a committed 5093697 after fake-peer hardening and native review review-94f3bf1462181744 approved/acknowledged. 16 focused tests; full library 773 passed, 6 ignored (worker evidence). 1361 diff-line exception includes protocol fake-peer harness; no safe checks removed. WAYLAND_SOCKET shared-stream adoption refused until exclusive ownership exists. Real compositor sweep pending. Next capture work split into geometry and buffers rather than repeating this oversized slice.

@@ -10,7 +10,11 @@
 //! sweep against a real compositor is still untested.
 
 pub mod capabilities;
+pub mod geometry;
 pub mod transport;
+
+#[cfg(test)]
+mod geometry_tests;
 
 #[cfg(test)]
 mod tests;
