@@ -161,8 +161,10 @@ fn the_built_dialog_defaults_to_the_refusing_button_and_shows_one_body() {
         allow_button.clicked();
         assert_eq!(*answers.borrow(), vec![refuse.1, allow.1], "{choice:?}");
 
-        // One caption and one body: the caption is the app title, and the content area holds a
-        // single label with the whole message — no heading copy of the title.
+        // The title is drawn exactly once and the body exactly once: GTK draws a dialog's caption
+        // only with `gtk-dialogs-use-header` on, and when it does not the dialog draws the app name
+        // itself instead. The count is asserted, not the arrangement, so no arrangement can ever
+        // show the name twice or leave it invisible.
         assert_eq!(dialog.title().map(|title| title.to_string()).as_deref(), Some("Gentle Dot"));
         let labels: Vec<String> = dialog
             .content_area()
@@ -171,7 +173,13 @@ fn the_built_dialog_defaults_to_the_refusing_button_and_shows_one_body() {
             .filter_map(|widget| widget.downcast::<gtk::Label>().ok())
             .map(|label| label.text().to_string())
             .collect();
-        assert_eq!(labels, vec![GLOBAL_GRANT_TEXT.to_owned()], "{choice:?}");
+        let copies = labels.iter().filter(|label| label.as_str() == "Gentle Dot").count();
+        assert_eq!(copies, 1, "{choice:?}: the title must be drawn exactly once, got {labels:?}");
+        assert_eq!(
+            labels.iter().filter(|label| label.as_str() == GLOBAL_GRANT_TEXT).count(),
+            1,
+            "{choice:?}: the body must be drawn exactly once, got {labels:?}"
+        );
 
         // The cleanup `show` runs after `run`: the same call, on the same unshown widget.
         release(&dialog);

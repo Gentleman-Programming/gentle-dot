@@ -2,9 +2,13 @@
 //!
 //! The dialog plugin's GTK backend (rfd 0.16) passes the title to `gtk_message_dialog_new` as the
 //! dialog's primary text *and* to `gtk_window_set_title`, so the app name was drawn twice above the
-//! message: once as the window caption and once as a bold heading. This builder keeps the window
-//! caption and puts the message in a single label — [`Content`] has no heading field, so no string
-//! can be shown twice — without blanking the caption or inventing a second title.
+//! message. This builder draws the title exactly once, as one bold heading label, and keeps the
+//! window title only for the compositor's own window list.
+//!
+//! The heading is unconditional on purpose: `gtk-dialogs-use-header` reads *true* in this
+//! environment and GTK still draws no caption for a bare `gtk::Dialog` on Wayland, so gating the
+//! heading on that setting left the dialog with no visible title at all — the live report that
+//! prompted this. The one drawn copy is the heading, which no decoration can duplicate.
 //!
 //! Only the allowing button's response allows. The refusing button is the dialog's default (Return),
 //! Escape and closing answer `DELETE_EVENT`, and a dialog that never ran or never answered refuses.
@@ -26,8 +30,7 @@ pub(super) const REFUSE_RESPONSE: gtk::ResponseType = gtk::ResponseType::Other(2
 /// The allowing button's response: the only answer that allows.
 pub(super) const ALLOW_RESPONSE: gtk::ResponseType = gtk::ResponseType::Other(2001);
 
-/// What the dialog shows: one caption and one body, and no heading field for a second copy of the
-/// app title (S3).
+/// What the dialog shows: the title drawn exactly once as a heading, plus one body label (S3).
 pub(super) struct Content {
     pub(super) caption: String,
     pub(super) body: String,
@@ -108,13 +111,20 @@ pub(super) fn release(dialog: &gtk::Dialog) {
     unsafe { dialog.destroy() };
 }
 
-/// The dialog itself: the window caption carries the title, one wrapping label carries the message.
+/// The dialog itself: one bold heading label with the app name, one wrapping body label, and the
+/// window title set only for the compositor's window list (GTK draws no caption for this dialog on
+/// Wayland, so the heading is the single drawn copy).
 pub(super) fn dialog(content: &Content, choice: Choice) -> gtk::Dialog {
     let dialog = gtk::Dialog::new();
     dialog.set_title(&content.caption);
     dialog.set_modal(true);
     dialog.set_resizable(false);
     dialog.set_border_width(12);
+    let heading = gtk::Label::new(None);
+    // Escaped even though the caption is ours: a label must never read it as markup.
+    heading.set_markup(&format!("<b>{}</b>", gtk::glib::markup_escape_text(&content.caption)));
+    heading.set_xalign(0.0);
+    dialog.content_area().pack_start(&heading, false, false, 0);
     let body = gtk::Label::new(Some(&content.body));
     body.set_line_wrap(true);
     body.set_max_width_chars(60);
