@@ -22,9 +22,9 @@
 //! and post registers its [`CancelHandle`] on entry and the [`OperationGuard`]
 //! removes exactly its own entry on exit (success, error, or panic unwind),
 //! so two concurrent calls never clear each other and no entry leaks.
-//! [`OperationRegistry::cancel_all`] is the hook the future `Control::end`
-//! (Stop) wiring will call. It is not wired yet: nothing here claims Stop
-//! interrupts an in-flight operation until that wiring plus its test land.
+//! [`OperationRegistry::cancel_all`] is the hook `Control::end` (Stop) calls:
+//! the app wiring in `app.rs` installs it through `set_on_end`, so a Stop
+//! cancels every in-flight capture and post.
 //!
 //! Monitor selection: screenshots use the stock Niri focused output, asked
 //! through the existing Niri [`Client`](crate::niri::Client) request path
@@ -359,10 +359,8 @@ impl OperationRegistry {
         OperationGuard { registry: self, id, handle }
     }
 
-    /// Cancel every in-flight operation. This is the hook the future
-    /// `Control::end` (Stop) wiring will call; it is not wired yet, so Stop
-    /// interrupting an operation is not claimed until that wiring and its
-    /// test land.
+    /// Cancel every in-flight operation. `Control::end` (Stop) reaches this
+    /// through the app wiring in `app.rs`.
     pub fn cancel_all(&self) {
         let active = self.active.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         for (_, handle) in active.iter() {
@@ -398,8 +396,8 @@ impl<B> LinuxDesktop<B> {
         Self { backend, ops: OperationRegistry::default() }
     }
 
-    /// Cancel every in-flight capture/post. Future `Control::end` hook; not
-    /// wired to Stop yet (see [`OperationRegistry::cancel_all`]).
+    /// Cancel every in-flight capture/post. `Control::end` (Stop) reaches this
+    /// through the app wiring in `app.rs`.
     pub fn cancel_all(&self) {
         self.ops.cancel_all();
     }

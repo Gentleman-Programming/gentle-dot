@@ -2678,11 +2678,17 @@ mod tests {
     #[test]
     fn global_input_without_a_session_still_refuses() {
         // The grant, not the removed blanket, is what gates input: no session means no input
-        // and no confirmation (S9 removes the repeated prompt, not the consent).
+        // and no confirmation (S9 removes the repeated prompt, not the consent). Every mutating
+        // tool goes through the same gate, so none of them may post or launch without it.
         let rig = global_rig_with(false, true);
         for (name, args) in [
+            ("click", json!({"x": 10, "y": 10})),
             ("move", json!({"x": 10, "y": 10})),
+            ("drag", json!({"fromX": 10, "fromY": 10, "toX": 20, "toY": 20})),
+            ("scroll", json!({"x": 5, "y": 6, "dx": 0, "dy": 10})),
             ("type", json!({"text": "ok"})),
+            ("key", json!({"combo": "tab"})),
+            ("open_app", json!({"name": "Mail"})),
         ] {
             let result = rig.call(name, args);
             assert!(is_error(&result), "{name}");
@@ -2690,6 +2696,7 @@ mod tests {
         }
         assert!(rig.dialogs.confirmations.lock().unwrap().is_empty());
         assert!(rig.desktop.events().is_empty());
+        assert!(rig.desktop.opened.lock().unwrap().is_empty());
     }
 
     #[test]
