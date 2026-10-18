@@ -25,7 +25,7 @@ General daemon/engine behaviour, not platform-specific and not part of the Linux
 - T3 [S1,S2] route=worker commit=b8fa0cd,37063b3: reactive recovery with one invisible re-send, suppressed error on the first attempt.
 - T4 [S1] route=worker commit=pending: learn the observed ceiling per model with a margin instead of guessing.
 - T5 [S1-S3] route=verify commit=pending: independent verification with deterministic tests.
-- T7 [S1,S2] route=worker commit=pending: a total cap for the user's own attachments, so one message cannot carry more images than a request may hold.
+- T7 [S1,S2] route=worker commit=42fa84b: a total cap for the user's own attachments, so one message cannot carry more images than a request may hold.
 - T6 [S1,S3] route=parent commit=pending: own branch and PR, plus an upstream issue with the evidence.
 
 ## Log
@@ -99,3 +99,13 @@ General daemon/engine behaviour, not platform-specific and not part of the Linux
   solo puede haber una recuperación en vuelo, así que un mensaje nuevo que falle mientras otra rota muestra su
   error real en esa ventana angosta (seguro, no invisible). Sigue sin verificar la muerte del daemon entre el
   fallo silenciado y el reenvío.
+
+- **L11** — T7 en 42fa84b: `composePrompt` suma los bytes de imagen en orden de adjunto y deja de adjuntar al
+  llegar al tope (`attachmentBudgetBytes` = mitad del presupuesto de petición, 4 MiB por defecto, derivado del
+  mismo constante que el reescritor y el piso de recuperación para que no se desincronicen). Cada imagen que
+  queda afuera mantiene su chip y lleva el motivo en el prompt. 31 pruebas del archivo y 515 del daemon en
+  verde. **Hueco de honestidad**: el motivo lo ve el modelo, no el usuario, porque `AttachmentInfo` no tiene
+  campo de nota y `splitAttachments` arma el chip sin motivo; el mismo hueco ya existía para una imagen
+  individual demasiado grande. Arreglo acordado: avisar al usuario con un `toast` de advertencia que nombre
+  cuántos adjuntos quedaron afuera y por qué, reutilizando el canal que ya existe en el protocolo; se
+  implementa junto con la ventana de reinicio porque ambos tocan `bridge.ts`.
