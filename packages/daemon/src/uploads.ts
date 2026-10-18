@@ -18,6 +18,7 @@ import {
 	type UploadedFile,
 } from "@gentle-dot/protocol";
 import { directAccess, type EngineAccess } from "./engine-access.ts";
+import { DEFAULT_REQUEST_BUDGET, REQUEST_BUDGET_ENV } from "./extensions/screenshot-context.ts";
 import { ensurePrivateDir } from "./isolation.ts";
 
 /** A stored file, with its absolute path. */
@@ -369,18 +370,43 @@ const INTRO =
 	"The user attached these files, saved in your workspace. Read them with your tools when needed.";
 const BLOCK_START = "<attachments>";
 const BLOCK_END = "</attachments>";
+/** The share of the request budget the user's own attachments may take. */
+const ATTACHMENT_BUDGET_RATIO = 0.5;
+/** Said of an image the message-wide budget leaves out, so nothing is dropped in silence. */
+const OVER_BUDGET_IMAGE =
+	"left out to keep this message within its image size budget; read it from the path if needed";
+
+/**
+ * The bytes of images one message may attach together, tied to the budget the request rewriter
+ * keeps the whole request under. Half of it, measured in the raw bytes the per-file cap already
+ * counts (base64 adds about a third), so the user's images stay under about two thirds of a
+ * request and the rest is left for the conversation. Unset or invalid means `DEFAULT_REQUEST_BUDGET`.
+ */
+export function attachmentBudgetBytes(env: NodeJS.ProcessEnv = process.env): number {
+	const raw = env[REQUEST_BUDGET_ENV]?.trim();
+	const configured = raw ? Number(raw) : Number.NaN;
+	const budget =
+		Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : DEFAULT_REQUEST_BUDGET;
+	return Math.floor(budget * ATTACHMENT_BUDGET_RATIO);
+}
 
 /**
  * The prompt for a message with files: the user's text, then a block with each file's name, size,
- * type, and absolute path. Images go to the model as images only when it accepts them.
+ * type, and absolute path. Images go to the model as images only when it accepts them, and only
+ * while the message's total stays inside its attachment budget; anything left out says why in its
+ * own entry, so the model and the user both see it. A message with no files is returned untouched.
  */
 export function composePrompt(
 	text: string,
 	files: StoredFile[],
-	options: { images: boolean | undefined; read?: (path: string) => Buffer },
+	options: { images: boolean | undefined; read?: (path: string) => Buffer; budget?: number },
 ): { message: string; images?: { type: "image"; mimeType: string; data: string }[] } {
+	if (files.length === 0) return { message: text };
 	const read = options.read ?? ((path: string) => readFileSync(path));
+	const budget = options.budget ?? attachmentBudgetBytes();
 	const images: { type: "image"; mimeType: string; data: string }[] = [];
+	let attachedBytes = 0;
+	let full = false;
 	const lines = files.map((file) => {
 		const entry: Record<string, unknown> = {
 			name: file.name,
@@ -391,8 +417,15 @@ export function composePrompt(
 		if (IMAGE_TYPES.has(file.mime)) {
 			if (file.size > MAX_IMAGE_BYTES) entry.image = "too large to show you; read it from the path if needed";
 			else if (options.images === true) {
-				images.push({ type: "image", mimeType: file.mime, data: read(file.path).toString("base64") });
-				entry.image = "attached to this message";
+				// In the order the user attached them: once one no longer fits, the rest are left out too.
+				if (full || attachedBytes + file.size > budget) {
+					full = true;
+					entry.image = OVER_BUDGET_IMAGE;
+				} else {
+					attachedBytes += file.size;
+					images.push({ type: "image", mimeType: file.mime, data: read(file.path).toString("base64") });
+					entry.image = "attached to this message";
+				}
 			} else entry.image = "saved, but the current model cannot see images";
 		}
 		return JSON.stringify(entry);

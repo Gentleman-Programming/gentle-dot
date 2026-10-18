@@ -25,6 +25,7 @@ General daemon/engine behaviour, not platform-specific and not part of the Linux
 - T3 [S1,S2] route=worker commit=b8fa0cd,37063b3: reactive recovery with one invisible re-send, suppressed error on the first attempt.
 - T4 [S1] route=worker commit=pending: learn the observed ceiling per model with a margin instead of guessing.
 - T5 [S1-S3] route=verify commit=pending: independent verification with deterministic tests.
+- T7 [S1,S2] route=worker commit=pending: a total cap for the user's own attachments, so one message cannot carry more images than a request may hold.
 - T6 [S1,S3] route=parent commit=pending: own branch and PR, plus an upstream issue with the evidence.
 
 ## Log
@@ -54,6 +55,11 @@ General daemon/engine behaviour, not platform-specific and not part of the Linux
 - **L5** — Evidencia en vivo del caso que motiva la feature: `opencode-go API error (500): 500 status code (no
   body)` repetido en `~/.gentle-dot/daemon.log`; la sesión del usuario con 16.9 MiB de los cuales 96% son
   imágenes (18 capturas, 16.2 MB en base64), y el chat dejó de responder incluso a "hola?".
+- **L10** — El usuario eligió, ante la pregunta de qué hacer con la feature: "Cerrar primero el tope de adjuntos"
+  (opción 2), y publicar después. El hueco que motiva T7: `uploads.ts` limita cada imagen
+  (`MAX_IMAGE_BYTES=3_750_000`) pero no la suma, y `ATTACHMENT_LIMITS` permite 10 archivos y 50 MB por mensaje,
+  así que un solo mensaje puede llevar decenas de MB en imágenes que el presupuesto de T2 no puede recortar
+  porque nunca toca los mensajes del usuario.
 
 - **L6** — T2 en 88b1646: `applyRequestBudget` en `screenshot-context.ts`, compuesto con `pruneScreenshots` en el
   hook de contexto de `approval-guard.ts`. Mide la petición (base64 de imágenes + texto), recorta las imágenes
