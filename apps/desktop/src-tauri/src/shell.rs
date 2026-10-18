@@ -2401,7 +2401,8 @@ fn toggle_panel_fullscreen(app: AppHandle) -> CommandResult {
 /// (at the end of setup): either a request lands before the ready flip
 /// (queued under the same lock that flips it, so none is lost) or after it
 /// (Shell is present and it dispatches directly). Coalesced early launches
-/// keep fullscreen precedence, matching `platform::launch_request`.
+/// keep `--stop` precedence above the panel verbs, matching
+/// `platform::launch_request`.
 struct PendingLaunches {
     inner: Mutex<PendingInner>,
 }
@@ -2454,11 +2455,14 @@ impl PendingLaunches {
     }
 }
 
-/// Fold several launch requests into the one that runs: fullscreen wins
-/// (the rarer, deliberate request, same as `platform::launch_request`),
+/// Fold several launch requests into the one that runs: `--stop` wins outright —
+/// the emergency must reach the session even when a panel verb races it — then
+/// fullscreen (the rarer, deliberate request, same as `platform::launch_request`),
 /// then toggle, then show. Pure so tests pin it without an app.
 fn fold_launch_requests(requests: &[LaunchRequest]) -> Option<LaunchRequest> {
-    if requests.contains(&LaunchRequest::Fullscreen) {
+    if requests.contains(&LaunchRequest::Stop) {
+        Some(LaunchRequest::Stop)
+    } else if requests.contains(&LaunchRequest::Fullscreen) {
         Some(LaunchRequest::Fullscreen)
     } else if requests.contains(&LaunchRequest::Toggle) {
         Some(LaunchRequest::Toggle)
@@ -2469,11 +2473,40 @@ fn fold_launch_requests(requests: &[LaunchRequest]) -> Option<LaunchRequest> {
     }
 }
 
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    #[test]
+    fn a_queued_stop_wins_the_fold() {
+        // T17/S2: a `--stop` racing setup is coalesced with whichever panel
+        // verbs arrive with it; folding the emergency into one of them would
+        // open the panel on the key the Linux Yolo dialog names as Stop.
+        assert_eq!(fold_launch_requests(&[LaunchRequest::Stop]), Some(LaunchRequest::Stop));
+        assert_eq!(
+            fold_launch_requests(&[LaunchRequest::Toggle, LaunchRequest::Stop, LaunchRequest::Fullscreen]),
+            Some(LaunchRequest::Stop)
+        );
+        assert_eq!(
+            fold_launch_requests(&[LaunchRequest::Show, LaunchRequest::Stop]),
+            Some(LaunchRequest::Stop)
+        );
+    }
+}
+
 /// Run one launch request with Shell present. The single-instance callback
 /// and the end-of-setup replay share it, so early and late launches keep
 /// identical semantics.
 fn dispatch_launch(app: &AppHandle, request: LaunchRequest) {
     let result = match request {
+        // The tray's Stop item and the managed `--stop` binding are the same act,
+        // with the same reason. `computer::stop` is infallible by design (it leaves
+        // a missing `Computer` state alone), so this arm reports no error; only the
+        // panel verbs can fail to do their work.
+        LaunchRequest::Stop => {
+            computer::stop(app, Reason::Stopped);
+            Ok(())
+        }
         LaunchRequest::Toggle => toggle_panel(app.clone()),
         LaunchRequest::Show => show_panel(app),
         LaunchRequest::Fullscreen => toggle_panel_fullscreen(app.clone()),
@@ -2483,8 +2516,8 @@ fn dispatch_launch(app: &AppHandle, request: LaunchRequest) {
     }
 }
 
-/// A launch of `gentle-dot` (usually `--toggle` or `--fullscreen` from a desktop
-/// shortcut) reaches the running app: ready setups dispatch at once, early
+/// A launch of `gentle-dot` (usually `--toggle`, `--fullscreen` or `--stop` from a
+/// desktop shortcut) reaches the running app: ready setups dispatch at once, early
 /// ones replay at the end of setup (see [`PendingLaunches`]).
 fn handle_launch(app: &AppHandle, pending: &PendingLaunches, args: &[String]) {
     if std::env::var_os("GENTLE_DOT_NIRI_TRACE").is_some() {
@@ -2794,8 +2827,12 @@ pub fn run() {
             }
             // Started by the shortcut while not running: open the panel right away.
             // Second-instance launches that raced setup replay here with the
-            // same semantics (fullscreen precedence); a quiet setup — no
-            // queue, no own toggle — stays quiet, as before.
+            // same semantics (stop precedence first, then fullscreen, then
+            // toggle); a quiet setup — no queue, no own toggle — stays quiet, as
+            // before. `own` names the panel verb only, so a first `--stop` (no
+            // session exists yet) requests nothing and does not quit: exiting
+            // here would quit this app whenever a stale `--stop` spawn raced the
+            // login autostart.
             let args: Vec<String> = std::env::args().collect();
             let own = (platform::launch_request(&args) == LaunchRequest::Toggle)
                 .then_some(LaunchRequest::Toggle);
