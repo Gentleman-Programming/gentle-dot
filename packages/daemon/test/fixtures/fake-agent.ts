@@ -44,7 +44,7 @@
 // get_state reports, so tests can read the last values back. A model's `input` says whether it
 // accepts images, like the engine's models.
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 type Rec = Record<string, unknown>;
@@ -74,16 +74,28 @@ let model = MODELS[0] as Rec;
 let thinkingLevel = "medium";
 
 const argv = process.argv.slice(2);
-if (process.env.FAKE_AGENT_ARGS_FILE) writeFileSync(process.env.FAKE_AGENT_ARGS_FILE, JSON.stringify(argv));
-if (process.env.FAKE_AGENT_CWD_FILE) writeFileSync(process.env.FAKE_AGENT_CWD_FILE, process.cwd());
+
+// Tests poll these files while this process writes them, and a plain write publishes a truncated
+// file for the length of the write: a poller that parses one dies with "Unexpected end of JSON
+// input" under load. Renaming a sibling temp file publishes the whole content at once, and the pid
+// keeps concurrent fake agents from sharing a temp name.
+const writePublished = (path: string, text: string) => {
+	const temp = `${path}.${process.pid}.tmp`;
+	writeFileSync(temp, text);
+	renameSync(temp, path);
+};
+
+if (process.env.FAKE_AGENT_ARGS_FILE)
+	writePublished(process.env.FAKE_AGENT_ARGS_FILE, JSON.stringify(argv));
+if (process.env.FAKE_AGENT_CWD_FILE) writePublished(process.env.FAKE_AGENT_CWD_FILE, process.cwd());
 if (process.env.FAKE_AGENT_MARKER_FILE) {
 	const home = argv[argv.indexOf("--home") + 1];
 	const marked =
 		argv.includes("--home") && home !== undefined && existsSync(join(home, ".gentle-shell-home"));
-	writeFileSync(process.env.FAKE_AGENT_MARKER_FILE, JSON.stringify(marked));
+	writePublished(process.env.FAKE_AGENT_MARKER_FILE, JSON.stringify(marked));
 }
 if (process.env.FAKE_AGENT_ENV_FILE) {
-	writeFileSync(
+	writePublished(
 		process.env.FAKE_AGENT_ENV_FILE,
 		JSON.stringify(
 			Object.fromEntries(
@@ -109,7 +121,7 @@ if (process.env.FAKE_AGENT_ENV_FILE) {
 	);
 }
 if (process.env.FAKE_AGENT_PROCESS_FILE) {
-	writeFileSync(
+	writePublished(
 		process.env.FAKE_AGENT_PROCESS_FILE,
 		JSON.stringify({ env: process.env, argv, uid: process.getuid?.(), gid: process.getgid?.() }),
 	);
@@ -327,13 +339,13 @@ async function runPrompt(text: string, images?: Rec[]) {
 	}
 	if (text === "tamper" || text === "tamper:stay") {
 		const notion = { url: "https://mcp.notion.com/mcp", exposure: "direct" };
-		writeFileSync(
+		writePublished(
 			"../connectors.json",
 			JSON.stringify({ version: 1, connectors: { notion: { enabled: true, mode: "read_write" } } }),
 		);
-		writeFileSync("../agent/mcp.json", JSON.stringify({ mcpServers: { notion } }));
+		writePublished("../agent/mcp.json", JSON.stringify({ mcpServers: { notion } }));
 		mkdirSync(".pi", { recursive: true });
-		writeFileSync(".pi/mcp.json", JSON.stringify({ mcpServers: { notion } }));
+		writePublished(".pi/mcp.json", JSON.stringify({ mcpServers: { notion } }));
 		if (text === "tamper") {
 			setTimeout(() => process.kill(process.pid, "SIGTERM"), 50);
 			return;
