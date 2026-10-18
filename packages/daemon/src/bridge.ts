@@ -127,6 +127,15 @@ const HISTORY_PAGE = 100;
 
 /** A prompt as the engine receives it, images inlined, so it can be sent again unchanged. */
 type SentPrompt = { message: string; images?: { type: "image"; mimeType: string; data: string }[] };
+/**
+ * A prompt handed to the engine. Its identity is what a refusal is attributed to, so a message sent
+ * later can neither inherit that failure nor spend the recovery this one already used.
+ */
+type SentTurn = {
+	prompt: SentPrompt;
+	/** This prompt already used its one automatic recovery; a second failure is the real one. */
+	recovered: boolean;
+};
 
 /**
  * The wording a request refused as too large carries. The engine formats the provider's status and
@@ -227,18 +236,18 @@ export class DotBridge {
 	/** Messages on their way to the agent; the session is never rotated under them. */
 	private sending = 0;
 	/**
-	 * The prompt of the user message being answered, kept before it is sent: a request the provider
-	 * refuses as too large is sent again exactly as it was, images included.
+	 * The prompt of the run being answered. A refusal is attributed to it, never to a message sent
+	 * later, so it is the identity carried into `pendingRecovery` and the one-recovery guard.
 	 */
-	private lastPrompt: SentPrompt | undefined;
+	private turn: SentTurn | undefined;
+	/** Prompts handed to the engine whose turn has not started yet, oldest first. */
+	private readonly starting: SentTurn[] = [];
 	/** A tool ran since the user's message; sending it again would repeat its side effects. */
 	private toolInTurn = false;
 	/** The refused answer waiting for a decision, taken up once the run settles. */
-	private pendingRecovery: { failed: { messageId: string; text: string }; prompt: SentPrompt } | undefined;
-	/** This user message already had its one automatic recovery; a second failure is real. */
-	private recovered = false;
-	/** The text the recovery re-sent, whose user message the window must not show twice. */
-	private resendingText: string | undefined;
+	private pendingRecovery: { failed: { messageId: string; text: string }; turn: SentTurn } | undefined;
+	/** The prompt the recovery sent again, whose user message the window must not show twice. */
+	private resending: SentTurn | undefined;
 	/** A conversation switch is in progress: the session is not rotated under it. */
 	private switchingNow = false;
 	/** A run settled while a message was still on its way; check for rotation once it arrived. */
@@ -493,17 +502,22 @@ export class DotBridge {
 								read: (path) => this.engine(() => readFileSync(path)),
 							})
 						: { message: message.text };
-				// Stash the prompt before it is sent: a refused one is sent again exactly as it was.
-				this.lastPrompt = prompt;
+				// Stash the prompt with its identity before it is sent: a refused one is sent again
+				// exactly as it was, and only its own refusal may start that recovery.
+				const turn: SentTurn = { prompt, recovered: false };
+				this.starting.push(turn);
 				this.toolInTurn = false;
-				this.recovered = false;
-				this.resendingText = undefined;
 				this.sending += 1;
 				try {
 					await this.supervisor.request(
 						busy ? { type: "prompt", ...prompt, streamingBehavior: "steer" } : { type: "prompt", ...prompt },
 					);
 					if (message.attachments) this.options.uploads?.consume(message.attachments);
+				} catch (error) {
+					// The prompt never reached a turn: drop it rather than let it claim a later one.
+					const index = this.starting.indexOf(turn);
+					if (index >= 0) this.starting.splice(index, 1);
+					throw error;
 				} finally {
 					this.sending -= 1;
 					// The run may have settled before the answer to this prompt was handled.
@@ -1236,8 +1250,8 @@ export class DotBridge {
 			void this.recoverTurn();
 			return;
 		}
-		// The answer is in: its images are not needed again.
-		this.lastPrompt = undefined;
+		// The answer is in: its prompt, and any images it carried, are not needed again.
+		this.turn = undefined;
 		this.rotateWhenIdle();
 	}
 
@@ -1252,9 +1266,9 @@ export class DotBridge {
 		const pending = this.pendingRecovery;
 		this.pendingRecovery = undefined;
 		if (!pending) return;
-		const { failed, prompt } = pending;
-		// A message sent meanwhile is the one to answer now: this failure is shown, not recovered.
-		if (this.switchingNow || this.lastPrompt !== prompt) {
+		const { failed, turn } = pending;
+		// A conversation switch tore the run down: there is nothing left to send again.
+		if (this.switchingNow) {
 			this.showFailure(failed);
 			return;
 		}
@@ -1264,10 +1278,12 @@ export class DotBridge {
 			return;
 		}
 		this.broadcast({ type: "history", ...this.conversationRef(), ...(await this.currentHistory()) });
-		this.resendingText = prompt.message;
+		// Always the refused prompt itself, never a message sent while the rotation was in flight.
+		this.resending = turn;
 		try {
-			await this.supervisor.request({ type: "prompt", ...prompt });
+			await this.supervisor.request({ type: "prompt", ...turn.prompt });
 		} catch (error) {
+			this.resending = undefined;
 			this.log(`could not send the message again: ${(error as Error).message}`);
 			this.showFailure(failed);
 		}
@@ -1406,10 +1422,16 @@ export class DotBridge {
 			// A new user message starts its turn: whatever ran for the previous one is over.
 			this.toolInTurn = false;
 			const raw = textOf(message);
-			// The recovery sends the message the window already shows: it must not appear twice.
-			const shown = this.resendingText !== undefined && raw === this.resendingText;
-			this.resendingText = undefined;
-			if (shown) return;
+			// The recovery sends a prompt the window already shows: attribute its failure to that
+			// prompt and do not show its message twice.
+			if (this.resending !== undefined && this.resending.prompt.message === raw) {
+				this.turn = this.resending;
+				this.resending = undefined;
+				return;
+			}
+			// The prompt this turn belongs to, matched by what the engine got and in send order.
+			const index = this.starting.findIndex((sent) => sent.prompt.message === raw);
+			this.turn = index >= 0 ? this.starting.splice(index, 1)[0] : undefined;
 			const { text, attachments } = splitAttachments(raw);
 			this.broadcast({
 				type: "user_message",
@@ -1446,9 +1468,10 @@ export class DotBridge {
 			this.log(`assistant error: ${message.errorMessage ?? "unknown"}`);
 			// A request the provider refused for its size is recovered behind the chat: the window
 			// hears nothing until the run settles, and only then when the message can be sent again.
-			if (this.canRecover(message.errorMessage)) {
-				this.recovered = true;
-				this.pendingRecovery = { failed: { messageId, text }, prompt: this.lastPrompt as SentPrompt };
+			const turn = this.turn;
+			if (turn !== undefined && this.canRecover(turn, message.errorMessage)) {
+				turn.recovered = true;
+				this.pendingRecovery = { failed: { messageId, text }, turn };
 				return;
 			}
 			this.showFailure({ messageId, text });
@@ -1458,13 +1481,8 @@ export class DotBridge {
 	}
 
 	/** The one recovery a user message may have, with no tool in the turn. */
-	private canRecover(errorMessage: string | undefined): boolean {
-		if (
-			this.lastPrompt === undefined ||
-			this.pendingRecovery !== undefined ||
-			this.recovered ||
-			this.toolInTurn
-		) {
+	private canRecover(turn: SentTurn, errorMessage: string | undefined): boolean {
+		if (this.pendingRecovery !== undefined || turn.recovered || this.toolInTurn) {
 			return false;
 		}
 		// The provider's wording separates size from a plain failure only when it says so. Otherwise the

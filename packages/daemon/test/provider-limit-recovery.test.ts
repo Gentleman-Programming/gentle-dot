@@ -635,6 +635,155 @@ describe("a refusal the provider does not name", () => {
 	});
 });
 
+describe("recovery while another message arrives", () => {
+	it("does not re-send a newer message when a stale failure lands during the recovery window", async () => {
+		const test = setup();
+		const { engine, bridge, client } = test;
+		engine.plan.big = [["size"], ["size"]];
+		engine.plan.other = [["answer"]];
+
+		const origRequest = engine.request.bind(engine);
+		let releaseSwitch: () => void = () => {};
+		const switchGate = new Promise<void>((resolve) => {
+			releaseSwitch = resolve;
+		});
+		let switchGated = false;
+		let otherRequested = false;
+		let releaseOther: () => void = () => {};
+		const otherGate = new Promise<void>((resolve) => {
+			releaseOther = resolve;
+		});
+
+		engine.request = async (command: AgentRecord) => {
+			if (String(command.type) === "switch_session" && !switchGated) {
+				switchGated = true;
+				await switchGate;
+			}
+			if (String(command.type) === "prompt" && String(command.message) === "other") {
+				otherRequested = true;
+				await otherGate;
+			}
+			return origRequest(command);
+		};
+
+		void bridge.handle(client, { type: "send", text: "big" });
+		await waitFor(() => switchGated);
+		const otherSend = bridge.handle(client, { type: "send", text: "other" });
+		await waitFor(() => otherRequested);
+		releaseSwitch();
+		await waitFor(() => engine.prompts.filter((p) => p.message === "big").length >= 2);
+		releaseOther();
+		await otherSend;
+		await new Promise((resolve) => setTimeout(resolve, 250));
+
+		const prompts = engine.prompts.map((p) => p.message);
+		expect(
+			prompts.filter((m) => m === "other"),
+			"the user's newer message must reach the provider once",
+		).toHaveLength(1);
+	});
+
+	/** Holds the rotation's session switch until released, like a slow rotation. */
+	function holdRotation(engine: FakeEngine) {
+		const original = engine.request.bind(engine);
+		let release: () => void = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let held = false;
+		engine.request = async (command: AgentRecord) => {
+			if (String(command.type) === "switch_session" && !held) {
+				held = true;
+				await gate;
+			}
+			return original(command);
+		};
+		return { release: () => release(), held: () => held };
+	}
+
+	/** Holds the prompt whose text is `text` until released, like a request still on its way. */
+	function holdPrompt(engine: FakeEngine, text: string) {
+		const original = engine.request.bind(engine);
+		let release: () => void = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let held = false;
+		engine.request = async (command: AgentRecord) => {
+			if (String(command.type) === "prompt" && String(command.message) === text && !held) {
+				held = true;
+				await gate;
+			}
+			return original(command);
+		};
+		return { release: () => release(), held: () => held };
+	}
+
+	it("re-sends exactly the refused prompt, images included, never the newer one", async () => {
+		const test = setup();
+		const { engine, bridge, client, received, uploads } = test;
+		engine.plan.big = [["size"], ["answer"]];
+		engine.plan.other = [["answer"]];
+		const stored = await uploads.receive(Readable.from([PNG]), { name: "shot.png" });
+		if (!stored.ok) throw new Error(stored.message);
+		const rotation = holdRotation(engine);
+		const pendingOther = holdPrompt(engine, "other");
+
+		void bridge.handle(client, {
+			type: "send",
+			text: "big",
+			attachments: [{ uploadId: stored.file.uploadId, name: stored.file.name }],
+		});
+		await waitFor(() => rotation.held());
+		const otherSend = bridge.handle(client, { type: "send", text: "other" });
+		await waitFor(() => pendingOther.held());
+		rotation.release();
+		await waitFor(() => engine.prompts.filter((p) => p.message.startsWith("big")).length === 2);
+		pendingOther.release();
+		await otherSend;
+		await new Promise((resolve) => setTimeout(resolve, 60));
+
+		// The refused prompt went out again exactly as it was; the newer message never did.
+		expect(engine.prompts[1]).toEqual(engine.prompts[0]);
+		expect(engine.prompts[1]?.message).toBe(engine.prompts[0]?.message);
+		expect(engine.prompts[1]?.images?.[0]).toEqual({
+			type: "image",
+			mimeType: "image/png",
+			data: PNG.toString("base64"),
+		});
+		expect(engine.prompts.filter((p) => p.message === "other")).toHaveLength(1);
+		// The re-sent question is not shown twice, and the newer message is its own turn.
+		expect(userMessages(received)).toEqual(["big", "other"]);
+	});
+
+	it("decides the newer message's own failure instead of inheriting the older recovery", async () => {
+		const test = setup();
+		const { engine, bridge, client, received } = test;
+		engine.plan.big = [["size"], ["size"]];
+		engine.plan.other = [["size"], ["answer"]];
+		const rotation = holdRotation(engine);
+		const pendingOther = holdPrompt(engine, "other");
+
+		void bridge.handle(client, { type: "send", text: "big" });
+		await waitFor(() => rotation.held());
+		const otherSend = bridge.handle(client, { type: "send", text: "other" });
+		await waitFor(() => pendingOther.held());
+		rotation.release();
+		// The older prompt's second failure is the real one and is shown while the newer one waits.
+		await waitFor(() => errors(received).length === 1);
+		pendingOther.release();
+		await otherSend;
+		await waitFor(() => engine.prompts.filter((p) => p.message === "other").length === 2);
+		await new Promise((resolve) => setTimeout(resolve, 60));
+
+		// The newer message got its own recovery: it was re-sent once and its answer is shown.
+		expect(engine.prompts.map((p) => p.message)).toEqual(["big", "big", "other", "other"]);
+		expect(errors(received)).toEqual([{ id: expect.any(String), error: ANSWER_FAILED }]);
+		expect(userMessages(received)).toEqual(["big", "other"]);
+		expect(received.some((p) => p.type === "message_done" && p.text.includes("Echo: other"))).toBe(true);
+	});
+});
+
 describe("the real engine, unchanged", () => {
 	it("still shows the window's error for a provider failure that is not about size", async () => {
 		const dataDir = tempDir();
