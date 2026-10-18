@@ -27,8 +27,8 @@ General daemon/engine behaviour, not platform-specific and not part of the Linux
 - T4 [S1] route=worker commit=a9112e3: learn the observed ceiling per model with a margin instead of guessing.
 - T5 [S1-S3] route=verify commit=pending: independent verification with deterministic tests.
 - T7 [S1,S2] route=worker commit=42fa84b: a total cap for the user's own attachments, so one message cannot carry more images than a request may hold.
-- T8 [S1,S2] route=worker commit=pending: tell the user which attachments were left out and why, so nothing is dropped silently.
-- T9 [S1,S2] route=worker commit=pending: a restart during a recovery must not lose the notice; the user is told the message could not be answered instead of seeing an unanswered turn.
+- T8 [S1,S2] route=worker commit=0e7b38d done: omitted image names/reasons shown via warning toast; metadata excluded from engine prompt.
+- T9 [S1,S2] route=worker commit=0e7b38d done: pre-dispatch restart marker with per-recovery owners; ordered per-send attribution prevents concurrent resend duplicates. Parent focused 72 passed; worker daemon 552 passed / 13 skipped.
 - T10 [S1-S3] route=worker commit=ee95d83 done: stage transitive dependencies; independent mve8kacm-d-f00t PASS, 7 tests and isolated staged-import smoke without source symlinks. Node 24 and Windows not exercised.
 - T11 [S1-S3] route=worker commit=0c65a73 done: document request budgeting, omitted attachments, bounded recovery and configuration without claiming an exact provider limit or confirmed incident cause.
 - T6 [S1,S3,S4] route=parent commit=pending blocked: own branch and PR, plus an upstream issue with the evidence; waiting for explicit user publication request.
