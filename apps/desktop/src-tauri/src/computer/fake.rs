@@ -33,6 +33,8 @@ pub struct FakeDesktop {
     /// When set, `focus_window` answers `Ok` but leaves the focus where it is
     /// (a compositor that ignored the request); the pre-post check must catch it.
     pub focus_ignores: AtomicBool,
+    /// When set, `focused_window` fails, as a compositor query can.
+    pub focus_query_failure: AtomicBool,
     /// Runs after each posted event with how many were posted so far, so a test
     /// can change the focus mid-typing.
     pub on_post: Mutex<Option<Box<dyn Fn(usize) + Send + Sync>>>,
@@ -59,6 +61,7 @@ impl Default for FakeDesktop {
             focus_restores: Mutex::new(Vec::new()),
             focus_failure: Mutex::new(None),
             focus_ignores: AtomicBool::new(false),
+            focus_query_failure: AtomicBool::new(false),
             on_post: Mutex::new(None),
             geometry: ScreenshotGeometry::for_display(Point { x: 0.0, y: 0.0 }, 2560.0, 1280, 800),
         }
@@ -130,6 +133,9 @@ impl Desktop for FakeDesktop {
     }
 
     fn focused_window(&self) -> Result<Option<FocusTarget>, String> {
+        if self.focus_query_failure.load(Ordering::SeqCst) {
+            return Err("niri FocusedWindow query failed (test)".into());
+        }
         Ok(self.focused_window.lock().unwrap().clone())
     }
 
@@ -194,6 +200,7 @@ impl Dialogs for FakeDialogs {
 
     fn ask_yolo(&self) -> bool {
         self.yolo_asks.fetch_add(1, Ordering::SeqCst);
+        self.run_hook();
         *self.yolo.lock().unwrap()
     }
 }

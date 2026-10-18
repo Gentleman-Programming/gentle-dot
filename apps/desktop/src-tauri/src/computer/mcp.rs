@@ -63,8 +63,8 @@ Take a new screenshot and try again.";
 
 /// Global-mode keyboard refusals (T4, S4/S5). Each one names what to do instead of typing
 /// into whatever happens to hold the focus.
-const NO_FOCUS_WINDOW: &str = "Cannot tell which window has the keyboard focus on this Linux desktop, so nothing was typed. \
-Click the window you want to receive the input and try again.";
+const NO_FOCUS_CONTEXT: &str = "The last screenshot did not capture a usable keyboard window, so nothing was typed. \
+Focus the window you want, take a new screenshot, and try again.";
 const OWN_FOCUS_WINDOW: &str = "Gentle Dot's own window has the keyboard focus, so nothing was typed. \
 Click the window you want to receive the input and try again.";
 const NO_WINDOW_OWNER: &str = "The focused window does not report its process, so Gentle Dot cannot rule out its own \
@@ -86,13 +86,13 @@ some apps (System Settings, password managers) are off limits.";
 /// What `initialize` tells the agent in global mode (T2, S5): the same catalog drives
 /// the Linux desktop as a whole, with no reliable per-app exclusion and no Mac permissions.
 const GLOBAL_INSTRUCTIONS: &str = "Controls this Linux desktop as a whole: pointer input reaches whatever is under \
-the point, keyboard input reaches the window that held the focus when the call started, and there is no reliable \
-per-app exclusion. Take a screenshot first; x and y are pixels of the latest screenshot. Every action returns a \
-fresh screenshot. A successful action means the input was delivered, not that the screen changed, so verify with \
-a new screenshot. Use `batch` for a predictable sequence (click a field, type, press tab, type, press return) so \
-it runs in one call; end the batch whenever you must see the screen before deciding the next step. The user must \
-allow a session, every mutating action asks the user to confirm outside yolo mode, and risky targets cannot be \
-fenced off per app.";
+the point, keyboard input reaches the external window observed with the latest screenshot (a focus that changed \
+since then is refused), and there is no reliable per-app exclusion. Take a screenshot first; x and y are pixels of \
+the latest screenshot. Every action returns a fresh screenshot. A successful action means the input was delivered, \
+not that the screen changed, so verify with a new screenshot. Use `batch` for a predictable sequence (click a field, \
+type, press tab, type, press return) so it runs in one call; end the batch whenever you must see the screen before \
+deciding the next step. The user must allow a session, every mutating action asks the user to confirm outside yolo \
+mode, and risky targets cannot be fenced off per app.";
 
 pub struct HttpRequest<'a> {
     pub method: &'a str,
@@ -206,9 +206,9 @@ fn tools() -> Value {
          "inputSchema": schema(json!({"fromX": x, "fromY": y, "toX": x, "toY": y}), &["fromX", "fromY", "toX", "toY"])},
         {"name": "scroll", "description": "Scroll at a point. dy > 0 scrolls down and dx > 0 scrolls right, in pixels.",
          "inputSchema": schema(json!({"x": x, "y": y, "dx": {"type": "integer"}, "dy": {"type": "integer"}}), &["x", "y", "dx", "dy"])},
-        {"name": "type", "description": "Type text into the focused window of the frontmost app. A newline presses Return.",
+        {"name": "type", "description": "Type text into the frontmost app. A newline presses Return.",
          "inputSchema": schema(json!({"text": {"type": "string"}}), &["text"])},
-        {"name": "key", "description": "Press a key combo in the focused window of the frontmost app, for example `cmd+shift+t`, `return`, or `esc`.",
+        {"name": "key", "description": "Press a key combo in the frontmost app, for example `cmd+shift+t`, `return`, or `esc`.",
          "inputSchema": schema(json!({"combo": {"type": "string"}}), &["combo"])},
         {"name": "open_app", "description": "Open or bring forward an app by name or bundle id.",
          "inputSchema": schema(json!({"name": {"type": "string"}}), &["name"])},
@@ -355,6 +355,18 @@ fn chunks(text: &str) -> Vec<String> {
     out
 }
 
+/// The latest request scope: the geometry of the last screenshot and, in global mode, the
+/// external window the keyboard must target for actions planned from it. One struct under the
+/// existing `actions` mutex, so the geometry and the keyboard target can never disagree.
+#[derive(Debug, Clone, PartialEq)]
+struct Snapshot {
+    geometry: ScreenshotGeometry,
+    /// `None` when no usable external window could be observed while the screenshot was taken
+    /// (targeted policy, unknown or own focus, a failed query, or a focus that changed
+    /// mid-capture). Never a guessed window.
+    keyboard: Option<FocusTarget>,
+}
+
 pub struct Helper {
     desktop: Arc<dyn Desktop>,
     dialogs: Arc<dyn Dialogs>,
@@ -363,8 +375,9 @@ pub struct Helper {
     token: String,
     own_pid: i32,
     limiter: Mutex<RateLimiter>,
-    /// Serializes actions and holds the geometry of the latest screenshot.
-    actions: Mutex<Option<ScreenshotGeometry>>,
+    /// Serializes actions and holds the latest request scope: the screenshot geometry plus the
+    /// keyboard window observed with that screenshot.
+    actions: Mutex<Option<Snapshot>>,
     /// Where an action that went through acted (S28); must return at once.
     glow: Box<dyn Fn(Mark) + Send + Sync>,
     /// The working rings around each call that captures or acts (S1, S5).
@@ -514,7 +527,12 @@ impl Helper {
             if !self.with_dialog(|| self.dialogs.ask_grant())? {
                 return Err(NOT_ALLOWED.into());
             }
-            self.control.grant(self.clock.now_ms());
+            // Commit the grant only while the epoch this call started under still holds, checked
+            // and granted under one session mutex: a Stop or panic while the dialog was open
+            // invalidates the pending consent, so no session is reopened and nothing is sent.
+            if !self.control.grant_if_epoch(epoch, self.clock.now_ms()) {
+                return Err(STOPPED.into());
+            }
         }
         // Until the call ends, however it ends, the rings show and the Dot and panel are hidden.
         let _prepared = match call.tool {
@@ -582,12 +600,14 @@ impl Helper {
     /// not be restored, so a caller never posts after losing its target.
     fn with_dialog(&self, dialog: impl FnOnce() -> bool) -> Result<bool, String> {
         if self.policy == BackendPolicy::DesktopGlobal {
-            let before = self.desktop.focused_window()?;
+            // The focus reads are best effort: a failed query must not stop a screenshot, while
+            // the keyboard guard stays strict about the target the request already bound.
+            let before = self.desktop.focused_window().ok().flatten();
             let answer = dialog();
             if let Some(before) = before {
-                let now = self.desktop.focused_window()?;
-                if now.as_ref().map(|window| window.window_id) != Some(before.window_id) {
-                    self.desktop.focus_window(&before)?;
+                match self.desktop.focused_window() {
+                    Ok(Some(now)) if now.window_id == before.window_id => {}
+                    _ => self.desktop.focus_window(&before)?,
                 }
             }
             return Ok(answer);
@@ -671,14 +691,16 @@ impl Helper {
         }
     }
 
-    /// The external window a keyboard action must target in global mode. Refuses Gentle Dot's
-    /// own window by pid and refuses a window whose owner is unknown, never matching an app
-    /// name. `Ok(None)` under the application-targeted policy, which keeps its own path.
-    fn keyboard_focus(&self) -> Result<Option<FocusTarget>, String> {
+    /// The keyboard target this request is bound to: the external window observed with the
+    /// latest screenshot. Deliberately NOT the window focused now, so a focus that moved after
+    /// the screenshot is caught as a mismatch instead of silently becoming the target. Targeted
+    /// policy keeps its own path (`Ok(None)`).
+    fn keyboard_focus(&self, latest: &Option<Snapshot>) -> Result<Option<FocusTarget>, String> {
         if self.policy != BackendPolicy::DesktopGlobal {
             return Ok(None);
         }
-        let window = self.desktop.focused_window()?.ok_or_else(|| NO_FOCUS_WINDOW.to_string())?;
+        let snapshot = latest.as_ref().ok_or_else(|| NEEDS_SCREENSHOT.to_string())?;
+        let window = snapshot.keyboard.clone().ok_or_else(|| NO_FOCUS_CONTEXT.to_string())?;
         self.usable_focus(&window)?;
         Ok(Some(window))
     }
@@ -745,10 +767,29 @@ The rest was not sent; click the window you want and try again."
         }
     }
 
-    fn screenshot(&self, latest: &mut Option<ScreenshotGeometry>) -> Result<Content, String> {
+    /// The focused window as observed right now, or `None` (targeted policy, a failed query, or
+    /// no window). Best effort: a capture still returns without a keyboard target rather than
+    /// failing the screenshot.
+    fn observed_keyboard_target(&self) -> Option<FocusTarget> {
+        if self.policy != BackendPolicy::DesktopGlobal {
+            return None;
+        }
+        self.desktop.focused_window().ok().flatten()
+    }
+
+    fn screenshot(&self, latest: &mut Option<Snapshot>) -> Result<Content, String> {
+        // Observe the keyboard target around the capture: the same usable external window before
+        // and after, or nothing. A focus that moves while the image is taken, an unknown or own
+        // window, and a failed query all leave the keyboard target unavailable instead of
+        // guessing one; the screenshot itself is still returned.
+        let before = self.observed_keyboard_target();
         let capture = self.desktop.capture()?;
-        let geometry = capture.geometry;
-        *latest = Some(geometry);
+        let after = self.observed_keyboard_target();
+        let keyboard = match (before, after) {
+            (Some(before), Some(after)) if before == after && self.usable_focus(&after).is_ok() => Some(after),
+            _ => None,
+        };
+        *latest = Some(Snapshot { geometry: capture.geometry, keyboard });
         // Global mode cannot tell which app a screenshot shows, so it names none rather
         // than repeating whatever the backend last reported.
         let front = match self.policy {
@@ -756,9 +797,9 @@ The rest was not sent; click the window you want and try again."
             BackendPolicy::DesktopGlobal => None,
         };
         let meta = json!({
-            "imageWidth": geometry.image_width,
-            "imageHeight": geometry.image_height,
-            "scale": geometry.scale,
+            "imageWidth": capture.geometry.image_width,
+            "imageHeight": capture.geometry.image_height,
+            "scale": capture.geometry.scale,
             "frontApp": front,
         });
         let data = base64::engine::general_purpose::STANDARD.encode(&capture.data);
@@ -766,7 +807,7 @@ The rest was not sent; click the window you want and try again."
     }
 
     /// What was done, then a fresh screenshot once the screen settled.
-    fn after(&self, latest: &mut Option<ScreenshotGeometry>, done: String, settle_ms: u64) -> Result<Content, String> {
+    fn after(&self, latest: &mut Option<Snapshot>, done: String, settle_ms: u64) -> Result<Content, String> {
         self.clock.sleep_ms(settle_ms);
         let mut content = vec![text(done)];
         match self.screenshot(latest) {
@@ -776,7 +817,7 @@ The rest was not sent; click the window you want and try again."
         Ok(content)
     }
 
-    fn act(&self, epoch: u64, latest: &mut Option<ScreenshotGeometry>, call: Call) -> Result<Content, Failed> {
+    fn act(&self, epoch: u64, latest: &mut Option<Snapshot>, call: Call) -> Result<Content, Failed> {
         match call.tool {
             Tool::Screenshot => Ok(self.screenshot(latest)?),
             Tool::ListApps => {
@@ -796,7 +837,7 @@ The rest was not sent; click the window you want and try again."
     fn batch(
         &self,
         epoch: u64,
-        latest: &mut Option<ScreenshotGeometry>,
+        latest: &mut Option<Snapshot>,
         steps: Vec<(&'static str, Call)>,
         intent: Option<&str>,
     ) -> Result<Content, Failed> {
@@ -856,12 +897,12 @@ The rest was not sent; click the window you want and try again."
     fn perform(
         &self,
         epoch: u64,
-        latest: &Option<ScreenshotGeometry>,
+        latest: &Option<Snapshot>,
         tool: Tool,
         intent: Option<&str>,
     ) -> Result<(String, u64), String> {
-        let map = |latest: &Option<ScreenshotGeometry>, (x, y): (f64, f64)| -> Result<Point, String> {
-            latest.ok_or(NEEDS_SCREENSHOT)?.to_point(x, y).map_err(|e| e.to_string())
+        let map = |latest: &Option<Snapshot>, (x, y): (f64, f64)| -> Result<Point, String> {
+            latest.as_ref().ok_or(NEEDS_SCREENSHOT)?.geometry.to_point(x, y).map_err(|e| e.to_string())
         };
         match tool {
             Tool::Screenshot | Tool::ListApps | Tool::Batch { .. } => Err("Not an action.".into()),
@@ -912,15 +953,17 @@ The rest was not sent; click the window you want and try again."
             }
             Tool::Type { text: typed } => {
                 let target = self.keyboard_target()?;
-                let focus = self.keyboard_focus()?;
+                let focus = self.keyboard_focus(latest)?;
                 let typed = typed.replace("\r\n", "\n").replace('\r', "\n");
                 let element = self.desktop.focused_element();
                 let action = format!("Type {} characters", typed.chars().count());
+                // Refuse before prompting when the focus already left the screenshot's target.
+                self.check_target_before_post(focus.as_ref(), &target, 0)?;
                 self.confirm_if_risky(assess(Act::Type(&typed, element.as_ref()), intent), &action, &target)?;
                 let return_key = parse_combo("return")?;
                 // Every synthesized Return and every text chunk is re-checked against the
-                // SAME captured window immediately before it is posted, so a focus that moves
-                // mid-typing stops the rest instead of sending it to the wrong window.
+                // SAME screenshot-bound window immediately before it is posted, so a focus that
+                // moves mid-typing stops the rest instead of sending it to the wrong window.
                 let mut sent = 0usize;
                 for (i, line) in typed.split('\n').enumerate() {
                     if i > 0 {
@@ -942,7 +985,7 @@ The rest was not sent; click the window you want and try again."
             }
             Tool::Key { combo } => {
                 let target = self.keyboard_target()?;
-                let focus = self.keyboard_focus()?;
+                let focus = self.keyboard_focus(latest)?;
                 let element = self.desktop.focused_element();
                 let act = if combo.is_return() {
                     Act::Return(element.as_ref())
@@ -952,6 +995,7 @@ The rest was not sent; click the window you want and try again."
                     Act::Other
                 };
                 let action = format!("Press {}", combo.key);
+                self.check_target_before_post(focus.as_ref(), &target, 0)?;
                 self.confirm_if_risky(assess(act, intent), &action, &target)?;
                 self.check_target_before_post(focus.as_ref(), &target, 0)?;
                 self.post(epoch, InputEvent::Key(combo))?;
@@ -1223,6 +1267,15 @@ mod tests {
         let click = tools.iter().find(|t| t["name"] == "click").unwrap();
         assert_eq!(click["inputSchema"]["required"], json!(["x", "y"]));
         assert_eq!(click["inputSchema"]["properties"]["button"]["enum"], json!(["left", "right"]));
+        // The shared catalog keeps the macOS wording, unchanged by the Linux focus work.
+        assert_eq!(
+            tools.iter().find(|t| t["name"] == "type").unwrap()["description"],
+            "Type text into the frontmost app. A newline presses Return."
+        );
+        assert_eq!(
+            tools.iter().find(|t| t["name"] == "key").unwrap()["description"],
+            "Press a key combo in the frontmost app, for example `cmd+shift+t`, `return`, or `esc`."
+        );
         let wait = tools.iter().find(|t| t["name"] == "wait").unwrap();
         assert_eq!(wait["inputSchema"]["properties"]["ms"]["maximum"], 5000);
     }
@@ -2612,6 +2665,9 @@ mod tests {
         let instructions = body["result"]["instructions"].as_str().unwrap().to_string();
         assert!(instructions.contains("Linux desktop"), "{instructions}");
         assert!(instructions.contains("no reliable per-app exclusion"), "{instructions}");
+        // The keyboard target is the one observed with the latest screenshot, not whatever is
+        // focused at call time.
+        assert!(instructions.contains("latest screenshot"), "{instructions}");
         assert!(!instructions.contains("this Mac"), "{instructions}");
         assert!(!instructions.contains("off limits"), "{instructions}");
     }
@@ -2636,13 +2692,13 @@ mod tests {
         // flags never block the global path and never name Mac permissions.
         rig.desktop.permissions.lock().unwrap().screenshots_supported = true;
         rig.desktop.permissions.lock().unwrap().screen_recording = false;
+        // A valid external keyboard target is focused at capture, so only the flag is under test.
+        *rig.desktop.focused_window.lock().unwrap() = Some(editor_window());
         let result = rig.call("screenshot", json!({}));
         assert!(!is_error(&result), "Screen Recording must not gate global seeing: {result}");
         assert!(!first_text(&result).contains("Screen Recording"), "{result:?}");
         rig.desktop.permissions.lock().unwrap().screen_recording = true;
         rig.desktop.permissions.lock().unwrap().accessibility = false;
-        // A valid external keyboard target is focused, so only the permission flag is under test.
-        *rig.desktop.focused_window.lock().unwrap() = Some(editor_window());
         let result = rig.call("key", json!({"combo": "tab"}));
         assert!(!is_error(&result), "Accessibility must not gate global input: {result}");
         assert!(!first_text(&result).contains("Accessibility"), "{result:?}");
@@ -2691,6 +2747,10 @@ mod tests {
         FocusTarget { window_id: 99, pid: Some(OWN_PID), title: Some("Gentle Dot".into()), app_id: Some("gentle-dot".into()) }
     }
 
+    fn terminal_window() -> FocusTarget {
+        FocusTarget { window_id: 12, pid: Some(300), title: Some("Terminal".into()), app_id: Some("foot".into()) }
+    }
+
     /// A global rig with the external editor window focused.
     fn focus_rig(allow: bool, confirm: bool) -> Rig {
         let rig = global_rig_with(allow, confirm);
@@ -2721,16 +2781,99 @@ mod tests {
     }
 
     #[test]
-    fn the_grant_dialog_restores_the_target_window_before_typing() {
+    fn typing_targets_the_screenshot_window_not_the_one_focused_later() {
+        // The screenshot bound the editor as the keyboard target; the human then focuses a
+        // terminal before asking to type. The terminal must NEVER become the intended target.
+        let rig = focus_rig(true, true);
+        *rig.desktop.focused_window.lock().unwrap() = Some(terminal_window());
+        let result = rig.call("type", json!({"text": "nope"}));
+        assert!(is_error(&result), "{result}");
+        assert!(rig.desktop.events().is_empty(), "{:?}", rig.desktop.events());
+    }
+
+    #[test]
+    fn global_keyboard_input_requires_a_screenshot() {
+        // The keyboard target comes from the latest screenshot, so no screenshot is no target.
+        let rig = global_rig_with(true, true);
+        *rig.desktop.owner_at.lock().unwrap() = Box::new(|_| None);
+        *rig.desktop.frontmost.lock().unwrap() = None;
+        *rig.desktop.focused_window.lock().unwrap() = Some(editor_window());
+        let result = rig.call("type", json!({"text": "nope"}));
+        assert!(is_error(&result), "{result}");
+        assert!(first_text(&result).contains("screenshot"), "{result}");
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn a_screenshot_without_a_usable_keyboard_window_still_shows() {
+        // An own/unknown focus at capture keeps the screenshot truthful and only leaves the
+        // keyboard target unavailable; typing must then fail closed.
+        let rig = global_rig_with(true, true);
+        *rig.desktop.owner_at.lock().unwrap() = Box::new(|_| None);
+        *rig.desktop.frontmost.lock().unwrap() = None;
+        *rig.desktop.focused_window.lock().unwrap() = Some(own_chat_window());
+        let shot = rig.call("screenshot", json!({}));
+        assert!(!is_error(&shot), "{shot}");
+        assert!(shot["content"].as_array().unwrap().iter().any(|c| c["type"] == "image"));
+        let result = rig.call("type", json!({"text": "nope"}));
+        assert!(is_error(&result), "{result}");
+        assert!(first_text(&result).contains("screenshot"), "{result}");
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn a_screenshot_query_failure_still_shows_without_a_keyboard_target() {
+        let rig = global_rig_with(true, true);
+        *rig.desktop.owner_at.lock().unwrap() = Box::new(|_| None);
+        *rig.desktop.frontmost.lock().unwrap() = None;
+        *rig.desktop.focused_window.lock().unwrap() = Some(editor_window());
+        rig.desktop.focus_query_failure.store(true, Ordering::SeqCst);
+        let shot = rig.call("screenshot", json!({}));
+        assert!(!is_error(&shot), "{shot}");
+        let result = rig.call("type", json!({"text": "nope"}));
+        assert!(is_error(&result), "{result}");
+        assert!(first_text(&result).contains("screenshot"), "{result}");
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn a_pointer_action_refreshes_the_keyboard_target_from_its_new_screenshot() {
+        let rig = focus_rig(true, true); // bound to the editor
+        *rig.desktop.focused_window.lock().unwrap() = Some(terminal_window());
+        // A click is not keyboard input; it posts and takes a fresh screenshot, which
+        // re-observes the focus, so the editor binding is replaced by the terminal.
+        assert!(!is_error(&rig.call("click", json!({"x": 10, "y": 10}))));
+        let result = rig.call("type", json!({"text": "ok"}));
+        assert!(!is_error(&result), "{result}");
+        let events = rig.desktop.events();
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert!(matches!(events[1], InputEvent::Text(_)));
+    }
+
+    #[test]
+    fn targeted_keyboard_input_still_works_without_a_screenshot() {
+        // macOS keeps its own path: no screenshot is needed for type or key.
+        let rig = rig();
+        assert!(!is_error(&rig.call("type", json!({"text": "hi"}))));
+        assert!(!is_error(&rig.call("key", json!({"combo": "tab"}))));
+        assert_eq!(rig.desktop.events().len(), 2);
+    }
+
+    #[test]
+    fn the_grant_dialog_restores_focus_before_the_screenshot_binds_the_target() {
         let rig = global_rig_with(true, true);
         *rig.desktop.owner_at.lock().unwrap() = Box::new(|_| None);
         *rig.desktop.frontmost.lock().unwrap() = None;
         *rig.desktop.focused_window.lock().unwrap() = Some(editor_window());
         dialogs_move_focus_to(&rig, own_chat_window());
-        // The very first call: the grant dialog opens before any screenshot and steals focus.
+        // The first call asks the grant; while it is open the focus moves to Own. The restore
+        // must put Editor back BEFORE the screenshot binds the keyboard target.
+        assert!(!is_error(&rig.call("screenshot", json!({}))));
+        assert_eq!(rig.dialogs.grants.load(Ordering::SeqCst), 1);
+        assert_eq!(*rig.desktop.focus_restores.lock().unwrap(), vec![10]);
+        // The type call's own confirmation steals focus again; the restore lets it reach Editor.
         let result = rig.call("type", json!({"text": "hi"}));
         assert!(!is_error(&result), "{result}");
-        assert_eq!(rig.dialogs.grants.load(Ordering::SeqCst), 1);
         assert_eq!(rig.dialogs.confirmations.lock().unwrap().len(), 1);
         assert_eq!(*rig.desktop.focus_restores.lock().unwrap(), vec![10, 10]);
         assert_eq!(rig.desktop.events(), vec![InputEvent::Text("hi".into())]);
@@ -2759,9 +2902,14 @@ mod tests {
     }
 
     #[test]
-    fn an_own_window_already_focused_is_never_a_keyboard_target() {
-        let rig = focus_rig(true, true);
+    fn an_own_window_at_capture_is_never_a_keyboard_target() {
+        // The screenshot is taken while Gentle Dot's own window is focused: the capture must
+        // bind no keyboard target and the later type must fail closed.
+        let rig = global_rig_with(true, true);
+        *rig.desktop.owner_at.lock().unwrap() = Box::new(|_| None);
+        *rig.desktop.frontmost.lock().unwrap() = None;
         *rig.desktop.focused_window.lock().unwrap() = Some(own_chat_window());
+        assert!(!is_error(&rig.call("screenshot", json!({}))));
         let result = rig.call("type", json!({"text": "nope"}));
         assert!(is_error(&result));
         assert!(!first_text(&result).contains("done"), "{result}");
@@ -2816,28 +2964,34 @@ mod tests {
 
     #[test]
     fn global_keyboard_input_without_a_focus_window_refuses() {
-        // No window focus can be named: keyboard input fails closed instead of
+        // No window focus can be named at capture: keyboard input fails closed instead of
         // typing into whatever happens to be focused.
         let rig = global_rig_with(true, true);
-        global_ready(&rig);
+        *rig.desktop.owner_at.lock().unwrap() = Box::new(|_| None);
+        *rig.desktop.frontmost.lock().unwrap() = None;
         *rig.desktop.focused_window.lock().unwrap() = None;
+        assert!(!is_error(&rig.call("screenshot", json!({}))));
         let result = rig.call("type", json!({"text": "nope"}));
         assert!(is_error(&result));
         assert!(!first_text(&result).contains("done"), "{result}");
+        assert!(first_text(&result).contains("screenshot"), "{result}");
         assert!(rig.desktop.events().is_empty());
     }
 
     #[test]
     fn a_window_without_an_owner_pid_is_not_a_keyboard_target() {
-        // Niri can report a window with no pid (for example a portal window): the
-        // owner cannot be ruled out, so keyboard input fails closed.
-        let rig = focus_rig(true, true);
+        // Niri can report a window with no pid (for example a portal window): the owner
+        // cannot be ruled out, so the capture binds no target and typing fails closed.
+        let rig = global_rig_with(true, true);
+        *rig.desktop.owner_at.lock().unwrap() = Box::new(|_| None);
+        *rig.desktop.frontmost.lock().unwrap() = None;
         *rig.desktop.focused_window.lock().unwrap() = Some(FocusTarget {
             window_id: 21,
             pid: None,
             title: Some("Portal".into()),
             app_id: None,
         });
+        assert!(!is_error(&rig.call("screenshot", json!({}))));
         let result = rig.call("type", json!({"text": "nope"}));
         assert!(is_error(&result));
         assert!(rig.desktop.events().is_empty());
@@ -2901,13 +3055,17 @@ mod tests {
     #[test]
     fn a_zero_or_negative_owner_pid_is_not_a_keyboard_target() {
         for pid in [0, -1, i32::MIN] {
-            let rig = focus_rig(true, true);
+            let rig = global_rig_with(true, true);
+            *rig.desktop.owner_at.lock().unwrap() = Box::new(|_| None);
+            *rig.desktop.frontmost.lock().unwrap() = None;
             *rig.desktop.focused_window.lock().unwrap() = Some(FocusTarget {
                 window_id: 21,
                 pid: Some(pid),
                 title: Some("Bad owner".into()),
                 app_id: None,
             });
+            // The capture observes the bad owner and binds no keyboard target.
+            assert!(!is_error(&rig.call("screenshot", json!({}))), "pid {pid}");
             let result = rig.call("type", json!({"text": "nope"}));
             assert!(is_error(&result), "pid {pid}: {result}");
             assert!(!first_text(&result).contains("done"), "pid {pid}: {result}");
@@ -2935,5 +3093,57 @@ mod tests {
         assert!(is_error(&result), "{result}");
         assert_eq!(rig.desktop.events().len(), 1, "the second chunk must not be posted");
         assert!(first_text(&result).contains("process this action captured"), "{result}");
+    }
+
+    #[test]
+    fn a_focus_query_failure_after_the_first_chunk_reports_partial_delivery() {        // The focus query the guard needs fails after the first chunk: exactly one event was
+        // delivered, and the error says so instead of claiming nothing happened.
+        let rig = focus_rig(true, true);
+        let desktop = rig.desktop.clone();
+        *rig.desktop.on_post.lock().unwrap() = Some(Box::new(move |count| {
+            if count == 1 {
+                desktop.focus_query_failure.store(true, Ordering::SeqCst);
+            }
+        }));
+        let result = rig.call("type", json!({"text": "a".repeat(25)}));
+        assert!(is_error(&result), "{result}");
+        let events = rig.desktop.events();
+        assert_eq!(events.len(), 1, "exactly one event may be delivered: {events:?}");
+        let message = first_text(&result);
+        assert!(message.contains("were sent"), "{message}");
+        assert!(!message.contains("done"), "{message}");
+    }
+
+    #[test]
+    fn a_stop_after_the_first_chunk_sends_no_later_event() {
+        // Stop mid-typing stops the remaining chunks and synthesized Returns, and reports the
+        // stop rather than a fake success.
+        let rig = focus_rig(true, true);
+        let control = rig.control.clone();
+        *rig.desktop.on_post.lock().unwrap() = Some(Box::new(move |count| {
+            if count == 1 {
+                control.end(Reason::Stopped);
+            }
+        }));
+        let result = rig.call("type", json!({"text": "a".repeat(25)}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(rig.desktop.events().len(), 1, "no later chunk or Return may be posted");
+        let message = first_text(&result);
+        assert!(message.contains("stopped"), "{message}");
+        assert!(!message.contains("done"), "{message}");
+    }
+
+    #[test]
+    fn a_stop_during_the_grant_dialog_does_not_regrant_the_session() {
+        let rig = global_rig_with(true, true);
+        *rig.desktop.owner_at.lock().unwrap() = Box::new(|_| None);
+        *rig.desktop.frontmost.lock().unwrap() = None;
+        *rig.desktop.focused_window.lock().unwrap() = Some(editor_window());
+        let control = rig.control.clone();
+        *rig.dialogs.during.lock().unwrap() = Some(Box::new(move || control.end(Reason::Stopped)));
+        // The grant dialog is accepted, but the Stop during it must win: no session reopened.
+        let result = rig.call("screenshot", json!({}));
+        assert!(is_error(&result), "a grant after Stop must not act: {result}");
+        assert!(!rig.control.is_active(rig.clock.now_ms()), "Stop must leave the session inactive");
     }
 }
