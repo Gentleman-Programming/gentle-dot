@@ -23,7 +23,7 @@ General daemon/engine behaviour, not platform-specific and not part of the Linux
 - T1 [S1-S3] route=parent commit=n/a done: investigate existing mechanisms, image caps and error path (explore mvdireuc-n-muwf).
 - T2 [S1,S2] route=worker commit=88b1646: total request budget at the source, so accumulated images cannot bloat the request.
 - T3 [S1,S2] route=worker commit=b8fa0cd,37063b3: reactive recovery with one invisible re-send, suppressed error on the first attempt.
-- T4 [S1] route=worker commit=pending: learn the observed ceiling per model with a margin instead of guessing.
+- T4 [S1] route=worker commit=a9112e3: learn the observed ceiling per model with a margin instead of guessing.
 - T5 [S1-S3] route=verify commit=pending: independent verification with deterministic tests.
 - T7 [S1,S2] route=worker commit=42fa84b: a total cap for the user's own attachments, so one message cannot carry more images than a request may hold.
 - T6 [S1,S3] route=parent commit=pending: own branch and PR, plus an upstream issue with the evidence.
@@ -109,3 +109,13 @@ General daemon/engine behaviour, not platform-specific and not part of the Linux
   individual demasiado grande. Arreglo acordado: avisar al usuario con un `toast` de advertencia que nombre
   cuántos adjuntos quedaron afuera y por qué, reutilizando el canal que ya existe en el protocolo; se
   implementa junto con la ventana de reinicio porque ambos tocan `bridge.ts`.
+
+- **L12** — T4 en a9112e3: `limits.ts` guarda los techos observados en `provider-limits.json` del directorio de
+  estado; el supervisor le pasa `GENTLE_DOT_PROVIDER_LIMITS_FILE` al motor en cada arranque y publica el modelo
+  seleccionado; el reescritor usa `min(presupuesto configurado, techo aprendido)`, y el techo se registra solo
+  cuando el reenvío **es contestado**, con margen 0,75 sobre el tamaño de la sesión rechazada. Nunca sube el
+  presupuesto, es por modelo, y sin archivo o con archivo corrupto queda el presupuesto configurado. 53 pruebas
+  focalizadas y 533 del daemon en verde, con mutaciones que confirman cada regla. Límites conocidos: en modo
+  servidor el archivo puede ser ilegible para el usuario del motor (queda fail-closed), los subagentes heredan
+  el techo del modelo padre, y el tamaño medido es el del archivo de sesión (mayor que la petición), de ahí el
+  margen.
