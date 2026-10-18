@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import type { ServerPayload } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DotBridge, isSizeLimitError, recoveryFloorBytes } from "../src/bridge.ts";
 import { DEFAULT_REQUEST_BUDGET, REQUEST_BUDGET_ENV } from "../src/extensions/screenshot-context.ts";
+import { CEILING_MARGIN, LIMITS_FILE_ENV, limitsFile, readLimits } from "../src/limits.ts";
 import { DEFAULT_ROTATION } from "../src/rotation.ts";
 import type {
 	AgentRecord,
@@ -810,6 +811,89 @@ describe("the real engine, unchanged", () => {
 			await new Promise((resolve) => setTimeout(resolve, 60));
 			expect(supervisor.sessionFile).toBe(session);
 			expect(readFileSync(prompts, "utf8").trim().split("\n")).toHaveLength(1);
+		} finally {
+			await supervisor.stop();
+		}
+	});
+});
+
+describe("the learned ceiling (S1)", () => {
+	it("records the refused size of the model that answered after the rotation, with a margin", async () => {
+		vi.stubEnv(REQUEST_BUDGET_ENV, "20000");
+		const test = setup();
+		const { engine, received } = test;
+		engine.plainError = INCIDENT;
+		engine.plan.big = [["error"], ["answer"]];
+		grow(engine, 12_000);
+		const refusedFile = engine.sessionFile as string;
+
+		await send(test, "big");
+
+		// The retry answered, so the refusal was size: the refused conversation is what was learned from.
+		expect(errors(received)).toEqual([]);
+		const refused = statSync(refusedFile).size;
+		const limits = readLimits(limitsFile(test.dir));
+		expect(limits.ceilings).toEqual({ "fake-model": Math.floor(refused * CEILING_MARGIN) });
+		expect(limits.model).toBe("fake-model");
+		expect(limits.ceilings?.["fake-model"]).toBeLessThan(refused);
+		expect(limits.ceilings?.["fake-model"]).toBeLessThan(20_000);
+	});
+
+	it("records nothing when the re-sent attempt fails too: that was not size", async () => {
+		vi.stubEnv(REQUEST_BUDGET_ENV, "20000");
+		const test = setup();
+		const { engine, received } = test;
+		engine.plainError = INCIDENT;
+		engine.plan.big = [["error"], ["error"]];
+		grow(engine, 12_000);
+
+		await send(test, "big");
+
+		expect(errors(received)).toHaveLength(1);
+		expect(readLimits(limitsFile(test.dir)).ceilings).toBeUndefined();
+	});
+
+	it("keeps the ceiling of one model out of another", async () => {
+		vi.stubEnv(REQUEST_BUDGET_ENV, "20000");
+		const test = setup();
+		const { engine, received } = test;
+		engine.plainError = INCIDENT;
+		engine.plan.first = [["error"], ["answer"]];
+		engine.model = "model-a";
+		grow(engine, 12_000);
+		const firstFile = engine.sessionFile as string;
+		await send(test, "first");
+
+		engine.plan.second = [["error"], ["answer"]];
+		engine.model = "model-b";
+		grow(engine, 16_000);
+		const secondFile = engine.sessionFile as string;
+		await send(test, "second");
+
+		expect(errors(received)).toEqual([]);
+		const limits = readLimits(limitsFile(test.dir));
+		expect(limits.ceilings).toEqual({
+			"model-a": Math.floor(statSync(firstFile).size * CEILING_MARGIN),
+			"model-b": Math.floor(statSync(secondFile).size * CEILING_MARGIN),
+		});
+		expect(limits.ceilings?.["model-a"]).not.toBe(limits.ceilings?.["model-b"]);
+		// The file can only name one model: the one the engine is on now.
+		expect(limits.model).toBe("model-b");
+	});
+
+	it("tells the engine where the file is and which model is selected", async () => {
+		const dataDir = tempDir();
+		const processFile = join(dataDir, "process.json");
+		const { supervisor } = fakeSupervisor({
+			dataDir,
+			env: { ...process.env, FAKE_AGENT_PROCESS_FILE: processFile },
+		});
+		await supervisor.start();
+		try {
+			await waitFor(() => existsSync(processFile));
+			const env = JSON.parse(readFileSync(processFile, "utf8")).env as Record<string, string>;
+			expect(env[LIMITS_FILE_ENV]).toBe(limitsFile(dataDir));
+			expect(readLimits(limitsFile(dataDir)).model).toBe("Fake Model");
 		} finally {
 			await supervisor.stop();
 		}

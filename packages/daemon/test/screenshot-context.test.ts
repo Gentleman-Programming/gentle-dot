@@ -1,3 +1,5 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	applyRequestBudget,
@@ -5,6 +7,8 @@ import {
 	pruneScreenshots,
 	REQUEST_BUDGET_ENV,
 } from "../src/extensions/screenshot-context.ts";
+import { LIMITS_FILE_ENV, LIMITS_FILE_NAME } from "../src/limits.ts";
+import { tempDir } from "./helpers.ts";
 
 const image = (data: string) => ({ type: "image", data, mimeType: "image/jpeg" });
 const meta = (frontApp: string) => ({
@@ -237,5 +241,85 @@ describe("applyRequestBudget (S1, S2)", () => {
 	it("starts from a default well below the request size that failed", () => {
 		expect(DEFAULT_REQUEST_BUDGET).toBeGreaterThan(0);
 		expect(DEFAULT_REQUEST_BUDGET).toBeLessThan(16 * 1024 * 1024);
+	});
+});
+
+/** Points the shaper at a limits file in a scratch folder, the way the supervisor does for the engine. */
+function learnedInFile(store: unknown): string {
+	const file = join(tempDir(), LIMITS_FILE_NAME);
+	writeFileSync(file, JSON.stringify(store));
+	vi.stubEnv(LIMITS_FILE_ENV, file);
+	return file;
+}
+
+describe("the learned ceiling (S1)", () => {
+	afterEach(() => vi.unstubAllEnvs());
+
+	/** Over the configured budget and under the learned one: only the tool text needs truncating. */
+	const overBudget = () => [toolResult("bash", [toolText("y".repeat(4500))]), shot(fill(1000), "Finder")];
+
+	it("shapes the request down to a ceiling learned for the model in use", () => {
+		budgetOf(100_000);
+		const messages = overBudget();
+		// Nothing learned yet: the configured budget alone, exactly as before.
+		expect(applyRequestBudget(messages)).toBe(messages);
+
+		learnedInFile({ model: "model-a", ceilings: { "model-a": 4000 } });
+
+		expect(applyRequestBudget(messages)).not.toBe(messages);
+	});
+
+	it("never raises what the configured budget already allows", () => {
+		budgetOf(6000);
+		const messages = [shot(fill(4000), "Finder"), shot(fill(4000), "Mail")];
+		const configured = applyRequestBudget(messages, 6000);
+
+		learnedInFile({ model: "model-a", ceilings: { "model-a": 100_000 } });
+
+		expect(applyRequestBudget(messages)).toEqual(configured);
+	});
+
+	it("applies one model's ceiling to that model alone", () => {
+		budgetOf(100_000);
+		const messages = overBudget();
+
+		// Another model's ceiling, even a low one, says nothing about the model in use.
+		learnedInFile({ model: "model-a", ceilings: { "model-b": 4000 } });
+		expect(applyRequestBudget(messages)).toBe(messages);
+
+		learnedInFile({ model: "model-b", ceilings: { "model-a": 100_000, "model-b": 4000 } });
+		expect(applyRequestBudget(messages)).not.toBe(messages);
+	});
+
+	it("leaves the configured budget in force when the file is missing, corrupt, or unreadable", () => {
+		budgetOf(100_000);
+		const messages = overBudget();
+		const dir = tempDir();
+		const corrupt = join(dir, LIMITS_FILE_NAME);
+		writeFileSync(corrupt, "{not json");
+		// A folder in the file's place fails to read the same way on every platform, even as root.
+		const unreadable = join(dir, "a-directory");
+		mkdirSync(unreadable);
+
+		for (const file of [join(dir, "missing.json"), corrupt, unreadable]) {
+			vi.stubEnv(LIMITS_FILE_ENV, file);
+			expect(applyRequestBudget(messages), file).toBe(messages);
+		}
+	});
+
+	it("shapes exactly as before when nothing was learned for the model", () => {
+		budgetOf(4000);
+		const messages = [
+			toolResult("bash", [toolText("O".repeat(6000))]),
+			toolResult("read", [toolText("z"), image(fill(1000))]),
+		];
+		const today = applyRequestBudget(messages, 4000);
+
+		learnedInFile({ model: "model-a", ceilings: {} });
+		expect(applyRequestBudget(messages)).toEqual(today);
+
+		// The ceiling cannot be attributed to a model it was not learned for.
+		learnedInFile({ ceilings: { "model-a": 1000 } });
+		expect(applyRequestBudget(messages)).toEqual(today);
 	});
 });

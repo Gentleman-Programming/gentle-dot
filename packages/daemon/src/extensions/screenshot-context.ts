@@ -12,7 +12,12 @@
  * 2. The request total is then brought under a budget by dropping the oldest images of tool
  *    results, of any tool, and only then by truncating the oldest large tool outputs. User and
  *    assistant messages are never rewritten, and the newest image always stays.
+ *
+ * The budget is the configured one, lowered by the ceiling learned for the model in use (S1, see
+ * `limits.ts`). Nothing learned is exactly the configured budget.
  */
+
+import { effectiveBudget, LIMITS_FILE_ENV, readLimits } from "../limits.ts";
 
 const COMPUTER_TOOL = "mcp__computer__";
 
@@ -25,7 +30,8 @@ export const REQUEST_BUDGET_ENV = "GENTLE_DOT_REQUEST_BUDGET_BYTES";
 /**
  * A starting value, not a provider's real limit: no such limit is knowable (the failure carries no
  * body and varies by model), so this is half of the ~16 MB request observed to fail, leaving a
- * margin for what the count does not see (JSON framing, the reply, provider-side accounting).
+ * margin for what the count does not see (JSON framing, the reply, provider-side accounting). The
+ * ceiling learned for a model may lower it, never raise it (`limits.ts`).
  */
 export const DEFAULT_REQUEST_BUDGET = 8 * 1024 * 1024;
 
@@ -105,11 +111,22 @@ function messageBytes(message: Message): number {
 	return blocksOf(message).reduce((total, block) => total + blockBytes(block), 0);
 }
 
-function budgetFrom(env: Record<string, string | undefined>): number {
+function configuredBudget(env: Record<string, string | undefined>): number {
 	const raw = env[REQUEST_BUDGET_ENV]?.trim();
 	if (!raw) return DEFAULT_REQUEST_BUDGET;
 	const value = Number(raw);
 	return Number.isFinite(value) && value > 0 ? Math.floor(value) : DEFAULT_REQUEST_BUDGET;
+}
+
+/**
+ * The budget for one call: the configured one, lowered by what a refused and then answered request
+ * taught about the model the engine is on. A missing, torn, or unreadable file leaves the configured
+ * budget in force, so nothing learned is the same request shaping as before S1.
+ */
+function budgetFrom(env: Record<string, string | undefined>): number {
+	const configured = configuredBudget(env);
+	const file = env[LIMITS_FILE_ENV]?.trim();
+	return file ? effectiveBudget(configured, readLimits(file)) : configured;
 }
 
 /** The head of a tool output plus what was cut, without splitting a surrogate pair. */

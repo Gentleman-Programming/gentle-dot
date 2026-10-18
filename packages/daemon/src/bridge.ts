@@ -35,6 +35,7 @@ import {
 import { directAccess, type EngineAccess } from "./engine-access.ts";
 import { DRAFT_STATUS_KEY } from "./extensions/approval-guard.ts";
 import { DEFAULT_REQUEST_BUDGET, REQUEST_BUDGET_ENV } from "./extensions/screenshot-context.ts";
+import { limitsFile, noteModel, recordCeiling } from "./limits.ts";
 import { describeTool, textOf } from "./presentation.ts";
 import {
 	LiveModelSwitch,
@@ -135,6 +136,11 @@ type SentTurn = {
 	prompt: SentPrompt;
 	/** This prompt already used its one automatic recovery; a second failure is the real one. */
 	recovered: boolean;
+	/**
+	 * The refused request's chat size and model, once it is sent again: an answer to that re-send is
+	 * the evidence a ceiling is learned from, and a failure teaches nothing.
+	 */
+	refused?: { bytes: number; model: string | undefined };
 };
 
 /**
@@ -1272,6 +1278,9 @@ export class DotBridge {
 			this.showFailure(failed);
 			return;
 		}
+		// The refused request's chat and model, read before rotation replaces the session: the answer to
+		// the re-send is what turns this observation into a ceiling for that model.
+		const refused = { bytes: this.sessionBytes(), model: this.supervisor.model };
 		this.log("the provider refused the request as too large; continuing the chat in a fresh session");
 		if (!(await this.rotator.forceRotate())) {
 			this.showFailure(failed);
@@ -1280,12 +1289,33 @@ export class DotBridge {
 		this.broadcast({ type: "history", ...this.conversationRef(), ...(await this.currentHistory()) });
 		// Always the refused prompt itself, never a message sent while the rotation was in flight.
 		this.resending = turn;
+		turn.refused = refused;
 		try {
 			await this.supervisor.request({ type: "prompt", ...turn.prompt });
 		} catch (error) {
 			this.resending = undefined;
+			turn.refused = undefined;
 			this.log(`could not send the message again: ${(error as Error).message}`);
 			this.showFailure(failed);
+		}
+	}
+
+	/**
+	 * The provider refused a chat of this size for this model and then answered the message sent
+	 * again: requests for that model stay under a ceiling a margin below it, which only ever lowers
+	 * the configured budget. It is an observation, never a claim about the provider's real limit.
+	 */
+	private learn(refused: { bytes: number; model: string | undefined }): void {
+		const model = refused.model;
+		if (!model) return;
+		const file = limitsFile(this.options.dataDir);
+		// The file can name one model: the one the extension shapes the next request for.
+		noteModel(file, this.supervisor.model ?? model);
+		const ceiling = recordCeiling(file, model, refused.bytes);
+		if (ceiling !== undefined) {
+			this.log(
+				`learned ceiling for ${model}: requests stay under ${ceiling} bytes (a ${refused.bytes}-byte chat was refused)`,
+			);
 		}
 	}
 
@@ -1463,12 +1493,17 @@ export class DotBridge {
 		const text = presentText(textOf(message));
 		// The engine ends a stopped answer as "aborted", or as an error when a session switch tore it down.
 		if (message.stopReason === "aborted" || (message.stopReason === "error" && this.stopRequested)) {
+			// Stopped on purpose: not the answer a ceiling could be learned from.
+			if (this.turn !== undefined) this.turn.refused = undefined;
 			this.broadcast({ type: "message_done", messageId, text, stopped: true });
 		} else if (message.stopReason === "error") {
 			this.log(`assistant error: ${message.errorMessage ?? "unknown"}`);
 			// A request the provider refused for its size is recovered behind the chat: the window
 			// hears nothing until the run settles, and only then when the message can be sent again.
 			const turn = this.turn;
+			// No failure teaches a ceiling, whether it is the first attempt or the one recovery: only the
+			// answer to the message sent again says the refused request was too large for the model.
+			if (turn !== undefined) turn.refused = undefined;
 			if (turn !== undefined && this.canRecover(turn, message.errorMessage)) {
 				turn.recovered = true;
 				this.pendingRecovery = { failed: { messageId, text }, turn };
@@ -1476,6 +1511,13 @@ export class DotBridge {
 			}
 			this.showFailure({ messageId, text });
 		} else {
+			// The re-sent message was answered: the request that was refused is too large for this model,
+			// so the ceiling it teaches keeps its next requests under it.
+			const turn = this.turn;
+			if (turn?.refused) {
+				this.learn(turn.refused);
+				turn.refused = undefined;
+			}
 			this.broadcast({ type: "message_done", messageId, text });
 		}
 	}
@@ -1492,11 +1534,15 @@ export class DotBridge {
 		return isSizeLimitError(errorMessage) || this.sessionIsLarge();
 	}
 
+	/** The live session file's size: larger than the request it carries, so conservative for both uses. */
+	private sessionBytes(): number {
+		const file = this.supervisor.sessionFile;
+		return file ? this.engine(() => sessionFileBytes(file)) : 0;
+	}
+
 	/** True when the live session is large enough that its whole request may have been refused. */
 	private sessionIsLarge(): boolean {
-		const file = this.supervisor.sessionFile;
-		if (!file) return false;
-		return this.engine(() => sessionFileBytes(file)) >= recoveryFloorBytes();
+		return this.sessionBytes() >= recoveryFloorBytes();
 	}
 
 	private onTool(event: AgentRecord): void {

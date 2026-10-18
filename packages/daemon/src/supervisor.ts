@@ -2,6 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { encodeRecord, JsonlDecoder } from "./jsonl.ts";
+import { LIMITS_FILE_ENV, limitsFile, noteModel } from "./limits.ts";
 import { writePrivateFile } from "./private-file.ts";
 import type { OsUser } from "./vps.ts";
 
@@ -91,12 +92,15 @@ export class AgentSupervisor {
 	private chains: Record<string, string[]> = {};
 	private readonly sessionDir: string;
 	private readonly stateFile: string;
+	/** The learned request ceilings, which the daemon writes and the engine's extension reads. */
+	private readonly limitsFile: string;
 	private readonly options: SupervisorOptions;
 
 	constructor(options: SupervisorOptions) {
 		this.options = options;
 		this.sessionDir = join(options.dataDir, "sessions");
 		this.stateFile = join(options.dataDir, "state.json");
+		this.limitsFile = limitsFile(options.dataDir);
 		this.sessionFile = this.readPersistedSession();
 	}
 
@@ -220,7 +224,9 @@ export class AgentSupervisor {
 		const { command, args = [], extraArgs = [], cwd, env, prepareSpawn, user } = this.options;
 		const child = spawn(command, [...args, "--mode", "rpc", "--session-dir", this.sessionDir, ...extraArgs], {
 			cwd,
-			env: { ...(env ?? process.env), ...prepareSpawn?.() },
+			// The extension shapes each request for the model the engine is on: it needs the file, and only
+			// the daemon can write it. Set last, so nothing meant for the engine can point it elsewhere.
+			env: { ...(env ?? process.env), ...prepareSpawn?.(), [LIMITS_FILE_ENV]: this.limitsFile },
 			stdio: ["pipe", "pipe", "pipe"],
 			...(user ? { uid: user.uid, gid: user.gid } : {}),
 		});
@@ -335,8 +341,12 @@ export class AgentSupervisor {
 	private applyModel(data: unknown): void {
 		if (typeof data !== "object" || data === null) return;
 		const model = data as { name?: string; id?: string; input?: unknown };
-		this.model = model.name ?? model.id;
+		const name = model.name ?? model.id;
+		const changed = typeof name === "string" && name !== this.model;
+		this.model = name;
 		this.modelImages = Array.isArray(model.input) ? model.input.includes("image") : undefined;
+		// The extension reads the ceiling of the model the engine is on, and the file can only name one.
+		if (changed) noteModel(this.limitsFile, this.model);
 	}
 
 	private readPersistedSession(): string | undefined {
