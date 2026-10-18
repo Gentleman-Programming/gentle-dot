@@ -82,3 +82,14 @@ General daemon/engine behaviour, not platform-specific and not part of the Linux
   escribe ni borra nada en disco y una respuesta real o un turno con herramientas nunca se descartan. 38
   pruebas focalizadas y 504 del daemon en verde. Sin verificar: el techo real del proveedor (T4) y el
   comportamiento contra un proveedor vivo.
+
+- **L9** — Bloqueante de la verificación independiente corregido en 2c63443. El fallo se atribuía a
+  `lastPrompt`, que cualquier envío posterior sobrescribía, así que un fallo viejo llegado durante la
+  recuperación se reatribuía al mensaje nuevo y lo enviaba **dos veces** en silencio (y duplicaba el efecto de
+  una herramienta en ese turno). Ahora cada prompt es un `SentTurn` con identidad propia, emparejado con el
+  evento de usuario del motor y con la guarda de una-por-mensaje viviendo en el registro; el reenvío siempre
+  manda el turno rechazado, nunca uno más nuevo. RED reproducido antes del arreglo (`['other','other']`),
+  después 20/20 focalizadas y 507 del daemon en verde, con las 17 pruebas previas intactas. Límite conocido:
+  solo puede haber una recuperación en vuelo, así que un mensaje nuevo que falle mientras otra rota muestra su
+  error real en esa ventana angosta (seguro, no invisible). Sigue sin verificar la muerte del daemon entre el
+  fallo silenciado y el reenvío.
