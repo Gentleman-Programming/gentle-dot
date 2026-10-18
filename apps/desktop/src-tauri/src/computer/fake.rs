@@ -38,6 +38,10 @@ pub struct FakeDesktop {
     /// Runs after each posted event with how many were posted so far, so a test
     /// can change the focus mid-typing.
     pub on_post: Mutex<Option<Box<dyn Fn(usize) + Send + Sync>>>,
+    /// Runs while an image is being taken, between the two focus reads the helper
+    /// takes around it, so a test can model a title repaint or a focus change during
+    /// one capture (T16, S4/S5).
+    pub on_capture: Mutex<Option<Hook>>,
     /// A 2560 × 1600 pt display at the origin, captured at 1280 × 800 (scale 0.5).
     pub geometry: ScreenshotGeometry,
 }
@@ -63,6 +67,7 @@ impl Default for FakeDesktop {
             focus_ignores: AtomicBool::new(false),
             focus_query_failure: AtomicBool::new(false),
             on_post: Mutex::new(None),
+            on_capture: Mutex::new(None),
             geometry: ScreenshotGeometry::for_display(Point { x: 0.0, y: 0.0 }, 2560.0, 1280, 800),
         }
     }
@@ -81,6 +86,9 @@ impl Desktop for FakeDesktop {
 
     fn capture(&self) -> Result<Capture, String> {
         self.captures.fetch_add(1, Ordering::SeqCst);
+        if let Some(hook) = self.on_capture.lock().unwrap().as_ref() {
+            hook();
+        }
         Ok(Capture { data: b"jpeg".to_vec(), mime_type: "image/jpeg", geometry: self.geometry })
     }
 

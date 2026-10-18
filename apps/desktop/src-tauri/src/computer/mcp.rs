@@ -72,16 +72,25 @@ const NEEDS_SCREENSHOT: &str = "Take a screenshot first: coordinates are pixels 
 const UNKNOWN_TARGET: &str = "Cannot tell which app is under that point, so the action was refused. \
 Take a new screenshot and try again.";
 
-/// Global-mode keyboard refusals (T4, S4/S5). Each one names what to do instead of typing
-/// into whatever happens to hold the focus.
-const NO_FOCUS_CONTEXT: &str = "The last screenshot did not capture a usable keyboard window, so nothing was typed. \
-Focus the window you want, take a new screenshot, and try again.";
-const OWN_FOCUS_WINDOW: &str = "Gentle Dot's own window has the keyboard focus, so nothing was typed. \
-Click the window you want to receive the input and try again.";
+/// Global-mode keyboard refusals (T4, T16, S4/S5). Each one names its own cause — no snapshot,
+/// a focus that moved during the capture, a focus that could not be read, Gentle Dot's own
+/// window, an absent or invalid owner — so a live failure is diagnosable from the reply alone,
+/// and each keeps the self-service next step instead of one generic sentence. None claims that
+/// an action happened.
+const NO_KEYBOARD_SNAPSHOT: &str = "No screenshot has been taken yet, so there is no keyboard target. \
+Take a screenshot and try again.";
+const FOCUS_MOVED_DURING_CAPTURE: &str = "The keyboard focus moved to another window while the last screenshot \
+was taken, so it bound no keyboard target. Nothing was sent; focus the window you want, take a new screenshot, and try again.";
+const NO_WINDOW_AT_CAPTURE: &str = "The last screenshot observed no focused window, so it bound no keyboard target. \
+Nothing was sent; focus the window you want, take a new screenshot, and try again.";
+const FOCUS_QUERY_FAILED_AT_CAPTURE: &str = "The keyboard focus could not be read while the last screenshot was taken, \
+so it bound no keyboard target. Nothing was sent; take a new screenshot and try again.";
+const OWN_FOCUS_WINDOW: &str = "Gentle Dot's own window has the keyboard focus, so nothing was sent. \
+Click the window you want to receive the input, take a new screenshot, and try again.";
 const NO_WINDOW_OWNER: &str = "The focused window does not report its process, so Gentle Dot cannot rule out its own \
-window. Nothing was typed; click the window you want and try again.";
+window. Nothing was sent; click the window you want, take a new screenshot, and try again.";
 const INVALID_OWNER_PID: &str = "The focused window reports an invalid owner process, so Gentle Dot cannot rule out its own \
-window. Nothing was typed; click the window you want and try again.";
+window. Nothing was sent; click the window you want, take a new screenshot, and try again.";
 /// Neutral reasons the captured target is no longer the focused window. A caller that already
 /// posted some events adds its own delivery claim instead of asserting that nothing happened.
 const FOCUS_MOVED_REASON: &str = "the keyboard focus moved to another window";
@@ -401,16 +410,117 @@ fn chunks(text: &str) -> Vec<String> {
     out
 }
 
+/// What the compositor reported about the keyboard focus at one moment around a capture
+/// (T16, S4/S5). The three outcomes stay distinct so a refusal can name its cause and the
+/// screenshot metadata can stay `null` when the observation did not succeed.
+#[derive(Debug, Clone, PartialEq)]
+enum FocusObservation {
+    /// The compositor named the focused window.
+    Window(FocusTarget),
+    /// The compositor reported no focused window.
+    NoWindow,
+    /// The compositor's query failed.
+    Failed,
+}
+
+impl FocusObservation {
+    /// The focused window's `app_id`, when the observation succeeded and the window reported
+    /// one. Never a fallback to the title: a document title is not an app name (T16, S4).
+    fn app_id(&self) -> Option<&str> {
+        match self {
+            FocusObservation::Window(window) => window.app_id.as_deref(),
+            FocusObservation::NoWindow | FocusObservation::Failed => None,
+        }
+    }
+}
+
+/// Why a capture bound no keyboard target (T16, S4/S5). Each variant maps to one refusal that
+/// names the cause, so a live failure is diagnosable without reading the code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusRefusal {
+    /// The focus moved to a different window, or to a different owner, while the image was taken.
+    Moved,
+    /// No window held the focus around the capture.
+    NoWindow,
+    /// The compositor's focus query failed.
+    QueryFailed,
+    /// Gentle Dot's own window held the focus.
+    OwnWindow,
+    /// The focused window reports no owner process.
+    NoOwnerPid,
+    /// The focused window reports a non-positive owner process.
+    InvalidOwnerPid,
+}
+
+impl FocusRefusal {
+    /// The refusal a keyboard action gets for this cause. The owner rules reuse the same string
+    /// whether the capture or the pre-post check detected the problem.
+    fn message(self) -> &'static str {
+        match self {
+            FocusRefusal::Moved => FOCUS_MOVED_DURING_CAPTURE,
+            FocusRefusal::NoWindow => NO_WINDOW_AT_CAPTURE,
+            FocusRefusal::QueryFailed => FOCUS_QUERY_FAILED_AT_CAPTURE,
+            FocusRefusal::OwnWindow => OWN_FOCUS_WINDOW,
+            FocusRefusal::NoOwnerPid => NO_WINDOW_OWNER,
+            FocusRefusal::InvalidOwnerPid => INVALID_OWNER_PID,
+        }
+    }
+}
+
+/// The keyboard target a screenshot bound (T16, S4/S5): the external window input may reach, or
+/// the cause none could be bound. Never a guessed window.
+#[derive(Debug, Clone, PartialEq)]
+enum KeyboardBinding {
+    Bound(FocusTarget),
+    Refused(FocusRefusal),
+}
+
 /// The latest request scope: the geometry of the last screenshot and, in global mode, the
 /// external window the keyboard must target for actions planned from it. One struct under the
 /// existing `actions` mutex, so the geometry and the keyboard target can never disagree.
 #[derive(Debug, Clone, PartialEq)]
 struct Snapshot {
     geometry: ScreenshotGeometry,
-    /// `None` when no usable external window could be observed while the screenshot was taken
-    /// (targeted policy, unknown or own focus, a failed query, or a focus that changed
-    /// mid-capture). Never a guessed window.
-    keyboard: Option<FocusTarget>,
+    /// The keyboard target observed with this screenshot, or why none was bound (targeted
+    /// policy, an unknown or own focus, a failed query, or a focus that moved mid-capture).
+    keyboard: KeyboardBinding,
+}
+
+/// Whether a window's owner process lets it receive keyboard input (T16, S4/S5): never Gentle
+/// Dot's own pid, and never an absent or non-positive pid (pid 0 is the kernel, not an app).
+fn usable_owner(pid: Option<i32>, own_pid: i32) -> Result<(), FocusRefusal> {
+    match pid {
+        Some(pid) if pid == own_pid => Err(FocusRefusal::OwnWindow),
+        Some(pid) if pid > 0 => Ok(()),
+        Some(_) => Err(FocusRefusal::InvalidOwnerPid),
+        None => Err(FocusRefusal::NoOwnerPid),
+    }
+}
+
+/// The keyboard binding a capture may use (T16, S4/S5): only the same usable external window
+/// observed before and after the image. Identity is the window id and its owner pid — a title
+/// or app-id repaint in between is cosmetic and must not drop the binding — while a moved
+/// window, a changed owner, Gentle Dot's own window, and a missing or non-positive owner all
+/// bind nothing, exactly as before.
+fn bind_keyboard_target(
+    before: &FocusObservation,
+    after: &FocusObservation,
+    own_pid: i32,
+) -> KeyboardBinding {
+    let (before, after) = match (before, after) {
+        (FocusObservation::Window(before), FocusObservation::Window(after)) => (before, after),
+        (FocusObservation::Failed, _) | (_, FocusObservation::Failed) => {
+            return KeyboardBinding::Refused(FocusRefusal::QueryFailed)
+        }
+        _ => return KeyboardBinding::Refused(FocusRefusal::NoWindow),
+    };
+    if before.window_id != after.window_id || before.pid != after.pid {
+        return KeyboardBinding::Refused(FocusRefusal::Moved);
+    }
+    match usable_owner(after.pid, own_pid) {
+        Ok(()) => KeyboardBinding::Bound(after.clone()),
+        Err(refusal) => KeyboardBinding::Refused(refusal),
+    }
 }
 
 pub struct Helper {
@@ -742,22 +852,23 @@ impl Helper {
         if self.policy != BackendPolicy::DesktopGlobal {
             return Ok(None);
         }
-        let snapshot = latest.as_ref().ok_or_else(|| NEEDS_SCREENSHOT.to_string())?;
-        let window = snapshot.keyboard.clone().ok_or_else(|| NO_FOCUS_CONTEXT.to_string())?;
-        self.usable_focus(&window)?;
-        Ok(Some(window))
+        let snapshot = latest.as_ref().ok_or_else(|| NO_KEYBOARD_SNAPSHOT.to_string())?;
+        match &snapshot.keyboard {
+            KeyboardBinding::Bound(window) => {
+                // The capture already validated this window; re-check the same rule so a target
+                // that became unusable can never receive input.
+                self.usable_focus(window)?;
+                Ok(Some(window.clone()))
+            }
+            KeyboardBinding::Refused(refusal) => Err(refusal.message().to_string()),
+        }
     }
 
     /// Whether `window` may receive keyboard input: never Gentle Dot's own window (by pid,
     /// never by name or app id), and never a window whose owner is absent or non-positive
     /// (pid 0 or negative is not a real process).
     fn usable_focus(&self, window: &FocusTarget) -> Result<(), String> {
-        match window.pid {
-            Some(pid) if pid == self.own_pid => Err(OWN_FOCUS_WINDOW.to_string()),
-            Some(pid) if pid > 0 => Ok(()),
-            Some(_) => Err(INVALID_OWNER_PID.to_string()),
-            None => Err(NO_WINDOW_OWNER.to_string()),
-        }
+        usable_owner(window.pid, self.own_pid).map_err(|refusal| refusal.message().to_string())
     }
 
     /// Global mode: why the focus is no longer the exact window this action captured, or
@@ -810,34 +921,38 @@ The rest was not sent; click the window you want and try again."
         }
     }
 
-    /// The focused window as observed right now, or `None` (targeted policy, a failed query, or
-    /// no window). Best effort: a capture still returns without a keyboard target rather than
-    /// failing the screenshot.
-    fn observed_keyboard_target(&self) -> Option<FocusTarget> {
+    /// What the compositor says about the keyboard focus right now (T16, S4/S5). The outcome
+    /// stays distinguishable so a capture can name the cause it bound nothing, and so the
+    /// screenshot metadata can stay `null` when the observation did not succeed. Best effort: a
+    /// capture still returns without a keyboard target rather than failing the screenshot.
+    fn observe_keyboard_focus(&self) -> FocusObservation {
         if self.policy != BackendPolicy::DesktopGlobal {
-            return None;
+            return FocusObservation::NoWindow;
         }
-        self.desktop.focused_window().ok().flatten()
+        match self.desktop.focused_window() {
+            Ok(Some(window)) => FocusObservation::Window(window),
+            Ok(None) => FocusObservation::NoWindow,
+            Err(_) => FocusObservation::Failed,
+        }
     }
 
     fn screenshot(&self, latest: &mut Option<Snapshot>) -> Result<Content, String> {
         // Observe the keyboard target around the capture: the same usable external window before
-        // and after, or nothing. A focus that moves while the image is taken, an unknown or own
-        // window, and a failed query all leave the keyboard target unavailable instead of
-        // guessing one; the screenshot itself is still returned.
-        let before = self.observed_keyboard_target();
+        // and after, or the cause none could be bound. A focus that moves while the image is
+        // taken, an unknown or own window, and a failed query all leave the keyboard target
+        // unavailable instead of guessing one; the screenshot itself is still returned.
+        let before = self.observe_keyboard_focus();
         let capture = self.desktop.capture()?;
-        let after = self.observed_keyboard_target();
-        let keyboard = match (before, after) {
-            (Some(before), Some(after)) if before == after && self.usable_focus(&after).is_ok() => Some(after),
-            _ => None,
-        };
+        let after = self.observe_keyboard_focus();
+        let keyboard = bind_keyboard_target(&before, &after, self.own_pid);
         *latest = Some(Snapshot { geometry: capture.geometry, keyboard });
-        // Global mode cannot tell which app a screenshot shows, so it names none rather
-        // than repeating whatever the backend last reported.
+        // Targeted mode names the frontmost app, exactly as before. Global mode cannot attribute
+        // an app, so it repeats no backend "frontmost"; it names the focused window's app id from
+        // the same observation that decided the keyboard target, and stays null when that
+        // observation failed or named no id (T16, S4).
         let front = match self.policy {
             BackendPolicy::Targeted => self.desktop.frontmost_app().map(|app| app.name),
-            BackendPolicy::DesktopGlobal => None,
+            BackendPolicy::DesktopGlobal => after.app_id().map(str::to_owned),
         };
         let meta = json!({
             "imageWidth": capture.geometry.image_width,
@@ -2769,15 +2884,54 @@ mod tests {
     }
 
     #[test]
-    fn a_global_screenshot_names_no_app() {
+    fn a_global_screenshot_names_the_focused_app_id() {
         let rig = global_rig_with(true, true);
         global_ready(&rig);
-        // Even when the backend reports a frontmost app, global mode names none: it
-        // cannot know which app a screenshot shows, so it must not say.
+        // The backend's own "frontmost" app is unverifiable on a desktop global mode cannot
+        // attribute, so it is never repeated; the focused window's app id comes from the same
+        // observation that decides the keyboard target (T16, S4).
         *rig.desktop.frontmost.lock().unwrap() = Some(app(200, "com.apple.Safari", "Safari"));
         let result = rig.call("screenshot", json!({}));
         let content = result["content"].as_array().unwrap();
         assert!(content.iter().any(|c| c["type"] == "image"));
+        let meta = content.iter().rfind(|c| c["type"] == "text").unwrap();
+        let meta: Value = serde_json::from_str(meta["text"].as_str().unwrap()).unwrap();
+        assert_eq!(meta["frontApp"], "org.gnome.TextEditor", "{meta}");
+    }
+
+    #[test]
+    fn a_global_screenshot_keeps_front_app_null_without_an_observation() {
+        // A failed query and a compositor that reports no focused window both leave nothing to
+        // name: the metadata stays null instead of fabricating one (T16, S4).
+        for failed in [false, true] {
+            let rig = global_rig_with(true, true);
+            global_ready(&rig);
+            if failed {
+                rig.desktop.focus_query_failure.store(true, Ordering::SeqCst);
+            } else {
+                *rig.desktop.focused_window.lock().unwrap() = None;
+            }
+            let result = rig.call("screenshot", json!({}));
+            let content = result["content"].as_array().unwrap();
+            let meta = content.iter().rfind(|c| c["type"] == "text").unwrap();
+            let meta: Value = serde_json::from_str(meta["text"].as_str().unwrap()).unwrap();
+            assert!(meta["frontApp"].is_null(), "failed {failed}: {meta}");
+        }
+    }
+
+    #[test]
+    fn a_global_screenshot_never_fabricates_an_app_name_from_a_title() {
+        // A window that reports a document title but no app id has no app name to give: the
+        // metadata stays null rather than presenting the title as an app (T16, S4).
+        let rig = global_rig_with(true, true);
+        *rig.desktop.focused_window.lock().unwrap() = Some(FocusTarget {
+            window_id: 30,
+            pid: Some(400),
+            title: Some("Confidential notes".into()),
+            app_id: None,
+        });
+        let result = rig.call("screenshot", json!({}));
+        let content = result["content"].as_array().unwrap();
         let meta = content.iter().rfind(|c| c["type"] == "text").unwrap();
         let meta: Value = serde_json::from_str(meta["text"].as_str().unwrap()).unwrap();
         assert!(meta["frontApp"].is_null(), "{meta}");
@@ -3010,14 +3164,16 @@ mod tests {
     }
 
     #[test]
-    fn global_keyboard_input_requires_a_screenshot() {
-        // The keyboard target comes from the latest screenshot, so no screenshot is no target.
+    fn no_screenshot_refuses_and_names_the_missing_snapshot() {
+        // The keyboard target comes from the latest screenshot, so no screenshot is no target; the
+        // refusal names that cause instead of one generic sentence (T16, S4).
         let rig = global_rig_with(true, true);
         *rig.desktop.owner_at.lock().unwrap() = Box::new(|_| None);
         *rig.desktop.frontmost.lock().unwrap() = None;
         *rig.desktop.focused_window.lock().unwrap() = Some(editor_window());
         let result = rig.call("type", json!({"text": "nope"}));
         assert!(is_error(&result), "{result}");
+        assert!(first_text(&result).contains("No screenshot has been taken yet"), "{result}");
         assert!(first_text(&result).contains("screenshot"), "{result}");
         assert!(rig.desktop.events().is_empty());
     }
@@ -3132,6 +3288,7 @@ mod tests {
         assert!(is_error(&result));
         assert!(!first_text(&result).contains("done"), "{result}");
         assert!(first_text(&result).to_lowercase().contains("focus"), "{result}");
+        assert!(first_text(&result).contains("own window"), "{result}");
         assert!(rig.desktop.events().is_empty());
     }
 
@@ -3212,6 +3369,63 @@ mod tests {
         assert!(!is_error(&rig.call("screenshot", json!({}))));
         let result = rig.call("type", json!({"text": "nope"}));
         assert!(is_error(&result));
+        assert!(first_text(&result).contains("does not report its process"), "{result}");
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn a_title_repaint_during_the_capture_keeps_the_keyboard_binding() {
+        // Niri can repaint a window's title between the two FocusedWindow reads around one
+        // capture (a terminal or editor title updates). The window and its owner are the same,
+        // so the binding must hold and the text must reach the editor (T16, S4).
+        let rig = focus_rig(true, true);
+        let desktop = rig.desktop.clone();
+        *rig.desktop.on_capture.lock().unwrap() = Some(Box::new(move || {
+            let mut focus = desktop.focused_window.lock().unwrap();
+            if let Some(window) = focus.as_mut() {
+                window.title = Some("notes.txt*".into());
+            }
+        }));
+        assert!(!is_error(&rig.call("screenshot", json!({}))));
+        let result = rig.call("type", json!({"text": "PRUEBA-NATIVA-OK"}));
+        assert!(!is_error(&result), "{result}");
+        assert_eq!(rig.desktop.events(), vec![InputEvent::Text("PRUEBA-NATIVA-OK".into())]);
+    }
+
+    #[test]
+    fn a_window_change_during_the_capture_refuses_with_the_moved_cause() {
+        // The focus lands on another window while the image is taken: the capture binds nothing
+        // and the refusal names the moved focus instead of a generic sentence (T16, S4).
+        let rig = focus_rig(true, true);
+        let desktop = rig.desktop.clone();
+        *rig.desktop.on_capture.lock().unwrap() = Some(Box::new(move || {
+            *desktop.focused_window.lock().unwrap() = Some(other_window_of_the_same_process());
+        }));
+        assert!(!is_error(&rig.call("screenshot", json!({}))));
+        let result = rig.call("type", json!({"text": "nope"}));
+        assert!(is_error(&result), "{result}");
+        assert!(first_text(&result).contains("moved"), "{result}");
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn an_owner_change_during_the_capture_refuses_with_the_moved_cause() {
+        // The same window id now belongs to another process: identity and owner must both still
+        // hold, so the capture binds nothing and no input is sent (T16, S4).
+        let rig = focus_rig(true, true);
+        let desktop = rig.desktop.clone();
+        *rig.desktop.on_capture.lock().unwrap() = Some(Box::new(move || {
+            *desktop.focused_window.lock().unwrap() = Some(FocusTarget {
+                window_id: 10,
+                pid: Some(777),
+                title: Some("Text Editor".into()),
+                app_id: Some("org.gnome.TextEditor".into()),
+            });
+        }));
+        assert!(!is_error(&rig.call("screenshot", json!({}))));
+        let result = rig.call("key", json!({"combo": "tab"}));
+        assert!(is_error(&result), "{result}");
+        assert!(first_text(&result).contains("moved"), "{result}");
         assert!(rig.desktop.events().is_empty());
     }
 
@@ -3287,6 +3501,7 @@ mod tests {
             let result = rig.call("type", json!({"text": "nope"}));
             assert!(is_error(&result), "pid {pid}: {result}");
             assert!(!first_text(&result).contains("done"), "pid {pid}: {result}");
+            assert!(first_text(&result).contains("invalid owner process"), "pid {pid}: {result}");
             assert!(rig.desktop.events().is_empty(), "pid {pid} must send zero input");
         }
     }
