@@ -21,11 +21,14 @@ use super::capabilities::{AdvertisedGlobal, CapabilitySnapshot, VIRTUAL_POINTER,
 use super::geometry::OutputGeometry;
 use super::outputs::Monitor;
 use super::pointer::{
-    click_pointer, drag_pointer, move_pointer, scroll_pointer, PointerButton, PointerError,
+    click_pointer, deliver_drag_steps, drag_path, drag_pointer, move_pointer, scroll_pointer,
+    DragStep, OutputPoint, PointerButton, PointerError, DRAG_STEPS,
 };
 use super::transport::{connection_from_stream, CancelHandle, TransportKind};
+use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -641,6 +644,114 @@ fn drag_holds_moves_and_releases_in_order() {
         seen.iter().filter(|event| matches!(event, Observed::Button { .. })).count(),
         2,
         "exactly one press and one release, got: {seen:?}"
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DragEffect {
+    Check,
+    Motion { x: u32, y: u32 },
+    Flush,
+    Pause,
+}
+
+fn drag_endpoints() -> (OutputPoint, OutputPoint) {
+    (
+        OutputPoint { x: 100, y: 100, x_extent: 1920, y_extent: 1080 },
+        OutputPoint { x: 200, y: 150, x_extent: 1920, y_extent: 1080 },
+    )
+}
+
+#[test]
+fn drag_path_yields_exactly_the_interpolated_steps_ending_at_to() {
+    let (from, to) = drag_endpoints();
+    let path = drag_path(from, to);
+    assert_eq!(path.len(), DRAG_STEPS as usize, "one point per drag step");
+    assert_eq!(path.last(), Some(&to), "the path ends exactly at to");
+    assert!(
+        path.iter().all(|point| {
+            point.x >= from.x && point.x <= to.x && point.y >= from.y && point.y <= to.y
+        }),
+        "every step stays between from and to, got: {path:?}"
+    );
+}
+
+#[test]
+fn deliver_drag_steps_runs_check_motion_flush_pause_for_every_step() {
+    let (from, to) = drag_endpoints();
+    let path = drag_path(from, to);
+    let log: Rc<RefCell<Vec<DragEffect>>> = Rc::new(RefCell::new(Vec::new()));
+    let mut step = DragStep {
+        check: || {
+            log.borrow_mut().push(DragEffect::Check);
+            Ok(())
+        },
+        motion: |point: &OutputPoint| {
+            log.borrow_mut().push(DragEffect::Motion { x: point.x, y: point.y });
+            Ok(())
+        },
+        flush: || {
+            log.borrow_mut().push(DragEffect::Flush);
+            Ok(())
+        },
+        pause: || {
+            log.borrow_mut().push(DragEffect::Pause);
+            Ok(())
+        },
+    };
+    deliver_drag_steps(&path, &mut step).expect("every injected effect succeeds");
+
+    let mut expected = Vec::new();
+    for point in &path {
+        expected.push(DragEffect::Check);
+        expected.push(DragEffect::Motion { x: point.x, y: point.y });
+        expected.push(DragEffect::Flush);
+        expected.push(DragEffect::Pause);
+    }
+    let effects = log.borrow().clone();
+    assert_eq!(effects, expected, "cadence is check, motion, flush, pause per step");
+    assert_eq!(
+        effects.iter().filter(|effect| matches!(effect, DragEffect::Motion { .. })).count(),
+        DRAG_STEPS as usize,
+        "one motion per drag step"
+    );
+    let last_motion = effects.iter().rev().find_map(|effect| match effect {
+        DragEffect::Motion { x, y } => Some((*x, *y)),
+        _ => None,
+    });
+    assert_eq!(last_motion, Some((to.x, to.y)), "the last motion is exactly to");
+}
+
+#[test]
+fn a_failing_check_aborts_the_step_before_motion_and_flush() {
+    let (from, to) = drag_endpoints();
+    let path = drag_path(from, to);
+    let log: Rc<RefCell<Vec<DragEffect>>> = Rc::new(RefCell::new(Vec::new()));
+    let mut step = DragStep {
+        check: || {
+            log.borrow_mut().push(DragEffect::Check);
+            Err(PointerError::NonFiniteCoordinate)
+        },
+        motion: |point: &OutputPoint| {
+            log.borrow_mut().push(DragEffect::Motion { x: point.x, y: point.y });
+            Ok(())
+        },
+        flush: || {
+            log.borrow_mut().push(DragEffect::Flush);
+            Ok(())
+        },
+        pause: || {
+            log.borrow_mut().push(DragEffect::Pause);
+            Ok(())
+        },
+    };
+    let err = deliver_drag_steps(&path, &mut step).expect_err("a check error aborts delivery");
+    assert!(matches!(err, PointerError::NonFiniteCoordinate), "got: {err}");
+    let effects = log.borrow().clone();
+    assert_eq!(
+        effects,
+        vec![DragEffect::Check],
+        "no motion, flush or pause follows a failing check"
     );
 }
 
