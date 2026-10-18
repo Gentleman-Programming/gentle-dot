@@ -1913,7 +1913,8 @@ fn conversations_on(value: Option<&str>) -> bool {
 
 /// The tray menu, top to bottom (`-` is a separator). "New conversation" only exists with the
 /// conversations list on; in the single continuous chat there is nothing new to start.
-/// "Stop computer control" and "Yolo mode" exist where computer control does (macOS, S24.3, S24.9).
+/// "Stop computer control" and "Yolo mode" exist where the computer-control helper actually runs
+/// (T2, S2, S24.3, S24.9); `computer_control_available` decides that, never a platform flag.
 /// "rose" hides or shows the floating Dot (S26.1).
 fn tray_menu_ids(conversations: bool, computer_control: bool) -> Vec<&'static str> {
     let mut ids = vec!["open"];
@@ -1926,6 +1927,42 @@ fn tray_menu_ids(conversations: bool, computer_control: bool) -> Vec<&'static st
     }
     ids.extend(["-", "restart", "autostart", "-", "quit"]);
     ids
+}
+
+/// The build's own platform name for the tray's control decision, spelled like
+/// `computer::app::platform_info`: `"macos"`, `"linux"`, or `"other"`.
+fn current_os() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "other"
+    }
+}
+
+/// Whether the tray offers "Stop computer control" and "Yolo mode" (T2, S2): the helper
+/// that actually started for this launch, read from the managed `Computer` endpoint. `setup`
+/// manages that state before the first `build_tray`, and the retry path reuses it, so there is
+/// no re-derived startup predicate and no second startup. macOS keeps its previous menu even
+/// when the helper failed; an unsupported host, or a Linux host the helper refused, offers
+/// nothing.
+fn computer_control_available(app: &AppHandle) -> bool {
+    let helper_started = app
+        .try_state::<computer::Computer>()
+        .and_then(|computer| computer.endpoint())
+        .is_some();
+    tray_offers_computer_control(current_os(), helper_started)
+}
+
+/// The production decision as a pure function of the platform and whether the helper started,
+/// so headless tests pin it: only macOS keeps its menu without a started helper.
+fn tray_offers_computer_control(os: &str, helper_started: bool) -> bool {
+    match os {
+        "macos" => true,
+        "linux" => helper_started,
+        _ => false,
+    }
 }
 
 /// Whether a tray-build failure is the transient missing-watcher case
@@ -2025,7 +2062,8 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tau
     app.manage(OpenMenuItem(open.clone()));
     let menu = Menu::new(app)?;
     let conversations = conversations_on(std::env::var("GENTLE_DOT_CONVERSATIONS").ok().as_deref());
-    for id in tray_menu_ids(conversations, cfg!(target_os = "macos")) {
+    let computer_control = computer_control_available(app);
+    for id in tray_menu_ids(conversations, computer_control) {
         match id {
             "open" => menu.append(&open)?,
             "new" => menu.append(&MenuItem::with_id(app, "new", "New conversation", true, None::<&str>)?)?,
