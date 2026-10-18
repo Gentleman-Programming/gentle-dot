@@ -534,16 +534,18 @@ impl Helper {
             return Err("Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.".into());
         }
         if sees && !permissions.screen_recording {
-            if self.policy == BackendPolicy::DesktopGlobal {
-                return Err("Screen capture is not available on this Linux desktop, so computer control cannot see it.".into());
+            // Stock Wayland has no Screen Recording permission concept (screencopy
+            // needs no portal grant): the flag never gates the DesktopGlobal path.
+            if self.policy != BackendPolicy::DesktopGlobal {
+                return Err(format!("{NEEDS_PERMISSION} Screen Recording permission. {GRANT_IT}"));
             }
-            return Err(format!("{NEEDS_PERMISSION} Screen Recording permission. {GRANT_IT}"));
         }
         if acts && !permissions.accessibility {
-            if self.policy == BackendPolicy::DesktopGlobal {
-                return Err("Input is not available on this Linux desktop, so computer control cannot act.".into());
+            // Stock Wayland has no Accessibility equivalent: the flag never gates
+            // the DesktopGlobal path (a denied flag must not block Linux input).
+            if self.policy != BackendPolicy::DesktopGlobal {
+                return Err(format!("{NEEDS_PERMISSION} Accessibility permission. {GRANT_IT}"));
             }
-            return Err(format!("{NEEDS_PERMISSION} Accessibility permission. {GRANT_IT}"));
         }
         Ok(())
     }
@@ -2501,15 +2503,41 @@ mod tests {
         let message = first_text(&rig.call("screenshot", json!({})));
         assert!(message.contains("Linux"), "{message}");
         assert!(!message.contains("macOS"), "{message}");
+        // Screen Recording and Accessibility are not Linux concepts: denied
+        // flags never block the global path and never name Mac permissions.
         rig.desktop.permissions.lock().unwrap().screenshots_supported = true;
         rig.desktop.permissions.lock().unwrap().screen_recording = false;
-        let message = first_text(&rig.call("screenshot", json!({})));
-        assert!(!message.contains("Screen Recording"), "{message}");
+        let result = rig.call("screenshot", json!({}));
+        assert!(!is_error(&result), "Screen Recording must not gate global seeing: {result}");
+        assert!(!first_text(&result).contains("Screen Recording"), "{result:?}");
         rig.desktop.permissions.lock().unwrap().screen_recording = true;
         rig.desktop.permissions.lock().unwrap().accessibility = false;
-        let message = first_text(&rig.call("key", json!({"combo": "tab"})));
-        assert!(!message.contains("Accessibility"), "{message}");
-        assert!(message.contains("Linux"), "{message}");
-        assert_eq!(rig.dialogs.grants.load(Ordering::SeqCst), 0);
+        let result = rig.call("key", json!({"combo": "tab"}));
+        assert!(!is_error(&result), "Accessibility must not gate global input: {result}");
+        assert!(!first_text(&result).contains("Accessibility"), "{result:?}");
+        assert_eq!(rig.dialogs.grants.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn global_accessibility_denied_does_not_block_input() {
+        // Stock Wayland has no Accessibility equivalent (S3-S5): a denied
+        // flag must never block the DesktopGlobal path.
+        let rig = global_rig_with(true, true);
+        global_ready(&rig);
+        rig.desktop.permissions.lock().unwrap().accessibility = false;
+        let result = rig.call("click", json!({"x": 10, "y": 10}));
+        assert!(!is_error(&result), "global input must not be blocked by Accessibility: {result}");
+        assert_eq!(rig.desktop.events().len(), 1);
+    }
+
+    #[test]
+    fn global_screen_recording_denied_does_not_block_seeing() {
+        // Screencopy needs no portal permission: the Screen Recording flag
+        // is not a Linux concept and must never gate the global path.
+        let rig = global_rig_with(true, true);
+        global_ready(&rig);
+        rig.desktop.permissions.lock().unwrap().screen_recording = false;
+        let result = rig.call("screenshot", json!({}));
+        assert!(!is_error(&result), "global seeing must not be blocked by Screen Recording: {result}");
     }
 }

@@ -24,6 +24,10 @@ pub mod backend;
 pub mod capabilities;
 pub mod capture;
 pub mod desktop;
+#[cfg(target_os = "linux")]
+pub mod dialogs;
+#[cfg(all(test, target_os = "linux"))]
+mod dialogs_tests;
 pub mod geometry;
 pub mod keyboard;
 pub mod keymap;
@@ -32,6 +36,11 @@ pub mod outputs;
 pub mod pixels;
 pub mod pointer;
 pub mod transport;
+#[cfg(target_os = "linux")]
+pub mod working;
+
+#[cfg(all(test, target_os = "linux"))]
+mod working_tests;
 
 #[cfg(test)]
 mod backend_tests;

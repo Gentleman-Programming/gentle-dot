@@ -410,12 +410,14 @@ impl<B: Backend> LinuxDesktop<B> {
 
 impl<B: Backend> Desktop for LinuxDesktop<B> {
     fn permissions(&self) -> Permissions {
-        // Synchronous, so no protocol probe: on Niri the Wayland protocols
-        // are the permission model (per-operation failures still fail
-        // closed); off Niri nothing is available and the MCP layer reports
-        // the Linux-truthful errors.
+        // Synchronous, so no protocol probe: screencopy needs no portal
+        // permission, and there is no Accessibility or Screen Recording
+        // concept to claim on Linux — both flags stay false on Niri and off
+        // it. `screenshots_supported` names Niri presence only (the MCP layer
+        // gates on it with a Linux-truthful message, while AX/SR never gate
+        // the global path); per-operation failures still fail closed.
         if self.backend.is_niri() {
-            Permissions { accessibility: true, screen_recording: true, screenshots_supported: true }
+            Permissions { accessibility: false, screen_recording: false, screenshots_supported: true }
         } else {
             Permissions {
                 accessibility: false,

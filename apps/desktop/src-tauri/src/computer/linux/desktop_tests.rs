@@ -441,6 +441,18 @@ fn concurrent_registrations_cancel_and_clean_up() {
 }
 
 #[test]
+fn permissions_never_claim_ax_or_screen_recording() {
+    // Stock Wayland has no Accessibility and no Screen Recording concept:
+    // Linux permissions must never claim either, on Niri or off it.
+    for niri in [true, false] {
+        let (linux, _) = desktop(niri, Ok(Some("DP-1".into())), vec![dp1()]);
+        let permissions = linux.permissions();
+        assert!(!permissions.accessibility, "no AX concept on Linux (niri={niri})");
+        assert!(!permissions.screen_recording, "no Screen Recording concept on Linux (niri={niri})");
+    }
+}
+
+#[test]
 fn off_niri_everything_refuses_before_any_io() {
     let (linux, backend) = desktop(false, Ok(Some("DP-1".into())), vec![dp1()]);
     assert!(!linux.permissions().accessibility);
@@ -458,7 +470,8 @@ fn off_niri_everything_refuses_before_any_io() {
 fn on_niri_permissions_advertise_the_protocol_model() {
     let (linux, _) = desktop(true, Ok(Some("DP-1".into())), vec![dp1()]);
     let permissions = linux.permissions();
-    assert!(permissions.accessibility && permissions.screen_recording && permissions.screenshots_supported);
+    assert!(!permissions.accessibility && !permissions.screen_recording);
+    assert!(permissions.screenshots_supported);
 }
 
 #[test]

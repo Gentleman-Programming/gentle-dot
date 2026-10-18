@@ -4,18 +4,34 @@
 
 use super::session::{Reason, Session, StateEvent};
 use super::Dialogs;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 type Notify = Box<dyn Fn(&StateEvent) + Send + Sync>;
+type EndHook = Arc<dyn Fn() + Send + Sync>;
 
 pub struct Control {
     session: Mutex<Session>,
     notify: Notify,
+    on_end: Mutex<Option<EndHook>>,
 }
 
 impl Control {
     pub fn new(notify: impl Fn(&StateEvent) + Send + Sync + 'static) -> Self {
-        Control { session: Mutex::new(Session::default()), notify: Box::new(notify) }
+        Control { session: Mutex::new(Session::default()), notify: Box::new(notify), on_end: Mutex::new(None) }
+    }
+
+    /// Runs `hook` once whenever the session ends (Stop, panic, timeout, or
+    /// expiry). Linux wires `cancel_all` plus the working end here so an
+    /// in-flight call is interrupted; macOS never sets it, so its behavior
+    /// is unchanged.
+    pub fn set_on_end(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *self.on_end.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(hook));
+    }
+
+    fn ended(&self) {
+        if let Some(hook) = self.on_end.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone() {
+            hook();
+        }
     }
 
     fn with<T>(&self, f: impl FnOnce(&mut Session) -> T) -> T {
@@ -47,12 +63,20 @@ impl Control {
 
     pub fn end(&self, reason: Reason) {
         let event = self.with(|s| s.end(reason));
+        let ended = event.as_ref().is_some_and(|event| !event.active);
         self.report(event);
+        if ended {
+            self.ended();
+        }
     }
 
     pub fn expire(&self, now_ms: u64) {
         let event = self.with(|s| s.expire(now_ms));
+        let ended = event.as_ref().is_some_and(|event| !event.active);
         self.report(event);
+        if ended {
+            self.ended();
+        }
     }
 
     pub fn yolo(&self, now_ms: u64) -> bool {
@@ -133,6 +157,33 @@ mod tests {
         control.end(Reason::Panic);
         assert!(!control.yolo(NOW));
         assert!(!states.lock().unwrap().last().unwrap().yolo);
+    }
+
+    #[test]
+    fn session_end_runs_the_hook_once_and_expiry_ends_it_too() {
+        use super::super::session::SESSION_MS;
+        use std::sync::atomic::AtomicUsize;
+        let (control, _states) = control();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        control.set_on_end(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        });
+        // No session yet: ending runs nothing.
+        control.end(Reason::Stopped);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        // Stop ends the session and runs the hook exactly once ...
+        control.grant(NOW);
+        control.end(Reason::Stopped);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // ... and ending the now-idle session runs nothing more.
+        control.end(Reason::Stopped);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // Expiry ends the session the timeout watcher reports, hook and all.
+        control.grant(NOW);
+        control.expire(NOW + SESSION_MS);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(!control.is_active(NOW + SESSION_MS));
     }
 
     #[test]

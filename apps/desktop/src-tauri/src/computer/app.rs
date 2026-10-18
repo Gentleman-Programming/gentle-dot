@@ -48,6 +48,10 @@ pub struct Computer {
     desktop: Arc<dyn super::Desktop>,
     #[cfg(target_os = "macos")]
     working: Arc<Working>,
+    #[cfg(target_os = "linux")]
+    desktop: Option<Arc<super::linux::desktop::LinuxDesktop<super::linux::backend::WaylandBackend>>>,
+    #[cfg(target_os = "linux")]
+    working: Arc<super::linux::working::LinuxWorking>,
 }
 
 /// What the overlay thread hears: the session started or ended, the agent acted, or a call
@@ -103,7 +107,7 @@ pub fn show_without_focus(window: &tauri::WebviewWindow) -> Result<(), String> {
 
 impl Computer {
     /// The helper's address and key for this launch, registered with the daemon over the app's
-    /// channel (S24.7, L61); `None` off macOS or when the helper did not start.
+    /// channel (S24.7, L61); `None` when the helper did not start (off macOS, or gated out on Linux).
     pub fn endpoint(&self) -> Option<Endpoint> {
         self.endpoint.clone()
     }
@@ -165,7 +169,12 @@ pub fn start(app: &AppHandle, windows: Arc<dyn Windows>) -> Computer {
         }
         Computer { control, endpoint, desktop, working }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        drop((overlay, marks));
+        start_linux(app, control)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         drop((overlay, marks));
         Computer { control, endpoint: None }
@@ -192,6 +201,98 @@ fn start_helper(
     .with_glow(glow)
     .with_working(working);
     super::server::start(Arc::new(helper), token)
+}
+
+/// Whether the Linux helper may start (T5c, S3): the centralized Niri gate
+/// plus a resolvable Wayland transport. Pure over `env`, so tests pin the
+/// matrix without a compositor; production passes the live environment. The
+/// backend needs `NIRI_SOCKET` for its focused-output query, so an exact
+/// desktop token alone is not enough.
+#[cfg(target_os = "linux")]
+fn linux_available(env: &impl Fn(&str) -> Option<String>) -> bool {
+    crate::platform::is_niri(env) && super::linux::backend::WaylandBackend::with_env(env).is_ok()
+}
+
+/// Linux startup (T5c, S1-S5): starts the in-process helper only when the
+/// runtime gate holds (centralized `is_niri` plus a resolvable Wayland
+/// transport). Otherwise `endpoint` stays `None` and the panel reports
+/// control as unavailable, never a fake success. Reuses `server::start` plus
+/// `mcp::Helper` with the DesktopGlobal policy; no second process and no
+/// duplicate launch mechanism.
+#[cfg(target_os = "linux")]
+fn start_linux(app: &AppHandle, control: Arc<Control>) -> Computer {
+    use super::linux::backend::WaylandBackend;
+    use super::linux::desktop::LinuxDesktop;
+    use super::linux::working::LinuxWorking;
+    let working = Arc::new(LinuxWorking::new());
+    let desktop: Option<Arc<LinuxDesktop<WaylandBackend>>> =
+        linux_available(&|key| std::env::var(key).ok())
+            .then(|| WaylandBackend::new().ok())
+            .flatten()
+            .map(|backend| Arc::new(LinuxDesktop::new(backend)));
+    // Stop, panic, or the timeout ends here: the working operation ends and
+    // one `cancel_all` interrupts the in-flight Wayland call, if any.
+    {
+        let working = working.clone();
+        let desktop = desktop.clone();
+        control.set_on_end(move || {
+            working.session_ended();
+            if let Some(desktop) = desktop.as_ref() {
+                desktop.cancel_all();
+            }
+        });
+    }
+    let endpoint = desktop
+        .as_ref()
+        .and_then(|desktop| {
+            start_helper_linux(app, control.clone(), desktop.clone(), working.clone())
+                .map_err(|error| eprintln!("gentle-dot: computer control is unavailable: {error}"))
+                .ok()
+        });
+    // Expiry ends the session as on macOS: the watcher reports it even with
+    // no tool call in flight. It runs whether or not the helper started, so
+    // a session can never outlive its timeout.
+    watch_timeout_linux(control.clone());
+    Computer { control, endpoint, desktop, working }
+}
+
+/// Starts the Linux helper: the same loopback `server::start` plus
+/// `mcp::Helper` as macOS, with the DesktopGlobal policy, Linux dialogs,
+/// and the ringless working preparation. The glow sink is a no-op — there is
+/// no overlay off macOS, and none is fabricated.
+#[cfg(target_os = "linux")]
+fn start_helper_linux(
+    app: &AppHandle,
+    control: Arc<Control>,
+    desktop: Arc<super::linux::desktop::LinuxDesktop<super::linux::backend::WaylandBackend>>,
+    working: Arc<super::linux::working::LinuxWorking>,
+) -> std::io::Result<Endpoint> {
+    use super::BackendPolicy;
+    use super::linux::dialogs::LinuxDialogs;
+    let token = super::server::new_token();
+    let desktop: Arc<dyn super::Desktop> = desktop;
+    let working: Arc<dyn super::working::Preparation> = working;
+    let helper = super::mcp::Helper::new(
+        desktop,
+        Arc::new(LinuxDialogs::new(app.clone())),
+        Arc::new(SystemClock),
+        control,
+        token.clone(),
+        std::process::id() as i32,
+    )
+    .with_glow(|_| {})
+    .with_working(working)
+    .with_policy(BackendPolicy::DesktopGlobal);
+    super::server::start(Arc::new(helper), token)
+}
+
+/// Reports the timeout when it happens, not only at the next tool call (Linux).
+#[cfg(target_os = "linux")]
+fn watch_timeout_linux(control: Arc<Control>) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        control.expire(SystemClock.now_ms());
+    });
 }
 
 /// The overlay's NSWindow, used on the main thread only (the window lives as long as the app).
@@ -379,7 +480,16 @@ pub fn computer_endpoint(computer: State<'_, Computer>) -> Option<Endpoint> {
 pub fn computer_permissions(computer: State<'_, Computer>) -> Permissions {
     #[cfg(target_os = "macos")]
     return computer.desktop.permissions();
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        use super::Desktop as _;
+        computer
+            .desktop
+            .as_ref()
+            .map(|desktop| desktop.permissions())
+            .unwrap_or(Permissions { accessibility: false, screen_recording: false, screenshots_supported: false })
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = computer;
         Permissions { accessibility: false, screen_recording: false, screenshots_supported: false }
@@ -390,7 +500,14 @@ pub fn computer_permissions(computer: State<'_, Computer>) -> Permissions {
 pub fn computer_request_permission(kind: PermissionKind) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     return super::request_permission(kind);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        let _ = kind;
+        Err("Computer control on Linux needs no Accessibility or Screen Recording permission: control is \
+allowed per session, and capture or input failures report per call."
+            .into())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = kind;
         Err("Computer control is only available on macOS.".into())
@@ -412,7 +529,14 @@ pub fn computer_working_ready(
 ) -> Result<bool, String> {
     #[cfg(target_os = "macos")]
     return computer.working.acknowledge(window.label(), operation_id);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        // No overlay exists off macOS, so there is no window to refuse: answer
+        // whether the operation is still the one running, and draw nothing.
+        let _ = window;
+        Ok(computer.working.is_current(operation_id))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (window, computer, operation_id);
         Err("Computer control is only available on macOS.".into())
@@ -425,7 +549,13 @@ pub fn set_yolo(app: &AppHandle, enabled: bool) -> Result<StateEvent, String> {
     let computer = app.try_state::<Computer>().ok_or("Computer control is not ready.")?;
     #[cfg(target_os = "macos")]
     return Ok(computer.control.set_yolo(enabled, SystemClock.now_ms(), &NativeDialogs { app: app.clone() }));
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    return Ok(computer.control.set_yolo(
+        enabled,
+        SystemClock.now_ms(),
+        &super::linux::dialogs::LinuxDialogs::new(app.clone()),
+    ));
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (computer, enabled);
         Err("Computer control is only available on macOS.".into())
@@ -532,5 +662,36 @@ for up to 1 hour. Stop and ⌥⇧Esc still work."
     fn permissions_serialize_with_the_l60_field_names() {
         let value = serde_json::to_value(Permissions { accessibility: true, screen_recording: false, screenshots_supported: true }).unwrap();
         assert_eq!(value, serde_json::json!({"accessibility": true, "screenRecording": false, "screenshotsSupported": true}));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_start_gate_needs_niri_and_a_resolvable_transport() {
+        fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+            move |key| pairs.iter().find(|(name, _)| *name == key).map(|(_, value)| value.to_string())
+        }
+        // Niri socket plus an absolute display: the helper may start.
+        assert!(linux_available(&env_of(&[
+            ("NIRI_SOCKET", "/run/user/1000/niri.sock"),
+            ("WAYLAND_DISPLAY", "/tmp/gentle-dot-test-wayland-0"),
+        ])));
+        // No Niri at all: gated out, so zero helper starts.
+        assert!(!linux_available(&env_of(&[
+            ("WAYLAND_DISPLAY", "/tmp/gentle-dot-test-wayland-0"),
+            ("XDG_RUNTIME_DIR", "/run/user/1000"),
+        ])));
+        // Niri without a transport: gated out.
+        assert!(!linux_available(&env_of(&[("NIRI_SOCKET", "/run/user/1000/niri.sock")])));
+        // An exact desktop token without a socket is not enough: the backend
+        // needs NIRI_SOCKET for its focused-output query.
+        assert!(!linux_available(&env_of(&[
+            ("XDG_CURRENT_DESKTOP", "niri"),
+            ("WAYLAND_DISPLAY", "/tmp/gentle-dot-test-wayland-0"),
+        ])));
+        // An empty socket is no socket.
+        assert!(!linux_available(&env_of(&[
+            ("NIRI_SOCKET", ""),
+            ("WAYLAND_DISPLAY", "/tmp/gentle-dot-test-wayland-0"),
+        ])));
     }
 }
