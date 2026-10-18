@@ -420,6 +420,17 @@ describe("the Computer description on a Mac (T18)", () => {
 	});
 });
 
+describe("the Computer description on a build that reports no platform (T18)", () => {
+	it("never claims a Mac, because only macOS may make that claim", async () => {
+		h.platform = { os: "other", policy: "targeted", stopShortcut: "" };
+		h.state = connectorsOpen([computerEntry({ sends: MAC_SENDS })]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		expect(within(entry).queryByText(/this Mac/)).toBeNull();
+		expect(within(entry).getByText(DESKTOP_SENDS)).toBeInTheDocument();
+	});
+});
+
 describe("on a Linux desktop (T5d)", () => {
 	beforeEach(() => {
 		h.platform = { os: "linux", policy: "desktopGlobal", stopShortcut: "Alt+Shift+Escape" };

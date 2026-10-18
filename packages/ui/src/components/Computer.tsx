@@ -56,7 +56,6 @@ export const GLOBAL_CONTROL_NOTE =
  */
 export const DESKTOP_SENDS_NOTE =
 	"Click, type, and open apps on this desktop during that session. The app asks you again only when it detects a risky action.";
-
 const NO_IMAGES_NOTE =
 	"The current model does not accept images, so the assistant cannot see your screen. Choose a model that does in Profiles.";
 
@@ -126,7 +125,9 @@ export function ComputerEntry({ info, controls }: ComputerEntryProps) {
 			{info ? (
 				<>
 					<p className="connector-note">{info.reads}</p>
-					<p className="connector-note">{platform.os === "linux" ? DESKTOP_SENDS_NOTE : info.sends}</p>
+					{/* Only macOS may claim a Mac. An unknown build gets the desktop sentence, which is
+					    true on both, rather than a Mac the user may not have. */}
+					<p className="connector-note">{macos ? info.sends : DESKTOP_SENDS_NOTE}</p>
 				</>
 			) : null}
 			<ul className="computer-permissions">
