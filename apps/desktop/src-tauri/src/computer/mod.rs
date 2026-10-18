@@ -187,6 +187,12 @@ pub const GLOBAL_TARGET: &str = "the Linux desktop";
 pub const GLOBAL_GRANT_TEXT: &str = "Allow Gentle Dot to see and control this Linux desktop for 30 minutes? \
 There is no reliable per-app exclusion: every visible app can receive input.";
 
+/// Yolo copy for the Linux consent UI: the same promise as the app-layer text, but
+/// the Stop fallback is the binding this desktop really has. The Mac notation is
+/// meaningless here, so it must never reach this string.
+pub const GLOBAL_YOLO_TEXT: &str = "Turn on yolo mode? Gentle Dot will send, pay, delete, and submit without asking you first, \
+for up to 1 hour. Stop and Alt+Shift+Escape still work.";
+
 impl BackendPolicy {
     /// One line for logs and the pending consent UI, naming what the user authorizes.
     pub fn describe(&self) -> &'static str {

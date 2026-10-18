@@ -12,7 +12,10 @@ use tauri::AppHandle;
 
 /// Grant/confirm/Yolo choices, shared with the app layer so Linux and macOS
 /// default to the same refusing button.
-pub use crate::computer::app::{CONFIRM_CHOICE, GRANT_CHOICE, YOLO_CHOICE, YOLO_TEXT};
+pub use crate::computer::app::{CONFIRM_CHOICE, GRANT_CHOICE, YOLO_CHOICE};
+/// The Yolo copy this platform's dialog asks with: the Linux Stop binding, never
+/// the Mac notation the app-layer text carries.
+pub use crate::computer::GLOBAL_YOLO_TEXT as YOLO_TEXT;
 
 /// Dialogs shown by the app itself on Linux (native GTK, see `alert`),
 /// never the webview.
