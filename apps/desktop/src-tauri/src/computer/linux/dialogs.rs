@@ -1,9 +1,9 @@
 //! Linux native dialogs (T5c, S1-S5): desktop-global consent through the
-//! app-owned dialog plugin, never the webview. Grant, per-action confirm,
+//! app-owned GTK alert, never the webview. Grant, per-action confirm,
 //! and Yolo ask use the exact policy copy (`GLOBAL_GRANT_TEXT`,
 //! `CONFIRM_CHOICE`, `YOLO_TEXT`/`YOLO_CHOICE`); every dialog defaults to
-//! its refusing button, exactly like the macOS path. The plugin marshals to
-//! the main thread itself, so helpers call this from MCP worker threads and
+//! its refusing button, exactly like the macOS path. The alert marshals to
+//! the main thread, so helpers call this from MCP worker threads and
 //! Yolo from `spawn_blocking`, never from the main thread.
 
 use super::super::{Dialogs, GLOBAL_GRANT_TEXT};
@@ -14,7 +14,7 @@ use tauri::AppHandle;
 /// default to the same refusing button.
 pub use crate::computer::app::{CONFIRM_CHOICE, GRANT_CHOICE, YOLO_CHOICE, YOLO_TEXT};
 
-/// Dialogs shown by the app itself on Linux (dialog plugin, see `alert`),
+/// Dialogs shown by the app itself on Linux (native GTK, see `alert`),
 /// never the webview.
 pub struct LinuxDialogs {
     app: AppHandle,
