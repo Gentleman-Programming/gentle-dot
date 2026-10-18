@@ -64,6 +64,12 @@ and `dx` > 0 scrolls right.";
 /// which is what enforces it.
 const LINUX_MAX_SCROLL_TICKS: u32 = 120;
 
+/// The `key` tool wording shared by both policies. The desktop-global catalog appends the real
+/// function-key range, since `keys::parse_combo` stops at `f12`; the macOS wording stays
+/// byte-identical (T22, S4).
+const KEY_DESCRIPTION: &str =
+    "Press a key combo in the frontmost app, for example `cmd+shift+t`, `return`, or `esc`.";
+
 const STOPPED: &str = "Computer control was stopped; this action was dropped.";
 const NOT_ALLOWED: &str = "Computer control was not allowed by the user. Nothing was done.";
 const NEEDS_PERMISSION: &str = "Gentle Dot needs the";
@@ -111,7 +117,9 @@ some apps (System Settings, password managers) are off limits.";
 /// future backend adds), never a claim that the target is certified safe.
 const GLOBAL_INSTRUCTIONS: &str = "Controls this Linux desktop as a whole: pointer input reaches whatever is under \
 the point, keyboard input reaches the external window observed with the latest screenshot (a focus that changed \
-since then is refused), and there is no reliable per-app exclusion. Take a screenshot first; x and y are pixels of \
+since then is refused), and there is no reliable per-app exclusion. This desktop moves the keyboard focus to the \
+window under the pointer, so moving the pointer changes which window receives the keyboard: take a fresh \
+screenshot after moving and before typing. Take a screenshot first; x and y are pixels of \
 the latest screenshot. Every action returns a fresh screenshot. A successful action means the input was delivered, \
 not that the screen changed, so verify with a new screenshot. Use `batch` for a predictable sequence (click a field, \
 type, press tab, type, press return) so it runs in one call; end the batch whenever you must see the screen before \
@@ -244,6 +252,14 @@ background apps and not bundle ids."
                 .to_string(),
         ),
     };
+    // Only the desktop-global catalog names the accepted function-key limit (T22, S4): the
+    // limit is real on both platforms, but macOS visible output stays byte-identical.
+    let key = match policy {
+        BackendPolicy::Targeted => KEY_DESCRIPTION.to_string(),
+        BackendPolicy::DesktopGlobal => format!(
+            "{KEY_DESCRIPTION} Function keys are `f1` to `f12`; `f13` to `f24` are rejected."
+        ),
+    };
     json!([
         {"name": "screenshot", "description": "Take a screenshot of the display under the pointer. Returns the image and its size.",
          "inputSchema": schema(json!({}), &[])},
@@ -261,7 +277,7 @@ background apps and not bundle ids."
             "dy": {"type": "integer", "description": "Vertical scroll, in pixels. Required; dy > 0 scrolls down."}}), &["x", "y", "dy"])},
         {"name": "type", "description": "Type text into the frontmost app. A newline presses Return.",
          "inputSchema": schema(json!({"text": {"type": "string"}}), &["text"])},
-        {"name": "key", "description": "Press a key combo in the frontmost app, for example `cmd+shift+t`, `return`, or `esc`.",
+        {"name": "key", "description": key,
          "inputSchema": schema(json!({"combo": {"type": "string"}}), &["combo"])},
         {"name": "open_app", "description": open_app,
          "inputSchema": schema(json!({"name": {"type": "string"}}), &["name"])},
@@ -520,6 +536,17 @@ fn bind_keyboard_target(
     match usable_owner(after.pid, own_pid) {
         Ok(()) => KeyboardBinding::Bound(after.clone()),
         Err(refusal) => KeyboardBinding::Refused(refusal),
+    }
+}
+
+/// A window's identity for a refusal message (T22, S4): the compositor window id plus the app
+/// id the observation reported, or its title when it reported none. It never invents an
+/// identity it does not hold, so a window with neither is named by its id alone.
+fn window_label(window: &FocusTarget) -> String {
+    match (&window.app_id, &window.title) {
+        (Some(app_id), _) => format!("window {} ({app_id})", window.window_id),
+        (None, Some(title)) => format!("window {} ({title})", window.window_id),
+        (None, None) => format!("window {}", window.window_id),
     }
 }
 
@@ -873,16 +900,30 @@ impl Helper {
 
     /// Global mode: why the focus is no longer the exact window this action captured, or
     /// `Ok(())`. The window id and the captured owner pid must both still match, so an id
-    /// reused by another process never silently passes. The reason is neutral because a
-    /// caller may already have posted some events.
+    /// reused by another process never silently passes. Every cause names the window the last
+    /// screenshot bound and, when it is known, the window focused now, so a refusal reads as a
+    /// cause instead of bad luck (T22, S4); the reason stays neutral because a caller may
+    /// already have posted some events.
     fn focus_mismatch(&self, focus: &FocusTarget) -> Result<(), String> {
-        match self.desktop.focused_window()? {
-            Some(window) if window.window_id == focus.window_id => match (window.pid, focus.pid) {
+        let bound = window_label(focus);
+        match self.desktop.focused_window() {
+            Ok(Some(window)) if window.window_id == focus.window_id => match (window.pid, focus.pid) {
                 (Some(now), Some(captured)) if now == captured => self.usable_focus(&window),
-                _ => Err(FOCUS_OWNER_CHANGED.to_string()),
+                _ => Err(format!(
+                    "{FOCUS_OWNER_CHANGED}: the last screenshot bound {bound}, and the focused window now is {}",
+                    window_label(&window)
+                )),
             },
-            Some(_) => Err(FOCUS_MOVED_REASON.to_string()),
-            None => Err(FOCUS_LOST_REASON.to_string()),
+            Ok(Some(window)) => Err(format!(
+                "{FOCUS_MOVED_REASON}: the last screenshot bound {bound}, and the focused window now is {}",
+                window_label(&window)
+            )),
+            Ok(None) => Err(format!(
+                "{FOCUS_LOST_REASON}: the last screenshot bound {bound}, and no window is focused now"
+            )),
+            Err(error) => Err(format!(
+                "{FOCUS_LOST_REASON} ({error}): the last screenshot bound {bound}, so the focused window now is unknown"
+            )),
         }
     }
 
@@ -1152,7 +1193,7 @@ The rest was not sent; click the window you want and try again."
                 } else {
                     Act::Other
                 };
-                let action = format!("Press {}", combo.key);
+                let action = format!("Press {}", combo.spelling());
                 self.check_target_before_post(focus.as_ref(), &target, 0)?;
                 self.confirm_if_risky(assess(act, intent), &action, &target)?;
                 self.check_target_before_post(focus.as_ref(), &target, 0)?;
@@ -3305,6 +3346,124 @@ mod tests {
         assert!(rig.desktop.events().is_empty());
     }
 
+    // --- T22 (S4): the refusal names both windows, the instructions name the pointer rule, and
+    // the key acknowledgement echoes the modifiers.
+
+    #[test]
+    fn a_focus_refusal_names_the_bound_window_and_the_window_focused_now() {
+        // The live failure read as bad luck ("the focus moved") instead of a cause: the refusal
+        // must name the window the last screenshot bound and the one focused now (T22, S4).
+        let rig = focus_rig(true, true);
+        *rig.desktop.focused_window.lock().unwrap() = Some(terminal_window());
+        let result = rig.call("type", json!({"text": "nope"}));
+        assert!(is_error(&result), "{result}");
+        let message = first_text(&result);
+        assert!(message.contains("window 10"), "{message}");
+        assert!(message.contains("org.gnome.TextEditor"), "{message}");
+        assert!(message.contains("window 12"), "{message}");
+        assert!(message.contains("foot"), "{message}");
+        assert!(message.contains("Nothing was sent"), "{message}");
+        assert!(!message.contains("done"), "{message}");
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn a_partial_delivery_refusal_keeps_the_delivery_claim_and_names_both_windows() {
+        // Some events were already delivered: the truthful partial wording stays, and both
+        // windows are named so the cause is unambiguous (T22, S4).
+        let rig = focus_rig(true, true);
+        let desktop = rig.desktop.clone();
+        *rig.desktop.on_post.lock().unwrap() = Some(Box::new(move |count| {
+            if count == 1 {
+                *desktop.focused_window.lock().unwrap() = Some(terminal_window());
+            }
+        }));
+        let result = rig.call("type", json!({"text": "a".repeat(25)}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(rig.desktop.events().len(), 1, "the second chunk must not be posted");
+        let message = first_text(&result);
+        assert!(message.contains("were sent"), "{message}");
+        assert!(message.contains("window 10"), "{message}");
+        assert!(message.contains("org.gnome.TextEditor"), "{message}");
+        assert!(message.contains("window 12"), "{message}");
+        assert!(message.contains("foot"), "{message}");
+        assert!(!message.contains("done"), "{message}");
+    }
+
+    #[test]
+    fn a_focus_refusal_stays_truthful_when_no_window_is_focused_now() {
+        // No window holds the focus at the pre-post check: the bound window is still named and
+        // the refusal says the current one is unknown instead of inventing one (T22, S4).
+        let rig = focus_rig(true, true);
+        let desktop = rig.desktop.clone();
+        *rig.desktop.on_post.lock().unwrap() = Some(Box::new(move |count| {
+            if count == 1 {
+                *desktop.focused_window.lock().unwrap() = None;
+            }
+        }));
+        let result = rig.call("type", json!({"text": "a".repeat(25)}));
+        assert!(is_error(&result), "{result}");
+        let message = first_text(&result);
+        assert!(message.contains("were sent"), "{message}");
+        assert!(message.contains("window 10"), "{message}");
+        assert!(message.contains("org.gnome.TextEditor"), "{message}");
+        assert!(message.contains("no window is focused now"), "{message}");
+        assert!(!message.contains("done"), "{message}");
+    }
+
+    #[test]
+    fn the_global_instructions_name_the_pointer_change_of_keyboard_focus() {
+        // Niri can focus the window under the pointer, so a move changes which window receives
+        // the keyboard: the instructions must ask for a fresh screenshot after moving, without
+        // ever claiming the pointer and the focus are the same fact (T22, S4).
+        let instructions = global_rig_with(true, true).rpc("initialize", json!({}))["result"]
+            ["instructions"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(instructions.contains("moves the keyboard focus"), "{instructions}");
+        assert!(instructions.contains("screenshot after moving"), "{instructions}");
+    }
+
+    #[test]
+    fn the_key_acknowledgement_echoes_the_modifiers() {
+        // `Press f` for ctrl+alt+shift+f cannot be audited against the call: the ack must name
+        // the combination the call really pressed, in the tool's own spelling (T22, S4).
+        let global = focus_rig(true, true);
+        let result = global.call("key", json!({"combo": "ctrl+alt+shift+f"}));
+        assert!(!is_error(&result), "{result}");
+        assert!(first_text(&result).contains("Press ctrl+alt+shift+f in"), "{result}");
+        assert_eq!(
+            global.desktop.events(),
+            vec![InputEvent::Key(parse_combo("ctrl+alt+shift+f").unwrap())]
+        );
+        // The macOS path shares the acknowledgement wording.
+        let mac = rig();
+        mac.ready();
+        let result = mac.call("key", json!({"combo": "cmd+shift+t"}));
+        assert!(first_text(&result).contains("Press cmd+shift+t in Safari"), "{result}");
+    }
+
+    #[test]
+    fn the_global_key_tool_names_its_function_key_range() {
+        // Decision (T22, S4): the range stays f1-f12. The Linux keymap could cover F13-F24
+        // cheaply (X11 keysyms 0xffca-0xffd5), but the shared grammar also carries a macOS
+        // virtual key code and this tree verifies only f1-f12, so extending is not a table-only
+        // change. The desktop-global catalog names the real limit instead.
+        let body = global_rig_with(true, true).rpc("tools/list", json!({}));
+        let tools = body["result"]["tools"].as_array().unwrap();
+        let description = tools.iter().find(|t| t["name"] == "key").unwrap()["description"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(description.contains("`f1`"), "{description}");
+        assert!(description.contains("`f12`"), "{description}");
+        assert!(description.contains("`f13`"), "{description}");
+        // The documented limit is the real behavior of both sides of the mismatch.
+        assert!(parse_combo("f13").is_err(), "the key tool stops at f12");
+        assert_eq!(crate::shortcut::normalize("f13"), Ok("F13".to_string()));
+    }
+
     #[test]
     fn two_windows_of_one_process_are_not_interchangeable() {
         let rig = focus_rig(true, true);
@@ -3545,6 +3704,11 @@ mod tests {
         let message = first_text(&result);
         assert!(message.contains("were sent"), "{message}");
         assert!(!message.contains("done"), "{message}");
+        // The unreadable query must not fabricate the window focused now; the bound one is
+        // still named so the refusal has a cause (T22, S4).
+        assert!(message.contains("window 10"), "{message}");
+        assert!(message.contains("org.gnome.TextEditor"), "{message}");
+        assert!(message.contains("unknown"), "{message}");
     }
 
     #[test]

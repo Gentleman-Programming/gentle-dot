@@ -29,6 +29,27 @@ impl KeyCombo {
     pub fn is_space(&self) -> bool {
         self.key == "space"
     }
+
+    /// The combination spelled in this grammar: the canonical lowercase modifier tokens in a
+    /// fixed order (cmd, ctrl, alt, shift, fn) plus the canonical key name. The modifier order
+    /// is the ack's own, not the order the caller typed, and the result always re-parses to the
+    /// same combo, so an acknowledgement can be audited against the call (T22, S4).
+    pub fn spelling(&self) -> String {
+        let modifiers = self.modifiers;
+        let mut parts: Vec<&str> = [
+            (modifiers.cmd, "cmd"),
+            (modifiers.ctrl, "ctrl"),
+            (modifiers.alt, "alt"),
+            (modifiers.shift, "shift"),
+            (modifiers.fn_key, "fn"),
+        ]
+        .into_iter()
+        .filter(|(held, _)| *held)
+        .map(|(_, name)| name)
+        .collect();
+        parts.push(self.key);
+        parts.join("+")
+    }
 }
 
 /// Named keys and their virtual key codes. Single characters use the ANSI layout.
@@ -129,6 +150,22 @@ mod tests {
     fn invalid_combos_are_rejected() {
         for combo in ["", "cmd+", "cmd", "cmd+shift", "cmd+a+b", "hyper+a", "f13", "cmd++a"] {
             assert!(parse_combo(combo).is_err(), "{combo:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn a_combo_spells_the_modifiers_it_really_pressed() {
+        // The `key` acknowledgement echoes this, so it must name every modifier the call
+        // pressed, in the accepted grammar, and round-trip to the same combo (T22, S4).
+        assert_eq!(parse_combo("ctrl+alt+shift+f").unwrap().spelling(), "ctrl+alt+shift+f");
+        assert_eq!(parse_combo("cmd+shift+t").unwrap().spelling(), "cmd+shift+t");
+        assert_eq!(parse_combo("option+ctrl+enter").unwrap().spelling(), "ctrl+alt+return");
+        assert_eq!(parse_combo("return").unwrap().spelling(), "return");
+        assert_eq!(parse_combo("fn+f1").unwrap().spelling(), "fn+f1");
+        for combo in ["ctrl+alt+shift+f", "cmd+shift+t", "option+ctrl+enter", "fn+f1", "alt+ctrl+a"] {
+            let parsed = parse_combo(combo).unwrap();
+            let spelled = parsed.spelling();
+            assert_eq!(parse_combo(&spelled).unwrap(), parsed, "{combo} spelled as {spelled}");
         }
     }
 
