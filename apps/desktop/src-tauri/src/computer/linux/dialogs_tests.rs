@@ -4,7 +4,7 @@
 //! a webview, never an allowing default. Deterministic, no compositor.
 
 use super::dialogs::{CONFIRM_CHOICE, GRANT_CHOICE, YOLO_CHOICE, YOLO_TEXT};
-use crate::computer::{GLOBAL_CONFIRM_REASON, GLOBAL_GRANT_TEXT, GLOBAL_TARGET};
+use crate::computer::GLOBAL_GRANT_TEXT;
 
 #[test]
 fn the_grant_copy_names_the_linux_desktop_without_per_app_exclusion() {
@@ -12,12 +12,6 @@ fn the_grant_copy_names_the_linux_desktop_without_per_app_exclusion() {
     assert!(GLOBAL_GRANT_TEXT.contains("30 minutes"), "{GLOBAL_GRANT_TEXT}");
     assert!(GLOBAL_GRANT_TEXT.contains("no reliable per-app exclusion"), "{GLOBAL_GRANT_TEXT}");
     assert!(!GLOBAL_GRANT_TEXT.contains("Mac"), "{GLOBAL_GRANT_TEXT}");
-}
-
-#[test]
-fn the_confirm_reason_names_no_reliable_exclusion() {
-    assert!(GLOBAL_CONFIRM_REASON.contains("no reliable per-app exclusion"), "{GLOBAL_CONFIRM_REASON}");
-    assert!(GLOBAL_TARGET.contains("Linux"), "{GLOBAL_TARGET}");
 }
 
 #[test]

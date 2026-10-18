@@ -33,7 +33,7 @@ use super::keys::{parse_combo, KeyCombo};
 use super::rate::{RateLimiter, MAX_ACTIONS_PER_SECOND};
 use super::risk::{assess, Act};
 use super::working::{NoPreparation, Preparation};
-use super::{BackendPolicy, Clock, Desktop, Dialogs, FocusTarget, GLOBAL_CONFIRM_REASON, GLOBAL_TARGET, InputEvent, MouseButton};
+use super::{BackendPolicy, Clock, Desktop, Dialogs, FocusTarget, GLOBAL_TARGET, InputEvent, MouseButton};
 use base64::Engine as _;
 use serde_json::{json, Map, Value};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -83,16 +83,23 @@ type, press tab, type, press return) so it runs in one call; end the batch whene
 before deciding the next step. The user must allow a session, risky actions ask the user to confirm, and \
 some apps (System Settings, password managers) are off limits.";
 
-/// What `initialize` tells the agent in global mode (T2, S5): the same catalog drives
+/// What `initialize` tells the agent in global mode (T2, S5; S9): the same catalog drives
 /// the Linux desktop as a whole, with no reliable per-app exclusion and no Mac permissions.
+/// The session grant authorizes ordinary input, so a confirmation appears only for a
+/// detected risk; the desktop cannot tell which app or control receives the input, so the
+/// detectable signal is the action's declared intent (plus any accessibility metadata a
+/// future backend adds), never a claim that the target is certified safe.
 const GLOBAL_INSTRUCTIONS: &str = "Controls this Linux desktop as a whole: pointer input reaches whatever is under \
 the point, keyboard input reaches the external window observed with the latest screenshot (a focus that changed \
 since then is refused), and there is no reliable per-app exclusion. Take a screenshot first; x and y are pixels of \
 the latest screenshot. Every action returns a fresh screenshot. A successful action means the input was delivered, \
 not that the screen changed, so verify with a new screenshot. Use `batch` for a predictable sequence (click a field, \
 type, press tab, type, press return) so it runs in one call; end the batch whenever you must see the screen before \
-deciding the next step. The user must allow a session, every mutating action asks the user to confirm outside yolo \
-mode, and risky targets cannot be fenced off per app.";
+deciding the next step. The user must allow a 30-minute session, and that grant authorizes ordinary desktop input \
+for the session: it does not ask again per action. A confirmation appears only when a risk is detected; on Linux the \
+desktop cannot tell which app or control receives the input, so the detectable signal is the action's declared \
+`intent` (plus anything a future accessibility feed adds), never a claim that the target is certified safe. Yolo \
+mode skips only that risk confirmation; Stop cancels immediately. Risky targets cannot be fenced off per app.";
 
 pub struct HttpRequest<'a> {
     pub method: &'a str,
@@ -669,13 +676,10 @@ impl Helper {
     }
 
     fn confirm_if_risky(&self, risk: Option<String>, action: &str, target: &str) -> Result<(), String> {
-        // No Accessibility feed exists in global mode, so nothing classifies an action as
-        // safe: every confirmation caller here is mutating input, and each one asks.
+        // Ask only for a risk the caller actually detected (S9). Global mode cannot classify a
+        // target, and inventing a reason from that unknown made ordinary input ask per action;
+        // the session grant covers ordinary input, and this step covers detected risk only.
         // Yolo still skips only this step; grant, Stop, and expiry live outside it.
-        let risk = match (self.policy, risk) {
-            (BackendPolicy::DesktopGlobal, None) => Some(GLOBAL_CONFIRM_REASON.into()),
-            (_, risk) => risk,
-        };
         let Some(reason) = risk else {
             return Ok(());
         };
@@ -2515,7 +2519,9 @@ mod tests {
     fn global_input_names_the_desktop_not_a_fabricated_app() {
         let rig = global_rig_with(true, true);
         global_ready(&rig);
-        let result = rig.call("click", json!({"x": 10, "y": 10}));
+        // A declared risky intent is what asks now (S9); the confirmation still names the
+        // desktop, never an app the global path cannot attribute.
+        let result = rig.call("click", json!({"x": 10, "y": 10, "intent": "buy the ticket"}));
         assert!(!is_error(&result), "{result}");
         assert!(first_text(&result).contains(super::super::GLOBAL_TARGET), "{result}");
         let asked = rig.dialogs.confirmations.lock().unwrap().clone();
@@ -2526,27 +2532,62 @@ mod tests {
     }
 
     #[test]
-    fn global_harmless_input_still_asks_outside_yolo() {
-        // Without Accessibility nothing classifies as safe, so every mutating action asks.
+    fn global_input_after_a_grant_does_not_ask_again() {
+        // S9 option 1: the 30-minute grant authorizes ordinary desktop input. Linux cannot
+        // classify the target, so an unknown target is no longer turned into a confirmation;
+        // only a detected risk asks (the tests below).
         let rig = global_rig_with(true, true);
         global_ready(&rig);
         for (name, args) in [
             ("click", json!({"x": 10, "y": 10})),
             ("move", json!({"x": 10, "y": 10})),
+            ("drag", json!({"fromX": 10, "fromY": 20, "toX": 30, "toY": 40})),
+            ("scroll", json!({"x": 5, "y": 6, "dx": 0, "dy": 120})),
             ("type", json!({"text": "ok"})),
             ("key", json!({"combo": "tab"})),
         ] {
             assert!(!is_error(&rig.call(name, args)), "{name}");
         }
-        assert_eq!(rig.dialogs.confirmations.lock().unwrap().len(), 4);
-        assert_eq!(rig.desktop.events().len(), 4);
+        assert!(rig.dialogs.confirmations.lock().unwrap().is_empty());
+        assert_eq!(rig.desktop.events().len(), 6);
+    }
+
+    #[test]
+    fn a_declared_risky_intent_still_asks_in_global_mode() {
+        // The declared intent is a real signal the global path can use (S9): it asks.
+        let rig = global_rig_with(true, true);
+        global_ready(&rig);
+        let result = rig.call("scroll", json!({"x": 5, "y": 6, "dx": 0, "dy": 10, "intent": "buy the ticket"}));
+        assert!(!is_error(&result), "{result}");
+        let asked = rig.dialogs.confirmations.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert!(asked[0].contains("buy the ticket"), "{asked:?}");
+        assert!(asked[0].contains(super::super::GLOBAL_TARGET), "{asked:?}");
+        assert_eq!(rig.desktop.events().len(), 1);
+    }
+
+    #[test]
+    fn global_input_without_a_session_still_refuses() {
+        // The grant, not the removed blanket, is what gates input: no session means no input
+        // and no confirmation (S9 removes the repeated prompt, not the consent).
+        let rig = global_rig_with(false, true);
+        for (name, args) in [
+            ("move", json!({"x": 10, "y": 10})),
+            ("type", json!({"text": "ok"})),
+        ] {
+            let result = rig.call(name, args);
+            assert!(is_error(&result), "{name}");
+            assert!(first_text(&result).contains("not allowed"), "{name}: {result}");
+        }
+        assert!(rig.dialogs.confirmations.lock().unwrap().is_empty());
+        assert!(rig.desktop.events().is_empty());
     }
 
     #[test]
     fn a_declined_global_action_sends_zero_input() {
         let rig = global_rig_with(true, false);
         global_ready(&rig);
-        let result = rig.call("click", json!({"x": 10, "y": 10}));
+        let result = rig.call("click", json!({"x": 10, "y": 10, "intent": "buy the ticket"}));
         assert!(is_error(&result));
         assert!(first_text(&result).contains("declined"), "{result}");
         assert!(rig.desktop.events().is_empty());
@@ -2563,7 +2604,7 @@ mod tests {
         yolo_on(&rig);
         global_ready(&rig);
         let confirmations = rig.dialogs.confirmations.lock().unwrap().len();
-        assert!(!is_error(&rig.call("click", json!({"x": 10, "y": 10}))));
+        assert!(!is_error(&rig.call("click", json!({"x": 10, "y": 10, "intent": "buy the ticket"}))));
         assert_eq!(rig.dialogs.confirmations.lock().unwrap().len(), confirmations);
         // Stop still guards: nothing is posted, and the next call re-asks the grant.
         rig.control.end(Reason::Stopped);
@@ -2578,6 +2619,24 @@ mod tests {
         assert!(first_text(&result).contains("screenshot"), "{result}");
         assert_eq!(rig.desktop.events().len(), events);
         assert_eq!(rig.dialogs.grants.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn global_yolo_skips_the_risk_confirmation_and_expiry_restores_it() {
+        // Yolo removes only the risk step (S24.9): with it on a declared risky intent does not
+        // ask; once it expires, the same action asks again (and is declined here).
+        let rig = global_rig_with(true, false);
+        global_ready(&rig);
+        yolo_on(&rig);
+        let risky = json!({"x": 10, "y": 10, "intent": "buy the ticket"});
+        assert!(!is_error(&rig.call("click", risky.clone())));
+        assert!(rig.dialogs.confirmations.lock().unwrap().is_empty());
+        assert_eq!(rig.desktop.events().len(), 1);
+        rig.clock.advance(super::super::session::YOLO_MS);
+        rig.ready();
+        let result = rig.call("click", risky);
+        assert!(first_text(&result).contains("declined"), "{result}");
+        assert_eq!(rig.desktop.events().len(), 1);
     }
 
     #[test]
@@ -2622,12 +2681,16 @@ mod tests {
     }
 
     #[test]
-    fn global_drag_scroll_and_open_app_ask_outside_yolo() {
+    fn global_drag_scroll_and_open_app_ask_with_a_declared_risk() {
+        // After S9 these ask because of the declared risk, not because the target is unknown.
         let rig = global_rig_with(true, true);
         global_ready(&rig);
-        assert!(!is_error(&rig.call("drag", json!({"fromX": 10, "fromY": 20, "toX": 30, "toY": 40}))));
-        assert!(!is_error(&rig.call("scroll", json!({"x": 5, "y": 6, "dx": 0, "dy": 120}))));
-        assert!(!is_error(&rig.call("open_app", json!({"name": "Mail"}))));
+        let drag = json!({"fromX": 10, "fromY": 20, "toX": 30, "toY": 40, "intent": "delete the file"});
+        let scroll = json!({"x": 5, "y": 6, "dx": 0, "dy": 120, "intent": "buy the ticket"});
+        let open = json!({"name": "Mail", "intent": "send the message"});
+        assert!(!is_error(&rig.call("drag", drag)));
+        assert!(!is_error(&rig.call("scroll", scroll)));
+        assert!(!is_error(&rig.call("open_app", open)));
         let asked = rig.dialogs.confirmations.lock().unwrap().clone();
         assert_eq!(asked.len(), 3, "{asked:?}");
         assert!(asked.iter().all(|m| m.contains(super::super::GLOBAL_TARGET)), "{asked:?}");
@@ -2641,11 +2704,11 @@ mod tests {
         global_ready(&rig);
         let captures = rig.desktop.captures.load(Ordering::SeqCst);
         for (name, args) in [
-            ("drag", json!({"fromX": 10, "fromY": 10, "toX": 20, "toY": 20})),
-            ("scroll", json!({"x": 5, "y": 6, "dx": 0, "dy": 10})),
-            ("type", json!({"text": "hello"})),
-            ("key", json!({"combo": "tab"})),
-            ("open_app", json!({"name": "Mail"})),
+            ("drag", json!({"fromX": 10, "fromY": 10, "toX": 20, "toY": 20, "intent": "delete the file"})),
+            ("scroll", json!({"x": 5, "y": 6, "dx": 0, "dy": 10, "intent": "buy the ticket"})),
+            ("type", json!({"text": "hello", "intent": "send the message"})),
+            ("key", json!({"combo": "tab", "intent": "send the message"})),
+            ("open_app", json!({"name": "Mail", "intent": "pagar la cuenta"})),
         ] {
             let result = rig.call(name, args);
             assert!(is_error(&result), "{name}");
@@ -2771,7 +2834,8 @@ mod tests {
     fn a_confirm_dialog_steals_focus_and_the_same_window_is_restored_before_typing() {
         let rig = focus_rig(true, true);
         dialogs_move_focus_to(&rig, own_chat_window());
-        let result = rig.call("type", json!({"text": "PRUEBA-NATIVA-OK"}));
+        // A declared risk is what opens the confirmation; ordinary typing no longer asks (S9).
+        let result = rig.call("type", json!({"text": "PRUEBA-NATIVA-OK", "intent": "send the message"}));
         assert!(!is_error(&result), "{result}");
         // Input is posted only after the exact original window (id 10) is focused again,
         // never the chat and never merely "some window of the same pid".
@@ -2872,7 +2936,7 @@ mod tests {
         assert_eq!(rig.dialogs.grants.load(Ordering::SeqCst), 1);
         assert_eq!(*rig.desktop.focus_restores.lock().unwrap(), vec![10]);
         // The type call's own confirmation steals focus again; the restore lets it reach Editor.
-        let result = rig.call("type", json!({"text": "hi"}));
+        let result = rig.call("type", json!({"text": "hi", "intent": "send the message"}));
         assert!(!is_error(&result), "{result}");
         assert_eq!(rig.dialogs.confirmations.lock().unwrap().len(), 1);
         assert_eq!(*rig.desktop.focus_restores.lock().unwrap(), vec![10, 10]);
@@ -2884,7 +2948,7 @@ mod tests {
         let rig = focus_rig(true, true);
         dialogs_move_focus_to(&rig, own_chat_window());
         *rig.desktop.focus_failure.lock().unwrap() = Some("niri: no such window".into());
-        let result = rig.call("type", json!({"text": "nope"}));
+        let result = rig.call("type", json!({"text": "nope", "intent": "send the message"}));
         assert!(is_error(&result));
         assert!(!first_text(&result).contains("done"), "{result}");
         assert!(rig.desktop.events().is_empty());
@@ -2895,7 +2959,7 @@ mod tests {
         let rig = focus_rig(true, true);
         let control = rig.control.clone();
         *rig.dialogs.during.lock().unwrap() = Some(Box::new(move || control.end(Reason::Stopped)));
-        let result = rig.call("type", json!({"text": "nope"}));
+        let result = rig.call("type", json!({"text": "nope", "intent": "send the message"}));
         assert!(is_error(&result));
         assert!(first_text(&result).contains("stopped"), "{result}");
         assert!(rig.desktop.events().is_empty());
@@ -2924,7 +2988,7 @@ mod tests {
         let rig = focus_rig(true, true);
         rig.desktop.focus_ignores.store(true, Ordering::SeqCst);
         dialogs_move_focus_to(&rig, other_window_of_the_same_process());
-        let result = rig.call("type", json!({"text": "nope"}));
+        let result = rig.call("type", json!({"text": "nope", "intent": "send the message"}));
         assert!(is_error(&result));
         assert!(!first_text(&result).contains("done"), "{result}");
         assert!(rig.desktop.events().is_empty());
@@ -2936,7 +3000,7 @@ mod tests {
         // The dialog moves focus to a second window of the same process; a pid-only
         // restore would consider the job done and type into the wrong window.
         dialogs_move_focus_to(&rig, other_window_of_the_same_process());
-        let result = rig.call("key", json!({"combo": "tab"}));
+        let result = rig.call("key", json!({"combo": "tab", "intent": "send the message"}));
         assert!(!is_error(&result), "{result}");
         assert_eq!(*rig.desktop.focus_restores.lock().unwrap(), vec![10]);
         assert_eq!(rig.desktop.focused_window.lock().unwrap().as_ref().unwrap().window_id, 10);

@@ -175,17 +175,12 @@ pub enum BackendPolicy {
     Targeted,
     /// Linux/Wayland: pointer input goes to the point and keyboard input to the window that
     /// held the focus when the action started (window id, never app pid), with no reliable
-    /// per-app exclusion. Sessions, Stop, rate limits, and per-action approval still apply.
+    /// per-app exclusion. Sessions, Stop, rate limits, and detected-risk approval still apply.
     DesktopGlobal,
 }
 
 /// The truthful target named in global-mode confirmations and results.
 pub const GLOBAL_TARGET: &str = "the Linux desktop";
-
-/// Why global input always asks outside Yolo: without Accessibility there is no signal
-/// for `risk` to classify, so every mutating action is confirmed rather than assumed safe.
-pub const GLOBAL_CONFIRM_REASON: &str =
-    "global desktop control cannot tell which app receives it, and there is no reliable per-app exclusion";
 
 /// Grant copy for the Linux consent UI (T5c): desktop-global, 30 minutes, no
 /// per-app exclusion promised. Asked by `linux::dialogs` before a session starts.
