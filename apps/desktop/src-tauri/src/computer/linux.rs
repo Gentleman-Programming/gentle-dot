@@ -20,6 +20,8 @@
 pub mod capabilities;
 pub mod capture;
 pub mod geometry;
+pub mod keyboard;
+pub mod keymap;
 pub mod outputs;
 pub mod pixels;
 pub mod pointer;
@@ -39,3 +41,9 @@ mod pointer_tests;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod keyboard_tests;
+
+#[cfg(test)]
+mod keymap_tests;

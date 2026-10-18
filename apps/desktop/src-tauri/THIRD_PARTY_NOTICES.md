@@ -65,6 +65,24 @@ before destroy itself and never relies on server-side cleanup.
 - Upstream: `/home/jona/mnt/sv-home/dev/upstream/wlroots-bridge`
 - License: MIT, Copyright (c) 2026 Patrick Jaja
 
+The keyboard input (`src/computer/linux/keyboard.rs` and `src/computer/linux/keymap.rs`)
+additionally follows the `zwp_virtual_keyboard_v1` request shape (`keymap` with an
+anonymous memfd, `format` 1, NUL-terminated `size`; `key` with evdev codes) and the
+hand-rolled XKB keymap-text technique of the same reference (sequential keycodes
+from 9, four modifiers first, `modifier_map` entries, Unicode keysyms as
+`0x01000000 | codepoint`), with these deliberate divergences: no xkeysym or
+libxkbcommon dependency (ASCII letters/digits spell themselves, punctuation goes
+through a fixed XKB name table, the rest uses `U` escapes); every keysym is bound
+at level 1 so Shift is never synthesized; the keymap upload is memfd-only with no
+filesystem fallback; each operation consumes its own `Connection` with a scope
+guard that releases only its own keys plus an explicit keyboard destroy and (v5+)
+seat release — the v1 manager has no destructor, so none is fabricated and the
+connection close frees it; Mac `cmd` drives Super while `fn` fails closed; and
+every wait, pause and the confirming `sync` barrier is deadline/cancel bounded
+instead of blocking `roundtrip`s. Unit tests validate the keymap structure;
+separate verification compiled six generated maps with libxkbcommon 1.13.2.
+Real-compositor keyboard input has not been verified.
+
 > Permission is hereby granted, free of charge, to any person obtaining a copy
 > of this software and associated documentation files (the "Software"), to deal
 > in the Software without restriction, including without limitation the rights
