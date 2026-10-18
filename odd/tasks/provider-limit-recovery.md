@@ -22,7 +22,7 @@ General daemon/engine behaviour, not platform-specific and not part of the Linux
 
 - T1 [S1-S3] route=parent commit=n/a done: investigate existing mechanisms, image caps and error path (explore mvdireuc-n-muwf).
 - T2 [S1,S2] route=worker commit=88b1646: total request budget at the source, so accumulated images cannot bloat the request.
-- T3 [S1,S2] route=worker commit=b8fa0cd: reactive recovery with one invisible re-send, suppressed error on the first attempt.
+- T3 [S1,S2] route=worker commit=b8fa0cd,37063b3: reactive recovery with one invisible re-send, suppressed error on the first attempt.
 - T4 [S1] route=worker commit=pending: learn the observed ceiling per model with a margin instead of guessing.
 - T5 [S1-S3] route=verify commit=pending: independent verification with deterministic tests.
 - T6 [S1,S3] route=parent commit=pending: own branch and PR, plus an upstream issue with the evidence.
@@ -72,3 +72,13 @@ General daemon/engine behaviour, not platform-specific and not part of the Linux
   guarda de herramienta hace fallar su test. **Hueco crítico**: la detección es por texto y no coincide con el
   error real del incidente (`500 status code (no body)`), así que el caso observado no se recuperaba; y una
   recarga en frío del historial muestra el turno rechazado dos veces (el anterior sigue en la cadena).
+
+- **L8** — Huecos de L7 cerrados en 37063b3. Detección por correlación: `canRecover` acepta la firma de texto
+  **o** que la sesión viva supere el piso (`recoveryFloorBytes` = mitad del presupuesto de petición, 4 MiB por
+  defecto), siempre con las guardas de ninguna-herramienta y una-por-mensaje; el reintento es el discriminador,
+  así que el incidente real se recupera sin que una caída quede tapada y un 500 en una conversación chica sigue
+  mostrando el error. Recarga en frío: `chainTurns` en `conversations.ts` descarta de la página el par
+  pregunta+respuesta vacía del turno rechazado solo cuando el archivo siguiente abre con ese mismo mensaje; no
+  escribe ni borra nada en disco y una respuesta real o un turno con herramientas nunca se descartan. 38
+  pruebas focalizadas y 504 del daemon en verde. Sin verificar: el techo real del proveedor (T4) y el
+  comportamiento contra un proveedor vivo.
