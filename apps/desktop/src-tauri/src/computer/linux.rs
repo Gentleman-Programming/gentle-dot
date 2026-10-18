@@ -20,6 +20,7 @@
 //! discovery and enumeration are tested, while sweeps against a real
 //! compositor are still untested.
 
+pub mod backend;
 pub mod capabilities;
 pub mod capture;
 pub mod desktop;
@@ -31,6 +32,9 @@ pub mod outputs;
 pub mod pixels;
 pub mod pointer;
 pub mod transport;
+
+#[cfg(test)]
+mod backend_tests;
 
 #[cfg(test)]
 mod capture_tests;
