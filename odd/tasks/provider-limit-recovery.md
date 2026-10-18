@@ -9,6 +9,7 @@ General daemon/engine behaviour, not platform-specific and not part of the Linux
 - S1: "Deberiamos implementar un fallback o un detector, por si el proveedor tiene otro limite ya sea por imagenes o bytes geneneral (como paso ahora), que si arroja/detecta este error no lo muestre en el chat, sino qeu directamente actue y haga lo que dices de iniciar nuevo chat o compact, nose que se hacia ahi o que deberia hacer (el chat sigue viendose como unico siempre como dices, la magia es por detras por decirlo asi). Para que no se frene y el usuario ni se entere que paso algo asi. Revisa primero que solucion habria, que mecanismos actuales hay y como funciona para ver como lo afrontamos las limitaciones de proveedor que podrian surgir"
 - S2: "sigamos tu recomendacion" — the approved recommendation: option (c) a total budget at the source so images never bloat the request, plus option (b) reactive recovery that rotates or compacts and re-sends the message once, invisibly, only when no tool ran in the failed turn.
 - S3: "igual esto es algo general creo, no algo de mac o linux" — a general fix, its own branch and PR, because it affects macOS too.
+- S4: "implementata todo primero. Cuando este dime para probar, no publiques hasta que lo pida"
 
 ## Design boundaries
 
@@ -26,7 +27,12 @@ General daemon/engine behaviour, not platform-specific and not part of the Linux
 - T4 [S1] route=worker commit=a9112e3: learn the observed ceiling per model with a margin instead of guessing.
 - T5 [S1-S3] route=verify commit=pending: independent verification with deterministic tests.
 - T7 [S1,S2] route=worker commit=42fa84b: a total cap for the user's own attachments, so one message cannot carry more images than a request may hold.
-- T6 [S1,S3] route=parent commit=pending: own branch and PR, plus an upstream issue with the evidence.
+- T8 [S1,S2] route=worker commit=pending: tell the user which attachments were left out and why, so nothing is dropped silently.
+- T9 [S1,S2] route=worker commit=pending: a restart during a recovery must not lose the notice; the user is told the message could not be answered instead of seeing an unanswered turn.
+- T10 [S1-S3] route=worker commit=ee95d83 done: stage transitive dependencies; independent mve8kacm-d-f00t PASS, 7 tests and isolated staged-import smoke without source symlinks. Node 24 and Windows not exercised.
+- T11 [S1-S3] route=worker commit=0c65a73 done: document request budgeting, omitted attachments, bounded recovery and configuration without claiming an exact provider limit or confirmed incident cause.
+- T6 [S1,S3,S4] route=parent commit=pending blocked: own branch and PR, plus an upstream issue with the evidence; waiting for explicit user publication request.
+- T12 [S1-S4] route=parent commit=pending: prepare a local integrated test package preserving native Linux control; no install or publication.
 
 ## Log
 
