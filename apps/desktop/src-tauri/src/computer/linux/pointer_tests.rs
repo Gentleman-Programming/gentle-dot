@@ -714,6 +714,88 @@ fn oversized_and_nonfinite_scroll_reject_before_any_input() {
 }
 
 #[test]
+fn scroll_accepts_120_ticks_and_refuses_121_with_a_split_hint() {
+    // The raised Linux per-operation cap: 120 axis ticks are queued and sent.
+    let (client, peer, _thread) = spawn_peer(false);
+    let conn = connection_from_stream(client).expect("client wraps the pair");
+    scroll_pointer(
+        conn,
+        &snapshot_with(&[(7, 4)], 2),
+        &plain_monitor(7),
+        300.0,
+        400.0,
+        0.0,
+        120.0,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+    )
+    .expect("120 axis ticks is exactly the raised per-operation cap");
+    let seen = wait_for(&peer, 5_000, &|log| contains(log, &Observed::Destroy));
+    assert_eq!(
+        seen.iter().filter(|event| matches!(event, Observed::Axis { .. })).count(),
+        120,
+        "a vertical scroll of 120 sends 120 vertical ticks, got: {seen:?}"
+    );
+    wait_eof(&peer, 2_000);
+
+    // One tick past the cap stays refused before any input, and the refusal tells the
+    // caller to split the scroll instead of guessing a smaller number.
+    let (client, peer, _thread) = spawn_peer(false);
+    let conn = connection_from_stream(client).expect("client wraps the pair");
+    let err = scroll_pointer(
+        conn,
+        &snapshot_with(&[(7, 4)], 2),
+        &plain_monitor(7),
+        300.0,
+        400.0,
+        0.0,
+        121.0,
+        Instant::now() + Duration::from_secs(5),
+        &CancelHandle::new(),
+    )
+    .expect_err("121 axis ticks must stay refused");
+    assert!(matches!(err, PointerError::InvalidScroll { .. }), "got: {err}");
+    let text = err.to_string();
+    assert!(text.contains("120"), "the refusal names the cap: {text}");
+    assert!(text.contains("split"), "the refusal tells the caller to split the scroll: {text}");
+    wait_eof(&peer, 2_000);
+    assert_eq!(peer.bytes.load(Ordering::SeqCst), 0, "no request may precede validation");
+    assert!(peer.take().is_empty(), "no event may precede validation");
+}
+
+#[test]
+fn a_cancelled_scroll_stops_before_any_tick_and_never_claims_success() {
+    // A Stop that arrives before the ticks are queued must end the scroll through the error
+    // path (its teardown still reaches the peer), not after queueing the whole burst.
+    let (client, peer, _thread) = spawn_peer(false);
+    let conn = connection_from_stream(client).expect("client wraps the pair");
+    let cancel = CancelHandle::new();
+    cancel.cancel();
+    let err = scroll_pointer(
+        conn,
+        &snapshot_with(&[(7, 4)], 2),
+        &plain_monitor(7),
+        300.0,
+        400.0,
+        0.0,
+        120.0,
+        Instant::now() + Duration::from_secs(5),
+        &cancel,
+    )
+    .expect_err("a cancelled scroll must not report success");
+    assert!(
+        matches!(&err, PointerError::Transport(error) if error.kind == TransportKind::Cancelled),
+        "got: {err}"
+    );
+    let seen = wait_for(&peer, 5_000, &|log| contains(log, &Observed::Destroy));
+    assert_eq!(
+        seen.iter().filter(|event| matches!(event, Observed::Axis { .. })).count(),
+        0,
+        "no tick may be queued before the Stop is honored, got: {seen:?}"
+    );
+}
+
+#[test]
 fn cancel_mid_drag_releases_the_owned_button_before_destroy() {
     let (client, peer, _thread) = spawn_peer(false);
     let conn = connection_from_stream(client).expect("client wraps the pair");

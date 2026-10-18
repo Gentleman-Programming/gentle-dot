@@ -53,6 +53,17 @@ const WAIT_SLICE_MS: u64 = 100;
 /// macOS posts at most 20 UTF-16 units of text per keyboard event.
 const TEXT_CHUNK_UNITS: usize = 20;
 
+/// The base scroll wording shared by both policies (S6): `dy` is required and `dx` is optional
+/// and defaults to 0, so a purely vertical scroll needs only `dy`.
+const SCROLL_DESCRIPTION: &str = "Scroll at a point. `dy` is required and `dx` is optional \
+(0 by default), so a purely vertical scroll can omit `dx`; in pixels, `dy` > 0 scrolls down \
+and `dx` > 0 scrolls right.";
+
+/// The Linux per-operation scroll tick cap (S6), named in the desktop-global catalog so the
+/// agent can split a longer gesture itself. It must match `linux::pointer::MAX_SCROLL_TICKS`,
+/// which is what enforces it.
+const LINUX_MAX_SCROLL_TICKS: u32 = 120;
+
 const STOPPED: &str = "Computer control was stopped; this action was dropped.";
 const NOT_ALLOWED: &str = "Computer control was not allowed by the user. Nothing was done.";
 const NEEDS_PERMISSION: &str = "Gentle Dot needs the";
@@ -196,10 +207,34 @@ fn coordinate(description: &str) -> Value {
     json!({"type": "number", "minimum": 0, "description": description})
 }
 
-/// The tool catalog (S24.2).
-fn tools() -> Value {
+/// The tool catalog (S24.2). The launch and inventory descriptions follow the policy (S7): the
+/// macOS wording stays exactly what it was, while the desktop-global one names what the Linux
+/// backend can truthfully promise.
+fn tools(policy: BackendPolicy) -> Value {
     let x = coordinate("Pixels from the left edge of the latest screenshot.");
     let y = coordinate("Pixels from the top edge of the latest screenshot.");
+    let scroll = match policy {
+        BackendPolicy::Targeted => SCROLL_DESCRIPTION.to_string(),
+        // The catalog is the agent's only way to plan around the backend limit before it hits it.
+        BackendPolicy::DesktopGlobal => format!(
+            "{SCROLL_DESCRIPTION} At most {LINUX_MAX_SCROLL_TICKS} axis ticks are accepted per call \
+on this Linux desktop; split a longer scroll into several calls."
+        ),
+    };
+    let (open_app, list_apps) = match policy {
+        BackendPolicy::Targeted => (
+            "Open or bring forward an app by name or bundle id.".to_string(),
+            "List the running apps.".to_string(),
+        ),
+        BackendPolicy::DesktopGlobal => (
+            "Open an installed app by desktop id or display name. A success answer means the \
+platform launcher accepted the request; it does not confirm that a window opened or gained focus."
+                .to_string(),
+            "List the apps Niri manages windows for: one entry per managed window app id, not \
+background apps and not bundle ids."
+                .to_string(),
+        ),
+    };
     json!([
         {"name": "screenshot", "description": "Take a screenshot of the display under the pointer. Returns the image and its size.",
          "inputSchema": schema(json!({}), &[])},
@@ -211,15 +246,17 @@ fn tools() -> Value {
          "inputSchema": schema(json!({"x": x, "y": y}), &["x", "y"])},
         {"name": "drag", "description": "Press at one point, move to another, and release.",
          "inputSchema": schema(json!({"fromX": x, "fromY": y, "toX": x, "toY": y}), &["fromX", "fromY", "toX", "toY"])},
-        {"name": "scroll", "description": "Scroll at a point. dy > 0 scrolls down and dx > 0 scrolls right, in pixels.",
-         "inputSchema": schema(json!({"x": x, "y": y, "dx": {"type": "integer"}, "dy": {"type": "integer"}}), &["x", "y", "dx", "dy"])},
+        {"name": "scroll", "description": scroll,
+         "inputSchema": schema(json!({"x": x, "y": y,
+            "dx": {"type": "integer", "description": "Horizontal scroll, in pixels. Optional; defaults to 0. Omit it for a purely vertical scroll."},
+            "dy": {"type": "integer", "description": "Vertical scroll, in pixels. Required; dy > 0 scrolls down."}}), &["x", "y", "dy"])},
         {"name": "type", "description": "Type text into the frontmost app. A newline presses Return.",
          "inputSchema": schema(json!({"text": {"type": "string"}}), &["text"])},
         {"name": "key", "description": "Press a key combo in the frontmost app, for example `cmd+shift+t`, `return`, or `esc`.",
          "inputSchema": schema(json!({"combo": {"type": "string"}}), &["combo"])},
-        {"name": "open_app", "description": "Open or bring forward an app by name or bundle id.",
+        {"name": "open_app", "description": open_app,
          "inputSchema": schema(json!({"name": {"type": "string"}}), &["name"])},
-        {"name": "list_apps", "description": "List the running apps.",
+        {"name": "list_apps", "description": list_apps,
          "inputSchema": schema(json!({}), &[])},
         {"name": "wait", "description": "Wait, then take a screenshot.",
          "inputSchema": schema(json!({"ms": {"type": "integer", "minimum": 0, "maximum": MAX_WAIT_MS}}), &["ms"])},
@@ -279,7 +316,9 @@ fn parse_call(name: &str, args: &Value) -> Option<Result<Call, String>> {
             "scroll" => {
                 let (x, y) = point("x", "y")?;
                 let delta = |key| integer(args, key).and_then(|v| i32::try_from(v).map_err(|e| e.to_string()));
-                Tool::Scroll { x, y, dx: delta("dx")?, dy: delta("dy")? }
+                // `dx` is optional (S6): a purely vertical scroll omits it and defaults to 0.
+                let dx = if args.contains_key("dx") { delta("dx")? } else { 0 };
+                Tool::Scroll { x, y, dx, dy: delta("dy")? }
             }
             "type" => {
                 let text = string(args, "text")?;
@@ -472,7 +511,7 @@ impl Helper {
         let outcome = match method {
             "initialize" => Ok(self.initialize(&params)),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({"tools": tools()})),
+            "tools/list" => Ok(json!({"tools": tools(self.policy)})),
             "tools/call" => self.tools_call(&params),
             _ => Err((-32601, format!("Method not found: {method}"))),
         };
@@ -1022,7 +1061,15 @@ The rest was not sent; click the window you want and try again."
                 self.confirm_if_risky(assess(Act::Other, intent), &action, target)?;
                 self.still_running(epoch)?;
                 self.desktop.open_app(&name)?;
-                Ok((format!("{action}: done."), OPEN_APP_SETTLE_MS))
+                // On Linux the launcher only accepts the request; it never confirms a window or
+                // focus, so the acknowledgement must not read like a verified open (S7).
+                let done = match self.policy {
+                    BackendPolicy::Targeted => format!("{action}: done."),
+                    BackendPolicy::DesktopGlobal => format!(
+                        "{action}: the launcher accepted the request; no window or focus was verified."
+                    ),
+                };
+                Ok((done, OPEN_APP_SETTLE_MS))
             }
             Tool::Wait { ms } => {
                 let mut left = ms;
@@ -1282,6 +1329,68 @@ mod tests {
         );
         let wait = tools.iter().find(|t| t["name"] == "wait").unwrap();
         assert_eq!(wait["inputSchema"]["properties"]["ms"]["maximum"], 5000);
+    }
+
+    #[test]
+    fn scroll_schema_requires_only_dy_and_names_the_linux_tick_cap() {
+        // A purely vertical scroll must not need `dx`: it stays out of `required` and
+        // defaults to 0. The macOS catalog keeps its wording; the desktop-global one names
+        // the Linux per-operation cap so the agent can split a longer gesture itself.
+        let mac = rig().rpc("tools/list", json!({}));
+        let mac = mac["result"]["tools"].as_array().unwrap();
+        let scroll = mac.iter().find(|t| t["name"] == "scroll").unwrap();
+        assert_eq!(scroll["inputSchema"]["required"], json!(["x", "y", "dy"]));
+        let description = scroll["description"].as_str().unwrap();
+        assert!(description.contains("`dy` is required"), "{description}");
+        assert!(description.contains("optional"), "{description}");
+        let properties = &scroll["inputSchema"]["properties"];
+        assert!(properties["dx"]["description"].as_str().unwrap().to_lowercase().contains("optional"));
+        assert!(properties["dx"]["description"].as_str().unwrap().contains("0"));
+        assert!(properties["dy"]["description"].as_str().unwrap().to_lowercase().contains("required"));
+        // macOS wording for the launch and inventory tools stays exactly as it was.
+        assert_eq!(
+            mac.iter().find(|t| t["name"] == "open_app").unwrap()["description"],
+            "Open or bring forward an app by name or bundle id."
+        );
+        assert_eq!(
+            mac.iter().find(|t| t["name"] == "list_apps").unwrap()["description"],
+            "List the running apps."
+        );
+
+        let global = global_rig_with(true, true).rpc("tools/list", json!({}));
+        let global = global["result"]["tools"].as_array().unwrap();
+        let scroll = global.iter().find(|t| t["name"] == "scroll").unwrap();
+        assert_eq!(scroll["inputSchema"]["required"], json!(["x", "y", "dy"]));
+        let description = scroll["description"].as_str().unwrap();
+        assert!(description.contains("120"), "{description}");
+        assert!(description.contains("split"), "{description}");
+    }
+
+    /// The catalog advertises the same cap the Linux backend enforces; if either moves alone
+    /// the agent would plan around a number that is not real.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_catalog_tick_cap_matches_the_linux_backend() {
+        assert_eq!(LINUX_MAX_SCROLL_TICKS, super::super::linux::pointer::MAX_SCROLL_TICKS);
+    }
+
+    #[test]
+    fn a_scroll_without_dx_defaults_to_zero_and_stays_vertical() {
+        assert!(
+            matches!(
+                parse_call("scroll", &json!({"x": 1, "y": 2, "dy": 10})),
+                Some(Ok(Call { tool: Tool::Scroll { dx: 0, dy: 10, .. }, .. }))
+            ),
+            "a missing dx must default to 0 instead of refusing the call"
+        );
+        let rig = rig();
+        rig.ready();
+        assert!(!is_error(&rig.call("scroll", json!({"x": 5, "y": 6, "dy": 10}))));
+        // The fake desktop sees one vertical scroll: dx is 0, so no horizontal axis is touched.
+        assert_eq!(
+            rig.desktop.events(),
+            vec![InputEvent::Scroll { at: Point { x: 10.0, y: 12.0 }, dx: 0, dy: 10 }]
+        );
     }
 
     #[test]
@@ -2696,6 +2805,44 @@ mod tests {
         assert!(asked.iter().all(|m| m.contains(super::super::GLOBAL_TARGET)), "{asked:?}");
         assert_eq!(rig.desktop.events().len(), 2);
         assert_eq!(*rig.desktop.opened.lock().unwrap(), vec!["Mail".to_string()]);
+    }
+
+    #[test]
+    fn the_global_catalog_describes_linux_launch_and_inventory_truthfully() {
+        let body = global_rig_with(true, true).rpc("tools/list", json!({}));
+        let tools = body["result"]["tools"].as_array().unwrap();
+        let open = tools.iter().find(|t| t["name"] == "open_app").unwrap()["description"]
+            .as_str()
+            .unwrap();
+        // Launch by desktop id or display name, acknowledged by the launcher only.
+        assert!(open.contains("desktop id"), "{open}");
+        assert!(open.contains("display name"), "{open}");
+        assert!(open.contains("launcher accepted the request"), "{open}");
+        assert!(open.contains("window") && open.contains("focus"), "{open}");
+        let list = tools.iter().find(|t| t["name"] == "list_apps").unwrap()["description"]
+            .as_str()
+            .unwrap();
+        // The inventory is Niri's managed windows, not background apps and not bundle ids.
+        assert!(list.contains("managed window"), "{list}");
+        assert!(list.contains("not background apps"), "{list}");
+        assert!(list.contains("not bundle ids"), "{list}");
+    }
+
+    #[test]
+    fn a_global_open_app_ack_means_the_launcher_accepted_not_that_it_opened() {
+        let global = global_rig_with(true, true);
+        global_ready(&global);
+        let result = global.call("open_app", json!({"name": "Mail"}));
+        assert!(!is_error(&result), "{result}");
+        let text = first_text(&result);
+        assert!(text.contains("launcher accepted the request"), "{text}");
+        assert!(!text.contains(": done."), "a bare done would claim more than the launcher gave: {text}");
+        // The macOS acknowledgement is unchanged.
+        let mac = rig();
+        mac.ready();
+        assert!(
+            first_text(&mac.call("open_app", json!({"name": "Mail"}))).contains("Open Mail: done.")
+        );
     }
 
     #[test]

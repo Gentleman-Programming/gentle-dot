@@ -85,8 +85,9 @@ const BTN_RIGHT: u32 = 0x111;
 const SCROLL_STEP: f64 = 15.0;
 
 /// Axis ticks refused past this per operation: each tick is two requests,
-/// so an unbounded vector could otherwise hold the deadline hostage.
-const MAX_SCROLL_TICKS: u32 = 40;
+/// so an unbounded vector could otherwise hold the deadline hostage. Named
+/// in the desktop-global tool catalog, which must move with it.
+pub(crate) const MAX_SCROLL_TICKS: u32 = 120;
 
 /// Drag interpolation steps (plus the exact endpoints): enough for the
 /// compositor to see motion while held, few enough to stay well inside the
@@ -131,7 +132,7 @@ pub enum PointerError {
     /// Click count outside 1..=3.
     InvalidCount { count: u32 },
     /// Scroll vector non-finite or past the per-operation tick cap.
-    InvalidScroll { dx: f64, dy: f64, detail: &'static str },
+    InvalidScroll { dx: f64, dy: f64, detail: String },
     /// A coordinate is NaN or infinite.
     NonFiniteCoordinate,
 }
@@ -309,18 +310,25 @@ pub fn scroll_pointer(
         return Err(PointerError::InvalidScroll {
             dx,
             dy,
-            detail: "more than 40 axis ticks in one operation",
+            detail: format!(
+                "more than {MAX_SCROLL_TICKS} axis ticks in one operation; \
+split the scroll into several calls"
+            ),
         });
     }
     let resolved = resolve(snapshot, monitor)?;
     let point = to_output_point(monitor, x, y)?;
     run(conn, &resolved, deadline, cancel, |scope| {
         scope.motion_abs(&point);
+        // One deadline/Stop check per tick: a long scroll ends between ticks instead of
+        // queueing the whole vector as one uninterruptible burst (S6).
         for _ in 0..vertical as u32 {
+            check_wait("pointer", deadline, cancel)?;
             let value = if dy > 0.0 { SCROLL_STEP } else { -SCROLL_STEP };
             scope.axis(wl_pointer::Axis::VerticalScroll, value);
         }
         for _ in 0..horizontal as u32 {
+            check_wait("pointer", deadline, cancel)?;
             let value = if dx > 0.0 { SCROLL_STEP } else { -SCROLL_STEP };
             scope.axis(wl_pointer::Axis::HorizontalScroll, value);
         }
