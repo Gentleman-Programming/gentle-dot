@@ -376,6 +376,21 @@ const ATTACHMENT_BUDGET_RATIO = 0.5;
 const OVER_BUDGET_IMAGE =
 	"left out to keep this message within its image size budget; read it from the path if needed";
 
+/** One attachment the message could not carry, and the reason the user is shown. */
+export type OmittedAttachment = { name: string; reason: string };
+/** An image larger than any single image may be, whatever the message's total. */
+export const OMITTED_TOO_LARGE = "too large to send as an image";
+/** The message's images together had already used their whole size budget. */
+export const OMITTED_OVER_BUDGET = "the message's images already used their total size budget";
+
+/** The warning for the user: every attachment the message left out, named, and why. */
+export function omittedAttachmentsToast(omitted: OmittedAttachment[]): string {
+	const list = omitted.map(({ name, reason }) => `${name} (${reason})`).join(", ");
+	return omitted.length === 1
+		? `1 attachment was not sent: ${list}.`
+		: `${omitted.length} attachments were not sent: ${list}.`;
+}
+
 /**
  * The bytes of images one message may attach together, tied to the budget the request rewriter
  * keeps the whole request under. Half of it, measured in the raw bytes the per-file cap already
@@ -394,17 +409,23 @@ export function attachmentBudgetBytes(env: NodeJS.ProcessEnv = process.env): num
  * The prompt for a message with files: the user's text, then a block with each file's name, size,
  * type, and absolute path. Images go to the model as images only when it accepts them, and only
  * while the message's total stays inside its attachment budget; anything left out says why in its
- * own entry, so the model and the user both see it. A message with no files is returned untouched.
+ * own entry (for the model) and is reported in `omitted` (for the user), so nothing is dropped in
+ * silence. A message with no files is returned untouched.
  */
 export function composePrompt(
 	text: string,
 	files: StoredFile[],
 	options: { images: boolean | undefined; read?: (path: string) => Buffer; budget?: number },
-): { message: string; images?: { type: "image"; mimeType: string; data: string }[] } {
+): {
+	message: string;
+	images?: { type: "image"; mimeType: string; data: string }[];
+	omitted?: OmittedAttachment[];
+} {
 	if (files.length === 0) return { message: text };
 	const read = options.read ?? ((path: string) => readFileSync(path));
 	const budget = options.budget ?? attachmentBudgetBytes();
 	const images: { type: "image"; mimeType: string; data: string }[] = [];
+	const omitted: OmittedAttachment[] = [];
 	let attachedBytes = 0;
 	let full = false;
 	const lines = files.map((file) => {
@@ -415,12 +436,15 @@ export function composePrompt(
 			path: file.path,
 		};
 		if (IMAGE_TYPES.has(file.mime)) {
-			if (file.size > MAX_IMAGE_BYTES) entry.image = "too large to show you; read it from the path if needed";
-			else if (options.images === true) {
+			if (file.size > MAX_IMAGE_BYTES) {
+				entry.image = "too large to show you; read it from the path if needed";
+				if (options.images === true) omitted.push({ name: file.name, reason: OMITTED_TOO_LARGE });
+			} else if (options.images === true) {
 				// In the order the user attached them: once one no longer fits, the rest are left out too.
 				if (full || attachedBytes + file.size > budget) {
 					full = true;
 					entry.image = OVER_BUDGET_IMAGE;
+					omitted.push({ name: file.name, reason: OMITTED_OVER_BUDGET });
 				} else {
 					attachedBytes += file.size;
 					images.push({ type: "image", mimeType: file.mime, data: read(file.path).toString("base64") });
@@ -432,7 +456,11 @@ export function composePrompt(
 	});
 	const block = [BLOCK_START, INTRO, ...lines, BLOCK_END].join("\n");
 	const message = text === "" ? block : `${text}\n\n${block}`;
-	return images.length > 0 ? { message, images } : { message };
+	return {
+		message,
+		...(images.length > 0 ? { images } : {}),
+		...(omitted.length > 0 ? { omitted } : {}),
+	};
 }
 
 /** Splits a user message into the text the user typed and the chips of the files the daemon appended. */

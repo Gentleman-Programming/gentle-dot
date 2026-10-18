@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
 	type AgentState,
@@ -37,6 +37,7 @@ import { DRAFT_STATUS_KEY } from "./extensions/approval-guard.ts";
 import { DEFAULT_REQUEST_BUDGET, REQUEST_BUDGET_ENV } from "./extensions/screenshot-context.ts";
 import { limitsFile, noteModel, recordCeiling } from "./limits.ts";
 import { describeTool, textOf } from "./presentation.ts";
+import { writePrivateFile } from "./private-file.ts";
 import {
 	LiveModelSwitch,
 	ProfileError,
@@ -48,7 +49,13 @@ import {
 } from "./profiles.ts";
 import { DEFAULT_ROTATION, type RotationLimits, SessionRotator, sessionFileBytes } from "./rotation.ts";
 import type { AgentRecord, AgentSupervisor, SupervisorEvent } from "./supervisor.ts";
-import { composePrompt, type StoredFile, splitAttachments, type UploadStore } from "./uploads.ts";
+import {
+	composePrompt,
+	omittedAttachmentsToast,
+	type StoredFile,
+	splitAttachments,
+	type UploadStore,
+} from "./uploads.ts";
 import type { VoiceService } from "./voice.ts";
 import type { PinGate } from "./web-pin.ts";
 import { isBlockedInput, presentText, shouldShowToast } from "./white-label.ts";
@@ -126,8 +133,10 @@ const READY_TIMEOUT_MS = 60_000;
 const ANSWER_FAILED = "Something went wrong while answering. Please try again.";
 const HISTORY_PAGE = 100;
 
+/** One image as the engine receives it and sends it back in its own user message. */
+type PromptImage = { type: "image"; mimeType: string; data: string };
 /** A prompt as the engine receives it, images inlined, so it can be sent again unchanged. */
-type SentPrompt = { message: string; images?: { type: "image"; mimeType: string; data: string }[] };
+type SentPrompt = { message: string; images?: PromptImage[] };
 /**
  * A prompt handed to the engine. Its identity is what a refusal is attributed to, so a message sent
  * later can neither inherit that failure nor spend the recovery this one already used.
@@ -142,6 +151,43 @@ type SentTurn = {
 	 */
 	refused?: { bytes: number; model: string | undefined };
 };
+
+/** A prompt the engine has not reported its own user message for yet. */
+type AwaitingTurn = {
+	turn: SentTurn;
+	/** This prompt is a recovery's copy of a message the window already shows. */
+	resend: boolean;
+};
+
+/**
+ * The images of the engine's own user message, in order. `[]` when it carries none, `undefined` when
+ * the event does not carry content this daemon can read: an incomplete event must not be used to rule
+ * a prompt in or out.
+ */
+function userMessageImages(message: unknown): PromptImage[] | undefined {
+	if (typeof message !== "object" || message === null) return undefined;
+	const content = (message as { content?: unknown }).content;
+	if (typeof content === "string") return [];
+	if (!Array.isArray(content)) return undefined;
+	const images: PromptImage[] = [];
+	for (const block of content) {
+		const part = block as { type?: unknown; mimeType?: unknown; data?: unknown };
+		if (part?.type !== "image") continue;
+		if (typeof part.mimeType !== "string" || typeof part.data !== "string") return undefined;
+		images.push({ type: "image", mimeType: part.mimeType, data: part.data });
+	}
+	return images;
+}
+
+/** True when two prompts carry the same images, in the same order. */
+function sameImages(a: PromptImage[] | undefined, b: PromptImage[] | undefined): boolean {
+	const left = a ?? [];
+	const right = b ?? [];
+	return (
+		left.length === right.length &&
+		left.every((image, i) => image.mimeType === right[i]?.mimeType && image.data === right[i]?.data)
+	);
+}
 
 /**
  * The wording a request refused as too large carries. The engine formats the provider's status and
@@ -192,6 +238,72 @@ export function recoveryFloorBytes(env: NodeJS.ProcessEnv = process.env): number
 	const budget =
 		Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : DEFAULT_REQUEST_BUDGET;
 	return Math.floor(budget * RECOVERY_FLOOR_RATIO);
+}
+
+/** The daemon's marker for recoveries that were started and never finished. */
+export const PENDING_RECOVERY_FILE_NAME = "pending-recovery.json";
+/** The only marker content this daemon writes; anything else on disk is never acted on. */
+const PENDING_RECOVERY_KIND = "too_large";
+/** What a startup says about a recovery the last run did not finish. */
+const LOST_RECOVERY_NOTICE =
+	"Your last message could not be answered because the request was too large. You can send it again.";
+
+/** The marker's path under the daemon's state folder, next to `state.json` and `provider-limits.json`. */
+export function pendingRecoveryFile(dataDir: string): string {
+	return join(dataDir, PENDING_RECOVERY_FILE_NAME);
+}
+
+/**
+ * The marker as on disk: the recoveries that still owe the user a notice. Each one owns its own id
+ * and removes only that id, so the first to finish cannot silence a later recovery still in flight.
+ * `legacy` is a marker written before owners existed: it is still owed, but no run can remove it, so
+ * only a startup clears it.
+ */
+type RecoveryMarker = { owners: string[]; legacy: boolean };
+
+function readMarker(file: string): RecoveryMarker | undefined {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(readFileSync(file, "utf8"));
+	} catch {
+		return undefined;
+	}
+	if (typeof parsed !== "object" || parsed === null) return undefined;
+	const marker = parsed as { kind?: unknown; pending?: unknown };
+	if (marker.kind !== PENDING_RECOVERY_KIND) return undefined;
+	if (marker.pending === undefined) return { owners: [], legacy: true };
+	if (!Array.isArray(marker.pending)) return undefined;
+	return {
+		owners: marker.pending.filter((id): id is string => typeof id === "string" && id !== ""),
+		legacy: false,
+	};
+}
+
+/**
+ * True when the state folder still holds the marker of a recovery that did not finish: the message
+ * was refused for size, its failure was hidden from the chat, and it was never sent again. A missing,
+ * torn, or foreign file reads false, so a startup never acts on anything it did not write.
+ */
+export function readPendingRecovery(file: string): boolean {
+	const marker = readMarker(file);
+	if (!marker) return false;
+	return marker.legacy || marker.owners.length > 0;
+}
+
+/** Adds `id` as an owner of the marker; the file is rewritten whole, as `limits.ts` does its own. */
+function addRecoveryOwner(file: string, id: string): void {
+	const owners = [...(readMarker(file)?.owners ?? []), id];
+	writePrivateFile(file, `${JSON.stringify({ kind: PENDING_RECOVERY_KIND, pending: owners })}\n`);
+}
+
+/** Removes only `id`'s ownership: the marker stays while any other recovery still owns a notice. */
+function removeRecoveryOwner(file: string, id: string): void {
+	const marker = readMarker(file);
+	if (!marker || marker.legacy) return;
+	const owners = marker.owners.filter((owner) => owner !== id);
+	if (owners.length === marker.owners.length) return;
+	if (owners.length === 0) rmSync(file, { force: true });
+	else writePrivateFile(file, `${JSON.stringify({ kind: PENDING_RECOVERY_KIND, pending: owners })}\n`);
 }
 
 /** True when the engine's formatted provider error says the request itself was too large. */
@@ -246,14 +358,19 @@ export class DotBridge {
 	 * later, so it is the identity carried into `pendingRecovery` and the one-recovery guard.
 	 */
 	private turn: SentTurn | undefined;
-	/** Prompts handed to the engine whose turn has not started yet, oldest first. */
-	private readonly starting: SentTurn[] = [];
+	/**
+	 * Every prompt handed to the engine whose own user message it has not reported yet, oldest first:
+	 * normal sends and recovery re-sends in one ordered registry. That order is the dispatch order, so
+	 * each engine event is matched to the right prompt and shown at most once — a recovery's copy, which
+	 * the window already shows, is the only one suppressed.
+	 */
+	private readonly awaiting: AwaitingTurn[] = [];
 	/** A tool ran since the user's message; sending it again would repeat its side effects. */
 	private toolInTurn = false;
-	/** The refused answer waiting for a decision, taken up once the run settles. */
-	private pendingRecovery: { failed: { messageId: string; text: string }; turn: SentTurn } | undefined;
-	/** The prompt the recovery sent again, whose user message the window must not show twice. */
-	private resending: SentTurn | undefined;
+	/** The refused answer waiting for a decision, taken up once the run settles; `id` is its marker. */
+	private pendingRecovery:
+		| { id: string | undefined; failed: { messageId: string; text: string }; turn: SentTurn }
+		| undefined;
 	/** A conversation switch is in progress: the session is not rotated under it. */
 	private switchingNow = false;
 	/** A run settled while a message was still on its way; check for rotation once it arrived. */
@@ -284,6 +401,7 @@ export class DotBridge {
 			options.connectors.imagesSupported = () => supervisor.modelImages;
 		}
 		this.state = this.deriveState();
+		this.reportLostRecovery();
 	}
 
 	get agentState(): AgentState {
@@ -500,18 +618,27 @@ export class DotBridge {
 				await this.switching;
 				this.interrupted = false;
 				const busy = this.supervisor.busy;
-				const prompt =
-					files.length > 0
-						? composePrompt(message.text, files, {
-								images: this.supervisor.modelImages,
-								// The stored file may have been swapped for a link since: read it as the engine.
-								read: (path) => this.engine(() => readFileSync(path)),
-							})
-						: { message: message.text };
+				let prompt: SentPrompt;
+				if (files.length > 0) {
+					const composed = composePrompt(message.text, files, {
+						images: this.supervisor.modelImages,
+						// The stored file may have been swapped for a link since: read it as the engine.
+						read: (path) => this.engine(() => readFileSync(path)),
+					});
+					const { omitted, ...sent } = composed;
+					// The chip of every file is still shown, so a file the request could not carry must be said
+					// out loud; the message itself goes out with the attachments that fit.
+					if (omitted && omitted.length > 0) {
+						this.broadcast({ type: "toast", level: "warning", message: omittedAttachmentsToast(omitted) });
+					}
+					prompt = sent;
+				} else {
+					prompt = { message: message.text };
+				}
 				// Stash the prompt with its identity before it is sent: a refused one is sent again
 				// exactly as it was, and only its own refusal may start that recovery.
 				const turn: SentTurn = { prompt, recovered: false };
-				this.starting.push(turn);
+				this.awaiting.push({ turn, resend: false });
 				this.toolInTurn = false;
 				this.sending += 1;
 				try {
@@ -521,8 +648,8 @@ export class DotBridge {
 					if (message.attachments) this.options.uploads?.consume(message.attachments);
 				} catch (error) {
 					// The prompt never reached a turn: drop it rather than let it claim a later one.
-					const index = this.starting.indexOf(turn);
-					if (index >= 0) this.starting.splice(index, 1);
+					const index = this.awaiting.findIndex((entry) => entry.turn === turn);
+					if (index >= 0) this.awaiting.splice(index, 1);
 					throw error;
 				} finally {
 					this.sending -= 1;
@@ -1272,32 +1399,86 @@ export class DotBridge {
 		const pending = this.pendingRecovery;
 		this.pendingRecovery = undefined;
 		if (!pending) return;
-		const { failed, turn } = pending;
-		// A conversation switch tore the run down: there is nothing left to send again.
-		if (this.switchingNow) {
-			this.showFailure(failed);
-			return;
-		}
-		// The refused request's chat and model, read before rotation replaces the session: the answer to
-		// the re-send is what turns this observation into a ceiling for that model.
-		const refused = { bytes: this.sessionBytes(), model: this.supervisor.model };
-		this.log("the provider refused the request as too large; continuing the chat in a fresh session");
-		if (!(await this.rotator.forceRotate())) {
-			this.showFailure(failed);
-			return;
-		}
-		this.broadcast({ type: "history", ...this.conversationRef(), ...(await this.currentHistory()) });
-		// Always the refused prompt itself, never a message sent while the rotation was in flight.
-		this.resending = turn;
-		turn.refused = refused;
+		const { id, failed, turn } = pending;
 		try {
-			await this.supervisor.request({ type: "prompt", ...turn.prompt });
-		} catch (error) {
-			this.resending = undefined;
-			turn.refused = undefined;
-			this.log(`could not send the message again: ${(error as Error).message}`);
-			this.showFailure(failed);
+			// A conversation switch tore the run down: there is nothing left to send again.
+			if (this.switchingNow) {
+				this.showFailure(failed);
+				return;
+			}
+			// The refused request's chat and model, read before rotation replaces the session: the answer to
+			// the re-send is what turns this observation into a ceiling for that model.
+			const refused = { bytes: this.sessionBytes(), model: this.supervisor.model };
+			this.log("the provider refused the request as too large; continuing the chat in a fresh session");
+			if (!(await this.rotator.forceRotate())) {
+				this.showFailure(failed);
+				return;
+			}
+			this.broadcast({ type: "history", ...this.conversationRef(), ...(await this.currentHistory()) });
+			// Always the refused prompt itself, never a message sent while the rotation was in flight.
+			this.awaiting.push({ turn, resend: true });
+			turn.refused = refused;
+			try {
+				await this.supervisor.request({ type: "prompt", ...turn.prompt });
+			} catch (error) {
+				// Drop only this recovery's own entry: another recovery still in flight keeps its own.
+				const index = this.awaiting.findIndex((entry) => entry.turn === turn);
+				if (index >= 0) this.awaiting.splice(index, 1);
+				turn.refused = undefined;
+				this.log(`could not send the message again: ${(error as Error).message}`);
+				this.showFailure(failed);
+			}
+		} finally {
+			// Either the message is on its way again or the user was shown the failure: this recovery's own
+			// marker is spent. Another recovery still in flight keeps its own.
+			this.clearRecovery(id);
 		}
+	}
+
+	/**
+	 * Leaves a marker before the failure is hidden from the chat: a daemon that exits before the
+	 * message is sent again would otherwise leave the turn unanswered with nothing to explain it (T9).
+	 * The id belongs to this recovery alone, so a later recovery finishing first cannot delete this
+	 * notice before it is dispatched. Best effort: a marker that cannot be written means at worst the
+	 * old, silent case, never a recovery that is lost because the notice could not be persisted.
+	 */
+	private markRecovery(): string | undefined {
+		const id = randomUUID();
+		try {
+			addRecoveryOwner(pendingRecoveryFile(this.options.dataDir), id);
+			return id;
+		} catch (error) {
+			this.log(`could not write the recovery marker: ${(error as Error).message}`);
+			return undefined;
+		}
+	}
+
+	/** This recovery reached the engine again, or the user was told: its own marker is spent. */
+	private clearRecovery(id: string | undefined): void {
+		if (!id) return;
+		try {
+			removeRecoveryOwner(pendingRecoveryFile(this.options.dataDir), id);
+		} catch {
+			// Already gone, or not removable: a marker left here only costs one extra warning.
+		}
+	}
+
+	/**
+	 * At startup, a marker the last run left behind means one turn was lost in a window the chat never
+	 * saw. The user is told once, through the same channel as every other daemon notice, and every
+	 * owner of the marker is dropped so the next run stays silent.
+	 */
+	private reportLostRecovery(): void {
+		const file = pendingRecoveryFile(this.options.dataDir);
+		if (!readPendingRecovery(file)) return;
+		try {
+			rmSync(file, { force: true });
+		} catch {
+			// Not removable: the next run would warn again, never a lost notice.
+		}
+		const notice: ServerPayload = { type: "toast", level: "warning", message: LOST_RECOVERY_NOTICE };
+		this.notices.push(notice);
+		this.broadcast(notice);
 	}
 
 	/**
@@ -1444,6 +1625,27 @@ export class DotBridge {
 		this.broadcast({ type: "queue", ...this.queue });
 	}
 
+	/**
+	 * The prompt an engine user event belongs to, taken out of the registry so it is attributed once.
+	 * The text is the first key; the images the event carries separate prompts that share it. An event
+	 * without readable image content only confirms a prompt that carried no images, and a tie is
+	 * resolved oldest-first, because that is the order the engine received the prompts — never by
+	 * consuming a newer record for an older event. `undefined` means no prompt here matches, so a
+	 * legitimate message that merely repeats a recovery's text is not swallowed.
+	 */
+	private takeAwaiting(raw: string, images: PromptImage[] | undefined): AwaitingTurn | undefined {
+		const candidates = this.awaiting.filter((entry) => entry.turn.prompt.message === raw);
+		if (candidates.length === 0) return undefined;
+		const confirmed =
+			images === undefined
+				? candidates.filter((entry) => (entry.turn.prompt.images ?? []).length === 0)
+				: candidates.filter((entry) => sameImages(entry.turn.prompt.images, images));
+		const chosen = confirmed[0];
+		if (!chosen) return undefined;
+		this.awaiting.splice(this.awaiting.indexOf(chosen), 1);
+		return chosen;
+	}
+
 	private onMessageStart(event: AgentRecord): void {
 		const message = event.message as { role?: string } | undefined;
 		// A tool result is a tool in the turn, however the engine reports it.
@@ -1452,16 +1654,11 @@ export class DotBridge {
 			// A new user message starts its turn: whatever ran for the previous one is over.
 			this.toolInTurn = false;
 			const raw = textOf(message);
-			// The recovery sends a prompt the window already shows: attribute its failure to that
-			// prompt and do not show its message twice.
-			if (this.resending !== undefined && this.resending.prompt.message === raw) {
-				this.turn = this.resending;
-				this.resending = undefined;
-				return;
-			}
-			// The prompt this turn belongs to, matched by what the engine got and in send order.
-			const index = this.starting.findIndex((sent) => sent.prompt.message === raw);
-			this.turn = index >= 0 ? this.starting.splice(index, 1)[0] : undefined;
+			// The recovery sends a prompt the window already shows: attribute its failure to that prompt
+			// and do not show its message twice. Every other prompt's own message is shown, once.
+			const matched = this.takeAwaiting(raw, userMessageImages(message));
+			this.turn = matched?.turn;
+			if (matched?.resend) return;
 			const { text, attachments } = splitAttachments(raw);
 			this.broadcast({
 				type: "user_message",
@@ -1506,7 +1703,11 @@ export class DotBridge {
 			if (turn !== undefined) turn.refused = undefined;
 			if (turn !== undefined && this.canRecover(turn, message.errorMessage)) {
 				turn.recovered = true;
-				this.pendingRecovery = { failed: { messageId, text }, turn };
+				// The failure is hidden from the chat from here: leave a marker so a restart in the window
+				// before the message is sent again still explains what happened (T9). The id belongs to this
+				// recovery alone, so a later recovery finishing first cannot delete this notice.
+				const id = this.markRecovery();
+				this.pendingRecovery = { id, failed: { messageId, text }, turn };
 				return;
 			}
 			this.showFailure({ messageId, text });
@@ -1615,6 +1816,8 @@ export class DotBridge {
 		for (const requestId of [...this.asks.keys()]) this.resolveAsk(requestId);
 		this.runningTools.clear();
 		this.assistantId = undefined;
+		// No engine left to report these prompts: drop them so a later event cannot match a stale one.
+		this.awaiting.length = 0;
 	}
 
 	private deriveState(): AgentState {

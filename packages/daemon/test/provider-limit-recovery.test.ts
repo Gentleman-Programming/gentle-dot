@@ -4,7 +4,13 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import type { ServerPayload } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DotBridge, isSizeLimitError, recoveryFloorBytes } from "../src/bridge.ts";
+import {
+	DotBridge,
+	isSizeLimitError,
+	pendingRecoveryFile,
+	readPendingRecovery,
+	recoveryFloorBytes,
+} from "../src/bridge.ts";
 import { DEFAULT_REQUEST_BUDGET, REQUEST_BUDGET_ENV } from "../src/extensions/screenshot-context.ts";
 import { CEILING_MARGIN, LIMITS_FILE_ENV, limitsFile, readLimits } from "../src/limits.ts";
 import { DEFAULT_ROTATION } from "../src/rotation.ts";
@@ -15,7 +21,7 @@ import type {
 	SupervisorEvent,
 	SupervisorState,
 } from "../src/supervisor.ts";
-import { UploadStore } from "../src/uploads.ts";
+import { MAX_IMAGE_BYTES, UploadStore } from "../src/uploads.ts";
 import { fakeSupervisor, tempDir, waitFor } from "./helpers.ts";
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 1, 2, 3]);
@@ -785,6 +791,85 @@ describe("recovery while another message arrives", () => {
 	});
 });
 
+describe("attachments left out of a message (T8)", () => {
+	it("tells the user which attachments were left out and why, and still sends the ones that fit", async () => {
+		vi.stubEnv(REQUEST_BUDGET_ENV, "20000"); // Half of it is the message's image budget.
+		const test = setup();
+		const { engine, bridge, client, received, uploads } = test;
+		engine.plan.look = [["answer"]];
+		const bytes = Buffer.concat([PNG, Buffer.alloc(7000)]);
+		const a = await uploads.receive(Readable.from([bytes]), { name: "a.png" });
+		const b = await uploads.receive(Readable.from([bytes]), { name: "b.png" });
+		if (!a.ok || !b.ok) throw new Error("the test's upload failed");
+
+		await bridge.handle(client, {
+			type: "send",
+			text: "look",
+			attachments: [
+				{ uploadId: a.file.uploadId, name: a.file.name },
+				{ uploadId: b.file.uploadId, name: b.file.name },
+			],
+		});
+		await waitFor(() => received.some((p) => p.type === "message_done" && p.text.includes("Echo: look")));
+
+		// The window is told exactly which attachment was left out and why, in one warning.
+		expect(received.filter((p) => p.type === "toast")).toEqual([
+			{
+				type: "toast",
+				level: "warning",
+				message: expect.stringContaining("b.png"),
+			},
+		]);
+		// The message itself still went out, carrying the image that fit.
+		expect(engine.prompts[0]?.images).toHaveLength(1);
+	});
+
+	it("tells the user when one image is larger than a single attachment may be", async () => {
+		const test = setup();
+		const { engine, bridge, client, received, uploads } = test;
+		engine.plan.look = [["answer"]];
+		const huge = Buffer.concat([PNG, Buffer.alloc(MAX_IMAGE_BYTES)]);
+		const stored = await uploads.receive(Readable.from([huge]), { name: "huge.png" });
+		if (!stored.ok) throw new Error("the test's upload failed");
+
+		await bridge.handle(client, {
+			type: "send",
+			text: "look",
+			attachments: [{ uploadId: stored.file.uploadId, name: stored.file.name }],
+		});
+		await waitFor(() => received.some((p) => p.type === "message_done" && p.text.includes("Echo: look")));
+
+		expect(received.filter((p) => p.type === "toast")).toEqual([
+			{
+				type: "toast",
+				level: "warning",
+				message: expect.stringContaining("huge.png"),
+			},
+		]);
+		expect(engine.prompts[0]?.images).toBeUndefined();
+	});
+
+	it("says nothing when no attachment was left out", async () => {
+		const test = setup();
+		const { engine, bridge, client, received, uploads } = test;
+		engine.plan.look = [["answer"]];
+		const stored = await uploads.receive(Readable.from([PNG]), { name: "a.png" });
+		if (!stored.ok) throw new Error("the test's upload failed");
+
+		await bridge.handle(client, { type: "send", text: "plain" });
+		await waitFor(() => received.some((p) => p.type === "message_done" && p.text.includes("Echo: plain")));
+		await bridge.handle(client, {
+			type: "send",
+			text: "look",
+			attachments: [{ uploadId: stored.file.uploadId, name: stored.file.name }],
+		});
+		await waitFor(() => received.some((p) => p.type === "message_done" && p.text.includes("Echo: look")));
+
+		expect(received.filter((p) => p.type === "toast")).toEqual([]);
+		expect(engine.prompts[1]?.images).toHaveLength(1);
+	});
+});
+
 describe("the real engine, unchanged", () => {
 	it("still shows the window's error for a provider failure that is not about size", async () => {
 		const dataDir = tempDir();
@@ -897,5 +982,234 @@ describe("the learned ceiling (S1)", () => {
 		} finally {
 			await supervisor.stop();
 		}
+	});
+});
+
+describe("a recovery the daemon did not survive (T9)", () => {
+	/** A bridge on an existing state folder, like the next run after a restart. */
+	function restart(engine: FakeEngine, dataDir: string) {
+		const bridge = new DotBridge(engine as unknown as AgentSupervisor, {
+			dataDir,
+			log: () => {},
+			rotation: DEFAULT_ROTATION,
+		});
+		const received: ServerPayload[] = [];
+		bridge.attach({ send: (payload: ServerPayload) => received.push(payload) });
+		return { bridge, received, toasts: () => received.filter((p) => p.type === "toast") };
+	}
+
+	/** Gates the `which`-th prompt with this text, like a request still on its way to the engine. */
+	function hold(engine: FakeEngine, text: string, which: number) {
+		const original = engine.request.bind(engine);
+		let release: () => void = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let seen = 0;
+		let held = false;
+		engine.request = async (command: AgentRecord) => {
+			if (String(command.type) === "prompt" && String(command.message) === text && ++seen === which) {
+				held = true;
+				await gate;
+			}
+			return original(command);
+		};
+		return { release: () => release(), held: () => held };
+	}
+
+	it("clears the marker when the recovery completes, and the next startup is silent", async () => {
+		const test = setup();
+		const { engine, dir, received } = test;
+		engine.plan.big = [["size"], ["answer"]];
+
+		await send(test, "big");
+
+		// Answered, so nothing was left pending; a marker still here would warn the user wrongly.
+		expect(errors(received)).toEqual([]);
+		expect(readPendingRecovery(pendingRecoveryFile(dir))).toBe(false);
+		expect(restart(engine, dir).toasts()).toEqual([]);
+	});
+
+	it("reports a marker the interrupted recovery left, once, and clears it", async () => {
+		const test = setup();
+		const { engine, dir } = test;
+		engine.plan.big = [["size"], ["answer"]];
+		const held = hold(engine, "big", 2);
+
+		void test.bridge.handle(test.client, { type: "send", text: "big" });
+		await waitFor(() => held.held());
+		expect(readPendingRecovery(pendingRecoveryFile(dir))).toBe(true);
+
+		// The daemon exits here, before the message was sent again: the failure was already hidden.
+		const next = restart(engine, dir);
+		expect(next.toasts()).toEqual([
+			{ type: "toast", level: "warning", message: expect.stringContaining("too large") },
+		]);
+		const toast = next
+			.toasts()
+			.find((p): p is Extract<ServerPayload, { type: "toast" }> => p.type === "toast");
+		expect(toast?.message).toContain("could not be answered");
+		expect(readPendingRecovery(pendingRecoveryFile(dir))).toBe(false);
+		// Said once: a further run has nothing left to report.
+		expect(restart(engine, dir).toasts()).toEqual([]);
+
+		held.release();
+		await waitFor(() => engine.prompts.filter((p) => p.message === "big").length === 2);
+	});
+
+	it("ignores a missing or corrupt marker instead of breaking startup", async () => {
+		const test = setup();
+		const { engine, dir } = test;
+		expect(readPendingRecovery(pendingRecoveryFile(dir))).toBe(false);
+		for (const garbage of ["not json {", "null", '"too_large"', '{"kind":"something-else"}', "[]"]) {
+			writeFileSync(pendingRecoveryFile(dir), garbage);
+			expect(restart(engine, dir).toasts(), garbage).toEqual([]);
+		}
+	});
+
+	it("still reads a marker written before owners existed", () => {
+		const test = setup();
+		const { engine, dir } = test;
+		writeFileSync(pendingRecoveryFile(dir), `${JSON.stringify({ kind: "too_large" })}\n`);
+
+		expect(restart(engine, dir).toasts()).toEqual([
+			{ type: "toast", level: "warning", message: expect.stringContaining("too large") },
+		]);
+		expect(readPendingRecovery(pendingRecoveryFile(dir))).toBe(false);
+	});
+
+	it("keeps a second recovery's marker when the first finishes before it is dispatched", async () => {
+		const test = setup();
+		const { engine, bridge, client, received, dir } = test;
+		engine.plan.alpha = [["size"], ["answer"]];
+		engine.plan.beta = [["size"], ["answer"]];
+		const alpha = hold(engine, "alpha", 2);
+		const beta = hold(engine, "beta", 2);
+		try {
+			void bridge.handle(client, { type: "send", text: "alpha" });
+			await waitFor(() => alpha.held());
+			void bridge.handle(client, { type: "send", text: "beta" });
+			await waitFor(() => beta.held());
+
+			// alpha finishes while beta is still held before dispatch: beta's notice must survive.
+			alpha.release();
+			await waitFor(() => received.some((p) => p.type === "message_done" && p.text.includes("Echo: alpha")));
+			expect(readPendingRecovery(pendingRecoveryFile(dir))).toBe(true);
+
+			beta.release();
+			await waitFor(() => received.some((p) => p.type === "message_done" && p.text.includes("Echo: beta")));
+			expect(readPendingRecovery(pendingRecoveryFile(dir))).toBe(false);
+			expect(userMessages(received)).toEqual(["alpha", "beta"]);
+		} finally {
+			alpha.release();
+			beta.release();
+		}
+	});
+
+	it("keeps the first recovery's marker when the later one finishes first", async () => {
+		const test = setup();
+		const { engine, bridge, client, received, dir } = test;
+		engine.plan.alpha = [["size"], ["answer"]];
+		engine.plan.beta = [["size"], ["answer"]];
+		const alpha = hold(engine, "alpha", 2);
+		const beta = hold(engine, "beta", 2);
+		try {
+			void bridge.handle(client, { type: "send", text: "alpha" });
+			await waitFor(() => alpha.held());
+			void bridge.handle(client, { type: "send", text: "beta" });
+			await waitFor(() => beta.held());
+
+			beta.release();
+			await waitFor(() => received.some((p) => p.type === "message_done" && p.text.includes("Echo: beta")));
+			expect(readPendingRecovery(pendingRecoveryFile(dir))).toBe(true);
+
+			alpha.release();
+			await waitFor(() => received.some((p) => p.type === "message_done" && p.text.includes("Echo: alpha")));
+			expect(readPendingRecovery(pendingRecoveryFile(dir))).toBe(false);
+			expect(userMessages(received)).toEqual(["alpha", "beta"]);
+		} finally {
+			alpha.release();
+			beta.release();
+		}
+	});
+
+	it("does not let a recovery that fails to dispatch clear another's marker", async () => {
+		const test = setup();
+		const { engine, bridge, client, received, dir } = test;
+		engine.plan.alpha = [["size"], ["answer"]];
+		engine.plan.beta = [["size"], ["answer"]];
+		const alpha = hold(engine, "alpha", 2);
+		// beta's re-send never reaches the engine: a failed dispatch, not a held one.
+		const original = engine.request.bind(engine);
+		let betaPrompts = 0;
+		engine.request = async (command: AgentRecord) => {
+			if (String(command.type) === "prompt" && String(command.message) === "beta" && ++betaPrompts === 2) {
+				throw new Error("engine went away");
+			}
+			return original(command);
+		};
+		try {
+			void bridge.handle(client, { type: "send", text: "alpha" });
+			await waitFor(() => alpha.held());
+			await bridge.handle(client, { type: "send", text: "beta" });
+			// beta was told the failure; alpha is still in flight, and its notice must still be owed.
+			await waitFor(() => errors(received).length === 1);
+			expect(readPendingRecovery(pendingRecoveryFile(dir))).toBe(true);
+		} finally {
+			alpha.release();
+		}
+		await waitFor(() => received.some((p) => p.type === "message_done" && p.text.includes("Echo: alpha")));
+		expect(readPendingRecovery(pendingRecoveryFile(dir))).toBe(false);
+	});
+
+	it("a failed re-send leaves no entry that would swallow a later message with the same text", async () => {
+		const test = setup();
+		const { engine, bridge, client, received, dir } = test;
+		engine.plan.alpha = [["size"], ["answer"]];
+		engine.plan.beta = [["size"], ["answer"], ["answer"]];
+		const alpha = hold(engine, "alpha", 2);
+		// beta's re-send never reaches the engine: a failed dispatch, not a held one.
+		const original = engine.request.bind(engine);
+		let betaPrompts = 0;
+		engine.request = async (command: AgentRecord) => {
+			if (String(command.type) === "prompt" && String(command.message) === "beta" && ++betaPrompts === 2) {
+				throw new Error("engine went away");
+			}
+			return original(command);
+		};
+		try {
+			void bridge.handle(client, { type: "send", text: "alpha" });
+			await waitFor(() => alpha.held());
+			await bridge.handle(client, { type: "send", text: "beta" });
+			await waitFor(() => errors(received).length === 1);
+
+			// The user types "beta" again: the failed re-send left nothing to claim this message.
+			await send(test, "beta");
+			expect(userMessages(received).filter((text) => text === "beta")).toHaveLength(2);
+		} finally {
+			alpha.release();
+		}
+		await waitFor(() => received.some((p) => p.type === "message_done" && p.text.includes("Echo: alpha")));
+		expect(userMessages(received).filter((text) => text === "alpha")).toHaveLength(1);
+		expect(readPendingRecovery(pendingRecoveryFile(dir))).toBe(false);
+	});
+
+	it("still shows a legitimate message that repeats a recovery's text", async () => {
+		const test = setup();
+		const { engine, bridge, client, received, dir } = test;
+		engine.plan.alpha = [["size"], ["answer"], ["answer"]];
+		const alpha = hold(engine, "alpha", 2);
+		try {
+			void bridge.handle(client, { type: "send", text: "alpha" });
+			await waitFor(() => alpha.held());
+			// The user types "alpha" again while the recovery's copy is still on its way. The two are
+			// indistinguishable, so the registry answers exactly one of them: two typed messages, two shown.
+			await send(test, "alpha");
+		} finally {
+			alpha.release();
+		}
+		await waitFor(() => userMessages(received).filter((text) => text === "alpha").length === 2);
+		expect(errors(received)).toEqual([]);
+		expect(readPendingRecovery(pendingRecoveryFile(dir))).toBe(false);
 	});
 });

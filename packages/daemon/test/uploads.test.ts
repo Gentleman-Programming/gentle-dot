@@ -10,6 +10,9 @@ import {
 	attachmentBudgetBytes,
 	composePrompt,
 	MAX_IMAGE_BYTES,
+	OMITTED_OVER_BUDGET,
+	OMITTED_TOO_LARGE,
+	omittedAttachmentsToast,
 	sanitizeName,
 	sniffMime,
 	splitAttachments,
@@ -375,6 +378,56 @@ describe("the total attachment budget for one message", () => {
 
 	it("leaves a text-only message exactly as it was", () => {
 		expect(composePrompt("just text", [], { images: true, read })).toEqual({ message: "just text" });
+	});
+
+	it("reports every image the message left out of its budget, with the reason", () => {
+		const files = [
+			imageOf("a.png", 400),
+			imageOf("b.png", 400),
+			imageOf("c.png", 400),
+			imageOf("d.png", 400),
+		];
+		const { images, omitted } = composePrompt("look", files, { images: true, read, budget: 1000 });
+		expect(images).toHaveLength(2);
+		expect(omitted).toEqual([
+			{ name: "c.png", reason: OMITTED_OVER_BUDGET },
+			{ name: "d.png", reason: OMITTED_OVER_BUDGET },
+		]);
+	});
+
+	it("reports an image larger than any single attachment may be, and keeps the ones that fit", () => {
+		const files = [imageOf("huge.png", MAX_IMAGE_BYTES + 1), imageOf("a.png", 400)];
+		const { images, omitted } = composePrompt("x", files, { images: true, read, budget: 1000 });
+		expect(images).toHaveLength(1);
+		expect(omitted).toEqual([{ name: "huge.png", reason: OMITTED_TOO_LARGE }]);
+	});
+
+	it("reports nothing when every attachment was sent", () => {
+		const fitting = composePrompt("x", [imageOf("a.png", 400), imageOf("b.png", 400)], {
+			images: true,
+			read,
+			budget: 1000,
+		});
+		expect(fitting.images).toHaveLength(2);
+		expect(fitting.omitted).toBeUndefined();
+		expect(composePrompt("just text", [], { images: true, read }).omitted).toBeUndefined();
+	});
+
+	it("reports nothing for a model that cannot see images: that case is not the budget's", () => {
+		const { omitted } = composePrompt("x", [imageOf("a.png", 400)], { images: false, read, budget: 1 });
+		expect(omitted).toBeUndefined();
+	});
+
+	it("says it for the user: one named attachment per reason, singular or plural", () => {
+		expect(omittedAttachmentsToast([{ name: "a.png", reason: OMITTED_TOO_LARGE }])).toBe(
+			`1 attachment was not sent: a.png (${OMITTED_TOO_LARGE}).`,
+		);
+		expect(
+			omittedAttachmentsToast([
+				{ name: "b.png", reason: OMITTED_OVER_BUDGET },
+				{ name: "c.png", reason: OMITTED_OVER_BUDGET },
+			]),
+		).toBe(`2 attachments were not sent: b.png (${OMITTED_OVER_BUDGET}), c.png (${OMITTED_OVER_BUDGET}).`);
 	});
 });
 
