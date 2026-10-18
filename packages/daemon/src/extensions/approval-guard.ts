@@ -37,7 +37,7 @@
 import { realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { pruneScreenshots } from "./screenshot-context.ts";
+import { applyRequestBudget, pruneScreenshots } from "./screenshot-context.ts";
 
 export const POLICY_ENV = "GENTLE_DOT_CONNECTOR_POLICY";
 /** The status key of a connector draft; the daemon reads it, nothing shows it. */
@@ -462,8 +462,11 @@ export default function approvalGuard(pi: ExtensionAPI, options: { subagent?: bo
 			},
 		});
 
-	// Each model call carries only the last computer screenshot (S24.10).
-	pi.on("context", (event) => ({ messages: pruneScreenshots(event.messages) }));
+	// Each model call carries only the last computer screenshot (S24.10) and stays under the request
+	// size budget, so accumulated images cannot break the provider (S1/S2).
+	pi.on("context", (event) => ({
+		messages: applyRequestBudget(pruneScreenshots(event.messages)),
+	}));
 
 	pi.on("tool_call", async (event, ctx) => {
 		const annotations = event.toolName.startsWith("mcp__")
