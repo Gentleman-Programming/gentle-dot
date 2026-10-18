@@ -648,7 +648,28 @@ pub fn ensure_first_run() -> io::Result<Report> {
         .to_str()
         .ok_or_else(|| invalid("niri: executable path is not utf-8"))?;
     let manifest = Manifest::from_config_file(&config_file);
-    first_run(&mut RealConfigIo, &manifest, executable, &stamp(), kdl_binds::TOGGLE_ARG, kdl_binds::DEFAULT_KEY)
+    ensure_bindings(&mut RealConfigIo, &manifest, executable, &stamp())
+}
+
+/// Both managed bindings, one pass each: the panel toggle, then the Stop
+/// fallback (`Alt+Shift+Escape`) that the compositor owns on Niri, where the
+/// global-shortcut plugin may deliver nothing. Each pass is idempotent and
+/// touches only its own argument, so neither erases the other and a snippet
+/// that already binds both writes nothing. The report merges the passes: a
+/// `true` means that pass wrote, and the backup names the first one taken.
+pub fn ensure_bindings(
+    io: &mut impl ConfigIo,
+    manifest: &Manifest,
+    executable: &str,
+    stamp: &str,
+) -> io::Result<Report> {
+    let toggle = first_run(io, manifest, executable, stamp, kdl_binds::TOGGLE_ARG, kdl_binds::DEFAULT_KEY)?;
+    let stop = first_run(io, manifest, executable, stamp, kdl_binds::STOP_ARG, kdl_binds::STOP_KEY)?;
+    Ok(Report {
+        wrote_snippet: toggle.wrote_snippet || stop.wrote_snippet,
+        wrote_include: toggle.wrote_include || stop.wrote_include,
+        backup: toggle.backup.or(stop.backup),
+    })
 }
 
 #[cfg(test)]
@@ -781,6 +802,37 @@ mod tests {
 
     fn manifest() -> Manifest {
         Manifest::new(Path::new("/home/someone/.config/niri"))
+    }
+
+    #[test]
+    fn the_stop_binding_is_written_alongside_the_toggle() {
+        let mut io = Fake::new(&[("/home/someone/.config/niri/config.kdl", CONFIG)]);
+        let report = ensure_bindings(&mut io, &manifest(), EXE, "20260101T000000Z").unwrap();
+        let snippet = io.files[&manifest().snippet].clone();
+        assert_eq!(
+            kdl_binds::bound_key(&snippet, kdl_binds::TOGGLE_ARG).as_deref(),
+            Some(kdl_binds::DEFAULT_KEY)
+        );
+        assert_eq!(kdl_binds::bound_key(&snippet, kdl_binds::STOP_ARG).as_deref(), Some(kdl_binds::STOP_KEY));
+        assert!(report.wrote_snippet && report.wrote_include);
+        // One app-owned snippet, one include line in the user's own config.
+        assert_eq!(io.files[&manifest().config_file].matches(kdl_binds::SNIPPET_STEM).count(), 1);
+    }
+
+    #[test]
+    fn a_snippet_binding_both_is_left_untouched() {
+        let config = with_include(CONFIG).unwrap();
+        let snippet = kdl_binds::upsert_binding(SNIPPET, EXE, kdl_binds::STOP_ARG, kdl_binds::STOP_KEY);
+        let mut io = Fake::new(&[
+            ("/home/someone/.config/niri/config.kdl", config.as_str()),
+            ("/home/someone/.config/niri/gentle-dot.kdl", snippet.as_str()),
+        ]);
+        assert_eq!(
+            ensure_bindings(&mut io, &manifest(), EXE, "20260101T000000Z").unwrap(),
+            Report { wrote_snippet: false, wrote_include: false, backup: None }
+        );
+        assert!(io.written.is_empty());
+        assert!(io.validated.is_empty());
     }
 
     #[test]
