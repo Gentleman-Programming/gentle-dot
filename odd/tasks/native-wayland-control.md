@@ -29,7 +29,9 @@ Explicit desktop-global consent; no compositor patches and no external MCP serve
 - T3b2 [S1-S4] route=worker commit=330b0d6 done: capture buffers and encoding using bounded transport and validated output geometry.
 - T4a [S1-S5] route=worker commit=cd3f719 done: bounded virtual-pointer actions and owned button cleanup, no production startup.
 - T4b [S1-S5] route=worker commit=ce83e8f done: virtual-keyboard/keymap input and owned modifier cleanup, no production startup.
-- T5 [S1-S5] route=worker commit=pending: app integration, tool catalog, session lifecycle, Stop, Yolo and truthful UI.
+- T5a [S1-S5] route=worker commit=ed2a373 done: internal adapter (selection, cancellation registry, fan-out) and fused bounded screenshot normalization; injected backend only, no startup/UI.
+- T5b [S1-S5] route=worker commit=pending: concrete Wayland backend over the existing primitives plus Niri focused-output selection.
+- T5c [S1-S5] route=worker commit=pending: app integration, tool catalog, session lifecycle, Stop, Yolo and truthful UI.
 - T6 [S3-S6] route=verify commit=pending: independent safety/portability verification, docs and functional checks.
 - T7 [S6] route=parent commit=pending: build package and await user test; no native-control publication before approval.
 
@@ -97,3 +99,5 @@ Explicit desktop-global consent; no compositor patches and no external MCP serve
 - L23: Pointer committed cd3f719 with19focused/82linux/full839passed6ignored(worker evidence). Independent verifier found per-operation globals leaked on borrowed connections; pointer/capture/output now consume connections. By-value Connection alone does NOT enforce exclusivity because Clone exists: production owner must open fresh connection per operation and never retain clones. Teardown sends owned-button release before pointer/manager destroy and output release, then success sync. Dead-peer server button residue remains unproven; do not claim disconnect synthesizes release. Native assess unassessable due unrelated untracked declaration; no approval asserted. Next keyboard uses same exclusive operation ownership.
 
 - L24: Keyboard committed ce83e8f separately from the dirty adapter (selective index module declarations; no adapter sources in keyboard commit). Independent verifier PASS no blockers: six exact generated maps compile with libxkbcommon1.13.2 incl unicode/punctuation and negative controls; focused24pass. Worker full863pass6ignored. Docs now distinguish parser-verified from real-compositor unverified. No production input. Adapter remains injected Backend only; independent review mvdf7qvc-i-hs7c checks normalization bounds/geometry and registry race before concrete backend/startup integration.
+
+- L25 — Adaptador interno y normalización fusionada en ed2a373 (adapter + capture/pixels/normalize): el verificador independiente encontró 3 bloqueos en la normalización JPEG (decodificaba antes de validar dimensiones, no contaba la memoria viva y el resize no era cancelable); el corrector eliminó el ida y vuelta JPEG del camino de producción (rotar+reducir una vez, codificar una vez, con tope y cancelación por fila). 56 tests acotados en verde, sin compositor real. T5b (backend concreto) en curso por worker; Control::end sigue sin cablear y Stop no se declara.
