@@ -2,6 +2,7 @@ import type { ClientMessage } from "@gentle-dot/protocol";
 import { type DragEvent, type KeyboardEvent as ReactKeyboardEvent, useRef, useState } from "react";
 import { chatScrollKey, scrollChatTo } from "../chat-scroll.ts";
 import { openUrl as openExternal } from "../desktop.ts";
+import { isMac } from "../shortcut.ts";
 import { activeTitle, type DotAction, type DotState, isBusy, needsAccount } from "../store.ts";
 import type { Uploader } from "../uploads.ts";
 import { useAttachments } from "../useAttachments.ts";
@@ -538,12 +539,14 @@ function RoseButton({ controls }: { controls: PanelWindowControls }) {
 
 function FullscreenButton({ controls }: { controls: PanelWindowControls }) {
 	const label = controls.fullscreen ? "Exit full screen" : "Full screen";
+	// App.tsx watches meta-or-ctrl + shift + F, so only the Mac names ⌘ here (T18).
+	const keys = isMac() ? "⌘⇧F" : "Ctrl+Shift+F";
 	return (
 		<button
 			type="button"
 			className="icon"
 			aria-label={label}
-			title={`${label} (⌘⇧F)`}
+			title={`${label} (${keys})`}
 			aria-pressed={controls.fullscreen}
 			onClick={() => controls.setFullscreen(!controls.fullscreen)}
 		>

@@ -5,8 +5,13 @@ use crate::computer::app::PANIC_SHORTCUT;
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
 
 pub const UNREADABLE: &str = "Gentle Dot cannot use that key combination. Try another one.";
+/// What Settings answers when the combination still needs a modifier. macOS keeps its glyphs
+/// byte for byte; every other build names the keys as `spell` and `RESERVED_PANIC` do.
+pub const NEEDS_MODIFIER_MACOS: &str = "Add ⌘, ⌥ or ⌃ (Super, Alt or Ctrl), or use a function key (F1–F24). Shift alone would capture your typing.";
+pub const NEEDS_MODIFIER_OTHER: &str = "Add Super, Alt or Ctrl, or use a function key (F1–F24). Shift alone would capture your typing.";
 pub const NEEDS_MODIFIER: &str =
-    "Add ⌘, ⌥ or ⌃ (Super, Alt or Ctrl), or use a function key (F1–F24). Shift alone would capture your typing.";
+    if cfg!(target_os = "macos") { NEEDS_MODIFIER_MACOS } else { NEEDS_MODIFIER_OTHER };
+
 pub const RESERVED_PANIC: &str = "⌥⇧Esc (Alt+Shift+Esc) is reserved for stopping computer control.";
 pub const ESC_ALONE: &str = "Esc alone closes the panel. Add a modifier key or choose another key.";
 pub const TAKEN: &str = "That shortcut is taken by the system or another app.";
@@ -257,5 +262,18 @@ mod tests {
         let host = FakeHost::default();
         assert_eq!(apply(&host, None, "F5"), Ok("F5".to_string()));
         assert_eq!(calls(&host), ["bind F5", "save F5", "tray F5"]);
+    }
+
+    #[test]
+    fn the_modifier_hint_speaks_this_platforms_notation() {
+        // macOS keeps its glyphs; every other build names the keys the way `spell` and
+        // `RESERVED_PANIC` already do, never ⌘/⌥/⌃.
+        let macos = "Add ⌘, ⌥ or ⌃ (Super, Alt or Ctrl), or use a function key (F1–F24). Shift alone would capture your typing.";
+        let words = "Add Super, Alt or Ctrl, or use a function key (F1–F24). Shift alone would capture your typing.";
+        let expected = if cfg!(target_os = "macos") { macos } else { words };
+        assert_eq!(NEEDS_MODIFIER, expected);
+        assert!(!words.chars().any(|c| "⌘⌥⌃".contains(c)), "{words}");
+        assert_eq!(NEEDS_MODIFIER_MACOS, macos);
+        assert_eq!(NEEDS_MODIFIER_OTHER, words);
     }
 }

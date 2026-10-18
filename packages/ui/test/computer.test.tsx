@@ -4,6 +4,7 @@ import { APP_REQUIRED, type ConnectorInfo } from "@gentle-dot/protocol";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { yoloNote } from "../src/components/Computer.tsx";
 import { type DotState, initialState } from "../src/store.ts";
 
 const HELPER = "http://127.0.0.1:51234/mcp";
@@ -72,6 +73,14 @@ const notion: ConnectorInfo = {
 const DEBUG_NOTE =
 	"Debug builds lose these permissions on every rebuild because macOS ties them to the app's signature; grant them again after updating.";
 
+/** The daemon's own Computer description, shown on a Mac: it must keep saying "this Mac" there. */
+const MAC_SENDS =
+	"Click, type, and open apps on this Mac during that session. The app asks you again before risky actions.";
+
+/** What the Linux panel must say instead: the same actions, on this desktop, not "this Mac". */
+const DESKTOP_SENDS =
+	"Click, type, and open apps on this desktop during that session. The app asks you again only when it detects a risky action.";
+
 function connectorsOpen(list: ConnectorInfo[]): DotState {
 	return { ...h.state, connectors: { open: true, list } };
 }
@@ -95,6 +104,7 @@ beforeEach(() => {
 	h.endpoint = { url: HELPER, token: KEY };
 	h.permissions = { accessibility: false, screenRecording: true };
 	h.status = { active: false };
+	h.platform = { os: "macos", policy: "targeted", stopShortcut: "⌥⇧Esc" };
 	h.listeners.clear();
 	h.send = vi.fn();
 	h.state = { ...initialState, connection: "open", agentState: "idle" };
@@ -369,6 +379,47 @@ describe("connector changes go through the app (S25.2)", () => {
 	});
 });
 
+describe("the yolo note names the Stop this build really has (T18)", () => {
+	const MAC_NOTE =
+		"Yolo mode lets the assistant send, pay, delete, and submit without asking you first. It turns itself off after 1 hour or when the app quits; Stop and ⌥⇧Esc still work.";
+	const NO_KEY_NOTE =
+		"Yolo mode lets the assistant send, pay, delete, and submit without asking you first. It turns itself off after 1 hour or when the app quits; Stop still works.";
+
+	it("reads correctly with no shortcut and keeps the macOS and Linux spellings exact", () => {
+		expect(yoloNote("")).toBe(NO_KEY_NOTE);
+		expect(yoloNote("⌥⇧Esc")).toBe(MAC_NOTE);
+		expect(yoloNote("Alt+Shift+Escape")).toBe(
+			"Yolo mode lets the assistant send, pay, delete, and submit without asking you first. It turns itself off after 1 hour or when the app quits; Stop and Alt+Shift+Escape still work.",
+		);
+	});
+
+	it("the panel with no reported shortcut shows the whole sentence, never the broken one", async () => {
+		h.platform = { os: "other", policy: "targeted", stopShortcut: "" };
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		expect(within(entry).getByText(NO_KEY_NOTE)).toBeInTheDocument();
+		expect(within(entry).queryByText(/Stop still work\./)).toBeNull();
+	});
+
+	it("the macOS panel keeps its exact sentence", async () => {
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		expect(within(entry).getByText(MAC_NOTE)).toBeInTheDocument();
+	});
+});
+
+describe("the Computer description on a Mac (T18)", () => {
+	it("shows the daemon's sentence verbatim, never the desktop one", async () => {
+		h.state = connectorsOpen([computerEntry({ sends: MAC_SENDS })]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		expect(within(entry).getByText(MAC_SENDS)).toBeInTheDocument();
+		expect(within(entry).queryByText(DESKTOP_SENDS)).toBeNull();
+	});
+});
+
 describe("on a Linux desktop (T5d)", () => {
 	beforeEach(() => {
 		h.platform = { os: "linux", policy: "desktopGlobal", stopShortcut: "Alt+Shift+Escape" };
@@ -386,6 +437,14 @@ describe("on a Linux desktop (T5d)", () => {
 		expect(within(entry).queryByText(/macOS ties them to the app's signature/)).toBeNull();
 		// Yolo names the Stop this build really has.
 		expect(within(entry).getByText(/Alt\+Shift\+Escape still work/)).toBeInTheDocument();
+	});
+
+	it("describes this desktop, not a Mac", async () => {
+		h.state = connectorsOpen([computerEntry({ sends: MAC_SENDS })]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		expect(within(entry).getByText(DESKTOP_SENDS)).toBeInTheDocument();
+		expect(within(entry).queryByText(/this Mac/)).toBeNull();
 	});
 
 	it("names the desktop, not a Mac, while a session runs", async () => {

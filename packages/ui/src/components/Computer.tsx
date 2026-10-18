@@ -35,10 +35,11 @@ const PERMISSIONS: [ComputerPermission, string][] = [
 export const DEBUG_BUILD_NOTE =
 	"Debug builds lose these permissions on every rebuild because macOS ties them to the app's signature; grant them again after updating.";
 
-/** Yolo mode's own note, naming the Stop this build really has (T5d). */
+/** Yolo mode's own note, naming the Stop this build really has (T5d); no key, no broken grammar. */
 export function yoloNote(stopShortcut: string): string {
 	const stop = stopShortcut ? `Stop and ${stopShortcut}` : "Stop";
-	return `Yolo mode lets the assistant send, pay, delete, and submit without asking you first. It turns itself off after 1 hour or when the app quits; ${stop} still work.`;
+	const still = stopShortcut ? "still work" : "still works";
+	return `Yolo mode lets the assistant send, pay, delete, and submit without asking you first. It turns itself off after 1 hour or when the app quits; ${stop} ${still}.`;
 }
 
 /**
@@ -47,6 +48,14 @@ export function yoloNote(stopShortcut: string): string {
  */
 export const GLOBAL_CONTROL_NOTE =
 	"Desktop-global control: every visible app can receive input, and there is no reliable per-app exclusion.";
+
+/**
+ * The daemon's connector metadata says "on this Mac", which is false of a Linux panel; the panel
+ * composes the true sentence from the platform it already has instead, so macOS keeps the daemon's
+ * words byte for byte (T18).
+ */
+export const DESKTOP_SENDS_NOTE =
+	"Click, type, and open apps on this desktop during that session. The app asks you again only when it detects a risky action.";
 
 const NO_IMAGES_NOTE =
 	"The current model does not accept images, so the assistant cannot see your screen. Choose a model that does in Profiles.";
@@ -117,7 +126,7 @@ export function ComputerEntry({ info, controls }: ComputerEntryProps) {
 			{info ? (
 				<>
 					<p className="connector-note">{info.reads}</p>
-					<p className="connector-note">{info.sends}</p>
+					<p className="connector-note">{platform.os === "linux" ? DESKTOP_SENDS_NOTE : info.sends}</p>
 				</>
 			) : null}
 			<ul className="computer-permissions">
