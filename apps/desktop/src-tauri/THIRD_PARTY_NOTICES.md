@@ -28,6 +28,26 @@ the pool file is read back with safe `File` reads (no `mmap`); decoding
 targets packed BGRA so the established `encode.rs` JPEG path is reused; and
 there is no cursor sampling, primary-output or front-app claim.
 
+The pointer actions (`src/computer/linux/pointer.rs`) follow the
+`wlr-virtual-pointer-unstable-v1` request shape (`motion_absolute` with
+extents, `button` with evdev codes, `axis` with 15-unit notches, `frame`)
+and the output-bound mapping of Niri's `src/protocols/virtual_pointer.rs`
+(device output from `create_virtual_pointer_with_output`, normalized
+position mapped through `compute_absolute_location` in `src/input/mod.rs`),
+with these deliberate divergences: the device is always created bound to the
+caller-selected output with selected-output logical coordinates and extents
+(never the reference's union bounding box, never clamped; a v1 manager
+fails closed instead of guessing); each operation consumes its own
+`Connection` and closes it on return, with a scope guard that releases only
+its own held button and explicitly destroys the device, its manager and
+(v3+) the output on every exit — so the destructor-less registry can never
+accumulate on a shared connection (no forked holder process, no pidfile, no
+held input across operations); and every wait, pause and the confirming
+`sync` barrier is deadline/cancel bounded instead of blocking `roundtrip`s.
+Whether a closed connection releases a stuck button server-side is
+compositor-defined and unproven here, so the client always sends release
+before destroy itself and never relies on server-side cleanup.
+
 - Protocol spec: `wlr-screencopy-unstable-v1.xml` (wayland-protocols-wlr)
 - License: MIT, Copyright (c) 2018 Simon Ser, Copyright (c) 2019 Andri Yngvason
 

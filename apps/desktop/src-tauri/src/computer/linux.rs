@@ -1,13 +1,16 @@
-//! Native Linux/Wayland backend (T3a-T3b1, S1-S4): bounded transport,
-//! protocol capability discovery, and bounded `wl_output` plus
-//! `zxdg_output_v1` monitor enumeration against a stock Wayland compositor.
+//! Native Linux/Wayland backend (T3a-T4a, S1-S5): bounded transport,
+//! protocol capability discovery, bounded `wl_output` plus
+//! `zxdg_output_v1` monitor enumeration, bounded full-output screencopy
+//! capture, and bounded virtual-pointer actions against a stock Wayland
+//! compositor.
 //!
-//! Discovery and enumeration only: this module never binds input (virtual
-//! pointer/keyboard) globals, starts no backend, and performs no input work
-//! (T4). Capture ([`capture`]) binds only the screencopy manager, `wl_shm`,
-//! and the one selected output, and returns JPEG bytes plus validated
-//! geometry; there is no production startup, no UI, and no cursor or primary
-//! claims anywhere in this module.
+//! Discovery, enumeration, capture and pointer input only: this module binds
+//! no virtual-keyboard globals, starts no backend, and performs no keyboard
+//! work (T4b). Capture ([`capture`]) binds only the screencopy manager,
+//! `wl_shm`, and the one selected output; pointer ([`pointer`]) binds only
+//! the virtual-pointer manager and the one selected output through
+//! `create_virtual_pointer_with_output`. There is no production startup, no
+//! UI, and no cursor or primary claims anywhere in this module.
 //! deadline and a cooperative [`transport::CancelHandle`]; there is no
 //! unbounded connect or roundtrip anywhere in this module. Ambient
 //! `WAYLAND_SOCKET` adoption is refused (shared protocol stream); fake-peer
@@ -19,6 +22,7 @@ pub mod capture;
 pub mod geometry;
 pub mod outputs;
 pub mod pixels;
+pub mod pointer;
 pub mod transport;
 
 #[cfg(test)]
@@ -29,6 +33,9 @@ mod geometry_tests;
 
 #[cfg(test)]
 mod output_tests;
+
+#[cfg(test)]
+mod pointer_tests;
 
 #[cfg(test)]
 mod tests;

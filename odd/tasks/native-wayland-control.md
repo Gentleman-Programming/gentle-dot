@@ -26,8 +26,9 @@ Explicit desktop-global consent; no compositor patches and no external MCP serve
 - T2 [S3-S5] route=worker commit=056abb6 done: explicit desktop-global policy and truthful permissions/consent, preserving native macOS mode; deterministic RED/GREEN checks.
 - T3a [S1-S4] route=worker commit=5093697 done: Linux-only Wayland dependencies, bounded connection/registry dispatch and capability discovery; no live input or production startup.
 - T3b1 [S1-S4] route=worker commit=ec05a96,23c50fb done: output geometry and coordinate/transform validation using bounded dispatch.
-- T3b2 [S1-S4] route=worker commit=pending: capture buffers and encoding using bounded transport and validated output geometry.
-- T4 [S1-S5] route=worker commit=pending: pointer and keyboard input with cancellation/held-input cleanup.
+- T3b2 [S1-S4] route=worker commit=330b0d6 done: capture buffers and encoding using bounded transport and validated output geometry.
+- T4a [S1-S5] route=worker commit=pending: bounded virtual-pointer actions and owned button cleanup, no production startup.
+- T4b [S1-S5] route=worker commit=pending: virtual-keyboard/keymap input and owned modifier cleanup, no production startup.
 - T5 [S1-S5] route=worker commit=pending: app integration, tool catalog, session lifecycle, Stop, Yolo and truthful UI.
 - T6 [S3-S6] route=verify commit=pending: independent safety/portability verification, docs and functional checks.
 - T7 [S6] route=parent commit=pending: build package and await user test; no native-control publication before approval.
@@ -90,3 +91,5 @@ Explicit desktop-global consent; no compositor patches and no external MCP serve
 
 - L20: Geometry committed ec05a96; independent verifier B1-B3 plus parent B4 corrected with observed RED/GREEN. Final17geometry tests, full790pass6ignored(worker).
 - L21: Outputs collector committed23c50fb, independent verifier PASS(no blockers),8focused tests exit0, worker full798pass6ignored. Real compositor untested. Native assess blocked by unrelated untracked selection; no native approval asserted. Next T3b2 capture remains nonproduction until checks.
+
+- L22: Capture committed330b0d6. Independent verifier found frame/pool/buffer leaks, postready cancellation/deadline gaps and nominal-vs-actual geometry mismatch; corrections pinned through fake peer. Writer Interrupted caused write_all retry and was replaced by Other. Final22focused/full820passed6ignored(worker evidence). Parent read encoder deadline/cancel/budget/postcheck. No live capture; codec cooperative between writes, not realtime. Native assess unassessable due untracked declaration despite inspect selection; no native approval claimed. Capture slice2417diff lines exceeds target including fake protocol tests; next input split into pointer then keyboard to limit scope.

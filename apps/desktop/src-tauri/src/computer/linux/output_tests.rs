@@ -314,7 +314,7 @@ fn collect_against(
     std::thread::spawn(|| serve_outputs(peer, outputs, removed));
     let conn = connection_from_stream(client).expect("client wraps the pair");
     collect(
-        &conn,
+        conn,
         &snapshot(advertised_outputs, manager_version),
         Instant::now() + Duration::from_millis(deadline_ms),
         &CancelHandle::new(),
@@ -457,7 +457,7 @@ fn missing_protocols_fail_closed_before_any_io() {
     let conn = connection_from_stream(client).expect("client wraps the pair");
     let empty = CapabilitySnapshot::negotiate(&[advertised(20, XDG_OUTPUT_MANAGER, 3)]);
     let err = collect(
-        &conn,
+        conn,
         &empty,
         Instant::now() + Duration::from_secs(5),
         &CancelHandle::new(),
@@ -466,9 +466,12 @@ fn missing_protocols_fail_closed_before_any_io() {
     assert!(matches!(err, OutputsError::MissingProtocol(_)), "got: {err}");
     assert!(err.to_string().contains("wl_output"), "got: {err}");
     // Outputs but no xdg-output manager: logical geometry is unavailable.
+    // Fresh connection per reject: operations consume their connections.
+    let (client, _peer) = UnixStream::pair().expect("socketpair works in tests");
+    let conn = connection_from_stream(client).expect("client wraps the pair");
     let no_manager = CapabilitySnapshot::negotiate(&[advertised(10, WL_OUTPUT, 4)]);
     let err = collect(
-        &conn,
+        conn,
         &no_manager,
         Instant::now() + Duration::from_secs(5),
         &CancelHandle::new(),
@@ -571,7 +574,7 @@ fn silent_peer_hits_the_total_deadline() {
     let conn = connection_from_stream(client).expect("client wraps the pair");
     let start = Instant::now();
     let err = collect(
-        &conn,
+        conn,
         &snapshot(&[(10, 4)], 3),
         start + Duration::from_millis(300),
         &CancelHandle::new(),
@@ -597,7 +600,7 @@ fn cancellation_wakes_the_collection() {
     });
     let start = Instant::now();
     let err = collect(
-        &conn,
+        conn,
         &snapshot(&[(10, 4)], 3),
         start + Duration::from_secs(5),
         &cancel,

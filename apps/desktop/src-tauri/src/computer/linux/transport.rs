@@ -316,12 +316,20 @@ pub fn wait_readable<Fd: AsFd>(
 }
 
 /// Wrap an already-connected stream in a real `wayland_client::Connection`.
-/// `Backend::connect` performs no I/O, so this stays bounded. The caller
-/// keeps exclusive ownership: one `Connection` per stream, never shared
-/// across threads for concurrent reads, because Wayland object ids are
-/// per-connection state and a second reader corrupts the sweep (the T5 owner
-/// enforces this; see [`connect_inherited_refused`] for why ambient fds are
-/// refused instead of duplicated).
+/// `Backend::connect` performs no I/O, so this stays bounded. Ownership
+/// rule for every Linux operation (`outputs::collect`, `capture::*`,
+/// `pointer::*`): each operation consumes its `Connection` and closes it
+/// before returning — one connection per operation. A shared borrowed
+/// connection would accumulate one `wl_registry` per operation, and
+/// `wl_registry` (like `wl_shm` and pre-v3 `wl_output`) has no destructor,
+/// so nothing could ever free it; consuming the connection makes that leak
+/// unrepresentable, with the fd close as the dead-fd cleanup. `discover`
+/// is the only borrower: it binds nothing but the sweep registry, which
+/// dies with the consumed connection right after. The consumed connection
+/// is never shared across threads for concurrent reads either, because
+/// Wayland object ids are per-connection state (see
+/// [`connect_inherited_refused`] for why ambient fds are refused instead
+/// of duplicated).
 pub fn connection_from_stream(stream: UnixStream) -> Result<Connection, TransportError> {
     Connection::from_socket(stream).map_err(|error| TransportError {
         kind: TransportKind::Io,

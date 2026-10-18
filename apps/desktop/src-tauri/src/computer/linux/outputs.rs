@@ -126,9 +126,12 @@ impl From<CapabilityError> for OutputsError {
 
 /// Enumerate every advertised `wl_output` with its xdg-output metadata,
 /// bounded by `deadline` and `cancel`. Binds nothing beyond this sweep: no
-/// input, capture or cursor globals are bound or used.
+/// input, capture or cursor globals are bound or used. Consumes `conn` and
+/// closes it before returning: one connection per operation, so the sweep's
+/// registry (which has no destructor) can never accumulate on a shared
+/// connection.
 pub fn collect(
-    conn: &Connection,
+    conn: Connection,
     snapshot: &CapabilitySnapshot,
     deadline: Instant,
     cancel: &CancelHandle,
@@ -154,7 +157,7 @@ pub fn collect(
     }
     let sync_done = Arc::new(AtomicBool::new(false));
     let callback = conn.display().sync(&qh, SyncFlag(sync_done.clone()));
-    flush_with_retry(conn, "outputs", deadline, cancel)?;
+    flush_with_retry(&conn, "outputs", deadline, cancel)?;
     let mut state = Collector {
         slots,
         xdg_version: manager.negotiated,

@@ -478,7 +478,7 @@ fn success_returns_known_colors_through_the_public_boundary() {
     let conn = connection_from_stream(client).expect("client wraps the pair");
     let cancel = CancelHandle::new();
     let frame = capture_monitor(
-        &conn,
+        conn,
         &snapshot(),
         &monitor(7, 16, 16),
         Instant::now() + Duration::from_secs(5),
@@ -503,7 +503,6 @@ fn success_returns_known_colors_through_the_public_boundary() {
     assert!(near(&decoded.get_pixel(11, 4).0, &[255, 255, 255]), "top-right is white");
     assert!(near(&decoded.get_pixel(4, 11).0, &[255, 0, 0]), "bottom-left is red");
     assert!(near(&decoded.get_pixel(11, 11).0, &[0, 255, 0]), "bottom-right is green");
-    drop(conn);
     let obs = peer_thread.join().expect("peer thread ends");
     assert!(obs.saw_pool, "success allocates exactly one pool");
     assert!(obs.saw_copy, "success issues the copy");
@@ -536,7 +535,7 @@ fn unsupported_format_is_refused_before_any_pool_exists() {
     let conn = connection_from_stream(client).expect("client wraps the pair");
     let cancel = CancelHandle::new();
     let err = capture_monitor(
-        &conn,
+        conn,
         &snapshot(),
         &monitor(7, 2, 2),
         Instant::now() + Duration::from_secs(5),
@@ -547,7 +546,6 @@ fn unsupported_format_is_refused_before_any_pool_exists() {
         matches!(err, CaptureError::UnsupportedBuffer { .. }),
         "wrong refusal: {err}"
     );
-    drop(conn);
     let obs = peer_thread.join().expect("peer thread ends");
     assert!(!obs.saw_pool, "refusal must not allocate a pool");
     assert!(!obs.saw_copy, "refusal must not issue a copy");
@@ -579,7 +577,7 @@ fn repeated_buffer_offer_fails_truthful() {
     let conn = connection_from_stream(client).expect("client wraps the pair");
     let cancel = CancelHandle::new();
     let err = capture_monitor(
-        &conn,
+        conn,
         &snapshot(),
         &monitor(7, 16, 16),
         Instant::now() + Duration::from_secs(5),
@@ -591,7 +589,6 @@ fn repeated_buffer_offer_fails_truthful() {
         "wrong refusal: {err}"
     );
     assert!(err.to_string().contains("buffer"), "names the repeat: {err}");
-    drop(conn);
     let obs = peer_thread.join().expect("peer thread ends");
     assert!(!obs.saw_pool, "repeat refusal must not allocate a pool");
     assert!(obs.frame_destroyed, "repeat refusal still destroys the frame on the wire");
@@ -622,7 +619,7 @@ fn oversized_buffer_is_refused_without_allocation() {
     let conn = connection_from_stream(client).expect("client wraps the pair");
     let cancel = CancelHandle::new();
     let err = capture_monitor(
-        &conn,
+        conn,
         &snapshot(),
         &monitor(7, 2, 2),
         Instant::now() + Duration::from_secs(5),
@@ -638,7 +635,6 @@ fn oversized_buffer_is_refused_without_allocation() {
         ),
         "wrong refusal: {err}"
     );
-    drop(conn);
     let obs = peer_thread.join().expect("peer thread ends");
     assert!(!obs.saw_pool, "refusal must not allocate a pool");
 }
@@ -669,7 +665,7 @@ fn oversize_past_matching_geometry_is_still_refused() {
     let cancel = CancelHandle::new();
     let huge = monitor(7, 40_000, 40_000);
     let err = capture_monitor(
-        &conn,
+        conn,
         &snapshot(),
         &huge,
         Instant::now() + Duration::from_secs(5),
@@ -677,7 +673,6 @@ fn oversize_past_matching_geometry_is_still_refused() {
     )
     .expect_err("a 6.4 GB burst must be refused");
     assert!(matches!(err, CaptureError::Oversized { .. }), "wrong refusal: {err}");
-    drop(conn);
     let obs = peer_thread.join().expect("peer thread ends");
     assert!(!obs.saw_pool, "oversize must not allocate a pool");
     const { assert!(MAX_SHM_BYTES < 160_000usize * 40_000) };
@@ -706,7 +701,7 @@ fn peer_failed_is_a_named_failure() {
     let conn = connection_from_stream(client).expect("client wraps the pair");
     let cancel = CancelHandle::new();
     let err = capture_monitor(
-        &conn,
+        conn,
         &snapshot(),
         &monitor(7, 2, 2),
         Instant::now() + Duration::from_secs(5),
@@ -715,7 +710,6 @@ fn peer_failed_is_a_named_failure() {
     .expect_err("peer failed must surface");
     assert!(matches!(err, CaptureError::Failed { registry_name: 7 }), "wrong error: {err}");
     assert!(err.to_string().contains('7'), "error names the output: {err}");
-    drop(conn);
     let obs = peer_thread.join().expect("peer thread ends");
     assert!(!obs.saw_pool, "failure must not allocate a pool");
 }
@@ -743,7 +737,7 @@ fn destroys_observed_on_post_copy_failure() {
     let conn = connection_from_stream(client).expect("client wraps the pair");
     let cancel = CancelHandle::new();
     let err = capture_monitor(
-        &conn,
+        conn,
         &snapshot(),
         &monitor(7, 2, 2),
         Instant::now() + Duration::from_secs(5),
@@ -751,7 +745,6 @@ fn destroys_observed_on_post_copy_failure() {
     )
     .expect_err("a post-copy failed must surface");
     assert!(matches!(err, CaptureError::Failed { registry_name: 7 }), "wrong error: {err}");
-    drop(conn);
     let obs = peer_thread.join().expect("peer thread ends");
     assert!(obs.saw_pool && obs.saw_copy, "copy happened before the failure");
     assert!(obs.frame_destroyed, "failure destroys the frame on the wire");
@@ -782,7 +775,7 @@ fn mismatched_dimensions_never_silently_remap() {
     let conn = connection_from_stream(client).expect("client wraps the pair");
     let cancel = CancelHandle::new();
     let err = capture_monitor(
-        &conn,
+        conn,
         &snapshot(),
         &monitor(7, 2, 2),
         Instant::now() + Duration::from_secs(5),
@@ -793,7 +786,6 @@ fn mismatched_dimensions_never_silently_remap() {
         matches!(err, CaptureError::DimensionMismatch { .. }),
         "wrong error: {err}"
     );
-    drop(conn);
     let obs = peer_thread.join().expect("peer thread ends");
     assert!(!obs.saw_pool, "mismatch must not allocate a pool");
 }
@@ -834,7 +826,7 @@ fn fractional_slop_buffer_is_accepted() {
     let conn = connection_from_stream(client).expect("client wraps the pair");
     let cancel = CancelHandle::new();
     let frame = capture_monitor(
-        &conn,
+        conn,
         &snapshot(),
         &slop_monitor,
         Instant::now() + Duration::from_secs(5),
@@ -843,7 +835,6 @@ fn fractional_slop_buffer_is_accepted() {
     .expect("the accepted slop buffer must capture");
     assert_eq!((frame.buffer_width, frame.buffer_height), (4, 4));
     assert_eq!(frame.geometry, geometry);
-    drop(conn);
     let obs = peer_thread.join().expect("peer thread ends");
     assert!(obs.frame_destroyed && obs.pool_destroyed && obs.buffer_destroyed);
 }
@@ -880,7 +871,7 @@ fn cancel_during_read_returns_cancelled() {
         }
     };
     let err = capture_monitor_with_hooks(
-        &conn,
+        conn,
         &snapshot(),
         &monitor(7, 256, 256),
         Instant::now() + Duration::from_secs(5),
@@ -892,7 +883,6 @@ fn cancel_during_read_returns_cancelled() {
         matches!(&err, CaptureError::Transport(t) if t.kind == TransportKind::Cancelled),
         "wrong error: {err}"
     );
-    drop(conn);
     let obs = peer_thread.join().expect("peer thread ends");
     assert!(obs.saw_copy, "the copy completed; the cancel lands mid-read");
     assert!(obs.frame_destroyed, "mid-read cancel still destroys the frame");
@@ -911,7 +901,7 @@ fn cancel_during_decode_returns_cancelled() {
         }
     };
     let err = capture_monitor_with_hooks(
-        &conn,
+        conn,
         &snapshot(),
         &monitor(7, 16, 16),
         Instant::now() + Duration::from_secs(5),
@@ -923,7 +913,6 @@ fn cancel_during_decode_returns_cancelled() {
         matches!(&err, CaptureError::Transport(t) if t.kind == TransportKind::Cancelled),
         "wrong error: {err}"
     );
-    drop(conn);
     let _ = peer_thread.join().expect("peer thread ends");
 }
 
@@ -943,7 +932,7 @@ fn cancel_during_encode_returns_cancelled() {
         }
     };
     let err = capture_monitor_with_hooks(
-        &conn,
+        conn,
         &snapshot(),
         &monitor(7, 16, 16),
         Instant::now() + Duration::from_secs(5),
@@ -955,7 +944,6 @@ fn cancel_during_encode_returns_cancelled() {
         matches!(&err, CaptureError::Transport(t) if t.kind == TransportKind::Cancelled),
         "wrong error: {err}"
     );
-    drop(conn);
     let _ = peer_thread.join().expect("peer thread ends");
 }
 
@@ -967,7 +955,7 @@ fn silent_peer_hits_the_deadline() {
     let cancel = CancelHandle::new();
     let start = Instant::now();
     let err = capture_monitor(
-        &conn,
+        conn,
         &snapshot(),
         &monitor(7, 2, 2),
         start + Duration::from_millis(300),
@@ -979,7 +967,6 @@ fn silent_peer_hits_the_deadline() {
         "wrong error: {err}"
     );
     assert!(start.elapsed() < Duration::from_secs(3), "deadline stays bounded");
-    drop(conn);
     let obs = peer_thread.join().expect("peer thread ends");
     assert!(obs.frame_destroyed, "even a timed-out wait destroys the frame");
     assert!(!obs.saw_pool, "timeout happens before any pool exists");
@@ -998,7 +985,7 @@ fn cancellation_wakes_the_capture() {
     });
     let start = Instant::now();
     let err = capture_monitor(
-        &conn,
+        conn,
         &snapshot(),
         &monitor(7, 2, 2),
         start + Duration::from_secs(5),
@@ -1010,7 +997,6 @@ fn cancellation_wakes_the_capture() {
         "wrong error: {err}"
     );
     assert!(start.elapsed() < Duration::from_secs(2), "cancel wakes early");
-    drop(conn);
     let obs = peer_thread.join().expect("peer thread ends");
     assert!(obs.frame_destroyed, "even a cancelled wait destroys the frame");
 }
@@ -1022,7 +1008,7 @@ fn gone_peer_is_a_disconnect() {
     let conn = connection_from_stream(client).expect("client wraps the pair");
     let cancel = CancelHandle::new();
     let err = capture_monitor(
-        &conn,
+        conn,
         &snapshot(),
         &monitor(7, 2, 2),
         Instant::now() + Duration::from_secs(5),
@@ -1037,18 +1023,22 @@ fn gone_peer_is_a_disconnect() {
 
 #[test]
 fn unknown_output_and_missing_protocols_fail_closed() {
-    let (client, _peer) = UnixStream::pair().expect("socketpair works in tests");
-    let conn = connection_from_stream(client).expect("client wraps the pair");
+    // Each operation consumes its own connection, so each reject gets a
+    // fresh one here.
     let cancel = CancelHandle::new();
     let deadline = Instant::now() + Duration::from_secs(5);
-    let err = capture_monitor(&conn, &snapshot(), &monitor(99, 2, 2), deadline, &cancel)
+    let (client, _peer) = UnixStream::pair().expect("socketpair works in tests");
+    let conn = connection_from_stream(client).expect("client wraps the pair");
+    let err = capture_monitor(conn, &snapshot(), &monitor(99, 2, 2), deadline, &cancel)
         .expect_err("an unadvertised id must fail");
     assert!(
         matches!(err, CaptureError::UnknownOutput { registry_name: 99 }),
         "wrong error: {err}"
     );
     let bare = CapabilitySnapshot::negotiate(&[advertised(1, WL_SHM, 1), advertised(7, WL_OUTPUT, 4)]);
-    let err = capture_monitor(&conn, &bare, &monitor(7, 2, 2), deadline, &cancel)
+    let (client, _peer) = UnixStream::pair().expect("socketpair works in tests");
+    let conn = connection_from_stream(client).expect("client wraps the pair");
+    let err = capture_monitor(conn, &bare, &monitor(7, 2, 2), deadline, &cancel)
         .expect_err("a missing manager must fail");
     assert!(
         matches!(err, CaptureError::MissingProtocol(_)),
@@ -1132,7 +1122,7 @@ fn deadline_during_encode_returns_timeout() {
     };
     let start = Instant::now();
     let err = capture_monitor_with_hooks(
-        &conn,
+        conn,
         &snapshot(),
         &monitor(7, 16, 16),
         start + Duration::from_millis(200),
@@ -1145,7 +1135,6 @@ fn deadline_during_encode_returns_timeout() {
         "wrong error: {err}"
     );
     assert!(start.elapsed() < Duration::from_secs(5), "encode timeout stays bounded");
-    drop(conn);
     let obs = peer_thread.join().expect("peer thread ends");
     assert!(obs.saw_copy, "the copy completed; the deadline lands mid-encode");
     assert!(obs.frame_destroyed, "mid-encode timeout still destroys the frame");
@@ -1165,7 +1154,7 @@ fn cancel_on_final_write_returns_cancelled() {
         let conn = connection_from_stream(client).expect("client wraps the pair");
         let cancel = CancelHandle::new();
         let frame = capture_monitor(
-            &conn,
+            conn,
             &snapshot(),
             &monitor(7, 16, 16),
             Instant::now() + Duration::from_secs(5),
@@ -1173,7 +1162,6 @@ fn cancel_on_final_write_returns_cancelled() {
         )
         .expect("baseline capture succeeds");
         let len = frame.jpeg.len() as u64;
-        drop(conn);
         peer_thread.join().expect("peer thread ends");
         assert!(len > 0, "baseline encodes a non-empty JPEG");
         len
@@ -1189,7 +1177,7 @@ fn cancel_on_final_write_returns_cancelled() {
         }
     };
     let err = capture_monitor_with_hooks(
-        &conn,
+        conn,
         &snapshot(),
         &monitor(7, 16, 16),
         Instant::now() + Duration::from_secs(5),
@@ -1201,7 +1189,6 @@ fn cancel_on_final_write_returns_cancelled() {
         matches!(&err, CaptureError::Transport(t) if t.kind == TransportKind::Cancelled),
         "wrong error: {err}"
     );
-    drop(conn);
     let obs = peer_thread.join().expect("peer thread ends");
     assert!(obs.saw_copy, "the copy completed; the cancel lands on the final write");
     assert!(obs.frame_destroyed, "final-write cancel still destroys the frame");
@@ -1219,7 +1206,7 @@ fn encoded_cap_refusal_is_oversized() {
     let cancel = CancelHandle::new();
     let limits = EncodeLimits { jpeg_cap: Some(16) };
     let err = capture_monitor_with_limits(
-        &conn,
+        conn,
         &snapshot(),
         &monitor(7, 16, 16),
         Instant::now() + Duration::from_secs(5),
@@ -1232,7 +1219,6 @@ fn encoded_cap_refusal_is_oversized() {
         matches!(&err, CaptureError::Oversized { limit: 16, .. }),
         "wrong error: {err}"
     );
-    drop(conn);
     let obs = peer_thread.join().expect("peer thread ends");
     assert!(obs.saw_copy, "the copy completed; the cap lands mid-encode");
     assert!(obs.frame_destroyed, "cap refusal still destroys the frame");

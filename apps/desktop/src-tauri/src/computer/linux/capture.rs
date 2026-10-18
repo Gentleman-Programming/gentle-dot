@@ -212,11 +212,15 @@ impl From<PixelsError> for CaptureError {
 /// through `conn`, bounded by `deadline` and `cancel`. Returns JPEG bytes
 /// plus the monitor's validated geometry for future mapping.
 ///
+/// Consumes `conn` and closes it before returning: one connection per
+/// operation, so the per-capture registry (which has no destructor) can
+/// never accumulate on a shared connection.
+///
 /// No processing hook:equivalent to [`capture_monitor_with_hooks`] with no
 /// hook. Every exit path (including this one) runs the scope guard, which
 /// protocol-destroys the owned frame, buffer and pool.
 pub fn capture_monitor(
-    conn: &Connection,
+    conn: Connection,
     snapshot: &CapabilitySnapshot,
     monitor: &Monitor,
     deadline: Instant,
@@ -238,7 +242,7 @@ pub fn capture_monitor(
 /// file read back. Anything else destroys the frame best-effort and returns
 /// without allocating.
 pub fn capture_monitor_with_hooks(
-    conn: &Connection,
+    conn: Connection,
     snapshot: &CapabilitySnapshot,
     monitor: &Monitor,
     deadline: Instant,
@@ -266,7 +270,7 @@ impl EncodeLimits {
 /// calls [`capture_monitor_with_hooks`]; tests pass [`EncodeLimits`] to pin
 /// the encoded-output refusal through the public boundary.
 pub(crate) fn capture_monitor_with_limits(
-    conn: &Connection,
+    conn: Connection,
     snapshot: &CapabilitySnapshot,
     monitor: &Monitor,
     deadline: Instant,
@@ -298,8 +302,8 @@ pub(crate) fn capture_monitor_with_limits(
     // Own every protocol object from here on: the scope guard below is the
     // only owner, so every exit (success, error, panic unwind) runs the
     // same cleanup.
-    let mut scope = CaptureScope::new(conn, frame);
-    flush_with_retry(conn, "capture", deadline, cancel)?;
+    let mut scope = CaptureScope::new(&conn, frame);
+    flush_with_retry(&conn, "capture", deadline, cancel)?;
 
     let mut state = Capture::default();
     // Phase 1: wait for the buffer description that sizes the pool.
@@ -420,7 +424,7 @@ pub(crate) fn capture_monitor_with_limits(
     scope.frame.as_ref().expect("scope owns the frame").copy(&buffer);
     scope.buffer = Some(buffer);
     scope.pool = Some(pool);
-    flush_with_retry(conn, "capture", deadline, cancel)?;
+    flush_with_retry(&conn, "capture", deadline, cancel)?;
 
     // Phase 2: wait for the copy to land (`flags` then `ready`, or `failed`).
     let y_invert = loop {
