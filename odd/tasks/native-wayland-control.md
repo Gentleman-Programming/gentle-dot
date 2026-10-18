@@ -25,7 +25,7 @@ Explicit desktop-global consent; no compositor patches and no external MCP serve
 - T1 [S1-S6] route=parent commit=056abb6 done: reconcile design and inspect local bridge/application seams.
 - T2 [S3-S5] route=worker commit=056abb6 done: explicit desktop-global policy and truthful permissions/consent, preserving native macOS mode; deterministic RED/GREEN checks.
 - T3a [S1-S4] route=worker commit=5093697 done: Linux-only Wayland dependencies, bounded connection/registry dispatch and capability discovery; no live input or production startup.
-- T3b1 [S1-S4] route=worker commit=pending: output geometry and coordinate/transform validation using bounded dispatch.
+- T3b1 [S1-S4] route=worker commit=ec05a96,23c50fb done: output geometry and coordinate/transform validation using bounded dispatch.
 - T3b2 [S1-S4] route=worker commit=pending: capture buffers and encoding using bounded transport and validated output geometry.
 - T4 [S1-S5] route=worker commit=pending: pointer and keyboard input with cancellation/held-input cleanup.
 - T5 [S1-S5] route=worker commit=pending: app integration, tool catalog, session lifecycle, Stop, Yolo and truthful UI.
@@ -87,3 +87,6 @@ Explicit desktop-global consent; no compositor patches and no external MCP serve
 - L18: T2 committed as 056abb6; 188 computer tests, full Rust library 757 passed / 6 ignored. Independent verifier findings corrected; native review review-f682b0af8a12e44d approved and acknowledged. Slice 428 diff lines including specification, 345 source/test diff lines. Subsequent work split into T3a transport and T3b capture, each separate reviewable commit. No native-control push before user test.
 
 - L19: T3a committed 5093697 after fake-peer hardening and native review review-94f3bf1462181744 approved/acknowledged. 16 focused tests; full library 773 passed, 6 ignored (worker evidence). 1361 diff-line exception includes protocol fake-peer harness; no safe checks removed. WAYLAND_SOCKET shared-stream adoption refused until exclusive ownership exists. Real compositor sweep pending. Next capture work split into geometry and buffers rather than repeating this oversized slice.
+
+- L20: Geometry committed ec05a96; independent verifier B1-B3 plus parent B4 corrected with observed RED/GREEN. Final17geometry tests, full790pass6ignored(worker).
+- L21: Outputs collector committed23c50fb, independent verifier PASS(no blockers),8focused tests exit0, worker full798pass6ignored. Real compositor untested. Native assess blocked by unrelated untracked selection; no native approval asserted. Next T3b2 capture remains nonproduction until checks.

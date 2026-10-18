@@ -15,6 +15,33 @@ rotation stays inside the validated `OutputGeometry` mapping instead of an
 untransformed screen shape; and the sweep never synthesizes a primary output,
 a fallback display name, a cursor position, or a compositor guess.
 
+The frame capture (`src/computer/linux/capture.rs`) and pixel decoding
+(`src/computer/linux/pixels.rs`) additionally follow the
+`wlr-screencopy-unstable-v1` request/event order (`capture_output`, `buffer`
+/ `buffer_done`, `copy`, `flags` / `ready` / `failed`, overlay cursor
+excluded) and the little-endian channel maps of its `decode_shm`, with
+these deliberate divergences: every wait is deadline/cancel bounded through
+the shared transport helpers instead of blocking `roundtrip`s; frame
+dimensions must equal the validated `OutputGeometry` instead of remapping;
+allocation is refused past an explicit memory cap before the SHM fd exists;
+the pool file is read back with safe `File` reads (no `mmap`); decoding
+targets packed BGRA so the established `encode.rs` JPEG path is reused; and
+there is no cursor sampling, primary-output or front-app claim.
+
+- Protocol spec: `wlr-screencopy-unstable-v1.xml` (wayland-protocols-wlr)
+- License: MIT, Copyright (c) 2018 Simon Ser, Copyright (c) 2019 Andri Yngvason
+
+> Permission is hereby granted, free of charge, to any person obtaining a copy
+> of this software and associated documentation files (the "Software"), to deal
+> in the Software without restriction, including without limitation the rights
+> to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+> copies of the Software, and to permit persons to whom the Software is
+> furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice (including the next
+> paragraph) shall be included in all copies or substantial portions of the
+> Software.
+
 - Upstream: `/home/jona/mnt/sv-home/dev/upstream/wlroots-bridge`
 - License: MIT, Copyright (c) 2026 Patrick Jaja
 
