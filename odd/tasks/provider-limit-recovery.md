@@ -22,7 +22,7 @@ General daemon/engine behaviour, not platform-specific and not part of the Linux
 
 - T1 [S1-S3] route=parent commit=n/a done: investigate existing mechanisms, image caps and error path (explore mvdireuc-n-muwf).
 - T2 [S1,S2] route=worker commit=88b1646: total request budget at the source, so accumulated images cannot bloat the request.
-- T3 [S1,S2] route=worker commit=pending: reactive recovery with one invisible re-send, suppressed error on the first attempt.
+- T3 [S1,S2] route=worker commit=b8fa0cd: reactive recovery with one invisible re-send, suppressed error on the first attempt.
 - T4 [S1] route=worker commit=pending: learn the observed ceiling per model with a margin instead of guessing.
 - T5 [S1-S3] route=verify commit=pending: independent verification with deterministic tests.
 - T6 [S1,S3] route=parent commit=pending: own branch and PR, plus an upstream issue with the evidence.
@@ -64,3 +64,11 @@ General daemon/engine behaviour, not platform-specific and not part of the Linux
   tests previos de `pruneScreenshots` intactos. Hueco conocido: las imágenes que adjunta el usuario no se
   recortan (no se toca su mensaje), así que un mensaje con muchos adjuntos puede seguir superando el
   presupuesto; corresponde limitarlo en la subida.
+
+- **L7** — T3 en b8fa0cd: `isSizeLimitError` en `bridge.ts` más la recuperación (rotar primero con
+  `SessionRotator.forceRotate`, reenviar el prompt guardado, suprimir el error en el primer intento, mostrar el
+  real si el segundo falla). Guardas: ninguna herramienta en el turno, una recuperación por mensaje, y si no
+  puede rotar muestra el error. 26 pruebas focalizadas y 494 del daemon en verde; la mutación que quita la
+  guarda de herramienta hace fallar su test. **Hueco crítico**: la detección es por texto y no coincide con el
+  error real del incidente (`500 status code (no body)`), así que el caso observado no se recuperaba; y una
+  recarga en frío del historial muestra el turno rechazado dos veces (el anterior sigue en la cadena).
