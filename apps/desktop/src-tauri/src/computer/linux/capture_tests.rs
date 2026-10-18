@@ -21,7 +21,8 @@
 
 use super::capabilities::{AdvertisedGlobal, CapabilitySnapshot, SCREENCOPY, WL_OUTPUT, WL_SHM};
 use super::capture::{
-    capture_monitor, capture_monitor_with_hooks, capture_monitor_with_limits, CaptureError,
+    capture_monitor, capture_monitor_normalized, capture_monitor_normalized_with_hooks,
+    capture_monitor_with_hooks, capture_monitor_with_limits, CaptureError,
     CaptureStage, EncodeLimits, JPEG_HEADER_SLACK_BYTES, MAX_AGGREGATE_BYTES, MAX_FRAME_PIXELS,
     MAX_JPEG_BYTES, MAX_SHM_BYTES,
 };
@@ -1246,4 +1247,198 @@ fn peak_accounting_covers_memfd_readback_and_capped_jpeg() {
     assert_eq!(peak, 2 * shm as u64 + 4 * px, "decode phase is the 8K peak");
     assert!(peak <= MAX_AGGREGATE_BYTES, "8K still fits the aggregate cap");
     assert!(capture_peak_bytes(shm, params, u64::MAX).is_err(), "uncapped budget overflows instead of wrapping");
+}
+
+/// XRGB quadrant pixels for a `width`x`height` buffer (both even):
+/// TL red, TR green, BL blue, BR white, no stride padding.
+fn quad_pixels(width: u32, height: u32) -> Vec<u8> {
+    let (w, h) = (width as usize, height as usize);
+    let mut out = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let (r, g, b) = match (x < w / 2, y < h / 2) {
+                (true, true) => (255, 0, 0),
+                (false, true) => (0, 255, 0),
+                (true, false) => (0, 0, 255),
+                (false, false) => (255, 255, 255),
+            };
+            // XRGB little-endian: memory order B, G, R, X.
+            out.extend([b, g, r, 255]);
+        }
+    }
+    out
+}
+
+fn r90_monitor() -> Monitor {
+    Monitor {
+        registry_name: 7,
+        name: Some("Fake-1".to_owned()),
+        geometry: OutputGeometry::new(0, 0, 24, 32, 1.0, 1, 32, 24)
+            .expect("rotated test geometry is valid"),
+        refresh_millihz: 60_000,
+    }
+}
+
+fn near(a: &[u8; 3], b: &[u8; 3]) -> bool {
+    a.iter().zip(b).all(|(g, w)| g.abs_diff(*w) < 40)
+}
+
+#[test]
+fn normalized_capture_rotates_upright_through_the_wire() {
+    // R90 monitor, 32x24 buffer: the fused tail returns the 24x32 upright
+    // image through the real protocol path — rotation happens exactly once
+    // between the SHM bytes and the single JPEG encode.
+    let (client, peer) = UnixStream::pair().expect("socketpair works in tests");
+    let peer_thread = std::thread::spawn(|| {
+        serve_capture(
+            peer,
+            FrameOffer {
+                format: xrgb_format(),
+                width: 32,
+                height: 24,
+                stride: 128,
+                y_invert: false,
+                send_done: true,
+                fail_early: false,
+                fail_after_copy: false,
+                mutated_buffer: None,
+                pixels: quad_pixels(32, 24),
+            },
+        )
+    });
+    let conn = connection_from_stream(client).expect("client wraps the pair");
+    let cancel = CancelHandle::new();
+    let frame = capture_monitor_normalized(conn, &snapshot(), &r90_monitor(), Instant::now() + Duration::from_secs(5), &cancel)
+        .expect("fake-peer normalized capture succeeds");
+    assert_eq!((frame.buffer_width, frame.buffer_height), (32, 24));
+    assert_eq!((frame.width, frame.height), (24, 32), "fused dims are the upright target");
+    let decoded = image::load_from_memory_with_format(&frame.jpeg, image::ImageFormat::Jpeg)
+        .expect("normalized capture returns JPEG bytes")
+        .to_rgb8();
+    assert_eq!(decoded.dimensions(), (24, 32));
+    // Buffer BL (blue) shows at upright TL; buffer TL (red) at upright TR.
+    assert!(near(&decoded.get_pixel(1, 1).0, &[0, 0, 255]), "upright TL is buffer BL blue");
+    assert!(near(&decoded.get_pixel(22, 1).0, &[255, 0, 0]), "upright TR is buffer TL red");
+    let obs = peer_thread.join().expect("peer thread ends");
+    assert!(obs.saw_pool && obs.saw_copy, "fused path allocates and copies like the raw path");
+    assert!(obs.frame_destroyed, "fused success destroys the frame on the wire");
+    assert!(obs.pool_destroyed, "fused success destroys the pool on the wire");
+    assert!(obs.buffer_destroyed, "fused success destroys the buffer on the wire");
+}
+
+#[test]
+fn normalized_capture_downscales_to_the_long_edge_through_the_wire() {
+    // 1920x1080 buffer at scale 1: the fused tail returns 1280x720 through
+    // the real protocol path, with the same destroy discipline.
+    let (client, peer) = UnixStream::pair().expect("socketpair works in tests");
+    let peer_thread = std::thread::spawn(|| {
+        serve_capture(
+            peer,
+            FrameOffer {
+                format: xrgb_format(),
+                width: 1920,
+                height: 1080,
+                stride: 1920 * 4,
+                y_invert: false,
+                send_done: true,
+                fail_early: false,
+                fail_after_copy: false,
+                mutated_buffer: None,
+                pixels: quad_pixels(1920, 1080),
+            },
+        )
+    });
+    let conn = connection_from_stream(client).expect("client wraps the pair");
+    let cancel = CancelHandle::new();
+    let monitor = monitor(7, 1920, 1080);
+    let frame = capture_monitor_normalized(conn, &snapshot(), &monitor, Instant::now() + Duration::from_secs(30), &cancel)
+        .expect("fake-peer normalized capture succeeds");
+    assert_eq!((frame.buffer_width, frame.buffer_height), (1920, 1080));
+    assert_eq!((frame.width, frame.height), (1280, 720));
+    let decoded = image::load_from_memory_with_format(&frame.jpeg, image::ImageFormat::Jpeg)
+        .expect("normalized capture returns JPEG bytes")
+        .to_rgb8();
+    assert_eq!(decoded.dimensions(), (1280, 720));
+    let obs = peer_thread.join().expect("peer thread ends");
+    assert!(obs.frame_destroyed && obs.pool_destroyed && obs.buffer_destroyed);
+}
+
+#[test]
+fn normalized_capture_refuses_dimension_mismatch_before_any_pool() {
+    let (client, peer) = UnixStream::pair().expect("socketpair works in tests");
+    let peer_thread = std::thread::spawn(|| {
+        serve_capture(
+            peer,
+            FrameOffer {
+                format: xrgb_format(),
+                width: 16,
+                height: 16,
+                stride: 64,
+                y_invert: false,
+                send_done: true,
+                fail_early: false,
+                fail_after_copy: false,
+                mutated_buffer: None,
+                pixels: quad_pixels(16, 16),
+            },
+        )
+    });
+    let conn = connection_from_stream(client).expect("client wraps the pair");
+    let cancel = CancelHandle::new();
+    let err = capture_monitor_normalized(conn, &snapshot(), &r90_monitor(), Instant::now() + Duration::from_secs(5), &cancel)
+        .expect_err("a 16x16 offer for a 32x24 buffer must be refused");
+    assert!(matches!(err, CaptureError::DimensionMismatch { .. }), "wrong refusal: {err}");
+    let obs = peer_thread.join().expect("peer thread ends");
+    assert!(!obs.saw_pool, "refusal must not allocate a pool");
+    assert!(obs.frame_destroyed, "refusal still destroys the frame on the wire");
+}
+
+#[test]
+fn normalized_capture_cancels_mid_downscale_with_destroys() {
+    // The hook fires per downscale row: cancelling there stops the fused
+    // tail mid-stage (not just pre-set), and the protocol objects still go
+    // through the scope guard.
+    let (client, peer) = UnixStream::pair().expect("socketpair works in tests");
+    let peer_thread = std::thread::spawn(|| {
+        serve_capture(
+            peer,
+            FrameOffer {
+                format: xrgb_format(),
+                width: 32,
+                height: 24,
+                stride: 128,
+                y_invert: false,
+                send_done: true,
+                fail_early: false,
+                fail_after_copy: false,
+                mutated_buffer: None,
+                pixels: quad_pixels(32, 24),
+            },
+        )
+    });
+    let conn = connection_from_stream(client).expect("client wraps the pair");
+    let cancel = CancelHandle::new();
+    let handle = cancel.clone();
+    let hook = move |stage: CaptureStage, _progress: u64| {
+        if stage == CaptureStage::DownscaleRows {
+            handle.cancel();
+        }
+    };
+    let err = capture_monitor_normalized_with_hooks(
+        conn,
+        &snapshot(),
+        &r90_monitor(),
+        Instant::now() + Duration::from_secs(5),
+        &cancel,
+        Some(&hook),
+    )
+    .expect_err("cancelling mid-downscale must stop the capture");
+    assert!(
+        matches!(err, CaptureError::Transport(_)),
+        "cancel surfaces as a transport stop, got: {err}"
+    );
+    let obs = peer_thread.join().expect("peer thread ends");
+    assert!(obs.frame_destroyed, "cancel still destroys the frame on the wire");
+    assert!(obs.pool_destroyed, "cancel still destroys the pool on the wire");
+    assert!(obs.buffer_destroyed, "cancel still destroys the buffer on the wire");
 }

@@ -1,7 +1,15 @@
 //! Bounded full-output screencopy capture over `zwlr_screencopy_manager_v1`
-//! (T3b2, S1-S4): capture the caller-selected [`Monitor`] by its stable
-//! registry id through the provided [`Connection`], reusing the transport's
-//! total deadline and cooperative [`CancelHandle`].
+//! (T3b2, S1-S4; fused normalization T5, S1-S5): capture the caller-selected
+//! [`Monitor`] by its stable registry id through the provided [`Connection`],
+//! reusing the transport's total deadline and cooperative [`CancelHandle`].
+//!
+//! Two tails share one protocol path: the raw tail ([`capture_monitor`])
+//! encodes the full buffer as-is for regression tests, while the normalized
+//! tail ([`capture_monitor_normalized`]) rotates the raw buffer upright,
+//! downscales it to [`MAX_LONG_EDGE`](crate::computer::coords::MAX_LONG_EDGE)
+//! and encodes once — the production adapter path, with no JPEG
+//! decode/re-encode anywhere. Both tails reuse the same owned resources,
+//! deadline, memory accounting and [`CancelWriter`]..
 //!
 //! What this binds, and nothing more: one `wl_shm`, one screencopy manager,
 //! and the one selected `wl_output`, all at the versions the
@@ -22,11 +30,14 @@
 //! Memory and cleanup: dimensions, stride and format are validated against
 //! the monitor's actual hardware buffer *before* anything is allocated, with
 //! an explicit [`MAX_SHM_BYTES`] cap plus pixel-count ([`MAX_FRAME_PIXELS`]),
-//! phased-peak ([`MAX_AGGREGATE_BYTES`]) and encoded-output
-//! ([`MAX_JPEG_BYTES`]) caps covering the memfd (kernel, server-mapped for
-//! the whole capture), the read-back vec, the decoded rows, the
-//! encoder-internal copy and the JPEG output; the pool file is an owned
-//! memfd sized once. Every owned protocol object (frame, buffer, pool)
+//! phased-peak ([`MAX_AGGREGATE_BYTES`], raw via [`capture_peak_bytes`]
+//! and normalized via [`normalized_peak_bytes`](super::pixels::normalized_peak_bytes))
+//! and encoded-output ([`MAX_JPEG_BYTES`]) caps covering the memfd (kernel,
+//! server-mapped for the whole capture), the read-back vec, the decoded rows,
+//! the upright/downscaled RGB copies and the JPEG output; the pool file is an
+//! owned memfd sized once. The fused tail's target (upright size downscaled)
+//! derives from the validated geometry alone, so its JPEG budget and peak are
+//! known before the memfd exists, exactly like the raw tail's. Every owned protocol object (frame, buffer, pool)
 //! lives in a scope guard that protocol-destroys them in order (buffer,
 //! pool, frame) with one best-effort nonblocking flush on every exit —
 //! success, error, or panic unwind — while the shared [`Connection`] itself
@@ -49,9 +60,13 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 };
 
 use super::capabilities::{CapabilityError, CapabilitySnapshot, SCREENCOPY, WL_SHM};
+use super::normalize::{
+    downscale_rgb_bilinear, normalize_bgra_to_rgb, normalize_error, normalized_target,
+};
 use super::outputs::Monitor;
 use super::pixels::{
-    capture_peak_bytes, decode_shm_to_bgra, frame_byte_len, pixel_count, FrameParams, PixelsError,
+    capture_peak_bytes, decode_shm_to_bgra, frame_byte_len, normalized_peak_bytes, pixel_count,
+    FrameParams, PixelsError,
 };
 use super::transport::{
     check_wait, flush_with_retry, read_ready_op, wait_readable, CancelHandle, TransportError,
@@ -96,19 +111,21 @@ pub const MAX_JPEG_BYTES: u64 = JPEG_HEADER_SLACK_BYTES + 4 * MAX_FRAME_PIXELS;
 pub const MAX_AGGREGATE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Processing stage reported to the [`capture_monitor_with_hooks`] hook:
-/// file read-back, row decode, and JPEG encode. The hook is the injected
-/// seam tests use to cancel deterministically mid-stage.
+/// file read-back, row decode, downscale rows, and JPEG encode. The hook is
+/// the injected seam tests use to cancel deterministically mid-stage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureStage {
     ReadFile,
     DecodeRows,
+    DownscaleRows,
     EncodeJpeg,
 }
 
 /// One captured monitor: JPEG bytes plus the validated geometry they map
-/// through. `width`/`height` are the encoded (here: full-buffer) dimensions;
-/// `geometry` is the monitor's own validated geometry, never adjusted to fit
-/// the frame (a mismatch fails instead).
+/// through. `width`/`height` are the encoded dimensions (the full buffer
+/// for the raw tail, the upright downscaled target for the normalized
+/// tail); `geometry` is the monitor's own validated geometry, never adjusted
+/// to fit the frame (a mismatch fails instead).
 #[derive(Debug, Clone)]
 pub struct CapturedFrame {
     pub jpeg: Vec<u8>,
@@ -252,9 +269,50 @@ pub fn capture_monitor_with_hooks(
     capture_monitor_with_limits(conn, snapshot, monitor, deadline, cancel, hook, &EncodeLimits::standard())
 }
 
+/// Capture the selected monitor normalized: rotate the raw buffer upright,
+/// downscale it to the normalized target and encode once — the production
+/// adapter path. Consumes `conn` and closes it before returning, exactly
+/// like the raw tail. No processing hook: equivalent to
+/// [`capture_monitor_normalized_with_hooks`] with no hook.
+pub fn capture_monitor_normalized(
+    conn: Connection,
+    snapshot: &CapabilitySnapshot,
+    monitor: &Monitor,
+    deadline: Instant,
+    cancel: &CancelHandle,
+) -> Result<CapturedFrame, CaptureError> {
+    capture_monitor_normalized_with_hooks(conn, snapshot, monitor, deadline, cancel, None)
+}
+
+/// Normalized capture with an injected per-stage hook (`None` in
+/// production). The hook fires per read chunk, per decode band, per
+/// downscale row and around the JPEG encode; it is how tests cancel
+/// deterministically mid-stage instead of only pre-setting the cancel flag.
+pub fn capture_monitor_normalized_with_hooks(
+    conn: Connection,
+    snapshot: &CapabilitySnapshot,
+    monitor: &Monitor,
+    deadline: Instant,
+    cancel: &CancelHandle,
+    hook: Option<&dyn Fn(CaptureStage, u64)>,
+) -> Result<CapturedFrame, CaptureError> {
+    capture_inner(conn, snapshot, monitor, deadline, cancel, hook, CapturePlan::Normalized)
+}
+
+/// Which tail runs after the SHM bytes land: the raw regression tail
+/// encodes the full buffer as-is, while the normalized production tail
+/// rotates upright, downscales and encodes once. Both share the protocol
+/// path, the owned resources, the deadline and the memory accounting.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum CapturePlan {
+    Raw { jpeg_cap: Option<u64> },
+    Normalized,
+}
+
 /// Internal encode budget for tests (`None` in production, which derives
 /// the per-frame cap): lets the fake-peer suite force an encoded-output
-/// refusal without allocating a gigapixel frame.
+/// refusal without allocating a gigapixel frame. Raw tail only; the
+/// normalized tail derives its (smaller) cap from the downscaled target.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EncodeLimits {
     pub jpeg_cap: Option<u64>,
@@ -277,6 +335,29 @@ pub(crate) fn capture_monitor_with_limits(
     cancel: &CancelHandle,
     hook: Option<&dyn Fn(CaptureStage, u64)>,
     limits: &EncodeLimits,
+) -> Result<CapturedFrame, CaptureError> {
+    capture_inner(
+        conn,
+        snapshot,
+        monitor,
+        deadline,
+        cancel,
+        hook,
+        CapturePlan::Raw { jpeg_cap: limits.jpeg_cap },
+    )
+}
+
+/// One protocol path, two tails: binds, Phase 1/2 and read-back are shared;
+/// only the post-decode processing and the encoded dimensions differ.
+#[allow(clippy::too_many_arguments)]
+fn capture_inner(
+    conn: Connection,
+    snapshot: &CapabilitySnapshot,
+    monitor: &Monitor,
+    deadline: Instant,
+    cancel: &CancelHandle,
+    hook: Option<&dyn Fn(CaptureStage, u64)>,
+    plan: CapturePlan,
 ) -> Result<CapturedFrame, CaptureError> {
     let output_global = snapshot
         .outputs
@@ -375,12 +456,13 @@ pub(crate) fn capture_monitor_with_limits(
     };
     // Checked budget before the memfd exists: the SHM length (capped),
     // then the pixel count (encode-time bound), then the worst-case
-    // simultaneously-live peak across the decode/convert/encode phases:
-    // the memfd (kernel pages the compositor keeps mapped until the pool
-    // is destroyed) plus the read-back vec, BGRA rows, encoder-internal
-    // RGB and the capped JPEG output. For 4-byte formats the SHM cap
-    // implies the pixel cap; every bound is enforced anyway so a future
-    // format or stride rule cannot slip past the accounting.
+    // simultaneously-live peak across the tail's phases. The raw tail
+    // budgets the full buffer through `capture_peak_bytes`; the normalized
+    // tail budgets the fused rotate/downscale/encode pipeline through
+    // `normalized_peak_bytes`, with the JPEG cap derived from the
+    // downscaled target (known from the validated geometry alone). Both
+    // refuse before the memfd exists; the explicit drops below keep reality
+    // at or under the accounted peak.
     let byte_len = frame_byte_len(params, MAX_SHM_BYTES)?;
     let pixels = pixel_count(params)?;
     if pixels > MAX_FRAME_PIXELS {
@@ -389,20 +471,43 @@ pub(crate) fn capture_monitor_with_limits(
             limit: MAX_FRAME_PIXELS as usize,
         });
     }
-    // Per-frame encoded-output budget: the header slack plus four bytes
-    // per pixel (checked), so the JPEG can never outgrow the raw frame it
-    // compresses; tests may inject a smaller cap to pin the refusal
-    // without a huge allocation.
-    let jpeg_cap = match limits.jpeg_cap {
-        Some(cap) => cap,
-        None => pixels
-            .checked_mul(4)
-            .and_then(|body| body.checked_add(JPEG_HEADER_SLACK_BYTES))
-            .ok_or(PixelsError::Overflow { field: "encoded frame budget" })?,
+    // The normalized target derives from the validated geometry alone
+    // (upright size downscaled, never upscaled), so it is known here.
+    let (tw, th, _) = normalized_target(&monitor.geometry);
+    let (jpeg_cap, peak) = match plan {
+        CapturePlan::Raw { jpeg_cap } => {
+            // Per-frame encoded-output budget: the header slack plus four
+            // bytes per pixel (checked), so the JPEG can never outgrow the
+            // raw frame it compresses; tests may inject a smaller cap to
+            // pin the refusal without a huge allocation.
+            let jpeg_cap = match jpeg_cap {
+                Some(cap) => cap,
+                None => pixels
+                    .checked_mul(4)
+                    .and_then(|body| body.checked_add(JPEG_HEADER_SLACK_BYTES))
+                    .ok_or(PixelsError::Overflow { field: "encoded frame budget" })?,
+            };
+            let peak = capture_peak_bytes(byte_len, params, jpeg_cap)?;
+            (jpeg_cap, peak)
+        }
+        CapturePlan::Normalized => {
+            let target_pixels = (u64::from(tw))
+                .checked_mul(u64::from(th))
+                .ok_or(PixelsError::Overflow { field: "normalized frame pixels" })?;
+            let jpeg_cap = target_pixels
+                .checked_mul(4)
+                .and_then(|body| body.checked_add(JPEG_HEADER_SLACK_BYTES))
+                .ok_or(PixelsError::Overflow { field: "normalized frame budget" })?;
+            if jpeg_cap > MAX_JPEG_BYTES {
+                return Err(CaptureError::Oversized {
+                    bytes: usize::try_from(jpeg_cap).unwrap_or(usize::MAX),
+                    limit: usize::try_from(MAX_JPEG_BYTES).unwrap_or(usize::MAX),
+                });
+            }
+            let peak = normalized_peak_bytes(byte_len, params, target_pixels, jpeg_cap)?;
+            (jpeg_cap, peak)
+        }
     };
-    // Phased peak before the memfd exists; the explicit drops below keep
-    // reality at or under it.
-    let peak = capture_peak_bytes(byte_len, params, jpeg_cap)?;
     if peak > MAX_AGGREGATE_BYTES {
         return Err(CaptureError::Oversized {
             bytes: usize::try_from(peak).unwrap_or(usize::MAX),
@@ -493,36 +598,88 @@ pub(crate) fn capture_monitor_with_limits(
         cancel,
         decode_progress.as_ref().map(|report| report as &dyn Fn(u64)),
     )?;
-    // The read-back vec's phase is over: drop it now so the convert and
-    // encode phases never carry it (the phased peak accounts this).
+    // The read-back vec's phase is over: drop it now so the later phases
+    // never carry it (the phased peak accounts this).
     drop(bytes);
-    // Packed BGRA to packed RGB (same channel order as `encode.rs`, kept
-    // local so the shared Mac encoder stays untouched), checking cancel
-    // per band so a large frame stays preemptible before the encode starts.
-    // No downscale: the encoded dims stay the buffer dims, so the geometry
-    // mapping is exact by construction (downscale remains T5 scope).
-    let width = params.width as usize;
-    let height = params.height as usize;
-    let mut rgb = vec![0u8; width * height * 3];
-    for row in 0..height {
-        if row % 64 == 0 && cancel.is_cancelled() {
-            return Err(PixelsError::Cancelled.into());
+    let (jpeg, width, height) = match plan {
+        CapturePlan::Raw { .. } => {
+            // Packed BGRA to packed RGB (same channel order as `encode.rs`,
+            // kept local so the shared Mac encoder stays untouched), checking
+            // cancel per band so a large frame stays preemptible before the
+            // encode starts. Regression tail: the encoded dims stay the
+            // buffer dims, so the geometry mapping is exact by construction.
+            let width = params.width as usize;
+            let height = params.height as usize;
+            let mut rgb = vec![0u8; width * height * 3];
+            for row in 0..height {
+                if row % 64 == 0 && cancel.is_cancelled() {
+                    return Err(PixelsError::Cancelled.into());
+                }
+                let src = &bgra[row * width * 4..(row + 1) * width * 4];
+                let dst = &mut rgb[row * width * 3..(row + 1) * width * 3];
+                for col in 0..width {
+                    dst[col * 3] = src[col * 4 + 2];
+                    dst[col * 3 + 1] = src[col * 4 + 1];
+                    dst[col * 3 + 2] = src[col * 4];
+                }
+            }
+            // BGRA's phase is over: the encoder only ever sees the RGB copy.
+            drop(bgra);
+            let jpeg = encode_jpeg_cancel(
+                &rgb,
+                params.width,
+                params.height,
+                deadline,
+                cancel,
+                hook,
+                jpeg_cap,
+            )?;
+            (jpeg, params.width, params.height)
         }
-        let src = &bgra[row * width * 4..(row + 1) * width * 4];
-        let dst = &mut rgb[row * width * 3..(row + 1) * width * 3];
-        for col in 0..width {
-            dst[col * 3] = src[col * 4 + 2];
-            dst[col * 3 + 1] = src[col * 4 + 1];
-            dst[col * 3 + 2] = src[col * 4];
+        CapturePlan::Normalized => {
+            // Production tail: rotate the validated buffer upright exactly
+            // once, downscale to the normalized target, and encode that
+            // once — one JPEG encode, no decode/re-encode. Every row band
+            // checks the deadline and cancel; the explicit drops keep
+            // reality at or under the accounted peak.
+            check_wait("capture", deadline, cancel)?;
+            let (upright, uw, uh) = normalize_bgra_to_rgb(
+                &bgra,
+                params.width,
+                params.height,
+                &monitor.geometry,
+                deadline,
+                cancel,
+            )
+            .map_err(|error| normalize_error(error, monitor.registry_name))?;
+            // BGRA's phase is over: rotation and downscale only ever see
+            // the upright copy.
+            drop(bgra);
+            let down_progress =
+                hook.map(|report| move |rows: u64| report(CaptureStage::DownscaleRows, rows));
+            let rgb = downscale_rgb_bilinear(
+                &upright,
+                uw,
+                uh,
+                tw,
+                th,
+                deadline,
+                cancel,
+                down_progress.as_ref().map(|report| report as &dyn Fn(u64)),
+            )
+            .map_err(|error| normalize_error(error, monitor.registry_name))?;
+            // Upright's phase is over: the encoder only ever sees the
+            // downscaled copy.
+            drop(upright);
+            let jpeg =
+                encode_jpeg_cancel(&rgb, tw, th, deadline, cancel, hook, jpeg_cap)?;
+            (jpeg, tw, th)
         }
-    }
-    // BGRA's phase is over: the encoder only ever sees the RGB copy.
-    drop(bgra);
-    let jpeg = encode_jpeg_cancel(&rgb, params, deadline, cancel, hook, jpeg_cap)?;
+    };
     Ok(CapturedFrame {
         jpeg,
-        width: params.width,
-        height: params.height,
+        width,
+        height,
         buffer_width: params.width,
         buffer_height: params.height,
         geometry: monitor.geometry,
@@ -670,9 +827,13 @@ impl Drop for CaptureScope<'_> {
 /// `CancelWriter`). A finished JPEG is still discarded when Stop or the
 /// deadline landed on the final write — success never outruns the bound.
 /// `encode.rs` (`bgra_to_jpeg`) stays untouched for the shared Mac path.
-fn encode_jpeg_cancel(
+///
+/// Shared with the adapter fakes and tests through [`encode_frame_jpeg`]:
+/// the production fused tail calls this directly with its derived cap.
+pub(crate) fn encode_jpeg_cancel(
     rgb: &[u8],
-    params: FrameParams,
+    width: u32,
+    height: u32,
     deadline: Instant,
     cancel: &CancelHandle,
     hook: Option<&dyn Fn(CaptureStage, u64)>,
@@ -696,7 +857,7 @@ fn encode_jpeg_cancel(
         let mut encoder =
             image::codecs::jpeg::JpegEncoder::new_with_quality(writer, JPEG_QUALITY);
         if let Err(error) =
-            encoder.encode(rgb, params.width, params.height, image::ExtendedColorType::Rgb8)
+            encoder.encode(rgb, width, height, image::ExtendedColorType::Rgb8)
         {
             // Priority is explicit and shared with the post-encode gate: a
             // fired cancel reports Cancelled even when the deadline also
@@ -722,6 +883,39 @@ fn encode_jpeg_cancel(
         return Err(stop);
     }
     Ok(jpeg)
+}
+
+/// Bounded JPEG encode for already-normalized RGB (`width * height * 3`)
+/// through the shared [`CancelWriter`]: the standard per-frame budget
+/// (header slack plus four bytes per pixel, checked) plus the pixel-count
+/// cap, the total deadline and the cancel handle. The adapter fakes and
+/// the normalization tests encode through this helper so every JPEG on
+/// the Linux path shares the same cap, the same writer checks and the
+/// same post-encode Stop/expiry gate — never a bare `JpegEncoder` with
+/// its own unwatched budget. Test-only: the production tails call
+/// [`encode_jpeg_cancel`] directly with their derived caps and hooks.
+#[cfg(test)]
+pub(crate) fn encode_frame_jpeg(
+    rgb: &[u8],
+    width: u32,
+    height: u32,
+    deadline: Instant,
+    cancel: &CancelHandle,
+) -> Result<Vec<u8>, CaptureError> {
+    let pixels = (u64::from(width))
+        .checked_mul(u64::from(height))
+        .ok_or(PixelsError::Overflow { field: "encoded frame pixels" })?;
+    if pixels > MAX_FRAME_PIXELS {
+        return Err(CaptureError::Oversized {
+            bytes: usize::try_from(pixels).unwrap_or(usize::MAX),
+            limit: MAX_FRAME_PIXELS as usize,
+        });
+    }
+    let jpeg_cap = pixels
+        .checked_mul(4)
+        .and_then(|body| body.checked_add(JPEG_HEADER_SLACK_BYTES))
+        .ok_or(PixelsError::Overflow { field: "encoded frame budget" })?;
+    encode_jpeg_cancel(rgb, width, height, deadline, cancel, None, jpeg_cap)
 }
 
 /// Stop check shared by the writer failures and the post-encode gate:

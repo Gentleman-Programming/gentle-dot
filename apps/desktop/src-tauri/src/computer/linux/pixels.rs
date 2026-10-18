@@ -97,6 +97,62 @@ pub fn aggregate_len(shm_len: usize, params: FrameParams) -> Result<u64, PixelsE
         .ok_or(PixelsError::Overflow { field: "aggregate frame memory" })
 }
 
+/// Worst-case simultaneously-live bytes for one NORMALIZED capture: the
+/// fused rotate-plus-downscale pipeline the production adapter uses. Same
+/// phase discipline as [`capture_peak_bytes`], with one more phase. Every
+/// addend is checked, the capture step caps the peak before the memfd
+/// exists, and drops each intermediate buffer as soon as its phase ends, so
+/// reality stays at or under the accounted peak. Phases, each counting the
+/// memfd (kernel pages the compositor keeps mapped until the pool is
+/// destroyed): decode (plus read-back vec plus BGRA rows), convert (plus
+/// BGRA plus the upright RGB copy, same pixel count as the buffer,
+/// transposed), downscale (plus upright RGB plus the downscaled RGB), and
+/// encode (plus downscaled RGB plus the capped JPEG output `jpeg_cap` the
+/// writer enforces before the output vec grows).
+/// `target_pixels` is the downscaled `tw * ht` product the caller computed
+/// with checked math; it is rechecked here against the pixel cap so a
+/// lying caller cannot smuggle an unbounded allocation past the accounting.
+pub fn normalized_peak_bytes(
+    shm_len: usize,
+    params: FrameParams,
+    target_pixels: u64,
+    jpeg_cap: u64,
+) -> Result<u64, PixelsError> {
+    let pixels = pixel_count(params)?;
+    if target_pixels > pixels {
+        // The fused path only ever downscales: a larger target is a
+        // caller bug, refused before any allocation.
+        return Err(PixelsError::TooLarge {
+            bytes: usize::try_from(target_pixels).unwrap_or(usize::MAX),
+            limit: usize::try_from(pixels).unwrap_or(usize::MAX),
+        });
+    }
+    let bgra = pixels.checked_mul(4).ok_or(PixelsError::Overflow { field: "bgra rows" })?;
+    // Upright RGB holds the same pixel count transposed: identical size.
+    let upright = pixels.checked_mul(3).ok_or(PixelsError::Overflow { field: "upright rgb" })?;
+    let resized = target_pixels
+        .checked_mul(3)
+        .ok_or(PixelsError::Overflow { field: "downscaled rgb" })?;
+    let shm = shm_len as u64;
+    let decode_peak = shm
+        .checked_add(shm)
+        .and_then(|total| total.checked_add(bgra))
+        .ok_or(PixelsError::Overflow { field: "decode-phase frame memory" })?;
+    let convert_peak = shm
+        .checked_add(bgra)
+        .and_then(|total| total.checked_add(upright))
+        .ok_or(PixelsError::Overflow { field: "convert-phase frame memory" })?;
+    let downscale_peak = shm
+        .checked_add(upright)
+        .and_then(|total| total.checked_add(resized))
+        .ok_or(PixelsError::Overflow { field: "downscale-phase frame memory" })?;
+    let encode_peak = shm
+        .checked_add(resized)
+        .and_then(|total| total.checked_add(jpeg_cap))
+        .ok_or(PixelsError::Overflow { field: "encode-phase frame memory" })?;
+    Ok(decode_peak.max(convert_peak).max(downscale_peak).max(encode_peak))
+}
+
 /// Worst-case simultaneously-live bytes for one capture, as the largest of
 /// the three phase peaks. Every addend is checked; the capture step caps
 /// the peak before the memfd exists and drops each intermediate buffer as
