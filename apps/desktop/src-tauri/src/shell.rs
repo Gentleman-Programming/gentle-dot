@@ -2523,6 +2523,7 @@ pub fn run() {
                 computer::computer_request_permission,
                 computer::computer_stop,
                 computer::computer_status,
+                computer::computer_platform,
                 computer::computer_set_yolo,
                 computer::computer_working_ready,
                 voice::voice_status,

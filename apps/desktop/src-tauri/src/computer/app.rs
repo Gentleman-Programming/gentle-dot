@@ -44,6 +44,9 @@ pub struct YoloMenuItem(pub tauri::menu::CheckMenuItem<tauri::Wry>);
 pub struct Computer {
     control: Arc<Control>,
     endpoint: Option<Endpoint>,
+    /// Which backend policy is in force on this build, so the panel names the
+    /// control the user is actually granting (T5d).
+    policy: super::BackendPolicy,
     #[cfg(target_os = "macos")]
     desktop: Arc<dyn super::Desktop>,
     #[cfg(target_os = "macos")]
@@ -52,6 +55,44 @@ pub struct Computer {
     desktop: Option<Arc<super::linux::desktop::LinuxDesktop<super::linux::backend::WaylandBackend>>>,
     #[cfg(target_os = "linux")]
     working: Arc<super::linux::working::LinuxWorking>,
+}
+
+/// What the panel needs to describe control truthfully on this build (T5d):
+/// the platform, the policy in force, and the Stop fallback the user really
+/// has. The web page never sees this; it comes from the app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformInfo {
+    /// `"macos"`, `"linux"` or `"other"`.
+    pub os: &'static str,
+    /// `"targeted"` (macOS per-app) or `"desktopGlobal"` (stock Wayland).
+    pub policy: &'static str,
+    /// Stop in the user's own notation: `⌥⇧Esc` on macOS, and on Linux the
+    /// compositor-owned binding, which is the same string the managed Niri
+    /// snippet writes.
+    pub stop_shortcut: &'static str,
+}
+
+/// Pure mapping, so the copy is pinned by tests with no Mac and no compositor.
+/// macOS keeps its notation and its per-app policy; every other platform has
+/// no such shortcut, so it names the compositor-owned binding instead.
+pub fn platform_info(os: &'static str, policy: super::BackendPolicy) -> PlatformInfo {
+    PlatformInfo {
+        os,
+        policy: if policy == super::BackendPolicy::Targeted { "targeted" } else { "desktopGlobal" },
+        stop_shortcut: if os == "macos" { "⌥⇧Esc" } else { crate::niri::kdl_binds::STOP_KEY },
+    }
+}
+
+/// The build's own platform name, used with [`platform_info`].
+fn current_os() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "other"
+    }
 }
 
 /// What the overlay thread hears: the session started or ended, the agent acted, or a call
@@ -167,7 +208,7 @@ pub fn start(app: &AppHandle, windows: Arc<dyn Windows>) -> Computer {
             Ok(window) => run_overlay(app.clone(), window, number, control.clone(), working.clone(), marks),
             Err(error) => eprintln!("gentle-dot: the computer-control glow is unavailable: {error}"),
         }
-        Computer { control, endpoint, desktop, working }
+        Computer { control, endpoint, desktop, working, policy: super::BackendPolicy::Targeted }
     }
     #[cfg(target_os = "linux")]
     {
@@ -177,7 +218,7 @@ pub fn start(app: &AppHandle, windows: Arc<dyn Windows>) -> Computer {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         drop((overlay, marks));
-        Computer { control, endpoint: None }
+        Computer { control, endpoint: None, policy: super::BackendPolicy::Targeted }
     }
 }
 
@@ -253,7 +294,7 @@ fn start_linux(app: &AppHandle, control: Arc<Control>) -> Computer {
     // no tool call in flight. It runs whether or not the helper started, so
     // a session can never outlive its timeout.
     watch_timeout_linux(control.clone());
-    Computer { control, endpoint, desktop, working }
+    Computer { control, endpoint, desktop, working, policy: super::BackendPolicy::DesktopGlobal }
 }
 
 /// Starts the Linux helper: the same loopback `server::start` plus
@@ -583,6 +624,14 @@ pub fn computer_status(computer: State<'_, Computer>) -> StateEvent {
     computer.control.status(SystemClock.now_ms())
 }
 
+/// The platform, the policy and the Stop shortcut the panel must describe
+/// truthfully (T5d): Linux reports `desktopGlobal` and the compositor-owned
+/// Stop binding, macOS keeps `targeted` and `⌥⇧Esc`.
+#[tauri::command]
+pub fn computer_platform(computer: State<'_, Computer>) -> PlatformInfo {
+    platform_info(current_os(), computer.policy)
+}
+
 /// Dialogs shown by the app itself (an `NSAlert`, see `alert`), never the webview.
 #[cfg(target_os = "macos")]
 struct NativeDialogs {
@@ -638,6 +687,29 @@ for up to 1 hour. Stop and ⌥⇧Esc still work."
             assert!(!choice.allows_response(Some(crate::alert::REFUSE_RESPONSE)));
             assert!(!choice.allows_response(None));
         }
+    }
+
+    #[test]
+    fn the_panel_names_the_control_this_build_actually_offers() {
+        assert_eq!(
+            platform_info("macos", crate::computer::BackendPolicy::Targeted),
+            PlatformInfo { os: "macos", policy: "targeted", stop_shortcut: "⌥⇧Esc" }
+        );
+        // Linux has no ⌥⇧Esc: the compositor owns the shortcut, so the panel
+        // names the same binding the managed snippet writes.
+        let linux = platform_info("linux", crate::computer::BackendPolicy::DesktopGlobal);
+        assert_eq!(linux.os, "linux");
+        assert_eq!(linux.policy, "desktopGlobal");
+        assert_eq!(linux.stop_shortcut, crate::niri::kdl_binds::STOP_KEY);
+        // The panel reads these exact keys.
+        assert_eq!(
+            serde_json::to_value(linux).unwrap(),
+            serde_json::json!({
+                "os": "linux",
+                "policy": "desktopGlobal",
+                "stopShortcut": "Alt+Shift+Escape"
+            })
+        );
     }
 
     #[test]

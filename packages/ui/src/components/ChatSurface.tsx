@@ -279,7 +279,12 @@ export function ChatSurface({
 			</header>
 
 			{computer?.session ? (
-				<ComputerBanner session={computer.session} yolo={computer.yolo !== undefined} stop={computer.stop} />
+				<ComputerBanner
+					session={computer.session}
+					yolo={computer.yolo !== undefined}
+					stop={computer.stop}
+					platform={computer.platform}
+				/>
 			) : null}
 
 			{conversations && showConversations ? (

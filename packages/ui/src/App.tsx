@@ -19,7 +19,7 @@ import {
 	togglePanel,
 } from "./desktop.ts";
 import { createUploader } from "./uploads.ts";
-import { useComputerAvailable, useComputerState } from "./useComputer.ts";
+import { useComputerAvailable, useComputerPlatform, useComputerState } from "./useComputer.ts";
 import { useDot } from "./useDot.ts";
 import { useNiriUnit } from "./useNiriUnit.ts";
 import { usePanelWindow } from "./usePanelWindow.ts";
@@ -78,6 +78,7 @@ function Assistant({ surface }: { surface: Surface }) {
 	const desktop = inDesktop();
 	const { session: computerSession, yolo } = useComputerState(desktop && surface !== "web");
 	const computerAvailable = useComputerAvailable(desktop && surface === "panel", state.connection === "open");
+	const computerPlatform = useComputerPlatform(desktop && surface === "panel");
 	// Connector changes go through the app, on behalf of this window (S25.2); the web page has none.
 	const clientId = state.clientId;
 	const appSend = useCallback(
@@ -104,6 +105,7 @@ function Assistant({ surface }: { surface: Surface }) {
 		desktop && surface === "panel"
 			? {
 					available: computerAvailable,
+					platform: computerPlatform,
 					...(computerSession ? { session: computerSession } : {}),
 					...(yolo ? { yolo } : {}),
 					stop: stopComputer,

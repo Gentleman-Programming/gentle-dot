@@ -13,6 +13,7 @@ const h = vi.hoisted(() => ({
 	tauri: true,
 	endpoint: null as unknown,
 	permissions: { accessibility: false, screenRecording: true },
+	platform: { os: "macos", policy: "targeted", stopShortcut: "⌥⇧Esc" } as unknown,
 	status: { active: false } as unknown,
 	invoke: vi.fn(),
 	send: vi.fn(),
@@ -105,6 +106,8 @@ beforeEach(() => {
 				return h.endpoint;
 			case "computer_permissions":
 				return h.permissions;
+			case "computer_platform":
+				return h.platform;
 			case "computer_status":
 				return h.status;
 			default:
@@ -363,5 +366,34 @@ describe("connector changes go through the app (S25.2)", () => {
 		expect(entry.getByRole("button", { name: "Disconnect Notion" })).toBeDisabled();
 		expect(screen.getByText(APP_REQUIRED)).toBeInTheDocument();
 		expect(h.invoke).not.toHaveBeenCalled();
+	});
+});
+
+describe("on a Linux desktop (T5d)", () => {
+	beforeEach(() => {
+		h.platform = { os: "linux", policy: "desktopGlobal", stopShortcut: "Alt+Shift+Escape" };
+	});
+
+	it("lists no macOS permission and says what desktop-global control means", async () => {
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		// Accessibility and Screen Recording do not exist here, so no Grant button may be offered.
+		expect(within(entry).queryByText("Accessibility")).toBeNull();
+		expect(within(entry).queryByText("Screen Recording")).toBeNull();
+		expect(within(entry).getByText(/every visible app can receive input/)).toBeInTheDocument();
+		// The macOS signature note is not true of a Linux package.
+		expect(within(entry).queryByText(/macOS ties them to the app's signature/)).toBeNull();
+		// Yolo names the Stop this build really has.
+		expect(within(entry).getByText(/Alt\+Shift\+Escape still work/)).toBeInTheDocument();
+	});
+
+	it("names the desktop, not a Mac, while a session runs", async () => {
+		vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+		vi.setSystemTime(1_800_000_000_000);
+		h.status = { active: true, endsAt: Date.now() + 90_000 };
+		await renderApp("?surface=panel");
+		const banner = await screen.findByRole("region", { name: "Computer control" });
+		expect(banner).toHaveTextContent("Controlling your desktop \u00b7 01:30 left");
 	});
 });
