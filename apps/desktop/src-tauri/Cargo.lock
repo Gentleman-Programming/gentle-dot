@@ -1447,6 +1447,7 @@ dependencies = [
  "tray-icon",
  "ureq",
  "wayland-client",
+ "wayland-protocols",
 ]
 
 [[package]]
@@ -4993,6 +4994,18 @@ dependencies = [
  "bitflags 2.13.2",
  "rustix",
  "wayland-backend",
+ "wayland-scanner",
+]
+
+[[package]]
+name = "wayland-protocols"
+version = "0.32.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23d0c813de3daa2ed6520af85a3bd49b0e722a3078506899aa9686fea58dc4b6"
+dependencies = [
+ "bitflags 2.13.2",
+ "wayland-backend",
+ "wayland-client",
  "wayland-scanner",
 ]
 

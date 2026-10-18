@@ -387,17 +387,25 @@ pub fn discover(
 /// WouldBlock with no data (the caller retries within its deadline).
 /// Anything else is a dead connection. `ReadEventsGuard::read` documents the
 /// WouldBlock case, and the backend sends/receives with `MSG_DONTWAIT`, so
-/// neither this nor the flush below ever blocks.
-pub(crate) fn read_ready(guard: ReadEventsGuard) -> Result<bool, TransportError> {
+/// neither this nor the flush below ever blocks. `op` names the step for log
+/// truthfulness (`discover` keeps the original label; `outputs` names the
+/// enumeration sweep).
+pub(crate) fn read_ready_op(guard: ReadEventsGuard, op: &'static str) -> Result<bool, TransportError> {
     match guard.read() {
         Ok(_) => Ok(true),
         Err(error) if is_wouldblock(&error) => Ok(false),
         Err(error) => Err(TransportError {
             kind: TransportKind::Disconnected,
-            op: "discover",
+            op,
             detail: format!("lost the compositor connection mid-sweep: {error}"),
         }),
     }
+}
+
+/// [`read_ready_op`] with the discovery label, so the existing registry sweep
+/// keeps its byte-identical errors.
+pub(crate) fn read_ready(guard: ReadEventsGuard) -> Result<bool, TransportError> {
+    read_ready_op(guard, "discover")
 }
 
 /// A backend WouldBlock is transient (a full kernel send buffer, a read
@@ -486,8 +494,10 @@ fn poll_once(fd: std::os::unix::io::BorrowedFd<'_>, events: i16, timeout_ms: i32
     }
 }
 
-/// Fail fast when cancellation or the deadline already passed.
-fn check_wait(op: &'static str, deadline: Instant, cancel: &CancelHandle) -> Result<(), TransportError> {
+/// Fail fast when cancellation or the deadline already passed. Shared by the
+/// registry sweep and the output enumeration so both honor the same total
+/// deadline and cancel handle instead of growing their own waits.
+pub(crate) fn check_wait(op: &'static str, deadline: Instant, cancel: &CancelHandle) -> Result<(), TransportError> {
     if cancel.is_cancelled() {
         return Err(TransportError {
             kind: TransportKind::Cancelled,
@@ -538,7 +548,9 @@ fn wait_fd(
 /// Flush queued Wayland requests without blocking: a WouldBlock (full
 /// kernel send buffer) retries within the deadline, anything else is a dead
 /// connection. The send path uses `MSG_DONTWAIT`, so this never blocks.
-fn flush_with_retry(
+/// Shared by the registry sweep and the output enumeration (`op` names the
+/// step for log truthfulness).
+pub(crate) fn flush_with_retry(
     conn: &Connection,
     op: &'static str,
     deadline: Instant,

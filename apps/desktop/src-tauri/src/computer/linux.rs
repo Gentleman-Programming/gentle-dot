@@ -1,20 +1,26 @@
-//! Native Linux/Wayland backend (T3a, S1-S4): bounded transport plus protocol
-//! capability discovery against a stock Wayland compositor.
+//! Native Linux/Wayland backend (T3a-T3b1, S1-S4): bounded transport,
+//! protocol capability discovery, and bounded `wl_output` plus
+//! `zxdg_output_v1` monitor enumeration against a stock Wayland compositor.
 //!
-//! Discovery only: this module never binds input (virtual pointer/keyboard) or
-//! capture (screencopy) globals, starts no backend, and performs no screenshot
-//! or input work (T3b/T4). Every wait carries a total deadline and a
-//! cooperative [`transport::CancelHandle`]; there is no unbounded connect or
-//! roundtrip anywhere in this module. Ambient `WAYLAND_SOCKET` adoption is
-//! refused (shared protocol stream); fake-peer discovery is tested, while a
-//! sweep against a real compositor is still untested.
+//! Discovery and enumeration only: this module never binds input (virtual
+//! pointer/keyboard) or capture (screencopy) globals, starts no backend, and
+//! performs no screenshot or input work (T3b2/T4). Every wait carries a total
+//! deadline and a cooperative [`transport::CancelHandle`]; there is no
+//! unbounded connect or roundtrip anywhere in this module. Ambient
+//! `WAYLAND_SOCKET` adoption is refused (shared protocol stream); fake-peer
+//! discovery and enumeration are tested, while sweeps against a real
+//! compositor are still untested.
 
 pub mod capabilities;
 pub mod geometry;
+pub mod outputs;
 pub mod transport;
 
 #[cfg(test)]
 mod geometry_tests;
+
+#[cfg(test)]
+mod output_tests;
 
 #[cfg(test)]
 mod tests;

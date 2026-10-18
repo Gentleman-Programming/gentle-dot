@@ -73,6 +73,9 @@ dbus-secret-service = "4.1"
 # crates (wlr/virtual-keyboard/screencopy binders) arrive with T3b/T4, which bind
 # globals; T3a only discovers them, so it needs the core client alone.
 wayland-client = "0.31"
+# Bounded output enumeration (T3b1, S1-S4): `wl_output` plus `zxdg_output_v1`
+# monitor enumeration. Linux only; feeds the validated geometry API.
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 # First-visible-frame gate (experimental, Niri compact only): `WidgetExt::set_opacity`
 # on the `gtk_window()` inside a main-thread closure. Tauri 2.12.1 does not re-export
 # its transitive gtk 0.18.2, so this direct Linux-only pin reuses the locked version
