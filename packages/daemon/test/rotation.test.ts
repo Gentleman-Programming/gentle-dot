@@ -9,6 +9,7 @@ import {
 	type RotationLimits,
 	rotationLimits,
 	SessionRotator,
+	sessionFileBytes,
 	writeHandoffSession,
 } from "../src/rotation.ts";
 import { AgentSupervisor } from "../src/supervisor.ts";
@@ -255,6 +256,14 @@ describe("rotation guards", () => {
 		expect(rotationLimits({ GENTLE_DOT_ROTATE_BYTES: "lots", GENTLE_DOT_ROTATE_COMPACTIONS: "0" })).toEqual(
 			DEFAULT_ROTATION,
 		);
+	});
+
+	it("reads the live session's size, and nothing when there is no file", () => {
+		const file = join(tempDir(), "live.jsonl");
+		writeFileSync(file, "abcd");
+		expect(sessionFileBytes(file)).toBe(4);
+		expect(sessionFileBytes(undefined)).toBe(0);
+		expect(sessionFileBytes(join(tempDir(), "missing.jsonl"))).toBe(0);
 	});
 });
 

@@ -34,6 +34,7 @@ import {
 } from "./conversations.ts";
 import { directAccess, type EngineAccess } from "./engine-access.ts";
 import { DRAFT_STATUS_KEY } from "./extensions/approval-guard.ts";
+import { DEFAULT_REQUEST_BUDGET, REQUEST_BUDGET_ENV } from "./extensions/screenshot-context.ts";
 import { describeTool, textOf } from "./presentation.ts";
 import {
 	LiveModelSwitch,
@@ -44,7 +45,7 @@ import {
 	toModelChoices,
 	toModelOptions,
 } from "./profiles.ts";
-import { DEFAULT_ROTATION, type RotationLimits, SessionRotator } from "./rotation.ts";
+import { DEFAULT_ROTATION, type RotationLimits, SessionRotator, sessionFileBytes } from "./rotation.ts";
 import type { AgentRecord, AgentSupervisor, SupervisorEvent } from "./supervisor.ts";
 import { composePrompt, type StoredFile, splitAttachments, type UploadStore } from "./uploads.ts";
 import type { VoiceService } from "./voice.ts";
@@ -129,10 +130,11 @@ type SentPrompt = { message: string; images?: { type: "image"; mimeType: string;
 
 /**
  * The wording a request refused as too large carries. The engine formats the provider's status and
- * body into one string, with no fields to read, so this list is the detection — kept narrow on
- * purpose: a network, auth, or rate limit failure must not start a recovery, which is why a bare
- * `500` never matches. `413` alone does: it means Content Too Large and nothing else. The provider's
- * real ceiling is unknown and varies by model, so nothing here claims to be one.
+ * body into one string, with no fields to read, so this list is the detection by wording — kept
+ * narrow on purpose: a network, auth, or rate limit failure must not start a recovery, which is why
+ * a bare `500` never matches here (the bridge retries that once only when the session itself is
+ * large). `413` alone does: it means Content Too Large and nothing else. The provider's real ceiling
+ * is unknown and varies by model, so nothing here claims to be one.
  */
 const SIZE_LIMIT_PHRASES = [
 	"request entity too large",
@@ -158,6 +160,24 @@ const SIZE_LIMIT_PHRASES = [
 const SIZE_WORD = /\b(?:size|bytes?|length|tokens?)\b/i;
 const OVERFLOW_WORD = /\b(?:exceed(?:s|ed|ing)?|overflow|too (?:many|long|large|big))\b/i;
 const SIZE_STATUS = /(?:^|\D)(?:422|500)(?:\D|$)/;
+
+/**
+ * Half of the request budget (`applyRequestBudget`). A live session past this floor carries a whole
+ * request large enough that the provider may have refused it for size without saying so, and the
+ * file is larger than the request (entry ids, timestamps, framing), so the floor is conservative.
+ * Tied to the same setting, so the two never drift; a starting point like the budget, not a claim
+ * about the provider's real ceiling.
+ */
+const RECOVERY_FLOOR_RATIO = 0.5;
+
+/** The live session size past which a refusal the provider did not name is retried once. */
+export function recoveryFloorBytes(env: NodeJS.ProcessEnv = process.env): number {
+	const raw = env[REQUEST_BUDGET_ENV]?.trim();
+	const configured = raw ? Number(raw) : Number.NaN;
+	const budget =
+		Number.isFinite(configured) && configured > 0 ? Math.floor(configured) : DEFAULT_REQUEST_BUDGET;
+	return Math.floor(budget * RECOVERY_FLOOR_RATIO);
+}
 
 /** True when the engine's formatted provider error says the request itself was too large. */
 export function isSizeLimitError(errorMessage: string | undefined): boolean {
@@ -1437,15 +1457,28 @@ export class DotBridge {
 		}
 	}
 
-	/** The one recovery a user message may have: a size failure, once, with no tool in the turn. */
+	/** The one recovery a user message may have, with no tool in the turn. */
 	private canRecover(errorMessage: string | undefined): boolean {
-		return (
-			this.lastPrompt !== undefined &&
-			this.pendingRecovery === undefined &&
-			!this.recovered &&
-			!this.toolInTurn &&
-			isSizeLimitError(errorMessage)
-		);
+		if (
+			this.lastPrompt === undefined ||
+			this.pendingRecovery !== undefined ||
+			this.recovered ||
+			this.toolInTurn
+		) {
+			return false;
+		}
+		// The provider's wording separates size from a plain failure only when it says so. Otherwise the
+		// retry is the discriminator: a request whose conversation is already large is sent once more,
+		// which succeeds for size and fails for an outage, and that failure is then shown. A small
+		// conversation is never retried, so an outage there surfaces immediately and costs nothing.
+		return isSizeLimitError(errorMessage) || this.sessionIsLarge();
+	}
+
+	/** True when the live session is large enough that its whole request may have been refused. */
+	private sessionIsLarge(): boolean {
+		const file = this.supervisor.sessionFile;
+		if (!file) return false;
+		return this.engine(() => sessionFileBytes(file)) >= recoveryFloorBytes();
 	}
 
 	private onTool(event: AgentRecord): void {

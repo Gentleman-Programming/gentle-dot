@@ -3,8 +3,9 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import type { ServerPayload } from "@gentle-dot/protocol";
-import { describe, expect, it } from "vitest";
-import { DotBridge, isSizeLimitError } from "../src/bridge.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { DotBridge, isSizeLimitError, recoveryFloorBytes } from "../src/bridge.ts";
+import { DEFAULT_REQUEST_BUDGET, REQUEST_BUDGET_ENV } from "../src/extensions/screenshot-context.ts";
 import { DEFAULT_ROTATION } from "../src/rotation.ts";
 import type {
 	AgentRecord,
@@ -18,6 +19,9 @@ import { fakeSupervisor, tempDir, waitFor } from "./helpers.ts";
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 1, 2, 3]);
 const ANSWER_FAILED = "Something went wrong while answering. Please try again.";
+/** The wording the incident that motivated this feature carried: no size anywhere in it. */
+const INCIDENT = "opencode-go API error (500): 500 status code (no body)";
+afterEach(() => vi.unstubAllEnvs());
 
 type Prompt = { message: string; images?: { type: "image"; mimeType: string; data: string }[] };
 /** What one attempt of a prompt does: steps run in order, the last one ends the run. */
@@ -292,6 +296,17 @@ function windowMessages(received: ServerPayload[]): { role: string; text: string
 	return shown;
 }
 
+/**
+ * Grows the live session the way a long chat with images does, without adding a message to it:
+ * only `type: "message"` entries become turns, so the pad changes the file's size and nothing else.
+ */
+function grow(engine: FakeEngine, bytes: number): void {
+	appendFileSync(
+		engine.sessionFile as string,
+		`${JSON.stringify({ type: "pad", data: "x".repeat(bytes) })}\n`,
+	);
+}
+
 /** Sends one message and waits until its turn (and anything the daemon did about it) finished. */
 async function send({ bridge, client, engine, received }: Setup, text: string) {
 	const runs = engine.runs;
@@ -411,11 +426,7 @@ describe("recovering from a refused request", () => {
 	});
 
 	it("shows the real error without retrying when the failure is not about size", async () => {
-		for (const plainError of [
-			"opencode-go API error (500): 500 status code (no body)",
-			"fetch failed: ECONNRESET",
-			"401 Unauthorized: invalid API key",
-		]) {
+		for (const plainError of ["fetch failed: ECONNRESET", "401 Unauthorized: invalid API key"]) {
 			const { engine, bridge, client, received } = setup();
 			engine.plainError = plainError;
 			engine.plan.plain = [["error"]];
@@ -497,6 +508,130 @@ describe("recovering from a refused request", () => {
 		expect(received.filter((p) => p.type === "message_done" && p.error !== undefined)).toEqual([]);
 		expect(engine.prompts).toHaveLength(1);
 		expect(engine.previousSessions).toEqual([]);
+	});
+
+	it("shows the re-sent question once when the whole chain is read again", async () => {
+		const test = setup();
+		const { engine, bridge, client, received } = test;
+		engine.plan.keep = [["answer"]];
+		engine.plan.big = [["size"], ["answer"]];
+		await send(test, "keep");
+		const first = engine.sessionFile as string;
+
+		await send(test, "big");
+
+		// The window saw the question once and never the failure; the previous session stays in the chain.
+		expect(userMessages(received)).toEqual(["keep", "big"]);
+		expect(errors(received)).toEqual([]);
+		expect(engine.previousSessions).toEqual([first]);
+
+		// A cold reload pages the whole chain: the refused turn shows once, and every other turn stays.
+		const start = received.length;
+		await bridge.handle(client, { type: "get_history" });
+		const history = received
+			.slice(start)
+			.find((p): p is Extract<ServerPayload, { type: "history" }> => p.type === "history");
+		expect(history?.messages.map((m) => `${m.role}:${m.text}`)).toEqual([
+			"user:keep",
+			"assistant:Echo: keep",
+			"user:big",
+			"assistant:Echo: big",
+		]);
+		expect(history?.messages.filter((m) => m.role === "user" && m.text === "big")).toHaveLength(1);
+	});
+});
+
+describe("the recovery floor", () => {
+	it("is half the request budget, read from the setting the request rewriter uses", () => {
+		expect(recoveryFloorBytes({})).toBe(DEFAULT_REQUEST_BUDGET / 2);
+		expect(recoveryFloorBytes({ [REQUEST_BUDGET_ENV]: "20000" })).toBe(10_000);
+		for (const bad of ["", "0", "-5", "lots"]) {
+			expect(recoveryFloorBytes({ [REQUEST_BUDGET_ENV]: bad })).toBe(DEFAULT_REQUEST_BUDGET / 2);
+		}
+	});
+});
+
+describe("a refusal the provider does not name", () => {
+	it("recovers the observed incident on a large conversation", async () => {
+		// A small budget keeps the test's session small; the floor is half of it, as in production.
+		vi.stubEnv(REQUEST_BUDGET_ENV, "20000");
+		const test = setup();
+		const { engine, bridge, client, received } = test;
+		engine.plainError = INCIDENT;
+		engine.plan.keep = [["answer"]];
+		engine.plan.big = [["error"], ["answer"]];
+		await send(test, "keep");
+		grow(engine, 12_000);
+		const first = engine.sessionFile as string;
+
+		await send(test, "big");
+		const onDisk = readFileSync(first, "utf8");
+
+		// The retry is the discriminator: it answered, so the refusal was size, and the window is clean.
+		expect(errors(received)).toEqual([]);
+		expect(engine.prompts).toHaveLength(3);
+		expect(engine.previousSessions).toEqual([first]);
+		expect(userMessages(received)).toEqual(["keep", "big"]);
+
+		const start = received.length;
+		await bridge.handle(client, { type: "get_history" });
+		const history = received
+			.slice(start)
+			.find((p): p is Extract<ServerPayload, { type: "history" }> => p.type === "history");
+		expect(history?.messages.map((m) => `${m.role}:${m.text}`)).toEqual([
+			"user:keep",
+			"assistant:Echo: keep",
+			"user:big",
+			"assistant:Echo: big",
+		]);
+		// Nothing on disk was deleted or rewritten by the history read.
+		expect(readFileSync(first, "utf8")).toBe(onDisk);
+	});
+
+	it("shows the real error on a large conversation when the retry fails too", async () => {
+		vi.stubEnv(REQUEST_BUDGET_ENV, "20000");
+		const test = setup();
+		const { engine, received } = test;
+		engine.plainError = INCIDENT;
+		engine.plan.big = [["error"], ["error"]];
+		grow(engine, 12_000);
+
+		await send(test, "big");
+
+		// An outage is never hidden: one extra attempt, then the real failure.
+		expect(errors(received)).toEqual([{ id: expect.any(String), error: ANSWER_FAILED }]);
+		expect(engine.prompts).toHaveLength(2);
+		expect(engine.runs).toBe(2);
+		expect(engine.previousSessions).toHaveLength(1);
+	});
+
+	it("shows the real error immediately when the conversation is small", async () => {
+		const { engine, bridge, client, received } = setup();
+		engine.plainError = INCIDENT;
+		engine.plan.plain = [["error"]];
+		const first = engine.sessionFile as string;
+
+		await bridge.handle(client, { type: "send", text: "plain" });
+		await waitFor(() => errors(received).length > 0);
+		await new Promise((resolve) => setTimeout(resolve, 40));
+
+		expect(errors(received)).toEqual([{ id: expect.any(String), error: ANSWER_FAILED }]);
+		expect(engine.prompts).toHaveLength(1);
+		expect(engine.sessionFile).toBe(first);
+		expect(engine.previousSessions).toEqual([]);
+	});
+
+	it("keeps the size signatures: a refusal that names the size recovers however small the chat is", async () => {
+		const test = setup();
+		const { engine, received } = test;
+		engine.sizeError = "opencode-go API error (413): request entity too large";
+		engine.plan.big = [["size"], ["answer"]];
+
+		await send(test, "big");
+
+		expect(errors(received)).toEqual([]);
+		expect(engine.prompts).toHaveLength(2);
+		expect(engine.previousSessions).toHaveLength(1);
 	});
 });
 

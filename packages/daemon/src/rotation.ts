@@ -35,6 +35,16 @@ export function rotationLimits(env: NodeJS.ProcessEnv): RotationLimits {
 	};
 }
 
+/** The live session file's size in bytes; 0 when there is no file or it cannot be read. */
+export function sessionFileBytes(file: string | undefined): number {
+	if (!file) return 0;
+	try {
+		return existsSync(file) ? statSync(file).size : 0;
+	} catch {
+		return 0;
+	}
+}
+
 function entries(file: string, mark: string): Record<string, unknown>[] {
 	const found: Record<string, unknown>[] = [];
 	for (const line of readFileSync(file, "utf8").split("\n")) {
