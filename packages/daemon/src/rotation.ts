@@ -167,6 +167,21 @@ export class SessionRotator {
 			return size >= limits.bytes || this.compactionsIn(file, size) >= limits.compactions;
 		});
 		if (!over) return false;
+		return this.rotateNow(file);
+	}
+
+	/**
+	 * Replaces the open session whatever its size, and only when the chat is idle: the provider
+	 * refused the request as too large, which no size limit of ours can tell in advance.
+	 */
+	async forceRotate(): Promise<boolean> {
+		if (this.rotating || !this.options.canRotate()) return false;
+		const file = this.supervisor.sessionFile;
+		if (!file) return false;
+		return this.rotateNow(file);
+	}
+
+	private async rotateNow(file: string): Promise<boolean> {
 		this.rotating = true;
 		try {
 			const state = (await this.supervisor.request({ type: "get_state" })).data as

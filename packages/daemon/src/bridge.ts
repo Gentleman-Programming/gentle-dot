@@ -124,6 +124,52 @@ const READY_TIMEOUT_MS = 60_000;
 const ANSWER_FAILED = "Something went wrong while answering. Please try again.";
 const HISTORY_PAGE = 100;
 
+/** A prompt as the engine receives it, images inlined, so it can be sent again unchanged. */
+type SentPrompt = { message: string; images?: { type: "image"; mimeType: string; data: string }[] };
+
+/**
+ * The wording a request refused as too large carries. The engine formats the provider's status and
+ * body into one string, with no fields to read, so this list is the detection — kept narrow on
+ * purpose: a network, auth, or rate limit failure must not start a recovery, which is why a bare
+ * `500` never matches. `413` alone does: it means Content Too Large and nothing else. The provider's
+ * real ceiling is unknown and varies by model, so nothing here claims to be one.
+ */
+const SIZE_LIMIT_PHRASES = [
+	"request entity too large",
+	"payload too large",
+	"entity too large",
+	"content too large",
+	"request too large",
+	"body too large",
+	"too large",
+	"input too long",
+	"prompt is too long",
+	"prompt too long",
+	"too many tokens",
+	"maximum number of tokens",
+	"context length",
+	"maximum context",
+	"max context",
+	"context window",
+	"context_length_exceeded",
+	"reduce the length of the messages",
+];
+/** A size, not merely a limit: "rate limit exceeded" and "context deadline exceeded" stay out. */
+const SIZE_WORD = /\b(?:size|bytes?|length|tokens?)\b/i;
+const OVERFLOW_WORD = /\b(?:exceed(?:s|ed|ing)?|overflow|too (?:many|long|large|big))\b/i;
+const SIZE_STATUS = /(?:^|\D)(?:422|500)(?:\D|$)/;
+
+/** True when the engine's formatted provider error says the request itself was too large. */
+export function isSizeLimitError(errorMessage: string | undefined): boolean {
+	if (!errorMessage) return false;
+	const text = errorMessage.toLowerCase();
+	// Content Too Large by definition, whatever the body says or omits.
+	if (/(?:^|\D)413(?:\D|$)/.test(text)) return true;
+	if (SIZE_LIMIT_PHRASES.some((phrase) => text.includes(phrase))) return true;
+	if (SIZE_WORD.test(text) && OVERFLOW_WORD.test(text)) return true;
+	return SIZE_STATUS.test(text) && SIZE_WORD.test(text);
+}
+
 /**
  * Translates between protocol v1 clients and the supervised agent: it keeps
  * the derived agent state, the pending asks, and the streaming message ids,
@@ -160,6 +206,21 @@ export class DotBridge {
 	private queue: MessageQueue = { steering: [], followUp: [] };
 	/** Messages on their way to the agent; the session is never rotated under them. */
 	private sending = 0;
+	/**
+	 * The prompt of the user message being answered, kept before it is sent: a request the provider
+	 * refuses as too large is sent again exactly as it was, images included.
+	 */
+	private lastPrompt: SentPrompt | undefined;
+	/** A tool ran since the user's message; sending it again would repeat its side effects. */
+	private toolInTurn = false;
+	/** The refused answer waiting for a decision, taken up once the run settles. */
+	private pendingRecovery: { failed: { messageId: string; text: string }; prompt: SentPrompt } | undefined;
+	/** This user message already had its one automatic recovery; a second failure is real. */
+	private recovered = false;
+	/** The text the recovery re-sent, whose user message the window must not show twice. */
+	private resendingText: string | undefined;
+	/** A conversation switch is in progress: the session is not rotated under it. */
+	private switchingNow = false;
 	/** A run settled while a message was still on its way; check for rotation once it arrived. */
 	private rotationDeferred = false;
 	private readonly features: Features;
@@ -412,6 +473,11 @@ export class DotBridge {
 								read: (path) => this.engine(() => readFileSync(path)),
 							})
 						: { message: message.text };
+				// Stash the prompt before it is sent: a refused one is sent again exactly as it was.
+				this.lastPrompt = prompt;
+				this.toolInTurn = false;
+				this.recovered = false;
+				this.resendingText = undefined;
 				this.sending += 1;
 				try {
 					await this.supervisor.request(
@@ -423,7 +489,7 @@ export class DotBridge {
 					// The run may have settled before the answer to this prompt was handled.
 					if (this.sending === 0 && this.rotationDeferred) {
 						this.rotationDeferred = false;
-						if (!this.supervisor.busy) this.rotateWhenIdle();
+						if (!this.supervisor.busy) this.afterRunSettled();
 					}
 				}
 				return;
@@ -684,7 +750,12 @@ export class DotBridge {
 	/** Runs a conversation switch; a message sent meanwhile goes to the new conversation, after its history. */
 	private changeConversation(change: () => Promise<void>): Promise<void> {
 		const run = change();
-		this.switching = run.catch(() => {});
+		this.switchingNow = true;
+		this.switching = run
+			.catch(() => {})
+			.finally(() => {
+				this.switchingNow = false;
+			});
 		return run;
 	}
 
@@ -1129,6 +1200,69 @@ export class DotBridge {
 	}
 
 	/**
+	 * After a run settles: restart if one was asked for, take up a refused request once nothing is on
+	 * its way, or rotate an oversized session.
+	 */
+	private afterRunSettled(): void {
+		if (this.restartPending) {
+			this.restartAgent();
+			return;
+		}
+		if (this.sending > 0) {
+			this.rotationDeferred = true;
+			return;
+		}
+		if (this.pendingRecovery) {
+			void this.recoverTurn();
+			return;
+		}
+		// The answer is in: its images are not needed again.
+		this.lastPrompt = undefined;
+		this.rotateWhenIdle();
+	}
+
+	/**
+	 * The provider refused the request as too large: continue the same chat in a fresh session and
+	 * send the user's message once more, so the answer arrives without the window ever seeing the
+	 * failure. Rotation comes first, so the live session holds one copy of the message, and the copy
+	 * the window already shows is not sent to it again. One recovery per user message, and none when
+	 * that is impossible: the error is shown instead of leaving the chat stalled.
+	 */
+	private async recoverTurn(): Promise<void> {
+		const pending = this.pendingRecovery;
+		this.pendingRecovery = undefined;
+		if (!pending) return;
+		const { failed, prompt } = pending;
+		// A message sent meanwhile is the one to answer now: this failure is shown, not recovered.
+		if (this.switchingNow || this.lastPrompt !== prompt) {
+			this.showFailure(failed);
+			return;
+		}
+		this.log("the provider refused the request as too large; continuing the chat in a fresh session");
+		if (!(await this.rotator.forceRotate())) {
+			this.showFailure(failed);
+			return;
+		}
+		this.broadcast({ type: "history", ...this.conversationRef(), ...(await this.currentHistory()) });
+		this.resendingText = prompt.message;
+		try {
+			await this.supervisor.request({ type: "prompt", ...prompt });
+		} catch (error) {
+			this.log(`could not send the message again: ${(error as Error).message}`);
+			this.showFailure(failed);
+		}
+	}
+
+	private showFailure(failed: { messageId: string; text: string }): void {
+		this.broadcast({
+			type: "message_done",
+			messageId: failed.messageId,
+			text: failed.text,
+			error: ANSWER_FAILED,
+		});
+	}
+
+	/**
 	 * History replaces what a window shows, so it must not be older than the
 	 * messages already sent: read it again when one arrived while loading.
 	 */
@@ -1216,9 +1350,7 @@ export class DotBridge {
 				// The title of a new conversation comes from its first message.
 				this.broadcast(this.conversationsPayload());
 				this.settleModelSwitch();
-				if (this.restartPending) this.restartAgent();
-				else if (this.sending > 0) this.rotationDeferred = true;
-				else this.rotateWhenIdle();
+				this.afterRunSettled();
 				break;
 			case "extension_ui_request":
 				this.onUiRequest(event);
@@ -1248,8 +1380,17 @@ export class DotBridge {
 
 	private onMessageStart(event: AgentRecord): void {
 		const message = event.message as { role?: string } | undefined;
+		// A tool result is a tool in the turn, however the engine reports it.
+		if (message?.role === "toolResult") this.toolInTurn = true;
 		if (message?.role === "user") {
-			const { text, attachments } = splitAttachments(textOf(message));
+			// A new user message starts its turn: whatever ran for the previous one is over.
+			this.toolInTurn = false;
+			const raw = textOf(message);
+			// The recovery sends the message the window already shows: it must not appear twice.
+			const shown = this.resendingText !== undefined && raw === this.resendingText;
+			this.resendingText = undefined;
+			if (shown) return;
+			const { text, attachments } = splitAttachments(raw);
 			this.broadcast({
 				type: "user_message",
 				messageId: `u${++this.nextMessage}`,
@@ -1271,6 +1412,10 @@ export class DotBridge {
 		const message = event.message as
 			| { role?: string; stopReason?: string; errorMessage?: string }
 			| undefined;
+		if (message?.role === "toolResult") {
+			this.toolInTurn = true;
+			return;
+		}
 		if (message?.role !== "assistant") return;
 		const messageId = this.assistantId ?? `m${++this.nextMessage}`;
 		const text = presentText(textOf(message));
@@ -1279,15 +1424,35 @@ export class DotBridge {
 			this.broadcast({ type: "message_done", messageId, text, stopped: true });
 		} else if (message.stopReason === "error") {
 			this.log(`assistant error: ${message.errorMessage ?? "unknown"}`);
-			this.broadcast({ type: "message_done", messageId, text, error: ANSWER_FAILED });
+			// A request the provider refused for its size is recovered behind the chat: the window
+			// hears nothing until the run settles, and only then when the message can be sent again.
+			if (this.canRecover(message.errorMessage)) {
+				this.recovered = true;
+				this.pendingRecovery = { failed: { messageId, text }, prompt: this.lastPrompt as SentPrompt };
+				return;
+			}
+			this.showFailure({ messageId, text });
 		} else {
 			this.broadcast({ type: "message_done", messageId, text });
 		}
 	}
 
+	/** The one recovery a user message may have: a size failure, once, with no tool in the turn. */
+	private canRecover(errorMessage: string | undefined): boolean {
+		return (
+			this.lastPrompt !== undefined &&
+			this.pendingRecovery === undefined &&
+			!this.recovered &&
+			!this.toolInTurn &&
+			isSizeLimitError(errorMessage)
+		);
+	}
+
 	private onTool(event: AgentRecord): void {
 		const id = String(event.toolCallId ?? "");
 		const started = event.type === "tool_execution_start";
+		// A tool ran in this turn: its effects must never be repeated by sending the message again.
+		this.toolInTurn = true;
 		if (started) this.runningTools.add(id);
 		else this.runningTools.delete(id);
 		const status = started ? "running" : event.isError ? "failed" : "done";

@@ -215,6 +215,36 @@ describe("rotation guards", () => {
 		expect(requests).toEqual([]);
 	});
 
+	it("rotates on demand below the limits, and refuses when the chat is not idle", async () => {
+		const file = compactedFile(0);
+		const requests: string[] = [];
+		const linked: string[][] = [];
+		const supervisor = {
+			state: "ready",
+			busy: false,
+			sessionFile: file,
+			previousSessions: [],
+			linkSessions: (_seed: string, previous: string[]) => linked.push(previous),
+			request: async (command: { type: string; sessionPath?: string }) => {
+				requests.push(command.type);
+				if (command.type === "switch_session") supervisor.sessionFile = String(command.sessionPath);
+				const data =
+					command.type === "get_messages"
+						? { messages: [{ role: "custom", customType: HANDOFF_TYPE, content: "x" }] }
+						: {};
+				return { type: "response", command: command.type, success: true, data };
+			},
+		} as unknown as AgentSupervisor;
+		const blocked = new SessionRotator(supervisor, { limits: DEFAULT_ROTATION, canRotate: () => false });
+		expect(await blocked.forceRotate()).toBe(false);
+		expect(requests).toEqual([]);
+
+		const rotator = new SessionRotator(supervisor, { limits: DEFAULT_ROTATION, canRotate: () => true });
+		expect(await rotator.forceRotate()).toBe(true);
+		expect(requests).toEqual(["get_state", "switch_session", "get_messages"]);
+		expect(linked).toEqual([[file]]);
+	});
+
 	it("reads its limits from the environment, defaulting to 20 MB or 10 compactions", () => {
 		expect(DEFAULT_ROTATION).toEqual({ bytes: 20 * 1024 * 1024, compactions: 10 });
 		expect(rotationLimits({})).toEqual(DEFAULT_ROTATION);
