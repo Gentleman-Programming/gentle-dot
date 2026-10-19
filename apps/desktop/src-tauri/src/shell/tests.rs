@@ -25,6 +25,38 @@ fn tray_offers_stop_computer_control_where_it_exists() {
     );
 }
 
+/// T2/S2: the tray menu follows the helper that actually started (the managed `Computer`
+/// endpoint), never a re-derived startup predicate. A Linux host whose Niri is configured
+/// but whose helper failed must not advertise control.
+#[test]
+fn tray_follows_the_started_helper_and_the_platform_menu() {
+    // Linux helper actually registered: both items appear.
+    assert!(tray_offers_computer_control("linux", true));
+    assert_eq!(
+        tray_menu_ids(false, tray_offers_computer_control("linux", true)),
+        vec!["open", "browser", "rose", "computer-stop", "computer-yolo", "-", "restart", "autostart", "-", "quit"]
+    );
+    // Niri configured but the helper never started (no endpoint): no item is offered.
+    assert!(!tray_offers_computer_control("linux", false));
+    assert_eq!(
+        tray_menu_ids(false, tray_offers_computer_control("linux", false)),
+        vec!["open", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
+    );
+    // macOS keeps its previous menu even when the helper failed.
+    assert!(tray_offers_computer_control("macos", false));
+    assert_eq!(
+        tray_menu_ids(false, tray_offers_computer_control("macos", false)),
+        vec!["open", "browser", "rose", "computer-stop", "computer-yolo", "-", "restart", "autostart", "-", "quit"]
+    );
+    // No other platform has a helper: never offer control.
+    assert!(!tray_offers_computer_control("other", false));
+    assert!(!tray_offers_computer_control("other", true));
+    assert_eq!(
+        tray_menu_ids(false, tray_offers_computer_control("other", false)),
+        vec!["open", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
+    );
+}
+
 #[test]
 fn the_shortcut_and_connector_commands_are_registered_and_granted_to_the_panel_only() {
     let build = include_str!("../../build.rs");

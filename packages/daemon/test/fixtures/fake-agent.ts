@@ -35,6 +35,11 @@
 //   FAKE_AGENT_DROP_QUEUE settle without taking or reporting queued messages
 //   FAKE_AGENT_IGNORE_ABORT  answer abort but keep running (a session switch still ends the run)
 //   FAKE_AGENT_START_DELAY_MS  answer the first get_state only after this delay
+//   FAKE_AGENT_ATTEMPTS_FILE  record this spawn's number (1, 2, ...) in this file
+//   FAKE_AGENT_STALL_START_AT  these spawn numbers (comma-separated) never answer get_state
+//   FAKE_AGENT_IGNORE_SIGNALS_AT  these spawn numbers ignore stdin EOF and SIGTERM: only a SIGKILL ends them
+//   FAKE_AGENT_EXIT_START_AT  these spawn numbers exit with code 1 instead of answering get_state
+//   FAKE_AGENT_SIGNALS_FILE  append the name of every signal this process catches
 //   FAKE_AGENT_DROP_CUSTOM  load session files without their custom messages (a format drift)
 //   FAKE_AGENT_PROMPTS_FILE  append every prompt command (message, images, streamingBehavior) as JSONL
 //   FAKE_AGENT_MARKER_FILE  write whether the `--home` folder held gentle-shell's `.gentle-shell-home` at launch
@@ -44,7 +49,7 @@
 // get_state reports, so tests can read the last values back. A model's `input` says whether it
 // accepts images, like the engine's models.
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 type Rec = Record<string, unknown>;
@@ -74,16 +79,61 @@ let model = MODELS[0] as Rec;
 let thinkingLevel = "medium";
 
 const argv = process.argv.slice(2);
-if (process.env.FAKE_AGENT_ARGS_FILE) writeFileSync(process.env.FAKE_AGENT_ARGS_FILE, JSON.stringify(argv));
-if (process.env.FAKE_AGENT_CWD_FILE) writeFileSync(process.env.FAKE_AGENT_CWD_FILE, process.cwd());
+
+// Tests poll these files while this process writes them, and a plain write publishes a truncated
+// file for the length of the write: a poller that parses one dies with "Unexpected end of JSON
+// input" under load. Renaming a sibling temp file publishes the whole content at once, and the pid
+// keeps concurrent fake agents from sharing a temp name.
+const writePublished = (path: string, text: string) => {
+	const temp = `${path}.${process.pid}.tmp`;
+	writeFileSync(temp, text);
+	renameSync(temp, path);
+};
+
+/** The spawns are numbered so a test can make one attempt the bad one and the next one work. */
+function bumpAttempt(path: string): number {
+	let seen = 0;
+	try {
+		seen = Number(JSON.parse(readFileSync(path, "utf8"))) || 0;
+	} catch {
+		// The first spawn finds no file yet.
+	}
+	const attempt = seen + 1;
+	writePublished(path, JSON.stringify(attempt));
+	return attempt;
+}
+
+const attempt = process.env.FAKE_AGENT_ATTEMPTS_FILE ? bumpAttempt(process.env.FAKE_AGENT_ATTEMPTS_FILE) : 1;
+/** Whether this spawn is one the variable names: a comma-separated list of spawn numbers. */
+const at = (name: string): boolean =>
+	(process.env[name] ?? "").split(",").some((value) => Number(value) === attempt);
+const stalled = at("FAKE_AGENT_STALL_START_AT");
+const ignoresSignals = at("FAKE_AGENT_IGNORE_SIGNALS_AT");
+if (at("FAKE_AGENT_EXIT_START_AT")) process.exit(1);
+
+const signalsFile = process.env.FAKE_AGENT_SIGNALS_FILE;
+if (signalsFile || ignoresSignals) {
+	const note = (signal: NodeJS.Signals) => {
+		if (signalsFile) appendFileSync(signalsFile, `${signal}\n`);
+		// Node's own SIGTERM handling is to leave; recording one must not change that.
+		if (!ignoresSignals) process.exit(0);
+	};
+	for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(signal, () => note(signal));
+}
+// With stdin ended and nothing else pending, the event loop empties and the process leaves anyway:
+// a child that has to ignore its stdin end needs something to stay on, as a working agent would.
+if (ignoresSignals) setInterval(() => {}, 1 << 30);
+
+if (process.env.FAKE_AGENT_ARGS_FILE) writePublished(process.env.FAKE_AGENT_ARGS_FILE, JSON.stringify(argv));
+if (process.env.FAKE_AGENT_CWD_FILE) writePublished(process.env.FAKE_AGENT_CWD_FILE, process.cwd());
 if (process.env.FAKE_AGENT_MARKER_FILE) {
 	const home = argv[argv.indexOf("--home") + 1];
 	const marked =
 		argv.includes("--home") && home !== undefined && existsSync(join(home, ".gentle-shell-home"));
-	writeFileSync(process.env.FAKE_AGENT_MARKER_FILE, JSON.stringify(marked));
+	writePublished(process.env.FAKE_AGENT_MARKER_FILE, JSON.stringify(marked));
 }
 if (process.env.FAKE_AGENT_ENV_FILE) {
-	writeFileSync(
+	writePublished(
 		process.env.FAKE_AGENT_ENV_FILE,
 		JSON.stringify(
 			Object.fromEntries(
@@ -109,7 +159,7 @@ if (process.env.FAKE_AGENT_ENV_FILE) {
 	);
 }
 if (process.env.FAKE_AGENT_PROCESS_FILE) {
-	writeFileSync(
+	writePublished(
 		process.env.FAKE_AGENT_PROCESS_FILE,
 		JSON.stringify({ env: process.env, argv, uid: process.getuid?.(), gid: process.getgid?.() }),
 	);
@@ -327,13 +377,13 @@ async function runPrompt(text: string, images?: Rec[]) {
 	}
 	if (text === "tamper" || text === "tamper:stay") {
 		const notion = { url: "https://mcp.notion.com/mcp", exposure: "direct" };
-		writeFileSync(
+		writePublished(
 			"../connectors.json",
 			JSON.stringify({ version: 1, connectors: { notion: { enabled: true, mode: "read_write" } } }),
 		);
-		writeFileSync("../agent/mcp.json", JSON.stringify({ mcpServers: { notion } }));
+		writePublished("../agent/mcp.json", JSON.stringify({ mcpServers: { notion } }));
 		mkdirSync(".pi", { recursive: true });
-		writeFileSync(".pi/mcp.json", JSON.stringify({ mcpServers: { notion } }));
+		writePublished(".pi/mcp.json", JSON.stringify({ mcpServers: { notion } }));
 		if (text === "tamper") {
 			setTimeout(() => process.kill(process.pid, "SIGTERM"), 50);
 			return;
@@ -402,6 +452,8 @@ function handle(rec: Rec) {
 	const { id, type } = rec;
 	switch (type) {
 		case "get_state": {
+			// An attempt a test stalls never answers, so it never becomes ready (T25).
+			if (stalled) return;
 			const delay = Number(process.env.FAKE_AGENT_START_DELAY_MS ?? 0);
 			if (!started && delay > 0) {
 				started = true;
@@ -547,4 +599,6 @@ process.stdin.on("data", (chunk: string) => {
 		newline = buffer.indexOf("\n");
 	}
 });
-process.stdin.on("end", () => process.exit(0));
+process.stdin.on("end", () => {
+	if (!ignoresSignals) process.exit(0);
+});

@@ -79,22 +79,28 @@ pub fn compositor_places_windows(env: impl Fn(&str) -> Option<String>) -> bool {
     }
 }
 
-/// What a launch asks for: `--toggle` toggles the panel (bind it to a desktop shortcut),
-/// `--fullscreen` toggles the panel between fullscreen and minimized (a second managed
-/// binding on Niri), and any other launch shows it. New launches only ADD requests;
-/// the existing toggle/show behaviour does not change.
+/// What a launch asks for: `--stop` ends the computer-control session (the managed Niri
+/// Alt+Shift+Escape binding, since the compositor owns that key there), `--toggle` toggles
+/// the panel (bind it to a desktop shortcut), `--fullscreen` toggles the panel between
+/// fullscreen and minimized (a second managed binding on Niri), and any other launch shows
+/// it. New launches only ADD requests; the existing toggle/show behaviour does not change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchRequest {
+    Stop,
     Toggle,
     Show,
     Fullscreen,
 }
 
 /// Reads the arguments of a launch, `args[0]` being the program. Exact tokens only,
-/// so `toggle` or `--fullscreen-x` never match; when both verbs are present the
-/// fullscreen one wins because it is the rarer, more deliberate request.
+/// so `toggle` or `--fullscreen-x` never match. `--stop` outranks the panel verbs —
+/// it is the emergency, so a launch carrying it must never open the panel instead of
+/// ending the session — and fullscreen keeps outranking toggle (the rarer, more
+/// deliberate panel request).
 pub fn launch_request(args: &[String]) -> LaunchRequest {
-    if args.iter().skip(1).any(|arg| arg == "--fullscreen") {
+    if args.iter().skip(1).any(|arg| arg == "--stop") {
+        LaunchRequest::Stop
+    } else if args.iter().skip(1).any(|arg| arg == "--fullscreen") {
         LaunchRequest::Fullscreen
     } else if args.iter().skip(1).any(|arg| arg == "--toggle") {
         LaunchRequest::Toggle
@@ -194,6 +200,37 @@ mod tests {
         // The program path is never read as an argument.
         assert_eq!(launch_request(&args(&["--toggle"])), LaunchRequest::Show);
         assert_eq!(launch_request(&[]), LaunchRequest::Show);
+    }
+
+    #[test]
+    fn the_stop_token_ends_the_session_and_never_opens_the_panel() {
+        // T17/S2: the managed Niri binding for Alt+Shift+Escape — the one this app
+        // writes and the Linux Yolo dialog names — spawns `gentle-dot --stop`.
+        // Reading it as `Show` opened the panel instead of ending the session.
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(launch_request(&args(&["gentle-dot", "--stop"])), LaunchRequest::Stop);
+        assert_eq!(launch_request(&args(&["/opt/gentle-dot", "--verbose", "--stop"])), LaunchRequest::Stop);
+        // The emergency wins over the panel verbs, whatever the order.
+        assert_eq!(launch_request(&args(&["gentle-dot", "--stop", "--toggle"])), LaunchRequest::Stop);
+        assert_eq!(launch_request(&args(&["gentle-dot", "--fullscreen", "--stop"])), LaunchRequest::Stop);
+        assert_eq!(
+            launch_request(&args(&["gentle-dot", "--toggle", "--fullscreen", "--stop"])),
+            LaunchRequest::Stop
+        );
+        // Exact token only, like the panel verbs; in `args[0]` it is the program.
+        assert_eq!(launch_request(&args(&["gentle-dot", "--stop-x"])), LaunchRequest::Show);
+        assert_eq!(launch_request(&args(&["gentle-dot", "stop", "--stopped"])), LaunchRequest::Show);
+        assert_eq!(launch_request(&args(&["--stop"])), LaunchRequest::Show);
+    }
+
+    #[test]
+    fn the_panel_verbs_keep_their_precedence_beside_stop() {
+        // PRESERVE (T17): `--stop` is added ahead of the panel verbs and must not
+        // disturb them; fullscreen still wins over toggle, and a bare path shows.
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(launch_request(&args(&["gentle-dot", "--toggle"])), LaunchRequest::Toggle);
+        assert_eq!(launch_request(&args(&["gentle-dot", "--toggle", "--fullscreen"])), LaunchRequest::Fullscreen);
+        assert_eq!(launch_request(&args(&["gentle-dot"])), LaunchRequest::Show);
     }
 
     #[test]

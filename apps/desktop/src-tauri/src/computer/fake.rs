@@ -3,8 +3,8 @@
 use super::blocklist::AppIdentity;
 use super::coords::{Point, ScreenshotGeometry};
 use super::risk::{AxElement, Focus};
-use super::{AppInfo, Capture, Clock, Desktop, Dialogs, InputEvent, Permissions};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use super::{AppInfo, Capture, Clock, Desktop, Dialogs, FocusTarget, InputEvent, Permissions};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 pub fn app(pid: i32, bundle: &str, name: &str) -> AppIdentity {
@@ -24,6 +24,24 @@ pub struct FakeDesktop {
     pub opened: Mutex<Vec<String>>,
     pub activated: Mutex<Vec<i32>>,
     pub captures: AtomicUsize,
+    /// The window holding the keyboard focus, when a test sets one (S4, S5).
+    pub focused_window: Mutex<Option<FocusTarget>>,
+    /// The window ids `focus_window` was asked to focus back, in order.
+    pub focus_restores: Mutex<Vec<u64>>,
+    /// When set, `focus_window` fails with this message instead of focusing.
+    pub focus_failure: Mutex<Option<String>>,
+    /// When set, `focus_window` answers `Ok` but leaves the focus where it is
+    /// (a compositor that ignored the request); the pre-post check must catch it.
+    pub focus_ignores: AtomicBool,
+    /// When set, `focused_window` fails, as a compositor query can.
+    pub focus_query_failure: AtomicBool,
+    /// Runs after each posted event with how many were posted so far, so a test
+    /// can change the focus mid-typing.
+    pub on_post: Mutex<Option<Box<dyn Fn(usize) + Send + Sync>>>,
+    /// Runs while an image is being taken, between the two focus reads the helper
+    /// takes around it, so a test can model a title repaint or a focus change during
+    /// one capture (T16, S4/S5).
+    pub on_capture: Mutex<Option<Hook>>,
     /// A 2560 × 1600 pt display at the origin, captured at 1280 × 800 (scale 0.5).
     pub geometry: ScreenshotGeometry,
 }
@@ -43,6 +61,13 @@ impl Default for FakeDesktop {
             opened: Mutex::new(Vec::new()),
             activated: Mutex::new(Vec::new()),
             captures: AtomicUsize::new(0),
+            focused_window: Mutex::new(None),
+            focus_restores: Mutex::new(Vec::new()),
+            focus_failure: Mutex::new(None),
+            focus_ignores: AtomicBool::new(false),
+            focus_query_failure: AtomicBool::new(false),
+            on_post: Mutex::new(None),
+            on_capture: Mutex::new(None),
             geometry: ScreenshotGeometry::for_display(Point { x: 0.0, y: 0.0 }, 2560.0, 1280, 800),
         }
     }
@@ -61,11 +86,21 @@ impl Desktop for FakeDesktop {
 
     fn capture(&self) -> Result<Capture, String> {
         self.captures.fetch_add(1, Ordering::SeqCst);
+        if let Some(hook) = self.on_capture.lock().unwrap().as_ref() {
+            hook();
+        }
         Ok(Capture { data: b"jpeg".to_vec(), mime_type: "image/jpeg", geometry: self.geometry })
     }
 
     fn post(&self, event: &InputEvent) -> Result<(), String> {
-        self.events.lock().unwrap().push(event.clone());
+        let count = {
+            let mut events = self.events.lock().unwrap();
+            events.push(event.clone());
+            events.len()
+        };
+        if let Some(hook) = self.on_post.lock().unwrap().as_ref() {
+            hook(count);
+        }
         Ok(())
     }
 
@@ -103,6 +138,24 @@ impl Desktop for FakeDesktop {
 
     fn activate(&self, pid: i32) {
         self.activated.lock().unwrap().push(pid);
+    }
+
+    fn focused_window(&self) -> Result<Option<FocusTarget>, String> {
+        if self.focus_query_failure.load(Ordering::SeqCst) {
+            return Err("niri FocusedWindow query failed (test)".into());
+        }
+        Ok(self.focused_window.lock().unwrap().clone())
+    }
+
+    fn focus_window(&self, target: &FocusTarget) -> Result<(), String> {
+        if let Some(error) = self.focus_failure.lock().unwrap().clone() {
+            return Err(error);
+        }
+        self.focus_restores.lock().unwrap().push(target.window_id);
+        if !self.focus_ignores.load(Ordering::SeqCst) {
+            *self.focused_window.lock().unwrap() = Some(target.clone());
+        }
+        Ok(())
     }
 }
 
@@ -155,6 +208,7 @@ impl Dialogs for FakeDialogs {
 
     fn ask_yolo(&self) -> bool {
         self.yolo_asks.fetch_add(1, Ordering::SeqCst);
+        self.run_hook();
         *self.yolo.lock().unwrap()
     }
 }

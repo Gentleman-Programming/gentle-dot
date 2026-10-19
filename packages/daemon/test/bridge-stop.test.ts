@@ -1,8 +1,11 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { ServerPayload } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import { DotBridge } from "../src/bridge.ts";
+import type { ConnectorManager } from "../src/connectors.ts";
 import type { AgentSupervisor } from "../src/supervisor.ts";
-import { fakeSupervisor, waitFor } from "./helpers.ts";
+import { fakeSupervisor, tempDir, waitFor } from "./helpers.ts";
 
 const supervisors: AgentSupervisor[] = [];
 afterEach(async () => {
@@ -51,5 +54,48 @@ describe("stopping before a switch", () => {
 			),
 		);
 		expect(failed.stopped).toBeUndefined();
+	});
+});
+
+describe("a connector change while the agent is starting", () => {
+	it("replaces the attempt without reporting it as a failure", async () => {
+		const argsFile = join(tempDir(), "argv.json");
+		const attemptsFile = join(tempDir(), "attempts.json");
+		const { supervisor, dataDir } = fakeSupervisor({
+			env: {
+				...process.env,
+				FAKE_AGENT_ARGS_FILE: argsFile,
+				FAKE_AGENT_ATTEMPTS_FILE: attemptsFile,
+				FAKE_AGENT_STALL_START_AT: "1",
+			},
+		});
+		supervisors.push(supervisor);
+		const logs: string[] = [];
+		// The bridge installs its own callbacks; `onChanged` is the connectors' way in, as in production.
+		const connectors = {
+			onChanged: (): void => {},
+			drafts: () => [],
+			list: () => [],
+			imagesSupported: () => undefined,
+		} as unknown as ConnectorManager;
+		const bridge = new DotBridge(supervisor, {
+			dataDir,
+			log: (line) => logs.push(line),
+			stopTimeoutMs: 300,
+			features: { conversations: true },
+			connectors,
+		});
+		const received: ServerPayload[] = [];
+		bridge.attach({ send: (payload: ServerPayload) => received.push(payload) });
+		const starting = supervisor.start();
+		// The child has to be up (and stalled) before the connector change lands on it.
+		await waitFor(() => existsSync(argsFile));
+		// A change that needs a restart lands while the first attempt is still starting.
+		connectors.onChanged(true);
+		await starting;
+		await waitFor(() => supervisor.state === "ready");
+		expect(logs.join("\n")).not.toMatch(/agent restart failed/);
+		expect(received.some((p) => p.type === "error" || p.type === "toast")).toBe(false);
+		expect(Number(readFileSync(attemptsFile, "utf8"))).toBe(2);
 	});
 });

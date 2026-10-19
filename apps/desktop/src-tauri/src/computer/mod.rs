@@ -14,6 +14,8 @@ pub mod glow;
 #[cfg(test)]
 mod fake;
 pub mod keys;
+#[cfg(target_os = "linux")]
+pub mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 pub mod mcp;
@@ -87,6 +89,24 @@ pub enum PermissionKind {
     ScreenRecording,
 }
 
+/// An explicit keyboard-focus target (S4, S5): the compositor window that holds the
+/// keyboard focus, which is a different fact from the app that owns it. Two windows of
+/// one process are different targets, so a dialog restores and an action verifies by
+/// `window_id`, never by pid alone. On Linux the pid comes straight from the Niri
+/// `FocusedWindow` reply (`Window.pid`), and is used only to exclude Gentle Dot's own
+/// window; a missing pid fails closed for keyboard input instead of guessing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FocusTarget {
+    /// Compositor window id; the target's identity.
+    pub window_id: u64,
+    /// Owning process when the compositor reports it. Never the target identity.
+    pub pid: Option<i32>,
+    /// Window title, for messages only.
+    pub title: Option<String>,
+    /// App id, for messages only; never matched as a substring to exclude an app.
+    pub app_id: Option<String>,
+}
+
 /// The Mac, as the helper sees it.
 pub trait Desktop: Send + Sync {
     fn permissions(&self) -> Permissions;
@@ -107,6 +127,20 @@ pub trait Desktop: Send + Sync {
     fn window_owner_at(&self, at: Point) -> Option<AppIdentity>;
     /// Brings an app back to the front (after a dialog took the focus).
     fn activate(&self, pid: i32);
+    /// The window holding the keyboard focus right now, when this platform can name one.
+    /// `Ok(None)` means "cannot tell", never "no window is focused"; `Err` is a truthful
+    /// query failure. The default is `Ok(None)`, so macOS keeps its pid-based frontmost
+    /// path unchanged.
+    fn focused_window(&self) -> Result<Option<FocusTarget>, String> {
+        Ok(None)
+    }
+    /// Focuses the exact window named by `target` again after a dialog took the focus.
+    /// Must fail when that cannot be done (window gone, no reply); never a pid or
+    /// first-window fallback. The default fails closed, and macOS never calls it.
+    fn focus_window(&self, target: &FocusTarget) -> Result<(), String> {
+        let _ = target;
+        Err("This platform cannot focus a window by identity, so nothing was posted.".into())
+    }
 }
 
 /// Native dialogs owned by the app, never the webview (S24.3, S24.4).
@@ -126,6 +160,48 @@ pub trait Clock: Send + Sync {
 }
 
 pub struct SystemClock;
+
+/// Which desktop a `mcp::Helper` drives (T2, S3-S5). This is an explicit backend
+/// policy, never a fabricated app identity: the Mac path keeps resolving a per-app
+/// target, while stock Wayland (Niri first) has no Accessibility equivalent, so the
+/// whole desktop is the only truthful target and per-app blocking is unavailable.
+/// The Linux backend (`linux::backend` + `linux::desktop`) drives `DesktopGlobal`
+/// in production behind the app's start gate; fake-backend tests still pin the
+/// policy through the Helper MCP interface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackendPolicy {
+    /// macOS: every pointer/key action resolves and checks its per-app target (default).
+    #[default]
+    Targeted,
+    /// Linux/Wayland: pointer input goes to the point and keyboard input to the window that
+    /// held the focus when the action started (window id, never app pid), with no reliable
+    /// per-app exclusion. Sessions, Stop, rate limits, and detected-risk approval still apply.
+    DesktopGlobal,
+}
+
+/// The truthful target named in global-mode confirmations and results.
+pub const GLOBAL_TARGET: &str = "the Linux desktop";
+
+/// Grant copy for the Linux consent UI (T5c): desktop-global, 30 minutes, no
+/// per-app exclusion promised. Asked by `linux::dialogs` before a session starts.
+pub const GLOBAL_GRANT_TEXT: &str = "Allow Gentle Dot to see and control this Linux desktop for 30 minutes? \
+There is no reliable per-app exclusion: every visible app can receive input.";
+
+/// Yolo copy for the Linux consent UI: the same promise as the app-layer text, but
+/// the Stop fallback is the binding this desktop really has. The Mac notation is
+/// meaningless here, so it must never reach this string.
+pub const GLOBAL_YOLO_TEXT: &str = "Turn on yolo mode? Gentle Dot will send, pay, delete, and submit without asking you first, \
+for up to 1 hour. Stop and Alt+Shift+Escape still work.";
+
+impl BackendPolicy {
+    /// One line for logs and the pending consent UI, naming what the user authorizes.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            BackendPolicy::Targeted => "application-targeted control",
+            BackendPolicy::DesktopGlobal => "desktop-global control without reliable per-app exclusion",
+        }
+    }
+}
 
 impl Clock for SystemClock {
     fn now_ms(&self) -> u64 {

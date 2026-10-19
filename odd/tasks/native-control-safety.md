@@ -1,0 +1,134 @@
+# Native Niri input safety and consent
+
+Repair the native-control live failures on stock Niri, preserving macOS behavior.
+Do not publish, install, modify compositor/config, or inject input into the user's active desktop.
+
+## Specs
+
+- S1: "hay que ver eso, buscar una alternativa para que no pida permiso a cada rato, ver altenativa accesibility o sacar, que funcione como en mac. no tiene sentido que pida permiso a cada rato, se pierde lo agentico y proposito asi. Esto es critico."
+- S2: "tambien hay que recuperar el yolo mode, que se vea en niri ahora que lo integramos en niri."
+- S3: "arrelgar igual lo del alerta de permiso que tenia el titulo duplicado, el cuadro de permisos."
+- S4: "type con PRUEBA-NATIVA-OK" / "La tool respondió done — 16 caracteres enviados." / "El texto no apareció en el editor: cayó en la caja de chat de la app."
+- S5: "drag devolvió done pero sin efecto visible verificable. key funcionó en mi prueba, pero arrastra el mismo problema de targeting."
+- S6: "scroll rechaza más de 40 ticks por operación" / "dx es obligatorio en scroll, incluso para scroll puramente vertical — el schema lo exige."
+- S7: "Se niegan en vez de fingir. Es el comportamiento correcto, pero deja dos agujeros funcionales."
+- S8: "implementata todo primero. Cuando este dime para probar, no publiques hasta que lo pida"
+- S9: "Autorizar input normal durante la sesión (recomendado)" — human selected option 1: no repeated unknown-target click/drag confirmations after the 30-minute global grant; detected risks may still ask and Yolo may skip those. Focus validation and Stop remain mandatory.
+
+## Tasks
+
+- T1 [S1,S4-S7] route=explore commit=n/a done: source lifecycle map from mveabppf-g-q9cm confirms Linux dialog save/restore is absent and preparation does not hide own windows; deterministic reproduction belongs to T4. AT-SPI bus was observed available, not universal app support. frontApp null is intentional metadata, not causal proof.
+- T2 [S2] route=worker commit=506fb5b done: Linux tray Yolo/Stop follow managed Computer.endpoint, not a duplicated startup predicate. Worker observed 9 tray tests and full 942 passed / 6 ignored; parent read back production wiring and setup ordering. Actual GTK/SNI menu rendering remains a T6/T7 check. Native assessment unavailable due to unrelated untracked scope; no native approval claimed.
+- T3 [S3] route=worker commit=85cb378 done: native caption/body once; default deny after button registration; explicit GTK destruction proved by unshown-widget destroy/WeakRef/toplevel-count regression. Parent full suite 958 passed / 6 ignored. Actual rendered dialog and literal Return/Escape remain T6/T7 checks; macOS unchanged.
+- T4a [S4,S5] route=worker commit=d0d301d done: exact-window dialog restore and positive-owner keyboard guard; same window id and owner rechecked before each text fragment and synthesized Return; partial delivery reported truthfully. Parent full suite 958 passed / 6 ignored. Separate IPC check/post is not atomic, and drag outcome remains T5; no live-user input.
+- T4a2 [S4,S8] route=worker commit=9f91540 done: keyboard input binds to the window observed with the latest screenshot (id + captured owner pid, before and after the capture; unknown/own/moved/failed-query binds none while still returning the image); Session.epoch is the single invalidation truth so an explicit Stop or panic always moves it, Control.grant_if_epoch compares and grants under the one session mutex, and a stale Yolo enable is refused while a revocation always commits. Parent read the diff; worker observed 390 focused and 969 full lib passed / 6 ignored before the sibling writer's in-flight module. Residual: the focus check and each individual keyboard post stay separate IPC calls; drag uncovered. No live-user input.
+- T8 [S1,S9] route=worker commit=86e9ab3 done: the fabricated blanket confirmation for an unclassifiable global target is gone, so after the 30-minute grant ordinary input posts with no dialog and only a risk the caller actually detected asks (a target chain or the declared intent). `GLOBAL_CONFIRM_REASON` and its dialog-copy test were removed and `GLOBAL_INSTRUCTIONS` states the real contract and its honest limit. The macOS targeted path is byte-identical by construction, since the removed arm was the only global-specific branch. Worker observed RED 407+1 then GREEN 407; parent ran the full barrier at 989 passed / 0 failed / 6 ignored.
+- T5a [S7] route=worker commit=8f74e43 done: inventory from Niri's real Windows reply and GIO launch of an installed desktop entry; no shell, no constructed Exec, own entry refused. Parent review found and fixed a real defect: a non-positive pid refused the whole inventory even for an app_id window, contradicting the backend's own unusable-owner rule. Worker observed 49 focused and 185 linux; parent observed 186 linux after the fix. Live Niri session and real installed apps remain unverified; no real app launched.
+- T9 [S5,S6] route=parent merged into T11: scroll usability and the drag limits are one reviewable unit in mcp.rs/pointer.rs.
+- T11 [S5,S6,S7] route=worker commit=bd451fa done: `dx` optional with default 0 and a truthful schema/description; Linux tick cap 40 to 120 with a deadline/Stop check on every tick and an actionable refusal; the catalog is policy-driven so the desktop-global text names the cap and the real launch/inventory semantics while the macOS wording and its "Open …: done." acknowledgement stay byte-identical. Worker observed 416 focused and 996 full lib; parent re-ran the full lib barrier. Confirmed by the worker and by the parent's read: `drag_pointer` queues every interpolated motion and the release without a flush, so they reach the peer as one burst at the end.
+- T12 [S5] route=worker commit=b8bcd38 done: `drag_path` holds the interpolated points and the `DragStep` seam injects check, motion, flush and pause, so the per-step flush is pinned deterministically without a socket. Worker observed RED (cadence without the flush) then GREEN 191 linux / 999 full lib; parent re-ran the full lib barrier. Endpoints, ordering, DRAG_STEPS, DRAG_STEP_MS and the release-on-every-exit guarantee unchanged; the visible effect stays a live check, never a claim.
+- T6 [S1-S8] route=verify commit=n/a done: mvecwp3h-x-h1yp audited the post-S9 consent surface and returned PASS on all four items with file:line evidence — every mutating tool reaches the grant gate and the removed blanket was provably not the only gate; Stop/expiry invalidate a pending grant and a stale Yolo enable is refused while a revocation always commits; Yolo skips only the risk confirmation; the keyboard target is the screenshot-observed window with truthful partial delivery. macOS UNAVAILABLE (cannot compile here). Advisories: A1 stale `cancel_all` comments in linux/desktop.rs contradicted the real `app.rs` wiring (fixed); A2 the focus check and each post remain separate IPC calls, inherent to Wayland and documented; A3 on Linux the only detected-risk signal is the declared intent, consistent with S9. Its durable probe strengthened the no-session gate test to all seven mutating tools. No live Niri run, so live Stop-cancels-in-flight, GTK rendering and real focus stay unverified.
+- T7 [S8] route=parent commit=n/a done: local integrated test package preserving provider recovery, built on test/native-safety-provider-recovery by merging the safety branch tip into the previous recovery integration (no conflicts). The manifest's daemonCommit equals the merge commit and the staged runtime carries the recovery extensions; merged-tree suites green (Rust 999/0/6, JS 942 passed / 13 skipped). Rebuilt after the Yolo copy fix as c779f64. Nothing installed and nothing published: the human installs and tests, and publication stays blocked until they ask.
+- T13 [S3] route=parent commit=c779f64 done: the live user test showed the native Yolo dialog saying "Stop and the Mac glyphs still work" on Niri, because the Linux dialog re-exported the app-layer text. RED observed first, then `GLOBAL_YOLO_TEXT` names Alt+Shift+Escape exactly as the managed snippet writes it and the Linux dialog asks with it. The panel was already correct through `platform_info.stopShortcut` and `RESERVED_PANIC` already carried both spellings, so the native dialog was the only leak. Parent observed 1000 passed / 0 failed / 6 ignored. Note: the installed build the human tested predates this commit, which is why the dialog still showed the Mac notation.
+- T14 [S2] route=worker merged into T17: the live user question exposed a safety bug — `platform::launch_request` only knows `--fullscreen` and `--toggle`, and `LaunchRequest` has no `Stop`, so the managed Niri binding `Alt+Shift+Escape { spawn "gentle-dot" "--stop" }` (the one the app itself writes and the Yolo dialog tells the user to press) is read as `Show` and opens the panel instead of stopping the session. Map `--stop` to a Stop launch request that ends the session through the existing `computer::stop(app, Reason::Stopped)` path, and report honestly whether a first-instance `--stop` with no running app can exit quietly.
+- T15 [S3,S7] route=worker merged into T18: two Mac-only strings still reach Linux — the fullscreen button's tooltip hardcodes `(⌘⇧F)` in `ChatSurface.tsx` although the binding is `Ctrl+Shift+F` off macOS, and the Computer connector's description says "on this Mac" (`packages/daemon/src/connectors.ts:358`) and is shown in the panel on Linux. Adapt both to the platform the UI already knows, keeping the macOS copy byte-identical. Note for the record: the Accessibility and Screen Recording rows, the "Check again" button and the debug-signature note are already gated on macOS in `ComputerEntry` and absent from the installed bundle, so the panel screenshot showing them predates that gating — ask the human to re-check after installing the new package. the live user test showed the native Yolo dialog saying "Stop and ⌥⇧Esc still work" on Niri — the Linux dialog re-exported the app-layer text, so the Mac notation leaked into Linux copy. RED observed first (the Linux copy contains ⌥ and does not name the real key), then `GLOBAL_YOLO_TEXT` names Alt+Shift+Escape exactly as the managed snippet writes it, and the Linux dialog asks with it. The panel was already correct through `platform_info.stopShortcut`, and `RESERVED_PANIC` already carried both spellings, so the native dialog was the only leak. Parent observed 1000 passed / 0 failed / 6 ignored.
+- T16 [S4] route=worker commit=d554143 done: the capture bound the keyboard target only when the whole `FocusTarget` was equal before and after the image, and that equality included the window title, so a cosmetic title repaint dropped the binding and `type` refused with one generic sentence that never said why. It now compares identity and owner only (`window_id` + `pid`), every refusal names its cause (no snapshot, moved, no window, failed query, own window, missing pid, non-positive pid), and the Linux metadata names the focused `app_id` instead of a bare null. Worker observed RED with one failure per changed rule, including the exact live message reproduced from a title-only change, then 425 focused and 1008 full lib; parent read back `bind_keyboard_target` and the refusal set, and confirmed the daemon consumes `frontApp` only as a readable label.
+- T17 [S2] route=worker commit=9a822e6 done: `--stop` is matched first and dispatches to `computer::stop(app, Reason::Stopped)`, the tray's identical call, and the launch fold puts Stop ahead of every panel verb so a pre-setup `--stop` is never dropped or folded into a panel verb. macOS untouched: no macOS binding passes `--stop`. Worker observed a compile-level RED (the variant did not exist) then 1009 full lib; parent read back the three spots. Honest gap: the dispatch call needs an `AppHandle`, so only the token match and the fold precedence are pinned; a first `--stop` with no running app stays quiet but does not exit, deliberately, because a user key press can race the login autostart.
+- T18 [S3,S7] route=worker commit=a309a0b done: the empty-shortcut Yolo note now reads "Stop still works." and names the real key when known; the Linux panel composes its own desktop sentence instead of the daemon's "on this Mac" (the daemon string feeds macOS too and has no platform at that seam); the fullscreen tooltip uses the combination this build really has off macOS; the modifier hint names Super, Alt and Ctrl; and the voice-language section is hidden where the setting is inert, because the local model detects the language itself. macOS byte-identity is asserted, not assumed. Worker observed UI RED then 870 passed / 13 skipped. Premise corrections worth keeping: `kdl_binds.rs` writes no managed fullscreen binding, so off macOS the real combination is the webview's Ctrl+Shift+F; and the Yolo note already named the Stop key since c779f64, so only the empty-shortcut grammar was broken.
+
+- T19 [S3] route=parent commit=e4262fe done: the live report said the dialogs had lost the Gentle Dot title entirely (it used to be duplicated). GTK draws no caption for a bare dialog on Wayland, so the caption-only fix left nothing visible; the dialog now packs one bold heading label with the title as well, and the test asserts the drawn copy count is exactly one. The heading is unconditional on purpose: `gtk-dialogs-use-header` reads true in this environment and GTK still draws no caption, so gating on that setting produced no title at all (measured, not assumed). alert:: 11 passed.
+- T20 [S7] route=parent commit=d01d6d7 done: the live screenshot still said "open apps on this Mac" while the Yolo note showed no shortcut, which together proved the panel was receiving no platform at all. The Linux sentence was gated on `platform.os === "linux"`, so an unknown build fell back to the daemon's Mac string. Only macOS may make a Mac claim now; every other build gets the desktop sentence, true on both. UI 26 passed in computer.test.tsx.
+- T21 [S7] route=parent commit=pending known remaining leak, not fixed: `packages/ui/src/components/DotSurface.tsx:49` hardcodes the rose's accessible label "controlling your Mac", and the platform is not plumbed into that surface (App.tsx and NiriUnitSurface.tsx both render it). The visible banner already names the platform correctly. Left for the human to prioritise, since a proper fix is a prop across three files plus tests for a screen-reader label.
+- T22 [S4] route=worker commit=5e7b534: the human's probe report, refined. (a) When the keyboard target no longer matches, the refusal must name BOTH windows — the one the screenshot bound and the one focused now — so the cause is explicit instead of "the focus moved", which reads as bad luck. (b) `GLOBAL_INSTRUCTIONS` must say that with the compositor's focus-follows-mouse, moving the pointer changes the keyboard target, so a fresh screenshot after moving is what makes typing land. The human's Niri has `focus-follows-mouse max-scroll-amount="0%"` (config.kdl:63), which is why their probe saw the app under the pointer: focus followed it. (c) The `key` acknowledgement must echo the modifiers, not just the key: `Press f` for ctrl+alt+shift+f is misleading to audit. (d) Resolve the range mismatch with evidence: the `key` tool accepts f1-f12 while the panel accelerator accepts F1-F24; extend only if the Linux keymap and the macOS codes already cover F13-F24 cheaply, otherwise state the range in the tool description.
+- T24 [S4] route=parent commit=2b6fa93: the fake agent published its env, args, marker and mcp files with a plain write, so a test polling one could parse a truncated file and die with "Unexpected end of JSON input". Reproduced: the full JS suite failed 2 of 2 with that SyntaxError while the same file passed alone 3 of 3 on an unchanged tree. Fixed at the writer (temp file + rename, pid-qualified temp name), which covers every reader of those files at once. Verified with three consecutive full JS runs, 871 passed / 13 skipped / 0 failed and zero occurrences of the SyntaxError.
+- T23 [S7] route=parent commit=n/a done, no code needed: two report items are resolved by evidence. Item 4 (NEEDS_MODIFIER still showing Mac glyphs) is already fixed: the shipped binary contains "Add Super, Alt or Ctrl" (verified with `strings` on the installed /usr/bin/gentle-dot), and the Mac literal survives in shortcut.rs only for macOS builds, which is why reading the source suggests otherwise. Item 5 (drag reports done with no effect signal) is by design and already documented: the acknowledgement says the input was delivered and the screen was not verified, and no tool can prove the effect without seeing the screen change.
+- L? T22 evidence: focused `cargo test --lib computer::` went from 424 passed / 7 failed (RED, each new test failing on the old behaviour: the refusal carried no window labels, the ack said `Press f`, the instructions lacked the rule, the global catalog had no `f1`/`f12`/`f13`) to 432 passed / 0 failed; full lib 1016 passed / 6 ignored / 0 failed. Item 4 decided with evidence and left alone: `/usr/include/X11/keysymdef.h` makes XK_F13..F24 (0xffca..0xffd5) a table-only change for the Linux keymap, but `KeyCombo` also carries a macOS virtual key code and this tree verifies only f1-f12, so extending would mean inventing codes; the f1-f12 limit is instead stated in the desktop-global `key` description and pinned by test, and the macOS catalog string stays byte-identical.
+- L? T22 verification of the report's item 4 family: the three "on this Mac" strings still inside the Linux binary are macOS-only messages, verified unreachable there rather than assumed. `Authorization::Restricted` is produced only by `voice/macos.rs` (`parakeet.rs:194` and `pipe.rs:55` return `Authorized`, so the voice reasons cannot arise on Linux), and the macOS screenshot sentence is selected only when the policy is not `DesktopGlobal`, which Linux always is. The shape is still fragile: that screenshot message keys off the policy rather than the platform, so a future non-macOS targeted backend would reach it. Left as a decision for the human, like T21.
+- L? Final barrier before delivery: Rust 1016 passed / 0 failed / 6 ignored; JS three consecutive full runs 871 passed / 13 skipped / 0 failed. Package rebuilt from merge 52f842cd, sha256 ff329a6efae1ffdd90a74189199866ec57d0c9b768a961ab97bc7a2a6e379e25; the extracted binary carries the focus-follows-mouse rule, the two-window refusal wording, the Linux modifier hint and the Linux Stop sentence.
+- T25 [S9] route=worker commit=8225571: a restart or stop requested while the agent is still starting must not wait for a graceful shutdown, and a superseded attempt must not be reported as a failure. Evidence from the human's daemon log: the app registers computer control at startup, `ConnectorStore.registerComputer` calls `onChanged(true)`, the bridge turns that into `restartAgent()`, and `AgentSupervisor.restart()` ends the starting child's stdin and waits for it to exit — 2 s in six of nine cases and 10-17 s in three — while `startDaemon` is awaiting `supervisor.start()`, so the app waits for a doomed attempt before it is even reachable. 72 starts in the previous era logged no such failure; 9 of 9 in this one do.
+- T26 [S9] route=worker commit=8225571: verification of T25 found one clause unmet and one new advisory. Unmet: the daemon printed "the first start was replaced" even when the replacement never came up, so the log claimed a replacement that did not happen; and the clause as first written (return only once the agent it reports is ready) is wrong as a blocking rule, because waiting for a failing replacement would hang the app behind the supervisor's backoff retries. The honest rule instead: the daemon never claims an agent that is not ready, and the replacement's own failure is reported once by the bridge's existing path. Advisory: a restart that supersedes a scheduled retry logged `agent restart failed` for a merely replaced attempt.
+- L? T25 and T26 landed as one commit (8225571, 447 authored lines) because both touch the same concurrency code and the second is the first's verification follow-up; it is the feature's high-risk unit and carries its own tests. Focused 24 passed. Full 880 passed / 13 skipped / 0 failed, twice. Rust 1016 passed / 0 failed / 6 ignored. tsc and biome clean on the changed files. Package rebuilt from merge 963a30bc, sha256 d6b3a21925a1ec483bf65efa67fffcf0369d95df88fba1cd3835c9d1af1281c4, 118,180,105 B; the extracted daemon bundle carries the replacement line, the superseded-attempt sentinel and the SIGKILL path, so the fix is in what the human installs.
+## Log
+- L? T26: independent verification of T25 (concurrency, high risk) reported R1 PASS (a not-ready child is killed at once: 35 ms against 2342 ms on the base), R3 PASS (a ready agent keeps stdin end, SIGTERM after the grace, and SIGKILL only for a stop, timings identical to the base), the base differential reproduced exactly (5 new behaviour tests fail on the base source, the other 873 pass), and R2 unmet in one clause: with a failing replacement the daemon returned with `state=restarting` and printed the replacement line as if it had succeeded.
+- L? T25 request, verbatim: "otro detalle es que note que al abrir dot demora mas en cargar el agente, nose si fue por algun mambio o algo" then "solo revisalo", and after the diagnosis, "arreglalo". The diagnosis: every start in the current era discards its first agent because the app's computer-control registration restarts it mid-start.
+
+### L1 — Original request (verbatim)
+
+Mover el mouse sin Yolo │ Normalmente no pregunta: se considera inocuo │ Pregunta, porque pusimos una confirmación conservadora al no tener Accessibility
+
+hay que ver eso, buscar una alternativa para que no pida permiso a cada rato, ver altenativa accesibility o sacar, que funcione como en mac. no tiene sentido que pida permiso a cada rato, se pierde lo agentico y proposito asi. Esto es critico.
+
+tambien hay que recuperar el yolo mode, que se vea en niri ahora que lo integramos en niri.
+
+arrelgar igual lo del alerta de permiso que tenia el titulo duplicado, el cuadro de permisos.
+
+Tambien lo probe con el agente y este es el reporte, hay que verlos y fixearlos igual:
+
+
+CachyOS + Niri
+
+11 tools probadas en vivo. Resumen: 7 funcionan, 2 no están soportadas, y hay 1 defecto de fondo que afecta a 3 tools de input.
+
+✅ Funcionan (7)
+
+Tool    Resultado    Detalle
+screenshot    ✅    1280x720, escala 0.5. Abre la sesión con contador y Stop
+move    ✅    punto exacto, responde done
+click    ✅    el click aterriza donde se pide
+scroll    ✅    ver límite abajo
+wait    ✅    espera y devuelve captura
+batch    ✅    3/3 pasos (move, wait, move)
+key    ✅    ctrl+a + backspace funcionaron
+❌ No soportadas (2) — y está bien que se nieguen
+
+Tool    Mensaje
+list_apps    "no Accessibility inventory exists to list (refusing instead of returning a faked empty list)"
+open_app    "no trusted launcher exists yet (refusing instead of spawning a shell)"
+Se niegan en vez de fingir. Es el comportamiento correcto, pero deja dos agujeros funcionales.
+
+⚠️ El defecto de fondo: input a ciegas (type, key, drag)
+
+Acá está el problema serio. Abrí un gnome-text-editor descartable, lo enfoqué (Niri confirmaba focused = TextEditor), y mandé type con PRUEBA-NATIVA-OK.
+
+La tool respondió done — 16 caracteres enviados.
+El texto no apareció en el editor: cayó en la caja de chat de la app.
+La causa: frontApp viene null en todas las respuestas. Sin inventario de accesibilidad, la app no sabe qué ventana tiene el foco — así que tipea a ciegas sobre lo que sea que lo tenga, y tampoco puede verificar dónde cayó.
+
+Por qué es grave: tipear a ciegas en un terminal, seguido de Enter, ejecuta comandos. No es un detalle cosmético; es un riesgo de ejecución involuntaria en la ventana equivocada.
+
+drag devolvió done pero sin efecto visible verificable. key funcionó en mi prueba, pero arrastra el mismo problema de targeting.
+
+Detalles menores que encontré
+
+scroll rechaza más de 40 ticks por operación: "more than 40 axis ticks in one operation". Con 30 funcionó.
+dx es obligatorio en scroll, incluso para scroll puramente vertical — el schema lo exige.
+Confirmación por cada acción de input. El permiso de pantalla (la sesión con contador) no cubre mouse/teclado: son permisos separados.
+Sobre tu pregunta anterior del mouse
+
+Aparece en tu propio código en prueba:
+
+"Mover el mouse sin Yolo | Normalmente no pregunta; se considera inocuo | Pregunta, porque pusimos una confirmación conservadora al no tener Accessibility"
+
+O sea: no debería preguntar, y pregunta por la limitación de Accessibility. Tu otra sesión ya está en eso.
+
+Dos cosas que te debo
+
+Te inyecté texto en la caja de chat (PRUEBA-NATIVA-OK) al probar type. Ya lo limpié con ctrl+a + backspace — verificado, la caja quedó vacía.
+Un Backspace pudo haber caído en tu terminal mientras escribías. No pude confirmarlo. Si te falta un carácter en tus notas, fue eso.
+Qué arreglaría, por prioridad
+
+Targeting de ventana para input. Es el bloqueante real. Sin eso, type y key no son confiables ni seguros.
+drag sin verificación — no hay forma de saber si el arrastre hizo algo.
+Yolo mode en la bandeja (ya detectado en tu sesión: shell.rs:2028 sigue atado a macOS).
+Alinear la regla del mouse con macOS: si es inocuo, no debería pedir permiso.
+Te dejé abierto el gnome-text-editor descartable (con un carácter suelto adentro, sin valor). Decime si querés que lo cierre.
+
+### L2 — Investigation evidence
+
+- Existing worktree reused for this Niri thread; branch fix/native-control-safety starts at native34ef085. Pre-existing untracked odd/tasks/niri-installed-startup.md is unrelated and must remain untouched.
+- Slice boundary: this branch carries the whole native chain (13 commits) plus the safety repairs, so `git commit` reports ~41k authored lines since origin/main. The feature's delivery strategy is the fork chain (tracker #12 as trunk, one layer per unit) with upstream delivery through PR #80; each safety unit below is its own commit so a layer can take it alone.
+- Explorer mveabppf-g-q9cm investigates focus lifecycle. No final focus diagnosis yet.
+- AT-SPI official EditableText/StateType documentation exposes editable objects and focused state; support is not universal and is not equivalent to atomic per-window input.
+- Niri IPC official docs support FocusedWindow and focusing a window by id; no claim of atomic IPC-check plus Wayland-injection safety.
+- Exact rfd0.16 GTK backend passes opt.title into both gtk_message_dialog_new primary text and gtk_window_set_title. This explains the duplicated visible heading.
+- shell.rs tray gate remains cfg!(target_os = "macos") although Linux helper is now available. This is a confirmed integration omission.

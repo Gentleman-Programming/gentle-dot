@@ -67,6 +67,22 @@ core-foundation = "0.10"
 # dependency is already linked by tao on Linux.
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus-secret-service = "4.1"
+# Native Wayland transport (T3a, S1-S4): `computer::linux` talks to a stock
+# compositor through `wayland-client`'s pure-Rust backend (no libwayland).
+# Linux only, so default and macOS builds never pull it. Protocol extension
+# crates (wlr/virtual-keyboard/screencopy binders) arrive with T3b/T4, which bind
+# globals; T3a only discovers them, so it needs the core client alone.
+wayland-client = "0.31"
+# Bounded output enumeration (T3b1, S1-S4): `wl_output` plus `zxdg_output_v1`
+# monitor enumeration. Linux only; feeds the validated geometry API.
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+# Bounded SHM frame capture (T3b2, S1-S4): `zwlr_screencopy_manager_v1` frame
+# capture plus `wl_shm` pools. Linux only; binds nothing beyond this slice.
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# Bounded virtual-keyboard input (T4b, S1-S5): `zwp_virtual_keyboard_v1`
+# manager plus `wl_seat` per operation, with a hand-rolled XKB keymap text
+# (no libxkbcommon, no xkeysym). Linux only; binds nothing beyond this slice.
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
 # First-visible-frame gate (experimental, Niri compact only): `WidgetExt::set_opacity`
 # on the `gtk_window()` inside a main-thread closure. Tauri 2.12.1 does not re-export
 # its transitive gtk 0.18.2, so this direct Linux-only pin reuses the locked version

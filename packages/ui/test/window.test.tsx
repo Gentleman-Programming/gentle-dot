@@ -77,6 +77,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	window.history.replaceState(null, "", "/");
 });
 
@@ -139,6 +140,22 @@ describe("full-screen chat (S26.2)", () => {
 		fireEvent.keyDown(window, { key: "f", code: "KeyF", metaKey: true });
 		fireEvent.keyDown(window, { key: "F", code: "KeyF", shiftKey: true });
 		expect(invoked("set_panel_fullscreen")).toHaveLength(2);
+	});
+
+	it("the button's tooltip names the combination this platform really has (T18)", async () => {
+		// The app watches meta-or-ctrl + shift + F (App.tsx); off macOS that is Ctrl+Shift+F, never ⌘.
+		await renderApp("?surface=panel");
+		const button = await screen.findByRole("button", { name: "Full screen" });
+		expect(button).toHaveAttribute("title", "Full screen (Ctrl+Shift+F)");
+	});
+
+	it("keeps the macOS spelling byte-identical", async () => {
+		vi.spyOn(navigator, "userAgent", "get").mockReturnValue(
+			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+		);
+		await renderApp("?surface=panel");
+		const button = await screen.findByRole("button", { name: "Full screen" });
+		expect(button).toHaveAttribute("title", "Full screen (⌘⇧F)");
 	});
 
 	it("Esc restores from full screen first and hides the panel only after that", async () => {

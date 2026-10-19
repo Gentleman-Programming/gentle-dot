@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { formatShortcut, recordKey } from "../src/shortcut.ts";
@@ -186,6 +186,24 @@ describe("voice language (S30.6)", () => {
 		expect(localStorage.getItem("gentle-dot-voice-language")).toBe("es-ES");
 		await userEvent.selectOptions(picker, "");
 		expect(localStorage.getItem("gentle-dot-voice-language")).toBeNull();
+	});
+
+	it("keeps the macOS sentence byte-identical on macOS", async () => {
+		await openSettings();
+		expect(screen.getByRole("heading", { name: "Voice language" })).toBeInTheDocument();
+		expect(
+			screen.getByText("The language macOS speech listens in. The local voice model detects it by itself."),
+		).toBeInTheDocument();
+	});
+
+	it("hides it off macOS, where only the language-detecting local model listens (T18)", async () => {
+		vi.spyOn(navigator, "userAgent", "get").mockReturnValue(LINUX_AGENT);
+		const settings = await openSettings();
+		expect(screen.queryByRole("heading", { name: "Voice language" })).toBeNull();
+		expect(screen.queryByRole("combobox", { name: "Voice language" })).toBeNull();
+		expect(within(settings).queryByText(/macOS speech/)).toBeNull();
+		// The rest of the panel is intact.
+		expect(await screen.findByText("Alt+Space")).toBeInTheDocument();
 	});
 });
 

@@ -1,7 +1,10 @@
 /**
  * The language macOS speech listens in (S30.6). Apple's recognizer does not detect the language
- * by itself, so a Mac set to English heard Spanish as noise; the local model (Parakeet) detects
- * it and ignores this. Kept in this window's storage; empty means the system language.
+ * by itself, so a Mac set to English heard Spanish as noise. The local model (Parakeet) detects
+ * it and ignores this, and it is the only recognizer off macOS (Linux records through a
+ * command-line tool and Parakeet, with no Apple Speech fallback), so the picker is hidden there
+ * and this choice only ever reaches Apple's recognizer. Kept in this window's storage; empty
+ * means the system language.
  */
 const KEY = "gentle-dot-voice-language";
 

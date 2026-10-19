@@ -15,8 +15,18 @@ pub const SNIPPET_STEM: &str = "gentle-dot.kdl";
 pub const TOGGLE_ARG: &str = "--toggle";
 /// Argument that asks the running app to toggle fullscreen/minimize.
 pub const FULLSCREEN_ARG: &str = "--fullscreen";
+/// Argument that asks the running app to stop computer control (Stop).
+/// Handled through the existing single-instance launch path, never a second
+/// helper process: the Niri `spawn` binding below is the Wayland fallback for
+/// the panic shortcut, which the global-shortcut plugin may not deliver.
+pub const STOP_ARG: &str = "--stop";
 /// Default binding for the toggle (S19: first run and Reset to default land here).
 pub const DEFAULT_KEY: &str = "Alt+Space";
+/// Reserved binding for Stop: the panic shortcut (S24.3), owned by the compositor
+/// on Niri through the managed snippet. Alt+Shift+Escape stays reachable even
+/// where the global-shortcut plugin cannot deliver it; only the toggle and
+/// this Stop binding are ever managed, never a second launch path.
+pub const STOP_KEY: &str = "Alt+Shift+Escape";
 // NOTE (user decision): no managed fullscreen binding. Fullscreen stays an
 // app-internal verb (`--fullscreen`, still parsed and still toggling the mode
 // when invoked by hand) with NO key in the snippet: on Niri a second global
@@ -828,6 +838,31 @@ mod tests {
         assert_eq!(bound_key(SNIPPET, FULLSCREEN_ARG).as_deref(), Some("Mod+Shift+F"));
         assert_eq!(bound_key(SNIPPET, "--other"), None);
         assert_eq!(bound_key("binds {\n}\n", TOGGLE_ARG), None);
+    }
+
+    #[test]
+    fn stop_stays_reachable_through_the_managed_snippet() {
+        // The panic shortcut (S24.3) is a Niri-owned key on Wayland: the Stop
+        // arg upserts through the same pure-text mechanism as the toggle,
+        // never a second launch path, and the key is the panic shortcut itself.
+        assert_eq!(STOP_ARG, "--stop");
+        assert_eq!(niri_key(crate::computer::app::PANIC_SHORTCUT), Some(STOP_KEY.to_owned()));
+        let with_stop = try_upsert_binding(SNIPPET, EXE, STOP_ARG, STOP_KEY).expect("stop upserts");
+        assert_eq!(bound_key(&with_stop, STOP_ARG).as_deref(), Some(STOP_KEY));
+        // The toggle binding and every other line survive the Stop upsert.
+        assert_eq!(bound_key(&with_stop, TOGGLE_ARG).as_deref(), Some("Mod+Alt+D"));
+        assert_eq!(bound_key(&with_stop, FULLSCREEN_ARG).as_deref(), Some("Mod+Shift+F"));
+        // Idempotent: re-applying the same Stop key is byte-identical.
+        assert_eq!(
+            try_upsert_binding(&with_stop, EXE, STOP_ARG, STOP_KEY).expect("stop idempotent"),
+            with_stop
+        );
+        // Removing Stop keeps the toggle.
+        assert_eq!(bound_key(&remove_binding(&with_stop, STOP_ARG), STOP_ARG), None);
+        assert_eq!(
+            bound_key(&remove_binding(&with_stop, STOP_ARG), TOGGLE_ARG).as_deref(),
+            Some("Mod+Alt+D")
+        );
     }
 
     #[test]

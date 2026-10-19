@@ -85,13 +85,18 @@ impl Session {
     }
 
     /// Ends the session for `reason`. `None` when there was none to end.
+    ///
+    /// Every explicit end request bumps `epoch`, even from an idle session. The epoch is the
+    /// single invalidation truth for pending consent: a Stop or panic while a grant dialog is
+    /// open must make the later grant fail, and an idle end produces no event and no yolo change
+    /// but still moves the epoch forward.
     pub fn end(&mut self, reason: Reason) -> Option<StateEvent> {
         // The panic shortcut is the emergency stop, so it also turns yolo mode off (L74).
         let yolo_off = matches!(reason, Reason::Panic) && self.yolo_ends_at.take().is_some();
+        self.epoch += 1;
         if self.ends_at.take().is_none() {
             return yolo_off.then(|| self.event(None));
         }
-        self.epoch += 1;
         Some(self.event(Some(reason)))
     }
 
@@ -151,10 +156,19 @@ mod tests {
     }
 
     #[test]
-    fn ending_an_idle_session_reports_nothing() {
+    fn ending_an_idle_session_reports_nothing_but_invalidates_pending_consent() {
         let mut session = Session::default();
         assert_eq!(session.end(Reason::Stopped), None);
-        assert_eq!(session.epoch(), 0);
+        // The old contract kept the epoch at 0 here; every explicit end now moves it, so a
+        // grant that was checked before the idle Stop can no longer commit.
+        assert_eq!(session.epoch(), 1);
+        assert!(!session.is_active(NOW));
+        // An idle panic still turns yolo off but reports no session event.
+        session.set_yolo(true, NOW);
+        assert_eq!(session.end(Reason::Panic), Some(StateEvent { yolo: false, ..StateEvent::default() }));
+        assert_eq!(session.epoch(), 2);
+        assert_eq!(session.end(Reason::Stopped), None);
+        assert_eq!(session.epoch(), 3);
     }
 
     #[test]

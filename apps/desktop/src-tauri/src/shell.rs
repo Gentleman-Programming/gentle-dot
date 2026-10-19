@@ -1913,7 +1913,8 @@ fn conversations_on(value: Option<&str>) -> bool {
 
 /// The tray menu, top to bottom (`-` is a separator). "New conversation" only exists with the
 /// conversations list on; in the single continuous chat there is nothing new to start.
-/// "Stop computer control" and "Yolo mode" exist where computer control does (macOS, S24.3, S24.9).
+/// "Stop computer control" and "Yolo mode" exist where the computer-control helper actually runs
+/// (T2, S2, S24.3, S24.9); `computer_control_available` decides that, never a platform flag.
 /// "rose" hides or shows the floating Dot (S26.1).
 fn tray_menu_ids(conversations: bool, computer_control: bool) -> Vec<&'static str> {
     let mut ids = vec!["open"];
@@ -1926,6 +1927,42 @@ fn tray_menu_ids(conversations: bool, computer_control: bool) -> Vec<&'static st
     }
     ids.extend(["-", "restart", "autostart", "-", "quit"]);
     ids
+}
+
+/// The build's own platform name for the tray's control decision, spelled like
+/// `computer::app::platform_info`: `"macos"`, `"linux"`, or `"other"`.
+fn current_os() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "other"
+    }
+}
+
+/// Whether the tray offers "Stop computer control" and "Yolo mode" (T2, S2): the helper
+/// that actually started for this launch, read from the managed `Computer` endpoint. `setup`
+/// manages that state before the first `build_tray`, and the retry path reuses it, so there is
+/// no re-derived startup predicate and no second startup. macOS keeps its previous menu even
+/// when the helper failed; an unsupported host, or a Linux host the helper refused, offers
+/// nothing.
+fn computer_control_available(app: &AppHandle) -> bool {
+    let helper_started = app
+        .try_state::<computer::Computer>()
+        .and_then(|computer| computer.endpoint())
+        .is_some();
+    tray_offers_computer_control(current_os(), helper_started)
+}
+
+/// The production decision as a pure function of the platform and whether the helper started,
+/// so headless tests pin it: only macOS keeps its menu without a started helper.
+fn tray_offers_computer_control(os: &str, helper_started: bool) -> bool {
+    match os {
+        "macos" => true,
+        "linux" => helper_started,
+        _ => false,
+    }
 }
 
 /// Whether a tray-build failure is the transient missing-watcher case
@@ -2025,7 +2062,8 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tau
     app.manage(OpenMenuItem(open.clone()));
     let menu = Menu::new(app)?;
     let conversations = conversations_on(std::env::var("GENTLE_DOT_CONVERSATIONS").ok().as_deref());
-    for id in tray_menu_ids(conversations, cfg!(target_os = "macos")) {
+    let computer_control = computer_control_available(app);
+    for id in tray_menu_ids(conversations, computer_control) {
         match id {
             "open" => menu.append(&open)?,
             "new" => menu.append(&MenuItem::with_id(app, "new", "New conversation", true, None::<&str>)?)?,
@@ -2363,7 +2401,8 @@ fn toggle_panel_fullscreen(app: AppHandle) -> CommandResult {
 /// (at the end of setup): either a request lands before the ready flip
 /// (queued under the same lock that flips it, so none is lost) or after it
 /// (Shell is present and it dispatches directly). Coalesced early launches
-/// keep fullscreen precedence, matching `platform::launch_request`.
+/// keep `--stop` precedence above the panel verbs, matching
+/// `platform::launch_request`.
 struct PendingLaunches {
     inner: Mutex<PendingInner>,
 }
@@ -2416,11 +2455,14 @@ impl PendingLaunches {
     }
 }
 
-/// Fold several launch requests into the one that runs: fullscreen wins
-/// (the rarer, deliberate request, same as `platform::launch_request`),
+/// Fold several launch requests into the one that runs: `--stop` wins outright —
+/// the emergency must reach the session even when a panel verb races it — then
+/// fullscreen (the rarer, deliberate request, same as `platform::launch_request`),
 /// then toggle, then show. Pure so tests pin it without an app.
 fn fold_launch_requests(requests: &[LaunchRequest]) -> Option<LaunchRequest> {
-    if requests.contains(&LaunchRequest::Fullscreen) {
+    if requests.contains(&LaunchRequest::Stop) {
+        Some(LaunchRequest::Stop)
+    } else if requests.contains(&LaunchRequest::Fullscreen) {
         Some(LaunchRequest::Fullscreen)
     } else if requests.contains(&LaunchRequest::Toggle) {
         Some(LaunchRequest::Toggle)
@@ -2431,11 +2473,40 @@ fn fold_launch_requests(requests: &[LaunchRequest]) -> Option<LaunchRequest> {
     }
 }
 
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+
+    #[test]
+    fn a_queued_stop_wins_the_fold() {
+        // T17/S2: a `--stop` racing setup is coalesced with whichever panel
+        // verbs arrive with it; folding the emergency into one of them would
+        // open the panel on the key the Linux Yolo dialog names as Stop.
+        assert_eq!(fold_launch_requests(&[LaunchRequest::Stop]), Some(LaunchRequest::Stop));
+        assert_eq!(
+            fold_launch_requests(&[LaunchRequest::Toggle, LaunchRequest::Stop, LaunchRequest::Fullscreen]),
+            Some(LaunchRequest::Stop)
+        );
+        assert_eq!(
+            fold_launch_requests(&[LaunchRequest::Show, LaunchRequest::Stop]),
+            Some(LaunchRequest::Stop)
+        );
+    }
+}
+
 /// Run one launch request with Shell present. The single-instance callback
 /// and the end-of-setup replay share it, so early and late launches keep
 /// identical semantics.
 fn dispatch_launch(app: &AppHandle, request: LaunchRequest) {
     let result = match request {
+        // The tray's Stop item and the managed `--stop` binding are the same act,
+        // with the same reason. `computer::stop` is infallible by design (it leaves
+        // a missing `Computer` state alone), so this arm reports no error; only the
+        // panel verbs can fail to do their work.
+        LaunchRequest::Stop => {
+            computer::stop(app, Reason::Stopped);
+            Ok(())
+        }
         LaunchRequest::Toggle => toggle_panel(app.clone()),
         LaunchRequest::Show => show_panel(app),
         LaunchRequest::Fullscreen => toggle_panel_fullscreen(app.clone()),
@@ -2445,8 +2516,8 @@ fn dispatch_launch(app: &AppHandle, request: LaunchRequest) {
     }
 }
 
-/// A launch of `gentle-dot` (usually `--toggle` or `--fullscreen` from a desktop
-/// shortcut) reaches the running app: ready setups dispatch at once, early
+/// A launch of `gentle-dot` (usually `--toggle`, `--fullscreen` or `--stop` from a
+/// desktop shortcut) reaches the running app: ready setups dispatch at once, early
 /// ones replay at the end of setup (see [`PendingLaunches`]).
 fn handle_launch(app: &AppHandle, pending: &PendingLaunches, args: &[String]) {
     if std::env::var_os("GENTLE_DOT_NIRI_TRACE").is_some() {
@@ -2523,6 +2594,7 @@ pub fn run() {
                 computer::computer_request_permission,
                 computer::computer_stop,
                 computer::computer_status,
+                computer::computer_platform,
                 computer::computer_set_yolo,
                 computer::computer_working_ready,
                 voice::voice_status,
@@ -2755,8 +2827,12 @@ pub fn run() {
             }
             // Started by the shortcut while not running: open the panel right away.
             // Second-instance launches that raced setup replay here with the
-            // same semantics (fullscreen precedence); a quiet setup — no
-            // queue, no own toggle — stays quiet, as before.
+            // same semantics (stop precedence first, then fullscreen, then
+            // toggle); a quiet setup — no queue, no own toggle — stays quiet, as
+            // before. `own` names the panel verb only, so a first `--stop` (no
+            // session exists yet) requests nothing and does not quit: exiting
+            // here would quit this app whenever a stale `--stop` spawn raced the
+            // login autostart.
             let args: Vec<String> = std::env::args().collect();
             let own = (platform::launch_request(&args) == LaunchRequest::Toggle)
                 .then_some(LaunchRequest::Toggle);
