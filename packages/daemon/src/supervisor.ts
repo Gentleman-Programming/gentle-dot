@@ -60,6 +60,25 @@ type Pending = {
 
 const DEFAULT_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
 
+/** A promise an attempt hands to whoever is waiting for the one that replaces it. */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+	let resolve: () => void = () => {};
+	const promise = new Promise<void>((done) => {
+		resolve = done;
+	});
+	return { promise, resolve };
+}
+
+/**
+ * Thrown by an attempt a restart replaced before it became ready. It is not a failure, so nothing
+ * reports it: the replacing attempt owns readiness and reports its own outcome through its own path.
+ */
+class SupersededAttemptError extends Error {
+	constructor() {
+		super("the agent was replaced while it was starting");
+	}
+}
+
 /**
  * Runs the agent (`gentle-shell --mode rpc`) as a child process, correlates
  * commands with responses, forwards session events, and respawns the agent
@@ -73,8 +92,19 @@ export class AgentSupervisor {
 	model: string | undefined;
 	/** Whether the current model accepts images (its `input` lists `image`); undefined when not reported. */
 	modelImages: boolean | undefined;
+	/**
+	 * True when a restart replaced the attempt `start` was waiting for. Read by whoever started the
+	 * assistant: a replaced attempt is not a failed one, and the replacing attempt owns the new agent.
+	 */
+	startReplaced = false;
 
 	private child: ChildProcess | undefined;
+	/** The child that answered its first `get_state`; a child that has not holds nothing to end. */
+	private readyChild: ChildProcess | undefined;
+	/** Children a restart replaced before they became ready; their attempts are not reported. */
+	private readonly superseded = new WeakSet<ChildProcess>();
+	/** The attempt a restart is making in place of one that was still starting; `start` waits on it. */
+	private supersession: Promise<void> | undefined;
 	private readonly pending = new Map<string, Pending>();
 	private readonly listeners = new Set<(event: SupervisorEvent) => void>();
 	private nextId = 0;
@@ -123,9 +153,21 @@ export class AgentSupervisor {
 	/** Spawns the agent and resolves once it answered `get_state`. */
 	async start(): Promise<void> {
 		this.stopping = false;
+		this.startReplaced = false;
 		mkdirSync(this.sessionDir, { recursive: true });
 		this.setState("starting");
-		await this.spawnAndInitialize();
+		try {
+			await this.spawnAndInitialize();
+		} catch (error) {
+			// A restart replaced this attempt, so it was not a failure: the replacing attempt owns
+			// readiness and reports its own failure. Waiting here settles this start with the agent
+			// the replacement produced, and only with that one. A replacement that fails settles too,
+			// instead of holding the app behind the supervisor's backoff retries.
+			if (!(error instanceof SupersededAttemptError)) throw error;
+			this.startReplaced = true;
+			const superseded = this.supersession;
+			if (superseded) await superseded;
+		}
 	}
 
 	/** Sends a command and resolves with its successful response. */
@@ -162,18 +204,29 @@ export class AgentSupervisor {
 		const child = this.child;
 		if (!child || this.stopping) return;
 		this.restarting = true;
-		const closed = new Promise<void>((resolve) => this.closeWaiters.push(resolve));
-		child.stdin?.end();
-		const term = setTimeout(() => child.kill("SIGTERM"), this.options.stopTimeoutMs ?? 5000);
-		await closed;
-		clearTimeout(term);
-		// Stopped while the old process was closing: nothing is started again.
-		if (this.stopping) {
-			this.setState("stopped");
-			return;
+		// Replacing a child that never became ready hands readiness to the new attempt: whoever was
+		// waiting on the old one waits for the new one instead of hearing that the old one failed.
+		const handoff = child === this.readyChild ? undefined : deferred();
+		if (handoff) {
+			// The attempt that was making this child ready is replaced, not failed.
+			this.superseded.add(child);
+			this.supersession = handoff.promise;
 		}
-		this.setState("restarting");
-		await this.spawnAndInitialize();
+		try {
+			await this.endChild(child, "restart");
+			// Stopped while the old process was closing: nothing is started again.
+			if (this.stopping) {
+				this.setState("stopped");
+				return;
+			}
+			this.setState("restarting");
+			await this.spawnAndInitialize();
+		} finally {
+			if (handoff) {
+				if (this.supersession === handoff.promise) this.supersession = undefined;
+				handoff.resolve();
+			}
+		}
 	}
 
 	async stop(): Promise<void> {
@@ -184,13 +237,28 @@ export class AgentSupervisor {
 			this.setState("stopped");
 			return;
 		}
+		await this.endChild(child, "stop");
+	}
+
+	/**
+	 * Ends the child. A ready one goes gracefully: its stdin, then SIGTERM after the grace (and, for a
+	 * stop, SIGKILL later still). One that never became ready holds nothing, so it is killed outright:
+	 * waiting on the start nobody is going to finish would stall the attempt replacing it.
+	 */
+	private async endChild(child: ChildProcess, mode: "restart" | "stop"): Promise<void> {
 		const closed = new Promise<void>((resolve) => this.closeWaiters.push(resolve));
+		const grace = this.options.stopTimeoutMs ?? 5000;
+		if (child !== this.readyChild) {
+			child.kill("SIGKILL");
+			await closed;
+			return;
+		}
 		child.stdin?.end();
-		const term = setTimeout(() => child.kill("SIGTERM"), this.options.stopTimeoutMs ?? 5000);
-		const kill = setTimeout(() => child.kill("SIGKILL"), (this.options.stopTimeoutMs ?? 5000) + 2000);
+		const term = setTimeout(() => child.kill("SIGTERM"), grace);
+		const kill = mode === "stop" ? setTimeout(() => child.kill("SIGKILL"), grace + 2000) : undefined;
 		await closed;
 		clearTimeout(term);
-		clearTimeout(kill);
+		if (kill) clearTimeout(kill);
 	}
 
 	private async spawnAndInitialize(): Promise<void> {
@@ -205,10 +273,15 @@ export class AgentSupervisor {
 			await this.refreshSession();
 		} catch (error) {
 			if (this.child === child) child.kill("SIGKILL");
-			throw error;
+			throw this.superseded.has(child) ? new SupersededAttemptError() : error;
 		}
-		if (this.child !== child) throw new Error("Agent exited during startup");
+		if (this.child !== child) {
+			throw this.superseded.has(child)
+				? new SupersededAttemptError()
+				: new Error("Agent exited during startup");
+		}
 		this.spawnedAt = Date.now();
+		this.readyChild = child;
 		this.setState("ready");
 		if (this.interrupted) {
 			this.interrupted = false;
@@ -274,6 +347,7 @@ export class AgentSupervisor {
 	private handleClose(child: ChildProcess, code: number | null, signal: NodeJS.Signals | null): void {
 		if (child !== this.child) return;
 		this.child = undefined;
+		if (this.readyChild === child) this.readyChild = undefined;
 		const reason = new Error(`Agent exited (${signal ?? `code ${code}`})`);
 		for (const [id, pending] of this.pending) {
 			clearTimeout(pending.timer);
@@ -306,6 +380,9 @@ export class AgentSupervisor {
 		this.restartTimer = setTimeout(() => {
 			if (this.stopping) return;
 			this.spawnAndInitialize().catch((error: Error) => {
+				// A restart replaced this attempt, so it is not a failure, and the replacement owns
+				// both readiness and any retry: this one is neither reported nor rescheduled.
+				if (error instanceof SupersededAttemptError) return;
 				this.log(`agent restart failed: ${error.message}`);
 				// A child that is still alive will close and schedule the next attempt.
 				if (!this.child && !this.stopping) this.scheduleRestart();
