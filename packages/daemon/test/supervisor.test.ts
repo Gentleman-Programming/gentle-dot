@@ -1,8 +1,8 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSupervisor } from "../src/supervisor.ts";
-import { fakeSupervisor, tempDir, waitFor } from "./helpers.ts";
+import { alive, fakeSupervisor, settled, tempDir, waitFor } from "./helpers.ts";
 
 const running: AgentSupervisor[] = [];
 afterEach(async () => {
@@ -176,5 +176,118 @@ describe("AgentSupervisor", () => {
 		await supervisor.stop();
 		expect(supervisor.state).toBe("stopped");
 		await expect(supervisor.request({ type: "get_state" })).rejects.toThrow(/not ready/i);
+	});
+
+	it("a restart while the agent is starting kills the starting child at once, without a failure", async () => {
+		const attemptsFile = join(tempDir(), "attempts.json");
+		const argsFile = join(tempDir(), "argv.json");
+		const { supervisor } = track(
+			fakeSupervisor({
+				env: {
+					...process.env,
+					FAKE_AGENT_ARGS_FILE: argsFile,
+					FAKE_AGENT_ATTEMPTS_FILE: attemptsFile,
+					// The first attempt never becomes ready and leaves only on a SIGKILL.
+					FAKE_AGENT_STALL_START_AT: "1",
+					FAKE_AGENT_IGNORE_SIGNALS_AT: "1",
+				},
+				stopTimeoutMs: 500,
+			}),
+		);
+		const starting = supervisor.start().then(
+			() => "settled" as const,
+			(error: Error) => error,
+		);
+		// The child has to be up (and stalled) before the restart lands on it.
+		await waitFor(() => existsSync(argsFile));
+		const pid = supervisor.pid as number;
+		const superseded = await settled(
+			supervisor.restart().then(() => "done" as const),
+			1500,
+		);
+		expect(superseded).toBe("done");
+		expect(await starting).toBe("settled");
+		expect(alive(pid)).toBe(false);
+		expect(supervisor.pid).not.toBe(pid);
+		expect(supervisor.state).toBe("ready");
+	});
+
+	it("a restart that replaces a scheduled retry does not report the replaced attempt as a failure", async () => {
+		const attemptsFile = join(tempDir(), "attempts.json");
+		const logs: string[] = [];
+		const { supervisor } = track(
+			fakeSupervisor({
+				env: {
+					...process.env,
+					FAKE_AGENT_ATTEMPTS_FILE: attemptsFile,
+					// The first attempt is ready; the retry its crash schedules never becomes ready.
+					FAKE_AGENT_STALL_START_AT: "2",
+				},
+				log: (line) => logs.push(line),
+			}),
+		);
+		await supervisor.start();
+		process.kill(supervisor.pid ?? 0, "SIGKILL");
+		// The supervisor's own backoff schedules attempt 2, which stalls.
+		await waitFor(() => readFileSync(attemptsFile, "utf8") === "2");
+		// A restart lands on that scheduled attempt and replaces it before it is ready.
+		await supervisor.restart();
+		expect(supervisor.state).toBe("ready");
+		expect(logs.filter((line) => line.includes("agent restart failed"))).toEqual([]);
+	});
+
+	it("a stop while the agent is starting kills the starting child at once", async () => {
+		const grace = 500;
+		const argsFile = join(tempDir(), "argv.json");
+		const { supervisor } = track(
+			fakeSupervisor({
+				env: {
+					...process.env,
+					FAKE_AGENT_ARGS_FILE: argsFile,
+					FAKE_AGENT_ATTEMPTS_FILE: join(tempDir(), "attempts.json"),
+					FAKE_AGENT_STALL_START_AT: "1",
+					FAKE_AGENT_IGNORE_SIGNALS_AT: "1",
+				},
+				stopTimeoutMs: grace,
+			}),
+		);
+		const starting = supervisor.start().catch(() => {});
+		await waitFor(() => existsSync(argsFile));
+		const pid = supervisor.pid as number;
+		const began = Date.now();
+		await supervisor.stop();
+		expect(Date.now() - began).toBeLessThan(grace);
+		expect(alive(pid)).toBe(false);
+		expect(supervisor.state).toBe("stopped");
+		await starting;
+	});
+
+	it("a ready agent still stops on its stdin, inside the grace window", async () => {
+		const signals = join(tempDir(), "signals.txt");
+		const grace = 5000;
+		const { supervisor } = track(
+			fakeSupervisor({ env: { ...process.env, FAKE_AGENT_SIGNALS_FILE: signals }, stopTimeoutMs: grace }),
+		);
+		await supervisor.start();
+		const pid = supervisor.pid as number;
+		const began = Date.now();
+		await supervisor.stop();
+		expect(Date.now() - began).toBeLessThan(grace);
+		expect(existsSync(signals)).toBe(false);
+		expect(supervisor.state).toBe("stopped");
+		expect(alive(pid)).toBe(false);
+	});
+
+	it("a ready agent's restart ends its stdin without signalling it", async () => {
+		const signals = join(tempDir(), "signals.txt");
+		const { supervisor } = track(
+			fakeSupervisor({ env: { ...process.env, FAKE_AGENT_SIGNALS_FILE: signals } }),
+		);
+		await supervisor.start();
+		const pid = supervisor.pid as number;
+		await supervisor.restart();
+		expect(existsSync(signals)).toBe(false);
+		expect(supervisor.pid).not.toBe(pid);
+		expect(supervisor.state).toBe("ready");
 	});
 });

@@ -56,3 +56,34 @@ export async function onDesktopEvent(
 	const { listen } = await import("@tauri-apps/api/event");
 	return listen(name, handler);
 }
+
+/**
+ * Shared-unit snapshot (T10/T19): logical enable/open for the single Niri
+ * surface. PANEL-only capability; the backend serves disabled off-Niri with no anchor bytes.
+ */
+export interface NiriUnitSnapshot {
+	enabled: boolean;
+	open: boolean;
+	roseHidden: boolean;
+	fullscreen: boolean;
+	revision: number;
+}
+
+export function niriUnitState(): Promise<NiriUnitSnapshot> {
+	return invoke<NiriUnitSnapshot>("niri_unit_state");
+}
+
+/** Unit transitions, PANEL-only; same payload as the getter. The backend publishes on each committed revision. */
+export async function onNiriUnit(handler: (snapshot: NiriUnitSnapshot) => void) {
+	if (!inDesktop()) return () => {};
+	const { listen } = await import("@tauri-apps/api/event");
+	return listen<NiriUnitSnapshot>("dot://unit", (event) => handler(event.payload));
+}
+
+/**
+ * Render-ready handshake (T10/T19): the panel committed the shared wrapper DOM for
+ * `revision`. Reports acceptance; the reveal worker reads the stored generation.
+ */
+export function niriUnitReady(revision: number): Promise<boolean> {
+	return invoke<boolean>("niri_unit_ready", { revision });
+}

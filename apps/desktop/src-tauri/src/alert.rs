@@ -10,10 +10,21 @@
 //! rfd shows a `CFUserNotification` and reports cancels and failures as `Cancel`, which the plugin
 //! turns into the second label of `OkCancelCustom` (T23c B1).
 //!
-//! Elsewhere (Linux): the dialog plugin with the allowing label in the OK slot and the refusing one
-//! in the cancel slot, so every outcome rfd reports as `Cancel` (the refusing button, Escape,
-//! closing, a dialog that failed) arrives as the refusing label. rfd's GTK dialog sets no default
-//! response, so Return does not pick the allowing button either (not verified on a Linux desktop).
+//! Linux: the app's own GTK dialog (see `linux`), because the dialog plugin repeated the title
+//! (S3): rfd 0.16's GTK backend hands it to `gtk_message_dialog_new` as the primary text *and* to
+//! `gtk_window_set_title`, so the app name showed as the caption and again as a bold heading above
+//! the message. The native dialog has one caption (the window title) and one body, and no heading
+//! at all. Only its allowing button's response allows; the refusing button is the default, and
+//! Escape, closing, a destroyed dialog, and a dialog that never ran refuse.
+//!
+//! Elsewhere (the desktops with no native builder here): the dialog plugin with the allowing label
+//! in the OK slot and the refusing one in the cancel slot, so every outcome rfd reports as `Cancel`
+//! (the refusing button, Escape, closing, a dialog that failed) arrives as the refusing label.
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests;
 
 use tauri::AppHandle;
 use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogResult};
@@ -41,8 +52,8 @@ impl Choice {
         self.allow != self.refuse && response == Some(ALLOW_RESPONSE)
     }
 
-    /// The plugin's buttons (off macOS): the refusing label takes the cancel slot, where rfd puts
-    /// Escape, closing, and failures.
+    /// The plugin's buttons (the desktops that use no native builder here: not macOS, not Linux):
+    /// the refusing label takes the cancel slot, where rfd puts Escape, closing, and failures.
     pub fn buttons(&self) -> MessageDialogButtons {
         MessageDialogButtons::OkCancelCustom(self.allow.into(), self.refuse.into())
     }
@@ -58,7 +69,9 @@ impl Choice {
 pub fn ask(app: &AppHandle, title: &str, message: &str, choice: Choice) -> bool {
     #[cfg(target_os = "macos")]
     return macos::ask(app, title, message, choice);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    return linux::ask(app, title, message, choice);
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
         let result = app

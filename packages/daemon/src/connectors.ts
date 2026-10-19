@@ -1807,6 +1807,11 @@ export class ConnectorManager {
 	onSetAside: (notice: string) => void = () => {};
 	/** Whether the current model accepts images; undefined when that is not known. */
 	imagesSupported: () => boolean | undefined = () => undefined;
+	/** Asks the connector's server whether it answers; wired by the daemon to the proxy. */
+	probe: (id: string) => Promise<{ ok: true; tools: number } | { ok: false; reason: string }> =
+		async () => ({ ok: false, reason: "That connector is not available." });
+	/** Why each connector's server is out of reach, while its configuration is still there. */
+	private readonly unreachable = new Map<string, string>();
 	private flow: Flow | undefined;
 	/** The window that registered the computer helper; it goes away with that window. */
 	private computerOwner: object | undefined;
@@ -1853,6 +1858,8 @@ export class ConnectorManager {
 				mode: saved?.mode ?? "read_only",
 				status: this.status(id, spec, saved),
 			};
+			const unreachableReason = this.unreachable.get(id);
+			if (unreachableReason !== undefined) info.unreachableReason = unreachableReason;
 			if (!spec.oauth) info.noSignIn = true;
 			if (spec.guide) info.guide = spec.guide;
 			if (spec.custom) info.custom = { origin: spec.custom.origin, summary: summarize(spec.custom.server) };
@@ -1870,6 +1877,31 @@ export class ConnectorManager {
 		};
 		if (this.imagesSupported() === false) computer.noImages = true;
 		return [...infos, computer];
+	}
+
+	/**
+	 * Remembers whether the connector's server answers. No reason means it does again.
+	 * Broadcasts only when the stored value actually changed: a successful call must be noise-free.
+	 */
+	setReachability(id: string, reason?: string): void {
+		if (reason === undefined) {
+			if (this.unreachable.delete(id)) this.onChanged(false);
+			return;
+		}
+		if (this.unreachable.get(id) !== reason) {
+			this.unreachable.set(id, reason);
+			this.onChanged(false);
+		}
+	}
+
+	/**
+	 * Asks the connector's server whether it answers, and reports what it found. The proxy owns the
+	 * reachability state: it is the one that can tell a server out of reach from something the user
+	 * has to fix (a secret, a sign-in), and marking those as out of reach would put a wrong reason
+	 * on the badge. This only returns the result for the caller to show.
+	 */
+	async retry(id: string): Promise<{ ok: true; tools: number } | { ok: false; reason: string }> {
+		return await this.probe(id);
 	}
 
 	/**
@@ -1987,6 +2019,8 @@ export class ConnectorManager {
 
 	/** Turns a connector off; its sign-in is kept for when it is turned on again. */
 	disconnect(id: string): ConnectorRefusal | undefined {
+		// A stale reason cannot stick: the server will be asked again when it is turned on.
+		this.unreachable.delete(id);
 		return this.change(id, (saved) => ({ ...saved, enabled: false }));
 	}
 
@@ -2004,6 +2038,7 @@ export class ConnectorManager {
 		if (this.setupFlow?.connectorId === id) this.cancelSetup(this.setupFlow);
 		await this.options.store.forget(id);
 		this.failed.delete(id);
+		this.unreachable.delete(id);
 		this.options.store.update((state) => {
 			delete state.connectors[id];
 		});
@@ -2217,6 +2252,7 @@ export class ConnectorManager {
 		if (!saved?.enabled) return "off";
 		if (missingValues(spec, saved.values)) return "needs_setup";
 		if (this.failed.has(id)) return "error";
+		if (this.unreachable.has(id)) return "unreachable";
 		if (spec.oauth && !this.options.store.isSignedIn(id)) return "needs_signin";
 		return "connected";
 	}
@@ -2227,6 +2263,9 @@ export class ConnectorManager {
 
 	/** Changes one connector, keeping what is not changed, then has the engine read it again. */
 	private save(id: string, update: (current: SavedConnector) => SavedConnector): void {
+		// A new value, address, or command makes a new connection: a stale reason cannot stick. A mode
+		// change does not come through here, so it keeps the reason.
+		this.unreachable.delete(id);
 		this.options.store.update((state) => {
 			state.connectors[id] = update(state.connectors[id] ?? { enabled: false, mode: "read_only" });
 		});

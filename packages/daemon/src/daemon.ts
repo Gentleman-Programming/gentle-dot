@@ -223,6 +223,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 				approvalRequest(preview.connector, preview.connectorId, preview.tool, preview.arguments),
 				signal,
 			),
+		reachable: (id, reason) => connectors.setReachability(id, reason),
 		...(options.connectorTransport ? { transport: options.connectorTransport } : {}),
 		env: agentEnv,
 		cwd: options.workspace,
@@ -302,6 +303,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 			: {}),
 		log,
 	});
+	connectors.probe = (id) => proxy.probe(id);
 	const voice = new VoiceService({
 		apiKey: () => auth.openAIApiKey(),
 		...(options.voiceFetch ? { fetch: options.voiceFetch } : {}),
@@ -437,6 +439,11 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		await supervisor
 			.start()
 			.catch((error: Error) => log(`agent failed to start: ${error.message}; retrying`));
+		// A start a restart replaced is not a failure, and a replacement that failed is reported by
+		// the bridge's own path. Only an agent that is ready is claimed: waiting here for a
+		// replacement that keeps failing would hold the app behind the supervisor's backoff retries.
+		if (supervisor.startReplaced && supervisor.state === "ready")
+			log("the agent was restarted while it was starting; the first start was replaced");
 	}
 
 	return {

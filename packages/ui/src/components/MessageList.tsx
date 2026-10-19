@@ -2,6 +2,7 @@ import type { Activity, ActivityKind } from "@gentle-dot/protocol";
 import { Fragment, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { chatScrollContainer, scrollChatTo } from "../chat-scroll.ts";
 import type { ChatMessage } from "../store.ts";
 import { formatSize } from "../uploads.ts";
 
@@ -70,10 +71,27 @@ export function MessageList({ messages, queued = [], hasEarlier = false, onShowE
 	// Earlier pages are added on top, so only the newest message moves the view.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: scroll whenever the newest content grows
 	useEffect(() => {
-		end.current?.scrollIntoView?.({ block: "end" });
+		scrollChatTo(end.current, "end");
 	}, [last?.id, last?.text, last?.activities.length, last?.note, queued.length]);
+	const hasContent = messages.length > 0 || queued.length > 0;
+	// The shell keeps this chat mounted while its panel is closed, where the chat body is not laid
+	// out and no scroll request can move it: without re-scrolling once it becomes visible, opening
+	// the app lands on the oldest message instead of the newest.
+	useEffect(() => {
+		if (!hasContent || typeof ResizeObserver === "undefined") return;
+		const container = chatScrollContainer(end.current);
+		if (!container) return;
+		let visible = container.clientHeight > 0;
+		const observer = new ResizeObserver(() => {
+			const shown = container.clientHeight > 0;
+			if (shown && !visible) scrollChatTo(end.current, "end");
+			visible = shown;
+		});
+		observer.observe(container);
+		return () => observer.disconnect();
+	}, [hasContent]);
 
-	if (messages.length === 0 && queued.length === 0) {
+	if (!hasContent) {
 		return (
 			<div className="empty">
 				<p>Hi! What can I do for you?</p>

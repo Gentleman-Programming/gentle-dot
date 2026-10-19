@@ -16,6 +16,20 @@ export interface ComputerPermissions {
 	screenRecording: boolean;
 }
 
+/**
+ * What the panel may claim about control on this build. `os` is `macos`, `linux` or `other`;
+ * `policy` is `targeted` (per-app, macOS) or `desktopGlobal` (stock Wayland, every visible app);
+ * `stopShortcut` is the Stop the user really has, in their own notation.
+ */
+export interface ComputerPlatform {
+	os: "macos" | "linux" | "other";
+	policy: "targeted" | "desktopGlobal";
+	stopShortcut: string;
+}
+
+/** Never guessed: an unknown build claims nothing, so the panel stays on the macOS wording it had. */
+export const UNKNOWN_PLATFORM: ComputerPlatform = { os: "other", policy: "targeted", stopShortcut: "" };
+
 export type ComputerPermission = keyof ComputerPermissions;
 
 /** A control session the user allowed; `endsAt` in milliseconds since the epoch. */
@@ -79,6 +93,22 @@ export function setComputerYolo(enabled: boolean): Promise<unknown> {
 export async function computerStatus(): Promise<ComputerState> {
 	if (!isTauri()) return {};
 	return stateOf(await invoke<ComputerStateEvent>("computer_status"));
+}
+
+/** The platform, policy and Stop shortcut the panel must describe; unknown never becomes a claim. */
+export async function computerPlatform(): Promise<ComputerPlatform> {
+	if (!isTauri()) return UNKNOWN_PLATFORM;
+	try {
+		const info = await invoke<Partial<ComputerPlatform>>("computer_platform");
+		const os = info?.os;
+		const policy = info?.policy;
+		if ((os !== "macos" && os !== "linux" && os !== "other") || (policy !== "targeted" && policy !== "desktopGlobal")) {
+			return UNKNOWN_PLATFORM;
+		}
+		return { os, policy, stopShortcut: typeof info?.stopShortcut === "string" ? info.stopShortcut : "" };
+	} catch {
+		return UNKNOWN_PLATFORM;
+	}
 }
 
 /** The event API, imported once: the glow overlay subscribes to three events at the same time. */

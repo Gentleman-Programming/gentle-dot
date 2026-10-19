@@ -133,6 +133,30 @@ export interface HistoryPage {
 }
 
 /**
+ * The display turns of every file in `chain`, used for paging. A recovery rotates and re-sends the
+ * user message the provider refused, so the previous file keeps a copy of that question with the
+ * empty answer the failure left behind. When the next file begins with the same user message, that
+ * trailing refused turn is shown once: it is dropped from the previous file's list here. Nothing is
+ * written or deleted; every other turn of every file stays.
+ */
+function chainTurns(chain: string[]): HistoryMessage[][] {
+	const turns = chain.map((file) => [...sessionTurns(file)]);
+	for (let index = 0; index < turns.length - 1; index++) {
+		const previous = turns[index] as HistoryMessage[];
+		const next = turns[index + 1] as HistoryMessage[];
+		const answer = previous.at(-1);
+		const question = previous.at(-2);
+		// The failure left an assistant turn with no text and no tool activity, unanswered.
+		if (answer?.role !== "assistant" || answer.text !== "" || answer.activities.length > 0) continue;
+		if (question?.role !== "user") continue;
+		// The next session opens with exactly that message: the recovery's re-send, not a new one.
+		if (next[0]?.role !== "user" || next[0].text !== question.text) continue;
+		previous.splice(-2);
+	}
+	return turns;
+}
+
+/**
  * One page of the chat kept in `chain` (session files, oldest first; the last
  * one is open), ending just before the message `before`, or at the newest one.
  * Ids are `s<file index>-<turn number>`, which stay valid while the chain grows.
@@ -147,16 +171,17 @@ export function pageHistory(chain: string[], limit: number, before?: string): Hi
 		file = Number(match[1]);
 		end = Number(match[2]) - 1;
 	}
+	const turnsOf = chainTurns(chain);
 	const page: HistoryMessage[] = [];
 	for (; file >= 0; file--, end = Number.POSITIVE_INFINITY) {
-		const turns = sessionTurns(chain[file] as string).slice(0, end);
+		const turns = (turnsOf[file] as HistoryMessage[]).slice(0, end);
 		const start = Math.max(0, turns.length - (limit - page.length));
 		const earlier = file < chain.length - 1 ? { earlier: true as const } : {};
 		page.unshift(
 			...turns.slice(start).map((turn, i) => ({ ...turn, id: `s${file}-${start + i + 1}`, ...earlier })),
 		);
 		if (page.length >= limit) {
-			const more = start > 0 || chain.slice(0, file).some((path) => sessionTurns(path).length > 0);
+			const more = start > 0 || turnsOf.slice(0, file).some((turns) => turns.length > 0);
 			return { messages: page, hasEarlier: more };
 		}
 	}

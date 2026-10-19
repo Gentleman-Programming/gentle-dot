@@ -12,7 +12,15 @@ apps/desktop/src-tauri/gen/
 # Installer staging: downloads cache and the default runtime output
 /.cache/
 /build/
+*.pkg.tar.zst
 .DS_Store
 
 # Declarations emitted next to sources by accident
 packages/*/src/**/*.d.ts
+
+# Test and parser scratch: recreated by their own runs, never source
+.vitest/
+.niri-c*/
+.tmp-niri-*/
+apps/desktop/src-tauri/.t/
+apps/desktop/src-tauri/.tmp-gd-unit/

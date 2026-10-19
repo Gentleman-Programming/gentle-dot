@@ -9,6 +9,8 @@ const COMMANDS: &[&str] = &[
     "set_dot_state",
     "rose_hidden",
     "set_rose_hidden",
+    "niri_unit_state",
+    "niri_unit_ready",
     "set_panel_fullscreen",
     "computer_endpoint",
     "computer_permissions",

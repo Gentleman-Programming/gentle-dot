@@ -1,5 +1,13 @@
 import { useEffect, useState } from "react";
-import { type ComputerState, computerEndpoint, computerStatus, onComputerState } from "./computer.ts";
+import {
+	type ComputerPlatform,
+	type ComputerState,
+	UNKNOWN_PLATFORM,
+	computerEndpoint,
+	computerPlatform,
+	computerStatus,
+	onComputerState,
+} from "./computer.ts";
 
 /** The control session and yolo mode the app reports (desktop windows only). */
 export function useComputerState(enabled: boolean): ComputerState {
@@ -23,8 +31,7 @@ export function useComputerState(enabled: boolean): ComputerState {
 /**
  * Whether the app has a computer-control helper (S24.7). The app itself registers it with the daemon
  * it launched, over its private channel (L61); the window never sends its key.
- */
-export function useComputerAvailable(enabled: boolean, connected: boolean): boolean {
+ */export function useComputerAvailable(enabled: boolean, connected: boolean): boolean {
 	const [available, setAvailable] = useState(false);
 	useEffect(() => {
 		if (!enabled || !connected) return;
@@ -43,4 +50,26 @@ export function useComputerAvailable(enabled: boolean, connected: boolean): bool
 		};
 	}, [enabled, connected]);
 	return available;
+}
+
+/**
+ * The platform, policy and Stop shortcut the panel must describe truthfully. Read once per panel
+ * mount from the app; a build that cannot answer claims nothing (`UNKNOWN_PLATFORM`).
+ */
+export function useComputerPlatform(enabled: boolean): ComputerPlatform {
+	const [platform, setPlatform] = useState<ComputerPlatform>(UNKNOWN_PLATFORM);
+	useEffect(() => {
+		if (!enabled) return;
+		let live = true;
+		computerPlatform().then(
+			(next) => {
+				if (live) setPlatform(next);
+			},
+			() => {},
+		);
+		return () => {
+			live = false;
+		};
+	}, [enabled]);
+	return platform;
 }

@@ -34,3 +34,31 @@ export async function waitFor<T>(probe: () => T | undefined | false, timeoutMs =
 		await new Promise((resolve) => setTimeout(resolve, 10));
 	}
 }
+
+/** Whether the process is still there; a child the supervisor waited out is gone, not a zombie. */
+export function alive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * The promise's value, or `undefined` when it is still going after `ms`: a test that would hang on
+ * behaviour which never settles fails on the value instead of on the runner's timeout.
+ */
+export async function settled<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+	let timer: NodeJS.Timeout | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<undefined>((resolve) => {
+				timer = setTimeout(() => resolve(undefined), ms);
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
