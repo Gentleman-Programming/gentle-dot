@@ -1,12 +1,14 @@
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
 const LOCKFILE = join(PACKAGE, "..", "..", "pnpm-lock.yaml");
 const IMPORTER = "packages/daemon";
+/** The engine loads the guard with `-e`; the guard imports the request shaper. */
+const EXTENSION_ENTRIES = ["approval-guard.ts", "screenshot-context.ts"];
 
 /**
  * The exact versions pnpm installed for the daemon's own dependencies, read from
@@ -65,6 +67,34 @@ function engineEntry(): string {
 }
 
 /**
+ * The extension entries and every source file they import at runtime, relative to `src`. esbuild
+ * resolves the graph the way Node will — a type-only import names no file — so each entry travels
+ * with everything it needs to load outside the checkout, not only the files named here (T10).
+ */
+async function extensionSources(): Promise<string[]> {
+	const sources = new Set<string>();
+	for (const name of EXTENSION_ENTRIES) {
+		const { metafile } = await build({
+			entryPoints: [join("src", "extensions", name)],
+			absWorkingDir: PACKAGE,
+			bundle: true,
+			write: false,
+			platform: "node",
+			format: "esm",
+			packages: "external",
+			metafile: true,
+			logLevel: "error",
+		});
+		for (const input of Object.keys(metafile.inputs)) sources.add(input);
+	}
+	return [...sources].map((input) => {
+		const source = relative(join(PACKAGE, "src"), resolve(PACKAGE, input));
+		if (source.startsWith("..")) throw new Error(`${input} is outside src/ and cannot be staged.`);
+		return source;
+	});
+}
+
+/**
  * Builds the daemon part of the installed runtime into `outDir`: `daemon/cli.mjs`
  * (the daemon and the protocol bundled; the engine and `ws` external), the files it
  * finds next to itself, a `package.json` for a flat install of the external
@@ -72,7 +102,6 @@ function engineEntry(): string {
  */
 export async function buildRuntime(outDir: string): Promise<void> {
 	const daemon = join(outDir, "daemon");
-	mkdirSync(join(daemon, "extensions"), { recursive: true });
 	mkdirSync(join(outDir, "bin"), { recursive: true });
 	const dependencies = lockedDependencies();
 	await build({
@@ -88,9 +117,12 @@ export async function buildRuntime(outDir: string): Promise<void> {
 	chmodSync(join(daemon, "cli.mjs"), 0o755);
 	// The bundle finds these through `import.meta.url`, as the sources do in `src/`.
 	copyFileSync(join(PACKAGE, "src", "identity.md"), join(daemon, "identity.md"));
-	// The engine loads the guard with -e, and the guard imports its siblings.
-	for (const name of ["approval-guard.ts", "screenshot-context.ts"]) {
-		copyFileSync(join(PACKAGE, "src", "extensions", name), join(daemon, "extensions", name));
+	// The engine loads the guard with -e, and it imports the shaper and the learned-limit store, so
+	// each entry is staged with every file of its import graph (T10).
+	for (const source of await extensionSources()) {
+		const target = join(daemon, source);
+		mkdirSync(dirname(target), { recursive: true });
+		copyFileSync(join(PACKAGE, "src", source), target);
 	}
 	const manifest = { name: "gentle-dot-runtime", private: true, type: "module", dependencies };
 	writeFileSync(join(daemon, "package.json"), `${JSON.stringify(manifest, null, "\t")}\n`);

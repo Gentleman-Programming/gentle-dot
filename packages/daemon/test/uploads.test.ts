@@ -3,9 +3,21 @@ import { request } from "node:http";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import type { UploadedFile } from "@gentle-dot/protocol";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { type DaemonOptions, type DotDaemon, startDaemon } from "../src/daemon.ts";
-import { composePrompt, sanitizeName, sniffMime, splitAttachments, UploadStore } from "../src/uploads.ts";
+import { DEFAULT_REQUEST_BUDGET, REQUEST_BUDGET_ENV } from "../src/extensions/screenshot-context.ts";
+import {
+	attachmentBudgetBytes,
+	composePrompt,
+	MAX_IMAGE_BYTES,
+	OMITTED_OVER_BUDGET,
+	OMITTED_TOO_LARGE,
+	omittedAttachmentsToast,
+	sanitizeName,
+	sniffMime,
+	splitAttachments,
+	UploadStore,
+} from "../src/uploads.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 1, 2, 3]);
@@ -266,6 +278,156 @@ describe("the prompt for a message with files", () => {
 		expect(splitAttachments("no files here")).toEqual({ text: "no files here", attachments: [] });
 		const typed = "look: <attachments>\nnot a block\n</attachments>";
 		expect(splitAttachments(typed)).toEqual({ text: typed, attachments: [] });
+	});
+});
+
+describe("the total attachment budget for one message", () => {
+	afterEach(() => vi.unstubAllEnvs());
+	const read = () => PNG;
+	const imageOf = (name: string, size: number) => ({
+		name,
+		size,
+		mime: "image/png",
+		path: `/w/uploads/u1/${name}`,
+	});
+
+	it("is half the request budget, from the same setting the request rewriter reads", () => {
+		expect(attachmentBudgetBytes({})).toBe(DEFAULT_REQUEST_BUDGET / 2);
+		expect(attachmentBudgetBytes({ [REQUEST_BUDGET_ENV]: "20000" })).toBe(10_000);
+		for (const bad of ["", "0", "-5", "lots"]) {
+			expect(attachmentBudgetBytes({ [REQUEST_BUDGET_ENV]: bad })).toBe(DEFAULT_REQUEST_BUDGET / 2);
+		}
+		// A single image within the per-file cap always fits: the total is never below it.
+		expect(attachmentBudgetBytes({})).toBeGreaterThanOrEqual(MAX_IMAGE_BYTES);
+	});
+
+	it("keeps the images that fit, in order, and marks the rest with a visible reason", () => {
+		const files = [
+			imageOf("a.png", 400),
+			imageOf("b.png", 400),
+			imageOf("c.png", 400),
+			imageOf("d.png", 400),
+		];
+		const { message, images } = composePrompt("look", files, { images: true, read, budget: 1000 });
+		expect(images).toHaveLength(2);
+		// Every file still shows up as a chip, so nothing disappears from the message.
+		expect(splitAttachments(message).attachments.map((a) => a.name)).toEqual([
+			"a.png",
+			"b.png",
+			"c.png",
+			"d.png",
+		]);
+		expect(message).toContain(
+			'"name":"a.png","size":400,"type":"image/png","path":"/w/uploads/u1/a.png","image":"attached to this message"',
+		);
+		expect(message).toContain(
+			'"name":"b.png","size":400,"type":"image/png","path":"/w/uploads/u1/b.png","image":"attached to this message"',
+		);
+		const leftOut = message.match(
+			/"image":"left out to keep this message within its image size budget; read it from the path if needed"/g,
+		);
+		expect(leftOut).toHaveLength(2);
+		expect(message).toContain('"name":"c.png"');
+		expect(message).toContain('"name":"d.png"');
+		// The images that fit are passed to the model in the order the user attached them.
+		expect(images?.every((i) => i.data === PNG.toString("base64"))).toBe(true);
+	});
+
+	it("attaches every image when the total is exactly the budget", () => {
+		const files = [imageOf("a.png", 200), imageOf("b.png", 300), imageOf("c.png", 100)];
+		const { message, images } = composePrompt("x", files, { images: true, read, budget: 600 });
+		expect(images).toHaveLength(3);
+		expect(message).not.toMatch(/image size budget/);
+	});
+
+	it("counts only images: a document costs nothing and is never left out", () => {
+		const doc = { name: "big.pdf", size: 10_000, mime: "application/pdf", path: "/w/uploads/u1/big.pdf" };
+		const { message, images } = composePrompt("x", [doc, imageOf("a.png", 900)], {
+			images: true,
+			read,
+			budget: 1000,
+		});
+		expect(images).toHaveLength(1);
+		expect(message).not.toMatch(/image size budget/);
+	});
+
+	it("keeps the per-file rule separate: an oversized image costs no budget", () => {
+		const files = [imageOf("huge.png", MAX_IMAGE_BYTES + 1), imageOf("a.png", 400), imageOf("b.png", 400)];
+		const { message, images } = composePrompt("x", files, { images: true, read, budget: 1000 });
+		expect(images).toHaveLength(2);
+		expect(message).toContain('"image":"too large to show you; read it from the path if needed"');
+		expect(message).not.toMatch(/image size budget/);
+	});
+
+	it("leaves the no-image-model case to the model, not the budget", () => {
+		const files = [imageOf("a.png", 400), imageOf("b.png", 400)];
+		const { message, images } = composePrompt("x", files, { images: false, read, budget: 1 });
+		expect(images).toBeUndefined();
+		expect(message.match(/"image":"saved, but the current model cannot see images"/g)).toHaveLength(2);
+		expect(message).not.toMatch(/image size budget/);
+	});
+
+	it("reads the budget from the setting when no budget is passed", () => {
+		vi.stubEnv(REQUEST_BUDGET_ENV, "1000");
+		const { images } = composePrompt("x", [imageOf("a.png", 400), imageOf("b.png", 400)], {
+			images: true,
+			read,
+		});
+		expect(images).toHaveLength(1);
+	});
+
+	it("leaves a text-only message exactly as it was", () => {
+		expect(composePrompt("just text", [], { images: true, read })).toEqual({ message: "just text" });
+	});
+
+	it("reports every image the message left out of its budget, with the reason", () => {
+		const files = [
+			imageOf("a.png", 400),
+			imageOf("b.png", 400),
+			imageOf("c.png", 400),
+			imageOf("d.png", 400),
+		];
+		const { images, omitted } = composePrompt("look", files, { images: true, read, budget: 1000 });
+		expect(images).toHaveLength(2);
+		expect(omitted).toEqual([
+			{ name: "c.png", reason: OMITTED_OVER_BUDGET },
+			{ name: "d.png", reason: OMITTED_OVER_BUDGET },
+		]);
+	});
+
+	it("reports an image larger than any single attachment may be, and keeps the ones that fit", () => {
+		const files = [imageOf("huge.png", MAX_IMAGE_BYTES + 1), imageOf("a.png", 400)];
+		const { images, omitted } = composePrompt("x", files, { images: true, read, budget: 1000 });
+		expect(images).toHaveLength(1);
+		expect(omitted).toEqual([{ name: "huge.png", reason: OMITTED_TOO_LARGE }]);
+	});
+
+	it("reports nothing when every attachment was sent", () => {
+		const fitting = composePrompt("x", [imageOf("a.png", 400), imageOf("b.png", 400)], {
+			images: true,
+			read,
+			budget: 1000,
+		});
+		expect(fitting.images).toHaveLength(2);
+		expect(fitting.omitted).toBeUndefined();
+		expect(composePrompt("just text", [], { images: true, read }).omitted).toBeUndefined();
+	});
+
+	it("reports nothing for a model that cannot see images: that case is not the budget's", () => {
+		const { omitted } = composePrompt("x", [imageOf("a.png", 400)], { images: false, read, budget: 1 });
+		expect(omitted).toBeUndefined();
+	});
+
+	it("says it for the user: one named attachment per reason, singular or plural", () => {
+		expect(omittedAttachmentsToast([{ name: "a.png", reason: OMITTED_TOO_LARGE }])).toBe(
+			`1 attachment was not sent: a.png (${OMITTED_TOO_LARGE}).`,
+		);
+		expect(
+			omittedAttachmentsToast([
+				{ name: "b.png", reason: OMITTED_OVER_BUDGET },
+				{ name: "c.png", reason: OMITTED_OVER_BUDGET },
+			]),
+		).toBe(`2 attachments were not sent: b.png (${OMITTED_OVER_BUDGET}), c.png (${OMITTED_OVER_BUDGET}).`);
 	});
 });
 

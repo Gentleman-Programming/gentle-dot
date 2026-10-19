@@ -35,6 +35,16 @@ export function rotationLimits(env: NodeJS.ProcessEnv): RotationLimits {
 	};
 }
 
+/** The live session file's size in bytes; 0 when there is no file or it cannot be read. */
+export function sessionFileBytes(file: string | undefined): number {
+	if (!file) return 0;
+	try {
+		return existsSync(file) ? statSync(file).size : 0;
+	} catch {
+		return 0;
+	}
+}
+
 function entries(file: string, mark: string): Record<string, unknown>[] {
 	const found: Record<string, unknown>[] = [];
 	for (const line of readFileSync(file, "utf8").split("\n")) {
@@ -167,6 +177,21 @@ export class SessionRotator {
 			return size >= limits.bytes || this.compactionsIn(file, size) >= limits.compactions;
 		});
 		if (!over) return false;
+		return this.rotateNow(file);
+	}
+
+	/**
+	 * Replaces the open session whatever its size, and only when the chat is idle: the provider
+	 * refused the request as too large, which no size limit of ours can tell in advance.
+	 */
+	async forceRotate(): Promise<boolean> {
+		if (this.rotating || !this.options.canRotate()) return false;
+		const file = this.supervisor.sessionFile;
+		if (!file) return false;
+		return this.rotateNow(file);
+	}
+
+	private async rotateNow(file: string): Promise<boolean> {
 		this.rotating = true;
 		try {
 			const state = (await this.supervisor.request({ type: "get_state" })).data as

@@ -56,7 +56,7 @@ A glowing rose sits on your desktop. Click it, press your shortcut (**`⌥ Space
 
 ### One conversation, with memory
 
-There is one continuous chat, not a list of threads to manage. When it grows too large, Gentle Dot quietly carries on in a fresh session seeded with a summary, so it stays fast and affordable. It remembers through your global **Engram™** memory: it saves to its own project, `gentle-dot`, and recalls from everything you keep there.
+There is one continuous chat, not a list of threads to manage. When it grows too large, Gentle Dot quietly carries on in a fresh session seeded with a summary, so it stays fast and affordable. For a suspected request-size failure, it can do the same behind the scenes and retry your message once, provided no tool ran in that turn. If recovery cannot complete, it shows the error. It remembers through your global **Engram™** memory: it saves to its own project, `gentle-dot`, and recalls from everything you keep there.
 
 ---
 
@@ -86,7 +86,7 @@ Notion, Linear, and Atlassian connect through their official servers; Discord, S
 
 ### Files in the chat
 
-Attach files with the paperclip, drag and drop, or paste. Images go straight to the model when it can see them; everything else lands in the assistant's workspace for it to read.
+Attach files with the paperclip, drag and drop, or paste. Images go straight to the model when it can see them; everything else lands in the assistant's workspace for it to read. The images of one message share a size budget to reduce oversized requests; anything left out keeps its chip and is named in a warning.
 
 ---
 
@@ -142,6 +142,7 @@ A small Node daemon starts the agent engine (Gentle Shell, `gentle-shell --mode 
 - **Memory:** your global Engram (`~/.engram`, port 7437), project `gentle-dot`; `GENTLE_DOT_ENGRAM=private` gives the assistant a memory of its own.
 - **Connectors:** the daemon alone writes `~/.gentle-dot/connectors.json` and the engine's `mcp.json`, and puts them back if anything else changes them. `connectors.json` is signed with a key kept in the Keychain; if it was changed while Gentle Dot was closed, it is set aside and you are told.
 - **Screenshots:** each model call carries only the latest one; earlier ones become one-line log entries, which keeps long control sessions fast.
+- **Requests:** before each model call, old tool images and text are trimmed to a size budget (8 MiB by default, `GENTLE_DOT_REQUEST_BUDGET_BYTES`) and a lower ceiling learned from a recovered refusal is applied per model. These are estimates, not guarantees about a provider's limits.
 
 <div align="right"><a href="#top">Back to top</a></div>
 
