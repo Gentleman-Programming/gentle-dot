@@ -62,6 +62,8 @@ export interface DaemonOptions {
 	agentEnv?: NodeJS.ProcessEnv;
 	/** The assistant's own Gentle Shell home (`--home`); profiles go next to it. */
 	agentHome?: string;
+	/** Deadline for one LLM turn (prompt with tools); from `loadConfig` (`GENTLE_DOT_TURN_TIMEOUT_MS`). */
+	turnTimeoutMs?: number;
 	/** Another setup's `profiles.json` offered for a one-time import; defaults to the user's Gentle Shell store. */
 	profilesImportPath?: string;
 	/** Creates the sign-in runtime; defaults to Pi's ModelRuntime on the agent home. */
@@ -261,8 +263,11 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 			}
 			return env;
 		},
-		// The first start in a new home installs the engine's companion packages.
-		...(config.turnTimeoutMs ? { turnTimeoutMs: config.turnTimeoutMs } : {}),
+		// The first start in a new home installs the engine's companion packages;
+		// that allowance is independent from the per-turn timeout (review feedback
+		// on the turn-timeout PR: do not shorten first-run provisioning).
+		...(options.agentHome ? { startTimeoutMs: 180_000 } : {}),
+		...(options.turnTimeoutMs ? { turnTimeoutMs: options.turnTimeoutMs } : {}),
 		...(options.backoffMs ? { backoffMs: options.backoffMs } : {}),
 		log: (line) => log(`[agent] ${line}`),
 	});

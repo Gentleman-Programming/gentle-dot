@@ -75,4 +75,41 @@ describe("loadConfig", () => {
 			"GENTLE_DOT_AGENT_ARGS must be a JSON array of strings",
 		);
 	});
+
+	it("accepts the documented 600000 ms turn timeout from the environment", () => {
+		const dataDir = tempDir();
+		// Regression: this used the port validator, rejecting anything over 65535 —
+		// including the documented default of 600000.
+		expect(
+			loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_TURN_TIMEOUT_MS: "600000" }).turnTimeoutMs,
+		).toBe(600_000);
+	});
+
+	it("reads turnTimeoutMs from config.json and lets the environment win", () => {
+		const dataDir = tempDir();
+		writeFileSync(join(dataDir, "config.json"), JSON.stringify({ turnTimeoutMs: 300_000 }));
+		expect(loadConfig({ GENTLE_DOT_DATA_DIR: dataDir }).turnTimeoutMs).toBe(300_000);
+		expect(
+			loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_TURN_TIMEOUT_MS: "45000" }).turnTimeoutMs,
+		).toBe(45_000);
+	});
+
+	it("rejects invalid turn timeouts from the environment and from config.json", () => {
+		const dataDir = tempDir();
+		expect(() => loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_TURN_TIMEOUT_MS: "abc" })).toThrow(
+			"Invalid duration",
+		);
+		expect(() => loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_TURN_TIMEOUT_MS: "-5" })).toThrow(
+			"Invalid duration",
+		);
+		expect(() => loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_TURN_TIMEOUT_MS: "0" })).toThrow(
+			"Invalid duration",
+		);
+		// A day is the sane ceiling; anything above is almost surely a unit mistake.
+		expect(() => loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_TURN_TIMEOUT_MS: "86400001" })).toThrow(
+			"Invalid duration",
+		);
+		writeFileSync(join(dataDir, "config.json"), JSON.stringify({ turnTimeoutMs: -1 }));
+		expect(() => loadConfig({ GENTLE_DOT_DATA_DIR: dataDir })).toThrow("Invalid duration");
+	});
 });
