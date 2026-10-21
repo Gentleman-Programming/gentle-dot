@@ -12,6 +12,7 @@ APP_BINARY="$REPO_ROOT/apps/desktop/src-tauri/target/release/gentle-dot"
 ASSUME_YES=0
 LAUNCH=1
 STEP=0
+SKIP_ROOT_CHECK=${SKIP_ROOT_CHECK:-0}
 
 for arg in "$@"; do
 	case "$arg" in

@@ -109,6 +109,9 @@ const MAX_BODY = 8 * 1024 * 1024;
 /** A tool call may wait for the user's approval and then the server: just under the engine's 300 s. */
 const CALL_TIMEOUT_MS = 290_000;
 const REQUEST_TIMEOUT_MS = 60_000;
+const CONNECT_TIMEOUT_MS = 15_000;
+const MAX_CONNECT_RETRIES = 3;
+const CONNECT_RETRY_BASE_MS = 1000;
 
 interface Upstream {
 	client: McpClient;
