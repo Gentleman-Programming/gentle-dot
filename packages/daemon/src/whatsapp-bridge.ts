@@ -66,6 +66,22 @@ export interface WhatsAppBridgeConfig {
 	accessToken: string;
 	/** Origen permitido para CORS */
 	origin: string;
+	/** Chat de WhatsApp autorizado: único remitente cuyos mensajes se
+	 *  reenvían al daemon y único destinatario de las respuestas. Los mensajes
+	 *  de otros chats se rechazan explícitamente (sin sesión, sin broadcast). */
+	authorizedChatId: string;
+	/** Client provider inyectado (tests). Por defecto se carga @builderbot/bot. */
+	client?: {
+		on(event: string, handler: (...args: never[]) => void): void;
+		initialize(): Promise<void>;
+		close(): Promise<void>;
+		sendMessage(chatId: string, text: string): Promise<unknown>;
+		downloadMedia(msg: unknown): Promise<{ data: string; mimetype?: string; filename?: string } | null>;
+	};
+	/** Reintentos de envío al daemon antes del reporte de no-entrega (default: 3). */
+	maxSendRetries?: number;
+	/** Backoff entre reintentos de envío (ms, default: 500). */
+	retryBackoffMs?: number;
 	/** Directorio temporal para archivos descargados */
 	tempDir?: string;
 	/** Límite de tamaño de archivo en bytes (default: 100MB) */
@@ -116,7 +132,7 @@ export class WhatsAppBridge {
 		sendMessage(chatId: string, text: string): Promise<unknown>;
 		downloadMedia(msg: unknown): Promise<{ data: string; mimetype?: string; filename?: string } | null>;
 	};
-	private config: Required<WhatsAppBridgeConfig>;
+	private config: Required<Omit<WhatsAppBridgeConfig, "client">> & Pick<WhatsAppBridgeConfig, "client">;
 	private sessionMap: Map<string, SessionMapping> = new Map();
 	private ws: WebSocket | null = null;
 	private wsReconnectTimer: NodeJS.Timeout | null = null;
@@ -126,6 +142,10 @@ export class WhatsAppBridge {
 			daemonUrl: config.daemonUrl,
 			accessToken: config.accessToken,
 			origin: config.origin,
+			authorizedChatId: config.authorizedChatId,
+			client: config.client,
+			maxSendRetries: config.maxSendRetries ?? 3,
+			retryBackoffMs: config.retryBackoffMs ?? 500,
 			tempDir: config.tempDir ?? join(tmpdir(), "gentle-dot-whatsapp"),
 			maxFileSize: config.maxFileSize ?? 100 * 1024 * 1024, // 100MB
 			maxImageSize: config.maxImageSize ?? 3_750_000, // 3.75MB
@@ -140,10 +160,12 @@ export class WhatsAppBridge {
 
 		// Placeholder client until initClient() replaces it with the real one (or a mock)
 		this.client = this.mockClient();
+		if (config.client) this.client = config.client;
 	}
 
 	/**
-	 * Inicializa el bridge: carga BuilderBot (opcional), conecta WebSocket al daemon
+	 * Inicializa el bridge: client inyectado (tests), BuilderBot (opcional) o mock,
+	 * y conecta el WebSocket al daemon.
 	 */
 	async start(): Promise<void> {
 		await this.initClient();
@@ -159,6 +181,12 @@ export class WhatsAppBridge {
 	 * Si no está instalado, usa un mock client inerte y reporta un warning.
 	 */
 	private async initClient(): Promise<void> {
+		// Seam de tests: el client inyectado se registra tal cual (sin import dinámico).
+		if (this.config.client) {
+			this.client = this.config.client;
+			this.setupEventHandlers();
+			return;
+		}
 		try {
 			const { createClient, MemoryStorage } = await import("@builderbot/bot");
 			this.client = createClient({
@@ -229,16 +257,32 @@ export class WhatsAppBridge {
 	 */
 	private handleDaemonMessage(data: string): void {
 		try {
-			const msg = JSON.parse(data) as { type?: string; text?: string };
+			const msg = JSON.parse(data) as { type?: string; text?: string; conversationId?: string; message?: string };
+			// Binding real de sesión: el payload del daemon lleva la conversación activa.
+			if (typeof msg.conversationId === "string" && msg.conversationId) {
+				const session = this.getOrCreateSession(this.config.authorizedChatId);
+				session.gentleDotSessionId = msg.conversationId;
+			}
 			switch (msg.type) {
 				case "ready":
 					console.log("[WhatsAppBridge] Daemon listo");
 					break;
-				case "message":
-					this.broadcastToWhatsApp(msg.text ?? "");
+				case "message_done":
+					// Routing explícito: solo el chat autorizado recibe respuestas. El
+					// daemon emite la respuesta final como message_done (no existe un
+					// tipo "message": el broadcast original era código muerto).
+					void this.sendToWhatsApp(
+						this.config.authorizedChatId,
+						typeof msg.text === "string" ? msg.text : "",
+					);
 					break;
 				case "error":
-					console.error("[WhatsAppBridge] Error del daemon:", msg);
+					// Superficiar errores del daemon al chat autorizado (antes:
+					// console.error y el mensaje se perdía en silencio).
+					void this.sendToWhatsApp(
+						this.config.authorizedChatId,
+						`⚠️ Daemon: ${typeof msg.message === "string" ? msg.message : "error"}`,
+					);
 					break;
 			}
 		} catch (err) {
@@ -292,6 +336,12 @@ export class WhatsAppBridge {
 		downloadMedia(): Promise<{ data: string; mimetype?: string; filename?: string } | null>;
 	}): Promise<void> {
 		const chatId = msg.from;
+		if (chatId !== this.config.authorizedChatId) {
+			// Routing explícito de remitente autorizado: los demás chats se rechazan
+			// sin sesión, sin reenvío al daemon y sin entrar al sessionMap.
+			await this.sendToWhatsApp(chatId, "⛔ Este bridge está vinculado a otro chat autorizado.");
+			return;
+		}
 		this.getOrCreateSession(chatId);
 
 		// Si es comando especial del bridge
@@ -318,15 +368,19 @@ export class WhatsAppBridge {
 			}
 		}
 
-		// Enviar al daemon via WebSocket
-		const payload = {
-			type: "send",
-			text: msg.body ?? "",
-			attachments,
-			requestId: randomUUID(),
-		};
+		// Enviar al daemon via WebSocket (sin el campo attachments si está vacío:
+		// el resolver de uploads del daemon rechaza arrays vacíos).
+		const payload: {
+			type: "send";
+			text: string;
+			requestId: string;
+			attachments?: Array<{ uploadId: string; name: string }>;
+		} = { type: "send", text: msg.body ?? "", requestId: randomUUID() };
+		if (attachments.length > 0) payload.attachments = attachments;
 
-		this.sendToDaemon(payload);
+		this.sendToDaemon(payload).catch((err: Error) =>
+			console.error("[WhatsAppBridge] Error enviando al daemon:", err),
+		);
 	}
 
 	/**
@@ -415,14 +469,27 @@ export class WhatsAppBridge {
 	}
 
 	/**
-	 * Envía mensaje al daemon via WebSocket
+	 * Envía mensaje al daemon via WebSocket con reintentos acotados. El payload
+	 * conserva el mismo requestId en todos los intentos: el daemon deduplica por
+	 * requestId (alreadySeen), así que los reintentos no reproducen efectos.
+	 * Si todos fallan, reporta la no-entrega al chat autorizado.
 	 */
-	private sendToDaemon(payload: object): void {
-		if (this.ws?.readyState === 1) {
-			this.ws.send(JSON.stringify(payload));
-		} else {
-			console.warn("[WhatsAppBridge] WebSocket no conectado, mensaje descartado");
+	private async sendToDaemon(payload: object): Promise<void> {
+		const attempts = this.config.maxSendRetries;
+		const backoff = this.config.retryBackoffMs;
+		for (let attempt = 0; attempt < attempts; attempt++) {
+			if (this.ws?.readyState === 1) {
+				this.ws.send(JSON.stringify(payload));
+				return;
+			}
+			if (attempt < attempts - 1) {
+				await new Promise((resolve) => setTimeout(resolve, backoff));
+			}
 		}
+		await this.sendToWhatsApp(
+			this.config.authorizedChatId,
+			"⚠️ No pude entregar tu mensaje al asistente (sin conexión). Reenvíalo cuando el bridge reconecte.",
+		);
 	}
 
 	/**
@@ -433,15 +500,6 @@ export class WhatsAppBridge {
 			await this.client.sendMessage(chatId, text);
 		} catch (err) {
 			console.error("[WhatsAppBridge] Error enviando a WhatsApp:", err);
-		}
-	}
-
-	/**
-	 * Broadcast a todas las sesiones activas (respuestas del asistente)
-	 */
-	private async broadcastToWhatsApp(text: string): Promise<void> {
-		for (const [chatId] of this.sessionMap) {
-			await this.sendToWhatsApp(chatId, text);
 		}
 	}
 
@@ -550,8 +608,8 @@ export class WhatsAppBridge {
 /**
  * Factory para crear bridge con configuración por defecto
  */
-export function createWhatsAppBridge(daemonUrl: string, accessToken: string, origin: string): WhatsAppBridge {
-	return new WhatsAppBridge({ daemonUrl, accessToken, origin });
+export function createWhatsAppBridge(daemonUrl: string, accessToken: string, origin: string, authorizedChatId: string): WhatsAppBridge {
+	return new WhatsAppBridge({ daemonUrl, accessToken, origin, authorizedChatId });
 }
 
 export default WhatsAppBridge;
