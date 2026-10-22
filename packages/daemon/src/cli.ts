@@ -64,7 +64,9 @@ async function main(): Promise<void> {
 			: {}),
 		log,
 	});
-	process.stdout.write(`${startupMessage(daemon.url, config.dataDir, process.stdout.isTTY === true)}\n`);
+	// Windows reserves stdout for the private anonymous-pipe protocol.
+	const startupOutput = appChannel && process.platform === "win32" ? process.stderr : process.stdout;
+	startupOutput.write(`${startupMessage(daemon.url, config.dataDir, startupOutput.isTTY === true)}\n`);
 
 	let closing = false;
 	const shutdown = (signal: string) => {

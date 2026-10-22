@@ -40,31 +40,22 @@ fn valid_port(value: Option<u64>) -> Option<u16> {
 
 /// Resolves the port and shortcut: environment first, then the file, then defaults.
 /// A missing or invalid file never prevents the app from starting.
-pub fn parse_config(
-    data_dir: PathBuf,
-    file: Option<&str>,
-    env: impl Fn(&str) -> Option<String>,
-) -> DesktopConfig {
-    let file: serde_json::Value = file
-        .and_then(|text| serde_json::from_str(text).ok())
-        .filter(serde_json::Value::is_object)
-        .unwrap_or_default();
+pub fn parse_config(data_dir: PathBuf, file: Option<&str>, env: impl Fn(&str) -> Option<String>) -> DesktopConfig {
+    let file: serde_json::Value =
+        file.and_then(|text| serde_json::from_str(text).ok()).filter(serde_json::Value::is_object).unwrap_or_default();
     let port = valid_port(env("GENTLE_DOT_PORT").and_then(|v| v.trim().parse().ok()))
         .or_else(|| valid_port(file["port"].as_u64()))
         .unwrap_or(DEFAULT_PORT);
-    let shortcut = file["shortcut"]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(DEFAULT_SHORTCUT)
-        .to_string();
+    let shortcut =
+        file["shortcut"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SHORTCUT).to_string();
     DesktopConfig { data_dir, port, shortcut }
 }
 
 /// Reads the real environment and `<data dir>/config.json`.
 pub fn load_config() -> DesktopConfig {
     let env = |key: &str| std::env::var(key).ok();
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let home_key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    let home = std::env::var_os(home_key).map(PathBuf::from).unwrap_or_default();
     let dir = data_dir(env, &home);
     let file = std::fs::read_to_string(dir.join("config.json")).ok();
     parse_config(dir, file.as_deref(), env)
@@ -94,7 +85,9 @@ pub fn save_shortcut(path: &Path, shortcut: &str) -> Result<(), String> {
     let file = match std::fs::read_to_string(path) {
         Ok(text) => Some(text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(format!("Gentle Dot cannot read config.json ({error}), so the shortcut was not saved.")),
+        Err(error) => {
+            return Err(format!("Gentle Dot cannot read config.json ({error}), so the shortcut was not saved."))
+        }
     };
     let text = with_shortcut(file.as_deref(), shortcut)?;
     write_private(path, &text).map_err(|error| format!("Gentle Dot cannot save config.json ({error})."))
@@ -165,7 +158,8 @@ mod tests {
 
     #[test]
     fn reads_port_and_shortcut_from_file() {
-        let config = parse_config(dir(), Some(r#"{ "port": 5000, "shortcut": "Cmd+Shift+K", "workspace": "~" }"#), env_of(&[]));
+        let config =
+            parse_config(dir(), Some(r#"{ "port": 5000, "shortcut": "Cmd+Shift+K", "workspace": "~" }"#), env_of(&[]));
         assert_eq!(config.port, 5000);
         assert_eq!(config.shortcut, "Cmd+Shift+K");
     }
@@ -178,7 +172,8 @@ mod tests {
 
     #[test]
     fn invalid_values_fall_back() {
-        let config = parse_config(dir(), Some(r#"{ "port": 70000, "shortcut": 3 }"#), env_of(&[("GENTLE_DOT_PORT", "abc")]));
+        let config =
+            parse_config(dir(), Some(r#"{ "port": 70000, "shortcut": 3 }"#), env_of(&[("GENTLE_DOT_PORT", "abc")]));
         assert_eq!(config.port, DEFAULT_PORT);
         assert_eq!(config.shortcut, DEFAULT_SHORTCUT);
         let config = parse_config(dir(), Some(r#"{ "port": "5001", "shortcut": "  " }"#), env_of(&[]));
@@ -196,9 +191,16 @@ mod tests {
 
     #[test]
     fn saving_a_shortcut_keeps_every_other_key() {
-        let text = with_shortcut(Some(r#"{ "port": 5000, "shortcut": "Alt+Space", "workspace": "~", "extra": { "a": [1] } }"#), "Ctrl+Alt+K").unwrap();
+        let text = with_shortcut(
+            Some(r#"{ "port": 5000, "shortcut": "Alt+Space", "workspace": "~", "extra": { "a": [1] } }"#),
+            "Ctrl+Alt+K",
+        )
+        .unwrap();
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(json, serde_json::json!({ "port": 5000, "shortcut": "Ctrl+Alt+K", "workspace": "~", "extra": { "a": [1] } }));
+        assert_eq!(
+            json,
+            serde_json::json!({ "port": 5000, "shortcut": "Ctrl+Alt+K", "workspace": "~", "extra": { "a": [1] } })
+        );
         let json: serde_json::Value = serde_json::from_str(&with_shortcut(None, "F5").unwrap()).unwrap();
         assert_eq!(json, serde_json::json!({ "shortcut": "F5" }));
     }
@@ -246,7 +248,10 @@ mod tests {
         // A missing file is created.
         let fresh = scratch("fresh").join("config.json");
         save_shortcut(&fresh, "F5").unwrap();
-        assert_eq!(parse_config(dir.clone(), std::fs::read_to_string(&fresh).ok().as_deref(), env_of(&[])).shortcut, "F5");
+        assert_eq!(
+            parse_config(dir.clone(), std::fs::read_to_string(&fresh).ok().as_deref(), env_of(&[])).shortcut,
+            "F5"
+        );
     }
 
     #[test]

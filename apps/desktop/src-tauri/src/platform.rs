@@ -6,10 +6,17 @@
 pub enum Os {
     MacOs,
     Linux,
+    Windows,
 }
 
 impl Os {
-    pub const CURRENT: Os = if cfg!(target_os = "macos") { Os::MacOs } else { Os::Linux };
+    pub const CURRENT: Os = if cfg!(target_os = "macos") {
+        Os::MacOs
+    } else if cfg!(target_os = "windows") {
+        Os::Windows
+    } else {
+        Os::Linux
+    };
 
     /// Only macOS blurs the desktop behind the panel (`HudWindow`); Linux has no window effects.
     pub fn has_vibrancy(self) -> bool {
@@ -48,10 +55,8 @@ fn is_wayland(env: &impl Fn(&str) -> Option<String>) -> bool {
 /// chosen by the user. Under X11 the app can place its windows, keep the Dot on top,
 /// and snap it to an edge; native Wayland allows none of that.
 pub fn forced_gdk_backend(env: impl Fn(&str) -> Option<String>) -> Option<&'static str> {
-    let wanted = is_wayland(&env)
-        && !is_hyprland(&env)
-        && set(&env, "DISPLAY").is_some()
-        && set(&env, "GDK_BACKEND").is_none();
+    let wanted =
+        is_wayland(&env) && !is_hyprland(&env) && set(&env, "DISPLAY").is_some() && set(&env, "GDK_BACKEND").is_none();
     wanted.then_some("x11")
 }
 
@@ -179,13 +184,16 @@ mod tests {
     fn the_panel_uses_vibrancy_only_on_macos() {
         assert!(Os::MacOs.has_vibrancy());
         assert!(!Os::Linux.has_vibrancy());
+        assert!(!Os::Windows.has_vibrancy());
         assert_eq!(panel_url(Os::MacOs), "index.html?surface=panel");
         assert_eq!(panel_url(Os::Linux), "index.html?surface=panel&effects=none");
+        assert_eq!(panel_url(Os::Windows), "index.html?surface=panel&effects=none");
     }
 
     #[test]
     fn current_os_matches_the_build_target() {
         assert_eq!(Os::CURRENT == Os::MacOs, cfg!(target_os = "macos"));
+        assert_eq!(Os::CURRENT == Os::Windows, cfg!(target_os = "windows"));
     }
 
     #[test]

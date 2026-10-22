@@ -63,6 +63,9 @@ dbus-secret-service = "4.1"
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 dbus = "0.9"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
 # Debug builds encode screenshots fast too (S24.8): `image` holds the JPEG encoder and `zune-*`
 # decode JPEGs (tests). The encoder is generic, so most of its code is compiled in this crate,
 # which gets opt-level 1 as well (measured on a 1280 × 800 encode: 200 ms unoptimized, 126 ms

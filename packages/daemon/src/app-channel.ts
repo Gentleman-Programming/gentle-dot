@@ -15,7 +15,7 @@
 import { type StdioOptions, spawnSync } from "node:child_process";
 import { closeSync, fstatSync } from "node:fs";
 import { Socket } from "node:net";
-import type { Duplex } from "node:stream";
+import { Duplex, Readable, Writable } from "node:stream";
 
 /** Where the app puts its end of the channel. */
 export const APP_FD = 3;
@@ -238,7 +238,22 @@ export interface InheritedChannelOptions extends AppChannelOptions {
  * is Node's own IPC channel). When a child would inherit it, it is closed and refused: an agent
  * holding it could act as the app.
  */
-export function inheritedAppSocket(options: InheritedChannelOptions = {}): Socket | undefined {
+export function inheritedAppSocket(options: InheritedChannelOptions = {}): Duplex | undefined {
+	if (process.platform === "win32" && process.env.GENTLE_DOT_APP_STDIO === "v1") {
+		// Only this app's owned child's anonymous stdin/stdout pipes carry privileged frames.
+		// Remove the selector before spawning children. It contains no credential or address.
+		delete process.env.GENTLE_DOT_APP_STDIO;
+		// Node's isFIFO() is always false on Windows; libuv still reports S_IFIFO
+		// in st_mode for inherited anonymous pipes (not terminals or regular files).
+		const isPipe = (fd: number) => (fstatSync(fd).mode & 0xf000) === 0x1000;
+		if (!isPipe(0) || !isPipe(1)) {
+			throw new Error("The app's private Windows pipes are unavailable.");
+		}
+		return Duplex.fromWeb({
+			readable: Readable.toWeb(process.stdin),
+			writable: Writable.toWeb(process.stdout),
+		});
+	}
 	const fd = options.fd ?? APP_FD;
 	if (process.env.NODE_CHANNEL_FD === String(fd)) return undefined;
 	let identity: string;

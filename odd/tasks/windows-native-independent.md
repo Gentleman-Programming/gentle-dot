@@ -6,7 +6,7 @@ This document recovers task tracking for the authorized Windows port of the offi
 
 - Source: official Gentleman-Programming/gentle-dot; branch: feat/windows-native-independent. Do not use PR #57, modify main, or publish releases.
 - The parent cloned and applied ../independent-windows.patch. Invalid ambient GITHUB_TOKEN was excluded process-only; the Maicololiveras keyring gh authentication is valid for MAINTAIN.
-- No commits, pushes, PRs, or merges have occurred. The user explicitly authorized publishing changes to feat/windows-native-independent and checking CI; no PR, merge, or release is authorized. All 34 source/docs/scripts files are staged; the stated changed-line count is 1,914 lines (1,913 excluding generated Cargo.lock; no binary count). This document is recovery tracking, not additional delivery authorization.
+- W1 is committed and pushed to the official `feat/windows-native-independent` branch as `9a5c0b4e7c1aac6d82e7b46630268520e65f89e` (321 changed lines); remaining source changes are staged. `gh run list` returned no CI runs; the Windows workflow remains staged for W5. No PR or merge has occurred. The user authorized publishing this branch and checking CI, but not PRs, merges, or releases. This document is recovery tracking, not additional delivery authorization.
 - Review mode is on by default (read-only confirmed). The preflight returned managed_assets_outdated; the exact gentle-ai sync --agent codex completed for 70 global managed files. No review START, lineage, consent, or receipt exists.
 - First future review boundary is the base SHA above. Review only a future work-unit commit or PR slice, never the accumulated branch.
 - Preserve existing grants, confirmations, privacy boundaries, and bounded owned-process cleanup. Do not apply global ACLs, touch unrelated processes, or claim unrun checks passed.
@@ -15,7 +15,7 @@ This document recovers task tracking for the authorized Windows port of the offi
 
 ## Work units
 
-All tasks remain open: no work-unit commit exists, so no task meets the completion rule (observed outcome, applicable checks, and commit identity). Routes record the planned execution path and trigger evidence.
+The broader acceptance tasks remain open; W1 is committed with bounded discovery proof, while full platform acceptance remains pending. Routes record the execution path and trigger evidence.
 
 | ID | Outcome / route | Progress and acceptance evidence | Status |
 |---|---|---|---|
@@ -45,13 +45,13 @@ The latest and earlier Vitest failures above remain unresolved; do not convert t
 
 ### Resume verification (2026-10-22)
 
-Re-read START_HERE.md and the supplied LOCAL_AGENT_HANDOFF.md; reconciled this document with its full Engram mirror before continuing. gh keyring authentication and MAINTAIN repository access were reverified. The remote feature branch is still absent and gh reported no CI runs for it. No source edits, commits, push, PR, merge, or review START occurred during these checks.
+Re-read START_HERE.md and the supplied LOCAL_AGENT_HANDOFF.md; reconciled this document with its full Engram mirror before continuing. The user authorized publication of the official feature branch; W1 passed native review and exact acknowledgement, then commit `9a5c0b4e7c1aac6d82e7b46630268520e65f89e` was pushed. `gh run list` returned no CI runs; the Windows workflow remains staged for W5. No PR, merge, or release occurred.
 
 Bounded independent checks passed: 15 Node contracts with zero skips; TypeScript build; six syntax parses (three scripts on Windows PowerShell 5.1 and pwsh); whitespace check; and 18 Vitest tests across runtime.test.ts and app-channel.test.ts with maxWorkers=2 and zero skips. The parent spot-check reran all 15 Node contracts successfully. This is not a full-suite pass and does not resolve the earlier 11 focused failures or native build/installer/capability blockers.
 
 Verification caveat: an incorrectly quoted first syntax-check command inadvertently invoked the scripts. Staging refused the existing generated directory; no installer was produced. Correct EncodedCommand/ParseFile checks then passed. Working-tree versus index comparison showed no tracked source changes; generated icon output remains build-only. Logs are under ignored build/windows/resume-*. TDD configuration/source remains unconfirmed.
 
-Forecast is at least 1,913 authored lines before this recovery document; committed authored count is zero. Chain strategy is now feature-branch-chain, explicitly confirmed with answer `1`; the previous delivery-choice blocker is resolved. Resolve TDD mode/source before further source implementation. Organize the existing normalized changes into coherent work-unit commits, keep their tests/docs, record commit identities and actual checks here, and assess/review eligible committed boundaries under the user-owned native review contract. Publish only the authorized feature branch and inspect its CI; do not infer PR, merge, or release authorization.
+Forecast remains above 1,913 authored lines; committed W1 count is 321 including its recovery documentation. Chain strategy is feature-branch-chain, confirmed with answer `1`. Resolve TDD mode/source before further source implementation. Continue coherent work-unit commits with tests/docs and native per-commit assessment. Publish only the authorized feature branch and inspect its CI; do not infer PR, merge, or release authorization.
 
 ### Work-unit organization
 
@@ -63,5 +63,11 @@ The user explicitly selected `feature-branch-chain` with answer `1`; no pull req
 4. **W4 — Packaging and runtime integrity**.
 5. **W5 — Windows CI and integration evidence**.
 
-No commit identities or task checkmarks are recorded by this preparation; all slices are provisional until each work unit's outcomes and checks are observed.
+W1 commit: `9a5c0b4` (`feat(daemon): discover Windows runtime executables safely`), 294 additions and 27 deletions. Focused Node resolver tests passed 9/9, Vitest runtime tests passed 9/9, typecheck passed, and parent Node spot-check passed 9/9. Existing isolation/privacy failures remain outside that bounded proof. Commit identity was supplied per-command from the authenticated GitHub account's public name and private ID-based noreply address, without global configuration changes. The first commit attempt failed before writing a commit because author identity was unset; the per-command identity resolved that failure.
+
+Native committed-only assessment from base `8cb20ee888c88be2b359258a65499c20b59e2a86` reported high risk, `review_due=true`, reason `high_risk` / `process_boundary` on isolation.ts. The human granted this candidate with answer `1`. All four provider-issued reviewer captures ran concurrently, without source mutation, and the final admitted capture approved the candidate. Its one advisory (`R2-misleading-precedence-comment`, windows-runtime.ts:35) is non-blocking future work; it did not open correction or reopen this review. The exact returned acknowledgement completed with `gentle-ai.review-acknowledged/v1`, action `acknowledged`, authority `burned`, lineage `review-6279c98b9cf8fa10`, target `sha256:01db4a4f9dfee523319f09b0f4f40e27f6baa45c16166c6be1efb28290301343`. Next reviewed boundary: W1 commit `9a5c0b4`. No further lifecycle operation is required for that target. The exact W1 commit was pushed to the authorized official feature branch; `gh run list` returned no runs. No PR is authorized or created. Other work-unit identities and full acceptance remain pending.
+
+#### W2 preparation (2026-10-22)
+
+W2 documentation is prepared in `docs/windows-daemon-lifecycle.md`. Focused Node Windows channel harness passed 1/1, Vitest app-channel suite passed 9/9, TypeScript build passed, and `git diff --check` passed. The harness confirms anonymous-pipe protocol/EOF and selector non-inheritance only; Rust Job assignment, descendant cleanup, and actual Windows ACL behavior remain unverified. The prior Cargo test attempt was blocked by missing MSVC `link.exe`; Cargo metadata checks do not establish compilation. W2 remains open pending parent commit/review and exact evidence recording. Credential Manager belongs to W3. The W2 slice may exceed 400 authored lines; do not split or compress it artificially. No PR has been created.
 

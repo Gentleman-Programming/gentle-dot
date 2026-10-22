@@ -30,10 +30,10 @@ impl TrayGlyph {
     pub fn image(self, os: Os) -> &'static [u8] {
         match (os, self) {
             (Os::MacOs, _) => self.png(),
-            (Os::Linux, Self::Ready) => include_bytes!("../icons/tray/linux/ready.png"),
-            (Os::Linux, Self::Working) => include_bytes!("../icons/tray/linux/working.png"),
-            (Os::Linux, Self::NeedsYou) => include_bytes!("../icons/tray/linux/needs-you.png"),
-            (Os::Linux, Self::Unavailable) => include_bytes!("../icons/tray/linux/unavailable.png"),
+            (Os::Linux | Os::Windows, Self::Ready) => include_bytes!("../icons/tray/linux/ready.png"),
+            (Os::Linux | Os::Windows, Self::Working) => include_bytes!("../icons/tray/linux/working.png"),
+            (Os::Linux | Os::Windows, Self::NeedsYou) => include_bytes!("../icons/tray/linux/needs-you.png"),
+            (Os::Linux | Os::Windows, Self::Unavailable) => include_bytes!("../icons/tray/linux/unavailable.png"),
         }
     }
 }
