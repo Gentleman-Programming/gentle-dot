@@ -164,8 +164,8 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	// create (S35.3). Only the assistant's default home; a home the user chose is never marked.
 	if (options.agentHome && resolve(options.agentHome) === resolve(options.dataDir, "agent"))
 		claimEngineHome(options.agentHome, log, access);
-	if (process.platform === "win32") ensurePrivateDir(options.workspace);
-	else access(() => mkdirSync(options.workspace, { recursive: true, mode: 0o700 }));
+	// A workspace may be intentionally shared; unlike daemon-private storage, it keeps inherited Windows ACLs.
+	access(() => mkdirSync(options.workspace, { recursive: true, mode: 0o700 }));
 	ensureMemoryProject(options.workspace, access);
 	const folderArgs = options.preferredFolder
 		? [

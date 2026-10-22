@@ -1,5 +1,6 @@
 // The daemon lives as long as the app that launched it (S35.2, #22), and the engine owns its home on
 // the first start (S35.3, #13).
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -9,6 +10,7 @@ import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import { fakeApp } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { inspectWindowsAcl } from "./windows-acl-oracle.ts";
 
 const MARKER = ".gentle-shell-home";
 
@@ -18,7 +20,12 @@ afterEach(async () => {
 });
 
 async function start(
-	options: { appChannel?: ReturnType<typeof fakeApp>; agentHome?: string; dataDir?: string } = {},
+	options: {
+		appChannel?: ReturnType<typeof fakeApp>;
+		agentHome?: string;
+		dataDir?: string;
+		workspace?: string;
+	} = {},
 ) {
 	const dataDir = options.dataDir ?? tempDir();
 	const markerFile = join(tempDir(), "marker.json");
@@ -28,7 +35,7 @@ async function start(
 		port: 0,
 		host: "127.0.0.1",
 		dataDir,
-		workspace: join(dataDir, "workspace"),
+		workspace: options.workspace ?? join(dataDir, "workspace"),
 		uiDir: dataDir,
 		agentCommand: process.execPath,
 		agentArgs: [FAKE_AGENT],
@@ -60,6 +67,40 @@ const alive = (pid: number) => {
 };
 
 describe("the daemon's lifetime (S35.2)", () => {
+	it.skipIf(process.platform !== "win32")("preserves existing shared workspace ACL grants", async () => {
+		const dataDir = tempDir();
+		const workspace = join(tempDir(), "workspace");
+		mkdirSync(workspace);
+		const script = `$ErrorActionPreference = 'Stop'
+$path = $env:GENTLE_DOT_WORKSPACE
+$directory = [System.IO.DirectoryInfo]::new($path)
+$sections = [System.Security.AccessControl.AccessControlSections]::Owner -bor [System.Security.AccessControl.AccessControlSections]::Access
+$acl = $directory.GetAccessControl($sections)
+$everyone = [System.Security.Principal.SecurityIdentifier]::new('S-1-1-0')
+$rule = [System.Security.AccessControl.FileSystemAccessRule]::new($everyone, 'FullControl', 'Allow')
+$acl.AddAccessRule($rule)
+$directory.SetAccessControl($acl)`;
+		execFileSync(
+			"powershell.exe",
+			[
+				"-NoProfile",
+				"-NonInteractive",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-EncodedCommand",
+				Buffer.from(script, "utf16le").toString("base64"),
+			],
+			{ env: { ...process.env, GENTLE_DOT_WORKSPACE: workspace }, windowsHide: true },
+		);
+		const before = inspectWindowsAcl(workspace);
+		expect(before.rules.map((rule) => rule.sid)).toContain("S-1-1-0");
+
+		await start({ dataDir, workspace });
+
+		const after = inspectWindowsAcl(workspace);
+		expect(after).toEqual(before);
+	});
+
 	it("a daemon started by the app stops when its app channel closes", async () => {
 		const app = fakeApp();
 		const { d, logs } = await start({ appChannel: app });
