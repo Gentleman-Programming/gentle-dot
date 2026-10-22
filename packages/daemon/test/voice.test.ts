@@ -139,6 +139,39 @@ function modelOnly(dataDir: string): () => void {
 }
 
 describe("VoiceService transcriber provisioning", () => {
+	it("logs provisioning progress while the install runs", async () => {
+		const dataDir = tempDir();
+		const restoreModel = modelOnly(dataDir);
+		const restoreSource = setSourceEnv(REPO_VOICE_TOOLS);
+		const logs: string[] = [];
+		const voice = new VoiceService({
+			apiKey: async () => KEY,
+			dataDir,
+			fetch: fakeFetch(() => new Response()).fetch,
+			log: (line) => logs.push(line),
+			progressIntervalMs: 40,
+			installDeps: async () => {
+				// Long enough for two progress ticks at the 40ms interval.
+				await new Promise((resolve) => setTimeout(resolve, 150));
+				writeFileSync(join(dataDir, "voice-tools", "transcriber.js"), STUB_TRANSCRIBER);
+			},
+		});
+		try {
+			expect(await voice.transcribe("audio/ogg", AUDIO)).toEqual({
+				ok: true,
+				text: "hello from the local transcriber",
+			});
+		} finally {
+			restoreModel();
+			restoreSource();
+		}
+		expect(logs).toContain("voice: installing the local transcriber");
+		expect(
+			logs.filter((l) => l.startsWith("voice: still installing the local transcriber (")).length,
+		).toBeGreaterThanOrEqual(2);
+		expect(logs).toContain("voice: local transcriber installed");
+	});
+
 	it("installs the transcriber on first use when the model is already downloaded", async () => {
 		const dataDir = tempDir();
 		const restoreModel = modelOnly(dataDir);

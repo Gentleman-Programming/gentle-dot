@@ -84,6 +84,8 @@ export interface VoiceServiceOptions {
 	 * Defaults to `npm install`; tests inject a fake.
 	 */
 	installDeps?: () => Promise<void>;
+	/** How often provisioning logs "still installing" progress. Default 15s. */
+	progressIntervalMs?: number;
 	fetch?: typeof fetch;
 	log?: (line: string) => void;
 	timeoutMs?: number;
@@ -146,9 +148,15 @@ class TranscriberServer {
 	private readonly model: string;
 	private readonly log?: (line: string) => void;
 	private readonly installDeps: () => Promise<void>;
+	private readonly progressIntervalMs: number;
 	private provisioning?: Promise<void>;
 
-	constructor(dataDir: string, log?: (line: string) => void, installDeps?: () => Promise<void>) {
+	constructor(
+		dataDir: string,
+		log?: (line: string) => void,
+		installDeps?: () => Promise<void>,
+		progressIntervalMs?: number,
+	) {
 		this.dir = join(dataDir, "voice-tools");
 		this.script = join(this.dir, "transcriber.js");
 		this.model =
@@ -159,6 +167,7 @@ class TranscriberServer {
 			);
 		this.log = log;
 		this.installDeps = installDeps ?? (() => npmInstallDeps(this.dir));
+		this.progressIntervalMs = progressIntervalMs ?? 15_000;
 	}
 
 	/**
@@ -175,6 +184,13 @@ class TranscriberServer {
 			if (!source) {
 				throw new Error("voice: the voice-tools assets are not bundled with this install");
 			}
+			this.log?.("voice: installing the local transcriber");
+			const startedAt = Date.now();
+			const progress = setInterval(() => {
+				this.log?.(
+					`voice: still installing the local transcriber (${Math.round((Date.now() - startedAt) / 1000)}s elapsed)`,
+				);
+			}, this.progressIntervalMs);
 			try {
 				await mkdir(this.dir, { recursive: true });
 				await copyFile(join(source, "transcriber.js"), this.script);
@@ -184,6 +200,8 @@ class TranscriberServer {
 			} catch (error) {
 				await rm(this.script, { force: true });
 				throw error;
+			} finally {
+				clearInterval(progress);
 			}
 		})().finally(() => {
 			// Keep the in-flight promise while it settles; a settled failure allows a retry.
@@ -318,7 +336,12 @@ export class VoiceService {
 
 	constructor(options: VoiceServiceOptions) {
 		this.options = options;
-		this.transcriber = new TranscriberServer(options.dataDir, options.log, options.installDeps);
+		this.transcriber = new TranscriberServer(
+			options.dataDir,
+			options.log,
+			options.installDeps,
+			options.progressIntervalMs,
+		);
 		// When the desktop app already downloaded the local model, provision the
 		// transcriber in the background so voice notes work without any setup.
 		if (this.transcriber.availability().model && !this.transcriber.availability().script) {
