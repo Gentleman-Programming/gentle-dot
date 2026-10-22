@@ -10,7 +10,7 @@ import {
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import { tempDir } from "./helpers.ts";
@@ -22,7 +22,8 @@ const ENGINE_CLI = join("@earendil-works", "pi-coding-agent", "dist", "bundle", 
 let out: string;
 
 beforeAll(() => {
-	out = tempDir();
+	const root = tempDir();
+	out = process.platform === "win32" ? join(root, "runtime Ω &") : root;
 	const build = spawnSync(process.execPath, [BUILD, "--out", out], { encoding: "utf8" });
 	expect(build.stderr).toBe("");
 	expect(build.status).toBe(0);
@@ -39,7 +40,7 @@ function listFiles(dir: string, prefix = ""): string[] {
 describe("build:runtime", () => {
 	it("emits the daemon part of the runtime layout, without node_modules", () => {
 		expect(listFiles(out).sort()).toEqual([
-			"bin/pi",
+			process.platform === "win32" ? "bin/pi.exe" : "bin/pi",
 			"daemon/cli.mjs",
 			"daemon/extensions/approval-guard.ts",
 			"daemon/extensions/screenshot-context.ts",
@@ -106,29 +107,107 @@ describe("build:runtime", () => {
 		expect(realpathSync(report.identity)).toBe(join(real, "daemon", "identity.md"));
 	});
 
-	it("emits a `pi` wrapper that runs the runtime's node and engine wherever the runtime is", () => {
-		expect(statSync(join(out, "bin", "pi")).mode & 0o111).toBe(0o111);
-		const moved = tempDir();
-		mkdirSync(join(moved, "bin"));
-		mkdirSync(join(moved, "node", "bin"), { recursive: true });
-		copyFileSync(join(out, "bin", "pi"), join(moved, "bin", "pi"));
-		writeFileSync(join(moved, "node", "bin", "node"), '#!/bin/sh\nprintf "%s\\n" "$0" "$@"\n', {
-			mode: 0o755,
-		});
-		const linked = join(tempDir(), "pi");
-		symlinkSync(join(moved, "bin", "pi"), linked);
-		const real = realpathSync(moved);
-		for (const entry of [join(moved, "bin", "pi"), linked]) {
-			const run = spawnSync(entry, ["--version", "a b"], { encoding: "utf8" });
-			expect(run.status).toBe(0);
-			expect(run.stdout.split("\n")).toEqual([
-				join(real, "node", "bin", "node"),
-				join(real, "daemon", "node_modules", ENGINE_CLI),
-				"--version",
-				"a b",
+	if (process.platform === "win32") {
+		it("runs the native launcher with literal argv and stdio from a relocated runtime", () => {
+			const moved = join(tempDir(), "runtime Ω &");
+			const movedBin = join(moved, "bin", "pi.exe");
+			const movedNode = join(moved, "node", "node.exe");
+			const engine = join(moved, "daemon", "node_modules", ENGINE_CLI);
+			mkdirSync(dirname(movedBin), { recursive: true });
+			mkdirSync(dirname(movedNode), { recursive: true });
+			mkdirSync(dirname(engine), { recursive: true });
+			copyFileSync(join(out, "bin", "pi.exe"), movedBin);
+			copyFileSync(process.execPath, movedNode);
+			writeFileSync(
+				engine,
+				[
+					"let input = '';",
+					"process.stdin.setEncoding('utf8');",
+					"for await (const chunk of process.stdin) input += chunk;",
+					"process.stdout.write(JSON.stringify({ engine: process.argv[1], args: process.argv.slice(2), input }));",
+					"process.stderr.write('fixture stderr');",
+					"process.exitCode = Number(process.argv.find((arg) => arg.startsWith('--fixture-exit='))?.split('=')[1] ?? 0);",
+				].join("\n"),
+			);
+			const marker = join(tempDir(), "launcher-must-not-create.txt");
+			const args = [
 				"",
-			]);
-		}
-		expect(existsSync(join(PACKAGE, "node_modules", ENGINE_CLI))).toBe(true);
-	});
+				"two words Ω 世界",
+				'quote " inside',
+				"%PATH%",
+				"!TEMP!",
+				"&",
+				"|",
+				"^",
+				"(parentheses)",
+				"<",
+				">",
+				`& echo injected > ${marker}`,
+				"--fixture-exit=23",
+			];
+			const input = "stdin Ω fixture";
+			const run = spawnSync(movedBin, args, {
+				encoding: "utf8",
+				input,
+				timeout: 15_000,
+				windowsHide: true,
+			});
+			expect(run.error).toBeUndefined();
+			expect(run.status).toBe(23);
+			expect(run.stdout).toBe(JSON.stringify({ engine, args, input }));
+			expect(run.stderr).toBe("fixture stderr");
+			expect(existsSync(marker)).toBe(false);
+
+			const successArgs = args.map((arg) => (arg === "--fixture-exit=23" ? "--fixture-exit=0" : arg));
+			const success = spawnSync(movedBin, successArgs, {
+				encoding: "utf8",
+				input,
+				timeout: 15_000,
+				windowsHide: true,
+			});
+			expect(success.error).toBeUndefined();
+			expect(success.status).toBe(0);
+			expect(success.stdout).toBe(JSON.stringify({ engine, args: successArgs, input }));
+			expect(success.stderr).toBe("fixture stderr");
+
+			const missingNodeBin = join(tempDir(), "missing-node-runtime Ω &", "bin", "pi.exe");
+			mkdirSync(dirname(missingNodeBin), { recursive: true });
+			copyFileSync(join(out, "bin", "pi.exe"), missingNodeBin);
+			const failed = spawnSync(missingNodeBin, [], {
+				encoding: "utf8",
+				timeout: 15_000,
+				windowsHide: true,
+			});
+			expect(failed.error).toBeUndefined();
+			expect(failed.status).toBe(1);
+			expect(failed.stdout).toBe("");
+			expect(failed.stderr).toMatch(/^pi launcher: start runtime Node:/);
+		});
+	} else {
+		it("emits a `pi` wrapper that runs the runtime's node and engine wherever the runtime is", () => {
+			expect(statSync(join(out, "bin", "pi")).mode & 0o111).toBe(0o111);
+			const moved = tempDir();
+			mkdirSync(join(moved, "bin"));
+			mkdirSync(join(moved, "node", "bin"), { recursive: true });
+			copyFileSync(join(out, "bin", "pi"), join(moved, "bin", "pi"));
+			writeFileSync(join(moved, "node", "bin", "node"), '#!/bin/sh\nprintf "%s\\n" "$0" "$@"\n', {
+				mode: 0o755,
+			});
+			const linked = join(tempDir(), "pi");
+			symlinkSync(join(moved, "bin", "pi"), linked);
+			const real = realpathSync(moved);
+			for (const entry of [join(moved, "bin", "pi"), linked]) {
+				const run = spawnSync(entry, ["--version", "a b"], { encoding: "utf8" });
+				expect(run.status).toBe(0);
+				expect(run.stdout.split("\n")).toEqual([
+					join(real, "node", "bin", "node"),
+					join(real, "daemon", "node_modules", ENGINE_CLI),
+					"--version",
+					"a b",
+					"",
+				]);
+			}
+			expect(existsSync(join(PACKAGE, "node_modules", ENGINE_CLI))).toBe(true);
+		});
+	}
 });

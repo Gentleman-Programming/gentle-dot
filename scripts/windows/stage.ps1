@@ -43,13 +43,7 @@ try {
     Push-Location (Join-Path $out 'daemon')
     try { Run $node @($npm,'install','--omit=dev','--no-bin-links','--no-audit','--no-fund','--foreground-scripts') }
     finally { Pop-Location }
-    # The command is relocatable; never point pi.cmd at the build host's pnpm store.
-    $engine = Get-Content (Join-Path $out 'daemon/node_modules/@earendil-works/pi-coding-agent/package.json') -Raw | ConvertFrom-Json
-    $entry = [string]$engine.bin.pi
-    if ($entry -notmatch '^[a-zA-Z0-9_./-]+$' -or $entry.Contains('..')) { throw 'Unsafe engine entry path' }
-    $wrapper = '@echo off' + "`r`n" + '"%~dp0..\node\node.exe" "%~dp0..\daemon\node_modules\@earendil-works\pi-coding-agent\' + $entry.Replace('/','\') + '" %*' + "`r`n" + 'exit /b %errorlevel%' + "`r`n"
-    [IO.File]::WriteAllText((Join-Path $out 'bin/pi.cmd'),$wrapper,[Text.Encoding]::ASCII)
-    Remove-Item (Join-Path $out 'bin/pi')
+    # build:runtime creates the relocatable native launcher; never route argv through CMD.
     $engramVersion = '3.4.0'
     $engramArchive = DownloadVerified "https://github.com/Gentleman-Programming/engram/releases/download/v$engramVersion" "engram_${engramVersion}_windows_amd64.zip" 'checksums.txt'
     $unpack = Join-Path $out '_engram'
@@ -61,7 +55,7 @@ try {
     Run 'pnpm.cmd' @('--filter','@gentle-dot/ui','build')
     Copy-Item (Join-Path $repo 'packages/ui/dist/app') (Join-Path $out 'ui') -Recurse
     Run $node @('--version')
-    Run (Join-Path $out 'bin/pi.cmd') @('--version')
+    Run (Join-Path $out 'bin/pi.exe') @('--version')
     Run (Join-Path $out 'bin/engram.exe') @('version')
     Run $node @((Join-Path $PSScriptRoot 'runtime-integrity.mjs'),'seal',$out)
 } finally { Pop-Location }

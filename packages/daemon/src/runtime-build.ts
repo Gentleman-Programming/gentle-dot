@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -68,7 +69,7 @@ function engineEntry(): string {
  * Builds the daemon part of the installed runtime into `outDir`: `daemon/cli.mjs`
  * (the daemon and the protocol bundled; the engine and `ws` external), the files it
  * finds next to itself, a `package.json` for a flat install of the external
- * dependencies, and `bin/pi`. Nothing is installed.
+ * dependencies, and a platform-native launcher (`bin/pi` or `bin/pi.exe`). Nothing is installed.
  */
 export async function buildRuntime(outDir: string): Promise<void> {
 	const daemon = join(outDir, "daemon");
@@ -94,5 +95,26 @@ export async function buildRuntime(outDir: string): Promise<void> {
 	}
 	const manifest = { name: "gentle-dot-runtime", private: true, type: "module", dependencies };
 	writeFileSync(join(daemon, "package.json"), `${JSON.stringify(manifest, null, "\t")}\n`);
-	writeFileSync(join(outDir, "bin", "pi"), piWrapper(engineEntry()), { mode: 0o755 });
+	const entry = engineEntry();
+	if (process.platform === "win32") {
+		const packagePath = "@earendil-works/pi-coding-agent/";
+		const relativeEntry = entry.startsWith(packagePath) ? entry.slice(packagePath.length) : "";
+		if (!/^[a-zA-Z0-9_./-]+$/.test(relativeEntry) || relativeEntry.includes("..")) {
+			throw new Error("Unsafe engine entry path for the Windows launcher.");
+		}
+		execFileSync(
+			"go",
+			[
+				"build",
+				"-o",
+				join(outDir, "bin", "pi.exe"),
+				"-ldflags",
+				`-X main.engineEntry=${entry}`,
+				join(PACKAGE, "..", "..", "scripts", "windows", "launcher", "main.go"),
+			],
+			{ cwd: PACKAGE },
+		);
+	} else {
+		writeFileSync(join(outDir, "bin", "pi"), piWrapper(entry), { mode: 0o755 });
+	}
 }

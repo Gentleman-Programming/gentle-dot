@@ -34,6 +34,9 @@ test('missing native engine, wrong executable and absent UI fail before packagin
   writeFileSync(join(root,'node/node.exe'),'not an executable');
   assert.throws(()=>seal(root), /Not a Windows executable/);
   writeFileSync(join(root,'node/node.exe'),'MZ-fixture-never-executed');
+  writeFileSync(join(root,'bin/pi.exe'),'not an executable');
+  assert.throws(()=>seal(root), /Not a Windows executable: bin\/pi\.exe/);
+  writeFileSync(join(root,'bin/pi.exe'),'MZ-fixture-never-executed');
   rmSync(join(root,'daemon/node_modules/gentle-pi/.gentle-ai/v4/gentle-ai.exe'));
   assert.throws(()=>seal(root), /exactly one/);
   rmSync(join(root,'ui/index.html'));
