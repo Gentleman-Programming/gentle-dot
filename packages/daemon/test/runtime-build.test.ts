@@ -10,7 +10,7 @@ import {
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import { tempDir } from "./helpers.ts";
@@ -78,14 +78,16 @@ describe("build:runtime", () => {
 
 	it("runs its self-check from the output with the engine resolved inside it", () => {
 		symlinkSync(join(PACKAGE, "node_modules"), join(out, "daemon", "node_modules"));
+		const engramBin = join(tempDir(), "engram.exe");
+		writeFileSync(engramBin, "fixture executable");
 		const check = spawnSync(process.execPath, [join(out, "daemon", "cli.mjs"), "--self-check"], {
 			encoding: "utf8",
 			env: {
-				PATH: "/usr/bin:/bin",
+				PATH: [join(tempDir(), "bin"), join(tempDir(), "system")].join(delimiter),
 				HOME: tempDir(),
 				GENTLE_DOT_DATA_DIR: tempDir(),
 				GENTLE_DOT_RUNTIME: out,
-				ENGRAM_BIN: "/x/engram",
+				ENGRAM_BIN: engramBin,
 			},
 		});
 		expect(check.stderr).toBe("");
@@ -98,7 +100,7 @@ describe("build:runtime", () => {
 			uiDir: join(out, "ui"),
 			gentleShell: join(out, "daemon", "node_modules", "gentle-pi", "bin", "gentle-shell.mjs"),
 			engineCli: join(out, "daemon", "node_modules", ENGINE_CLI),
-			engramBin: "/x/engram",
+			engramBin,
 		});
 		expect(realpathSync(report.approvalGuard)).toBe(join(real, "daemon", "extensions", "approval-guard.ts"));
 		expect(realpathSync(report.identity)).toBe(join(real, "daemon", "identity.md"));

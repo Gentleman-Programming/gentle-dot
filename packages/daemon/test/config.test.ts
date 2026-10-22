@@ -19,7 +19,9 @@ describe("loadConfig", () => {
 		});
 		expect(config.preferredFolder).toBeUndefined();
 		expect(config.agentArgs).toHaveLength(1);
-		expect(config.agentArgs[0]).toMatch(/node_modules\/gentle-pi\/bin\/gentle-shell\.mjs$/);
+		expect(config.agentArgs[0]?.endsWith(join("node_modules", "gentle-pi", "bin", "gentle-shell.mjs"))).toBe(
+			true,
+		);
 		expect(existsSync(config.agentArgs[0] ?? "")).toBe(true);
 	});
 
@@ -30,7 +32,10 @@ describe("loadConfig", () => {
 			agentArgs: [],
 			agentHome: join(dataDir, "agent"),
 		});
-		expect(loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_AGENT_HOME: "/h" }).agentHome).toBe("/h");
+		const customHome = join(dataDir, "custom-agent-home");
+		expect(loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_AGENT_HOME: customHome }).agentHome).toBe(
+			customHome,
+		);
 	});
 
 	it("runs a custom agent script without the Gentle Shell home", () => {
@@ -46,19 +51,21 @@ describe("loadConfig", () => {
 
 	it("reads config.json and lets environment variables win", () => {
 		const dataDir = tempDir();
-		writeFileSync(join(dataDir, "config.json"), JSON.stringify({ port: 5000, workspace: "/projects" }));
+		const projects = join(dataDir, "projects");
+		writeFileSync(join(dataDir, "config.json"), JSON.stringify({ port: 5000, workspace: projects }));
 		expect(loadConfig({ GENTLE_DOT_DATA_DIR: dataDir })).toMatchObject({
 			port: 5000,
-			preferredFolder: "/projects",
+			preferredFolder: projects,
 		});
 		expect(loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_PORT: "6000" }).port).toBe(6000);
 	});
 
 	it("keeps the engine in its own workspace and treats a custom one as the user's preferred folder", () => {
 		const dataDir = tempDir();
-		const config = loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_WORKSPACE: "/work/repo" });
+		const preferredFolder = join(dataDir, "work", "repo");
+		const config = loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_WORKSPACE: preferredFolder });
 		// The workspace holds the memory project setting, so the engine always works there.
-		expect(config).toMatchObject({ workspace: join(dataDir, "workspace"), preferredFolder: "/work/repo" });
+		expect(config).toMatchObject({ workspace: join(dataDir, "workspace"), preferredFolder });
 		const same = loadConfig({
 			GENTLE_DOT_DATA_DIR: dataDir,
 			GENTLE_DOT_WORKSPACE: join(dataDir, "workspace"),
