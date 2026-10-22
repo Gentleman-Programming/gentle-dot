@@ -297,24 +297,21 @@ func verifyACL(handle syscall.Handle, directory bool) error {
 	if directory {
 		expected = "D:P(A;OICI;FA;;;" + userText + ")(A;OICI;FA;;;SY)"
 	}
-	index := strings.Index(sddl, "D:")
-	if index < 0 {
-		return errors.New("private-storage DACL is missing")
+	actual, err := extractDACL(sddl)
+	if err != nil {
+		return err
 	}
-	actual := sddl[index:]
-	if strings.HasPrefix(actual, "D:PAI") {
-		actual = "D:P" + actual[len("D:PAI"):]
-	}
-	if actual != expected {
-		return fmt.Errorf("private-storage DACL contains unexpected principals or permissions: got %q, want %q", actual, expected)
-	}
-	return nil
+	return compareDACLs(actual, expected)
 }
 
 func descriptorString(sd uintptr) (string, error) {
+	return securityDescriptorString(sd, ownerSecurityInformation|daclSecurityInformation)
+}
+
+func securityDescriptorString(sd uintptr, information uint32) (string, error) {
 	var text uintptr
 	var length uint32
-	ok, _, callErr := procConvertSDToSDDL.Call(sd, securityDescriptorRevision, ownerSecurityInformation|daclSecurityInformation, uintptr(unsafe.Pointer(&text)), uintptr(unsafe.Pointer(&length)))
+	ok, _, callErr := procConvertSDToSDDL.Call(sd, securityDescriptorRevision, uintptr(information), uintptr(unsafe.Pointer(&text)), uintptr(unsafe.Pointer(&length)))
 	if ok == 0 {
 		return "", callError(callErr)
 	}
@@ -324,6 +321,56 @@ func descriptorString(sd uintptr) (string, error) {
 		value = append(value, *cursor)
 	}
 	return syscall.UTF16ToString(value), nil
+}
+
+func extractDACL(sddl string) (string, error) {
+	index := strings.Index(sddl, "D:")
+	if index < 0 {
+		return "", errors.New("private-storage DACL is missing")
+	}
+	dacl := sddl[index:]
+	if strings.HasPrefix(dacl, "D:PAI") {
+		dacl = "D:P" + dacl[len("D:PAI"):]
+	}
+	return dacl, nil
+}
+
+func compareDACLs(actual, expected string) error {
+	canonicalActual, err := canonicalDACL(actual)
+	if err != nil {
+		return err
+	}
+	canonicalExpected, err := canonicalDACL(expected)
+	if err != nil {
+		return err
+	}
+	if canonicalActual != canonicalExpected {
+		return fmt.Errorf("private-storage DACL contains unexpected principals or permissions: got %q, want %q", canonicalActual, canonicalExpected)
+	}
+	return nil
+}
+
+func canonicalDACL(value string) (string, error) {
+	dacl, err := extractDACL(value)
+	if err != nil {
+		return "", err
+	}
+	text, err := wide(dacl)
+	if err != nil {
+		return "", err
+	}
+	var sd uintptr
+	var size uint32
+	ok, _, callErr := procConvertSDDL.Call(uintptr(unsafe.Pointer(text)), securityDescriptorRevision, uintptr(unsafe.Pointer(&sd)), uintptr(unsafe.Pointer(&size)))
+	if ok == 0 {
+		return "", callError(callErr)
+	}
+	defer procLocalFree.Call(sd)
+	canonical, err := securityDescriptorString(sd, daclSecurityInformation)
+	if err != nil {
+		return "", err
+	}
+	return extractDACL(canonical)
 }
 
 func secureHandle(handle syscall.Handle, directory bool) error {

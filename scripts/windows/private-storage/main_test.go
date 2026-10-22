@@ -151,3 +151,55 @@ func TestACLRejectionReportsActualAndExpectedDACL(t *testing.T) {
 		t.Fatalf("ACL rejection omitted actual and expected DACLs: %v", err)
 	}
 }
+
+func TestLocalAdministratorAliasMatchesItsNumericSID(t *testing.T) {
+	text, err := syscall.UTF16PtrFromString("O:LA D:P(A;OICI;FA;;;LA)(A;OICI;FA;;;SY)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var descriptor uintptr
+	var size uint32
+	ok, _, callErr := procConvertSDDL.Call(uintptr(unsafe.Pointer(text)), securityDescriptorRevision, uintptr(unsafe.Pointer(&descriptor)), uintptr(unsafe.Pointer(&size)))
+	if ok == 0 {
+		t.Fatal(callError(callErr))
+	}
+	defer procLocalFree.Call(descriptor)
+	var owner uintptr
+	var defaulted int32
+	getOwner := advapi32.NewProc("GetSecurityDescriptorOwner")
+	ok, _, callErr = getOwner.Call(descriptor, uintptr(unsafe.Pointer(&owner)), uintptr(unsafe.Pointer(&defaulted)))
+	if ok == 0 || owner == 0 {
+		t.Fatal(callError(callErr))
+	}
+	adminSID, err := sidString((*syscall.SID)(unsafe.Pointer(owner)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	actualSDDL, err := descriptorString(descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := strings.Index(actualSDDL, "D:")
+	if index < 0 || !strings.Contains(actualSDDL[index:], "LA") {
+		t.Fatalf("Windows did not preserve the local Administrator SDDL alias: %q", actualSDDL)
+	}
+	expected := "D:P(A;OICI;FA;;;" + adminSID + ")(A;OICI;FA;;;SY)"
+	if err := compareDACLs(actualSDDL[index:], expected); err != nil {
+		t.Fatalf("equivalent local Administrator SID was rejected: %v", err)
+	}
+	for _, bad := range []struct {
+		name string
+		dacl string
+	}{
+		{name: "Everyone ACE", dacl: "D:P(A;OICI;FA;;;LA)(A;OICI;FA;;;SY)(A;OICI;FA;;;WD)"},
+		{name: "wrong SID", dacl: "D:P(A;OICI;FA;;;BU)(A;OICI;FA;;;SY)"},
+		{name: "wrong mask", dacl: "D:P(A;OICI;FR;;;LA)(A;OICI;FA;;;SY)"},
+		{name: "wrong inheritance", dacl: "D:P(A;OI;FA;;;LA)(A;OICI;FA;;;SY)"},
+	} {
+		t.Run(bad.name, func(t *testing.T) {
+			if err := compareDACLs(bad.dacl, expected); err == nil {
+				t.Fatalf("accepted invalid DACL %q", bad.dacl)
+			}
+		})
+	}
+}
