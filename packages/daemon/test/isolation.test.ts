@@ -17,6 +17,7 @@ import {
 	PRIVATE_ENGRAM_PORT,
 } from "../src/isolation.ts";
 import { FAKE_AGENT, tempDir } from "./helpers.ts";
+import { inspectWindowsAcl } from "./windows-acl-oracle.ts";
 
 const daemons: DotDaemon[] = [];
 afterEach(async () => {
@@ -145,7 +146,14 @@ describe("isolatedAgentEnv temporary folder", () => {
 		const dataDir = tempDir();
 		const env = isolatedAgentEnv({ HOME: tempDir() }, dataDir);
 		expect(env.TMPDIR).toBe(join(dataDir, "home", ".cache", "tmp"));
-		expect(statSync(env.TMPDIR ?? "").mode & 0o777).toBe(0o700);
+		if (process.platform === "win32") {
+			const acl = inspectWindowsAcl(env.TMPDIR ?? "");
+			expect(acl.owner).toBe(acl.currentSid);
+			expect(acl.protected).toBe(true);
+			expect(acl.rules.map((rule) => rule.sid)).toEqual(expect.arrayContaining([acl.currentSid, "S-1-5-18"]));
+			expect(acl.rules).toHaveLength(2);
+			expect(acl.rules.every((rule) => rule.type === "Allow" && !rule.inherited)).toBe(true);
+		} else expect(statSync(env.TMPDIR ?? "").mode & 0o777).toBe(0o700);
 	});
 
 	it("keeps the user's own TMPDIR", () => {

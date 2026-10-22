@@ -41,7 +41,7 @@ import { type OAuthSettings, type SignIn, SignInCancelledError, startSignIn } fr
 import { directAccess, type EngineAccess } from "./engine-access.ts";
 import { type ConnectorPolicy, draftSecretProblem, POLICY_ENV } from "./extensions/approval-guard.ts";
 import type { ProxiedConnector, UpstreamCredentials } from "./mcp-proxy.ts";
-import { writePrivateFile } from "./private-file.ts";
+import { PrivateFileProtectionError, readPrivateFileSync, writePrivateFile } from "./private-file.ts";
 import { runtimeDir, runtimeModules } from "./runtime.ts";
 import { NO_APP, type SecretSource, SecretsUnavailableError } from "./secret-source.ts";
 
@@ -1059,7 +1059,7 @@ export class ConnectorStore {
 		const noConnectors = Object.keys(this.saved.connectors).length === 0;
 		const changed: string[] = [];
 		const record = this.recordText();
-		const current = readOrUndefined(this.file);
+		const current = readPrivateOrUndefined(this.file);
 		if (current !== record && !(current === undefined && noConnectors)) {
 			writePrivateFile(this.file, record);
 			changed.push(this.file);
@@ -1366,7 +1366,7 @@ export class ConnectorStore {
 		};
 		let text: string;
 		try {
-			text = readFileSync(file, "utf8");
+			text = readPrivateFileSync(file);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 			return unread("could not be read");
@@ -1560,7 +1560,7 @@ export class ConnectorStore {
 	private load(): { state: ConnectorsState; renamed: boolean; version: number } {
 		let saved: { version?: unknown; connectors?: Record<string, Record<string, unknown> | undefined> };
 		try {
-			const text = readFileSync(this.file, "utf8");
+			const text = readPrivateFileSync(this.file);
 			this.loaded = { text };
 			const raw = JSON.parse(text) as unknown;
 			if (typeof raw === "object" && raw !== null && !Array.isArray(raw))
@@ -1571,7 +1571,8 @@ export class ConnectorStore {
 					? secretRef(ref)
 					: value;
 			});
-		} catch {
+		} catch (error) {
+			if (error instanceof PrivateFileProtectionError) throw error;
 			return { state: { connectors: {} }, renamed: false, version: existsSync(this.file) ? 1 : 0 };
 		}
 		const connectors: ConnectorsState["connectors"] = {};
@@ -1678,6 +1679,15 @@ function readOrUndefined(path: string): string | undefined {
 		return readFileSync(path, "utf8");
 	} catch {
 		return undefined;
+	}
+}
+
+function readPrivateOrUndefined(path: string): string | undefined {
+	try {
+		return readPrivateFileSync(path);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
 	}
 }
 

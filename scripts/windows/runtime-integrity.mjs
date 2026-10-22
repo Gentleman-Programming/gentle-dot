@@ -3,7 +3,7 @@ import { lstatSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-export const REQUIRED = ['node/node.exe', 'bin/engram.exe', 'bin/pi.exe', 'daemon/cli.mjs',
+export const REQUIRED = ['node/node.exe', 'bin/engram.exe', 'bin/pi.exe', 'bin/private-storage.exe', 'daemon/cli.mjs',
   'daemon/node_modules/gentle-pi/bin/gentle-shell.mjs', 'ui/index.html'];
 const MANIFEST = 'WINDOWS-INTEGRITY.json';
 export function inventory(root, relative = '', result = {}) {
@@ -23,7 +23,7 @@ export function seal(root) {
   for (const path of REQUIRED) if (!files[path]) throw new Error(`Missing runtime file: ${path}`);
   const native = Object.keys(files).filter(p => p.startsWith('daemon/node_modules/gentle-pi/.gentle-ai/') && p.endsWith('/gentle-ai.exe'));
   if (native.length !== 1) throw new Error('Expected exactly one packaged Gentle AI executable');
-  for (const path of ['node/node.exe', 'bin/engram.exe', 'bin/pi.exe', ...native]) {
+  for (const path of ['node/node.exe', 'bin/engram.exe', 'bin/pi.exe', 'bin/private-storage.exe', ...native]) {
     if (readFileSync(join(root,path)).subarray(0,2).toString() !== 'MZ') throw new Error(`Not a Windows executable: ${path}`);
   }
   const data = {schema:1, platform:'win32-x64', files};

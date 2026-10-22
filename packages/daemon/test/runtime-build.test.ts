@@ -40,7 +40,7 @@ function listFiles(dir: string, prefix = ""): string[] {
 describe("build:runtime", () => {
 	it("emits the daemon part of the runtime layout, without node_modules", () => {
 		expect(listFiles(out).sort()).toEqual([
-			process.platform === "win32" ? "bin/pi.exe" : "bin/pi",
+			...(process.platform === "win32" ? ["bin/pi.exe", "bin/private-storage.exe"] : ["bin/pi"]),
 			"daemon/cli.mjs",
 			"daemon/extensions/approval-guard.ts",
 			"daemon/extensions/screenshot-context.ts",

@@ -7,6 +7,8 @@ import { bundledGentleShell } from "./config.ts";
 import { directAccess, type EngineAccess } from "./engine-access.ts";
 import { resolveEngramBin, runtimeDir } from "./runtime.ts";
 import { windowsUserHome } from "./windows-runtime.ts";
+import { windowsPrivateStorage } from "./windows-private-storage.ts";
+import { writePrivateFile } from "./private-file.ts";
 
 /**
  * The folder with the `pi` executable bundled with the daemon. The engine's
@@ -24,8 +26,12 @@ function bundledBinDir(base: NodeJS.ProcessEnv): string | undefined {
 	return undefined;
 }
 
-/** Creates `path` with mode 0700, and tightens it to 0700 when it already exists. */
+/** Creates or tightens `path`; Windows uses a verified protected current-user/SYSTEM DACL. */
 export function ensurePrivateDir(path: string): void {
+	if (process.platform === "win32") {
+		windowsPrivateStorage("ensure-dir", path);
+		return;
+	}
 	mkdirSync(path, { recursive: true, mode: 0o700 });
 	chmodSync(path, 0o700);
 }
@@ -107,7 +113,11 @@ export function ensureMemoryProject(workspace: string, access: EngineAccess = di
 	const file = join(workspace, ".engram", "config.json");
 	access(() => {
 		ensurePrivateDir(join(workspace, ".engram"));
-		// Written next to it and renamed over it: a link planted at its place is replaced, never followed.
+		if (process.platform === "win32") {
+			writePrivateFile(file, `${JSON.stringify({ project_name: MEMORY_PROJECT })}\n`);
+			return;
+		}
+		// Written next to it and renamed over it; Windows' native helper refuses reparse-point collisions.
 		const temp = `${file}.${process.pid}.tmp`;
 		writeFileSync(temp, `${JSON.stringify({ project_name: MEMORY_PROJECT })}\n`);
 		renameSync(temp, file);

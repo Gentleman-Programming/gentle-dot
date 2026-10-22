@@ -10,8 +10,7 @@
  * File: `{"version":1,"records":{"<id>":{"nonce":"<base64>","data":"<base64>","tag":"<base64>"}}}`.
  */
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { writePrivateFile } from "./private-file.ts";
+import { PrivateFileProtectionError, readPrivateFileSync, writePrivateFile } from "./private-file.ts";
 import { type SecretSource, SecretsUnavailableError } from "./secret-source.ts";
 
 /** The daemon's environment variable with the key. */
@@ -100,9 +99,10 @@ export class FileSecretSource implements SecretSource {
 		if (id !== undefined && !ID.test(id)) throw new Error("That secret id is not valid.");
 		let text: string;
 		try {
-			text = readFileSync(this.options.file, "utf8");
+			text = readPrivateFileSync(this.options.file);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+			if (error instanceof PrivateFileProtectionError) throw new SecretsUnavailableError(error.message);
 			throw new SecretsUnavailableError(DAMAGED);
 		}
 		try {

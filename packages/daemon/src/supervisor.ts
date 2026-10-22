@@ -1,8 +1,8 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { encodeRecord, JsonlDecoder } from "./jsonl.ts";
-import { writePrivateFile } from "./private-file.ts";
+import { PrivateFileProtectionError, readPrivateFileSync, writePrivateFile } from "./private-file.ts";
 import type { OsUser } from "./vps.ts";
 
 /** A record the agent wrote to stdout that is not a command response. */
@@ -341,7 +341,7 @@ export class AgentSupervisor {
 
 	private readPersistedSession(): string | undefined {
 		try {
-			const saved = JSON.parse(readFileSync(this.stateFile, "utf8")) as {
+			const saved = JSON.parse(readPrivateFileSync(this.stateFile)) as {
 				sessionFile?: string;
 				chains?: unknown;
 			};
@@ -352,7 +352,8 @@ export class AgentSupervisor {
 				}
 			}
 			return typeof saved.sessionFile === "string" ? saved.sessionFile : undefined;
-		} catch {
+		} catch (error) {
+			if (error instanceof PrivateFileProtectionError) throw error;
 			return undefined;
 		}
 	}

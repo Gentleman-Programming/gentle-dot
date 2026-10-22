@@ -14,6 +14,7 @@ export default defineConfig({
 					],
 					environment: "node",
 					testTimeout: 20_000,
+					globalSetup: ["packages/daemon/test/windows-private-storage-global-setup.ts"],
 				},
 			},
 			"packages/ui",

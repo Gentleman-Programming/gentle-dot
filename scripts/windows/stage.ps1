@@ -43,7 +43,7 @@ try {
     Push-Location (Join-Path $out 'daemon')
     try { Run $node @($npm,'install','--omit=dev','--no-bin-links','--no-audit','--no-fund','--foreground-scripts') }
     finally { Pop-Location }
-    # build:runtime creates the relocatable native launcher; never route argv through CMD.
+    # build:runtime creates the relocatable launcher and scoped private-storage helper.
     $engramVersion = '3.4.0'
     $engramArchive = DownloadVerified "https://github.com/Gentleman-Programming/engram/releases/download/v$engramVersion" "engram_${engramVersion}_windows_amd64.zip" 'checksums.txt'
     $unpack = Join-Path $out '_engram'

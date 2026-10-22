@@ -17,6 +17,7 @@
 		"lint": "biome check .",
 		"format": "biome format --write .",
 		"test:real": "GENTLE_DOT_REAL_AGENT=1 vitest run packages/daemon/test/real-agent.test.ts",
+		"prepare:windows-private-storage": "node scripts/windows/private-storage/prepare.ts",
 		"package:mac": "node scripts/package/package-mac.mjs",
 		"package:linux": "node scripts/package/package-linux.mjs",
 		"package:linux:check": "node scripts/package/linux-check.mjs",

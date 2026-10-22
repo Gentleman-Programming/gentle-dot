@@ -34,7 +34,7 @@ import {
 	privateMemory,
 } from "./isolation.ts";
 import { MCP_PREFIX, McpProxy, type ProxiedConnector, type UpstreamCredentials } from "./mcp-proxy.ts";
-import { writePrivateFile } from "./private-file.ts";
+import { readPrivateFileSync, writePrivateFile } from "./private-file.ts";
 import { defaultImportPath, ProfileStore } from "./profiles.ts";
 import { type RotationLimits, rotationLimits } from "./rotation.ts";
 import { FileSecretSource, SECRETS_FILE, SECRETS_KEY_VAR } from "./secret-file.ts";
@@ -127,14 +127,15 @@ const CONTENT_TYPES: Record<string, string> = {
 
 /**
  * Reads the access token from `<dataDir>/token`, creating a random one when
- * absent. The data folder is kept at 0700 (0711 in server mode, so the engine reaches its own folders by name) and the token at 0600.
+ * absent. POSIX permissions remain 0700 (0711 in server mode) and 0600; Windows uses a protected
+ * current-user/SYSTEM DACL for the data directory and token file.
  */
 export function ensureToken(dataDir: string): string {
 	ensurePrivateDir(dataDir);
 	const file = join(dataDir, "token");
 	if (existsSync(file)) {
-		chmodSync(file, 0o600);
-		const existing = readFileSync(file, "utf8").trim();
+		if (process.platform !== "win32") chmodSync(file, 0o600);
+		const existing = readPrivateFileSync(file).trim();
 		if (existing.length >= 32) return existing;
 	}
 	const token = randomBytes(32).toString("base64url");
@@ -163,7 +164,8 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	// create (S35.3). Only the assistant's default home; a home the user chose is never marked.
 	if (options.agentHome && resolve(options.agentHome) === resolve(options.dataDir, "agent"))
 		claimEngineHome(options.agentHome, log, access);
-	access(() => mkdirSync(options.workspace, { recursive: true, mode: 0o700 }));
+	if (process.platform === "win32") ensurePrivateDir(options.workspace);
+	else access(() => mkdirSync(options.workspace, { recursive: true, mode: 0o700 }));
 	ensureMemoryProject(options.workspace, access);
 	const folderArgs = options.preferredFolder
 		? [

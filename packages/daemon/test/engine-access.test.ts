@@ -8,14 +8,17 @@ import {
 	readFileSync,
 	statSync,
 	symlinkSync,
+	unlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { engineAccess, insideEngineAccess } from "../src/engine-access.ts";
+import { ensurePrivateDir } from "../src/isolation.ts";
 import { writePrivateFile } from "../src/private-file.ts";
 import { tempDir } from "./helpers.ts";
+import { inspectWindowsAcl } from "./windows-acl-oracle.ts";
 
 // Bracket semantics use an explicit POSIX identity fixture, not a fabricated Windows root.
 const own = { uid: process.getuid?.() ?? 1001, gid: process.getgid?.() ?? 1001 };
@@ -70,14 +73,29 @@ describe("engine access", () => {
 describe("the daemon's own files", () => {
 	it("are written whole, private, and replace a link at their place without following it", () => {
 		const dir = tempDir();
+		if (process.platform === "win32") ensurePrivateDir(dir);
 		const target = join(dir, "target");
 		writeFileSync(target, "keep");
-		symlinkSync(target, join(dir, "state.json"));
-		writePrivateFile(join(dir, "state.json"), "new\n");
+		const file = join(dir, "state.json");
+		symlinkSync(target, file);
+		if (process.platform === "win32") {
+			expect(() => writePrivateFile(file, "new\n")).toThrow(/reparse points/);
+			expect(readFileSync(target, "utf8")).toBe("keep");
+			expect(lstatSync(file).isSymbolicLink()).toBe(true);
+			unlinkSync(file);
+		} else writePrivateFile(file, "new\n");
+		writePrivateFile(file, "new\n");
 		expect(readFileSync(target, "utf8")).toBe("keep");
-		expect(lstatSync(join(dir, "state.json")).isFile()).toBe(true);
-		expect(readFileSync(join(dir, "state.json"), "utf8")).toBe("new\n");
-		expect(statSync(join(dir, "state.json")).mode & 0o777).toBe(0o600);
+		expect(lstatSync(file).isFile()).toBe(true);
+		expect(readFileSync(file, "utf8")).toBe("new\n");
+		if (process.platform === "win32") {
+			const acl = inspectWindowsAcl(file);
+			expect(acl.owner).toBe(acl.currentSid);
+			expect(acl.protected).toBe(true);
+			expect(acl.rules.map((rule) => rule.sid)).toEqual(expect.arrayContaining([acl.currentSid, "S-1-5-18"]));
+			expect(acl.rules).toHaveLength(2);
+			expect(acl.rules.every((rule) => rule.type === "Allow" && !rule.inherited)).toBe(true);
+		} else expect(statSync(file).mode & 0o777).toBe(0o600);
 		expect(readdirSync(dir).sort()).toEqual(["state.json", "target"]);
 	});
 

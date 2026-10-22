@@ -6,7 +6,7 @@ import { resolveWindowsEngram } from "./windows-runtime.ts";
 
 /**
  * The installed app's runtime folder (`GENTLE_DOT_RUNTIME`), or undefined in a
- * source checkout. It holds `node/`, `bin/` (`engram`, `pi`),
+ * source checkout. It holds `node/`, `bin/` (`engram`, `pi`, and Windows private storage),
  * `daemon/` (this bundle and its `node_modules/`) and `ui/`.
  */
 export function runtimeDir(env: NodeJS.ProcessEnv = process.env): string | undefined {

@@ -1,13 +1,38 @@
 import { execFileSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
+const REPOSITORY = fileURLToPath(new URL("../../../", import.meta.url));
 const LOCKFILE = join(PACKAGE, "..", "..", "pnpm-lock.yaml");
 const IMPORTER = "packages/daemon";
+const PRIVATE_STORAGE_SOURCE = join(REPOSITORY, "scripts", "windows", "private-storage", "main.go");
+
+/** The explicit local-source helper output; installed runtimes never consult it. */
+export const SOURCE_PRIVATE_STORAGE_HELPER = join(
+	REPOSITORY,
+	"build",
+	"windows",
+	"local-tools",
+	"bin",
+	"private-storage.exe",
+);
+
+/** Compile the standalone helper at the same runtime/bin layout used by packaging. */
+export function buildWindowsPrivateStorageHelper(outputPath: string): void {
+	mkdirSync(dirname(outputPath), { recursive: true });
+	execFileSync("go", ["build", "-o", outputPath, PRIVATE_STORAGE_SOURCE], { cwd: REPOSITORY });
+}
+
+/** Explicit developer/test preparation; never called automatically by app startup. */
+export function prepareWindowsPrivateStorageForSource(): void {
+	if (process.platform !== "win32")
+		throw new Error("Windows private-storage preparation is available only on Windows.");
+	buildWindowsPrivateStorageHelper(SOURCE_PRIVATE_STORAGE_HELPER);
+}
 
 /**
  * The exact versions pnpm installed for the daemon's own dependencies, read from
@@ -69,7 +94,7 @@ function engineEntry(): string {
  * Builds the daemon part of the installed runtime into `outDir`: `daemon/cli.mjs`
  * (the daemon and the protocol bundled; the engine and `ws` external), the files it
  * finds next to itself, a `package.json` for a flat install of the external
- * dependencies, and a platform-native launcher (`bin/pi` or `bin/pi.exe`). Nothing is installed.
+ * dependencies, and platform-native executables. Nothing is installed.
  */
 export async function buildRuntime(outDir: string): Promise<void> {
 	const daemon = join(outDir, "daemon");
@@ -114,6 +139,7 @@ export async function buildRuntime(outDir: string): Promise<void> {
 			],
 			{ cwd: PACKAGE },
 		);
+		buildWindowsPrivateStorageHelper(join(outDir, "bin", "private-storage.exe"));
 	} else {
 		writeFileSync(join(outDir, "bin", "pi"), piWrapper(entry), { mode: 0o755 });
 	}
