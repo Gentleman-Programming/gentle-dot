@@ -14,7 +14,11 @@ name: POSIX
 
 on:
   push:
-    branches: [main]
+    # `main` is the branch this workflow guards. `ci/linux-macos` is listed while the workflow is
+    # being measured on the runners: `workflow_dispatch` cannot start a file that is not on the
+    # default branch yet, and a fork PR's first run waits for a maintainer's approval, so its own
+    # pushes are the only channel available to it. The line goes away before the PR leaves draft.
+    branches: [main, ci/linux-macos]
   pull_request:
   workflow_dispatch:
 
