@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -76,5 +77,36 @@ func TestOwnerMismatchDiagnosticIncludesBothPrincipals(t *testing.T) {
 	want := "private-storage object owner SID " + ownerSID + " does not match current Windows user SID " + userSID
 	if err.Error() != want {
 		t.Fatalf("owner mismatch diagnostic = %q, want %q", err, want)
+	}
+}
+
+func TestPrivateDescriptorsSetCurrentUserAsOwner(t *testing.T) {
+	user, err := currentSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	userText, err := sidString(user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, directory := range []bool{true, false} {
+		name := "file"
+		if directory {
+			name = "directory"
+		}
+		t.Run(name, func(t *testing.T) {
+			sd, err := descriptor(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer procLocalFree.Call(sd)
+			sddl, err := descriptorString(sd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasPrefix(sddl, "O:"+userText+"D:") {
+				t.Fatalf("private %s descriptor owner is not the current user: %s", name, sddl)
+			}
+		})
 	}
 }

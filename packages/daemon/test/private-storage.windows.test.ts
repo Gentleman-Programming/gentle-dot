@@ -1,13 +1,12 @@
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
 	existsSync,
 	linkSync,
 	mkdirSync,
-	mkdtempSync,
 	readFileSync,
 	rmSync,
 	symlinkSync,
-	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -25,6 +24,13 @@ import { windowsPrivateStorageExecutable } from "../src/windows-private-storage.
 import { inspectWindowsAcl } from "./windows-acl-oracle.ts";
 
 const fixtures: string[] = [];
+
+function privateScratch(prefix: string): string {
+	const root = join(tmpdir(), `${prefix}${randomUUID()}`);
+	ensurePrivateDir(root);
+	fixtures.push(root);
+	return root;
+}
 
 afterEach(() => {
 	for (const root of fixtures.splice(0)) {
@@ -80,8 +86,7 @@ $file.SetAccessControl($acl)`,
 
 describe.skipIf(process.platform !== "win32")("Windows private storage DACL", () => {
 	it("does not retain broad inherited access on a private directory", () => {
-		const root = mkdtempSync(join(tmpdir(), "gentle-dot-acl-")).replace(/[\\/]$/, "");
-		fixtures.push(root);
+		const root = privateScratch("gentle-dot-acl-");
 		const target = join(root, "private");
 		powershell(
 			`$ErrorActionPreference = 'Stop'
@@ -119,10 +124,9 @@ $directory.SetAccessControl($acl)`,
 	});
 
 	it("tightens an existing owned directory without changing its parent", () => {
-		const parent = mkdtempSync(join(tmpdir(), "gentle-dot-existing-parent-"));
-		fixtures.push(parent);
+		const parent = privateScratch("gentle-dot-existing-parent-");
 		const existing = join(parent, "existing");
-		mkdirSync(existing);
+		ensurePrivateDir(existing);
 		const parentDacl = directorySddl(parent, parent);
 		powershell(
 			`$ErrorActionPreference = 'Stop'
@@ -147,12 +151,10 @@ $directory.SetAccessControl($acl)`,
 	});
 
 	it("secures a legacy private file before reading it and preserves its contents", async () => {
-		const root = mkdtempSync(join(tmpdir(), "gentle-dot-legacy-file-"));
-		fixtures.push(root);
-		ensurePrivateDir(root);
+		const root = privateScratch("gentle-dot-legacy-file-");
 		const file = join(root, "secrets.enc.json");
 		const contents = JSON.stringify({ version: 1, records: {} });
-		writeFileSync(file, contents);
+		writePrivateFile(file, contents);
 		addExplicitEveryoneAccess(root, file);
 		const parentDacl = inspectWindowsAcl(root);
 		const before = inspectWindowsAcl(file);
@@ -170,19 +172,15 @@ $directory.SetAccessControl($acl)`,
 	});
 
 	it("preserves the missing encrypted-secret file contract", async () => {
-		const root = mkdtempSync(join(tmpdir(), "gentle-dot-missing-secret-"));
-		fixtures.push(root);
-		ensurePrivateDir(root);
+		const root = privateScratch("gentle-dot-missing-secret-");
 		const source = new FileSecretSource({ file: join(root, "secrets.enc.json"), key: Buffer.alloc(32, 4) });
 		await expect(source.list()).resolves.toEqual([]);
 	});
 
 	it("repairs legacy connector, PIN, and supervisor files at their read boundaries", () => {
-		const root = mkdtempSync(join(tmpdir(), "gentle-dot-private-readers-"));
-		fixtures.push(root);
-		ensurePrivateDir(root);
+		const root = privateScratch("gentle-dot-private-readers-");
 		const assertRepairedRead = (file: string, contents: string, read: () => unknown, expected: unknown) => {
-			writeFileSync(file, contents);
+			writePrivateFile(file, contents);
 			addExplicitEveryoneAccess(root, file);
 			const parentDacl = inspectWindowsAcl(dirname(file));
 			expect(read()).toEqual(expected);
@@ -225,15 +223,13 @@ $directory.SetAccessControl($acl)`,
 	});
 
 	it("refuses to change a hard-linked private file or its external alias", () => {
-		const root = mkdtempSync(join(tmpdir(), "gentle-dot-hardlink-"));
-		fixtures.push(root);
-		ensurePrivateDir(root);
+		const root = privateScratch("gentle-dot-hardlink-");
 		const privateDir = join(root, "private");
 		ensurePrivateDir(privateDir);
 		const alias = join(root, "legacy-secret.json");
 		const target = join(privateDir, "legacy-secret.json");
 		const contents = "legacy value must remain unchanged\n";
-		writeFileSync(alias, contents);
+		writePrivateFile(alias, contents);
 		addExplicitEveryoneAccess(root, alias);
 		linkSync(alias, target);
 		const before = inspectWindowsAcl(alias);
@@ -248,8 +244,7 @@ $directory.SetAccessControl($acl)`,
 	});
 
 	it("refuses reparse-point targets and does not mutate their destination", () => {
-		const root = mkdtempSync(join(tmpdir(), "gentle-dot-reparse-"));
-		fixtures.push(root);
+		const root = privateScratch("gentle-dot-reparse-");
 		const outside = join(root, "outside");
 		const link = join(root, "linked");
 		mkdirSync(outside);
@@ -261,8 +256,7 @@ $directory.SetAccessControl($acl)`,
 	});
 
 	it("uses the source helper from this checkout without changing runtime identity", () => {
-		const root = mkdtempSync(join(tmpdir(), "gentle-dot-source-mode-"));
-		fixtures.push(root);
+		const root = privateScratch("gentle-dot-source-mode-");
 		const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 		const stagingRoot = join(repositoryRoot, "build", "windows", "runtime");
 		const relativeToStaging = relative(stagingRoot, SOURCE_PRIVATE_STORAGE_HELPER);

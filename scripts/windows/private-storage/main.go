@@ -123,9 +123,9 @@ func descriptor(directory bool) (uintptr, error) {
 	if err != nil {
 		return 0, err
 	}
-	sddl := "D:P(A;;FA;;;" + userText + ")(A;;FA;;;SY)"
+	sddl := "O:" + userText + "D:P(A;;FA;;;" + userText + ")(A;;FA;;;SY)"
 	if directory {
-		sddl = "D:P(A;OICI;FA;;;" + userText + ")(A;OICI;FA;;;SY)"
+		sddl = "O:" + userText + "D:P(A;OICI;FA;;;" + userText + ")(A;OICI;FA;;;SY)"
 	}
 	text, err := wide(sddl)
 	if err != nil {
