@@ -7,7 +7,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import {
@@ -25,11 +25,14 @@ afterEach(async () => {
 
 describe("isolatedAgentEnv PATH", () => {
 	it("puts the bundled `pi` first so the engine's first-run setup works on a clean machine", () => {
-		const env = isolatedAgentEnv({ PATH: "/usr/bin:/bin", HOME: tempDir() }, tempDir());
-		const [first, ...rest] = (env.PATH ?? "").split(":");
-		expect(first).toMatch(/node_modules\/\.bin$/);
+		const env = isolatedAgentEnv(
+			{ PATH: ["first-bin", "second-bin"].join(delimiter), HOME: tempDir() },
+			tempDir(),
+		);
+		const [first, ...rest] = (env.PATH ?? "").split(delimiter);
+		expect(first).toMatch(/node_modules[\\/]\.bin$/);
 		expect(existsSync(join(first ?? "", "pi"))).toBe(true);
-		expect(rest).toEqual(["/usr/bin", "/bin"]);
+		expect(rest).toEqual(["first-bin", "second-bin"]);
 	});
 
 	it("does not add the bundled folder twice", () => {
@@ -42,7 +45,7 @@ describe("isolatedAgentEnv PATH", () => {
 describe("isolatedAgentEnv memory", () => {
 	it("points the engine's memory at the user's global Engram data and server", () => {
 		const realHome = tempDir();
-		const env = isolatedAgentEnv({ PATH: "/bin", HOME: realHome }, tempDir());
+		const env = isolatedAgentEnv({ PATH: "", HOME: realHome, USERPROFILE: realHome }, tempDir());
 		expect(env.ENGRAM_DATA_DIR).toBe(join(realHome, ".engram"));
 		// The default server (7437) unless the user configured another one.
 		expect(env.ENGRAM_PORT).toBeUndefined();
@@ -189,6 +192,7 @@ describe("engine memory and folders", () => {
 			agentEnv: {
 				PATH: process.env.PATH,
 				HOME: realHome,
+				USERPROFILE: realHome,
 				...options.env,
 				FAKE_AGENT_ENV_FILE: files.env,
 				FAKE_AGENT_ARGS_FILE: files.args,

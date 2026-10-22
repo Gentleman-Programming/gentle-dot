@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { resolveWindowsEngram } from "./windows-runtime.ts";
 
 /**
  * The installed app's runtime folder (`GENTLE_DOT_RUNTIME`), or undefined in a
@@ -62,6 +63,7 @@ export function resolveEngramBin(
 	runtime: string,
 	options: { home?: string; knownDirs?: string[] } = {},
 ): string {
+	if (process.platform === "win32") return resolveWindowsEngram(env, runtime, { home: options.home });
 	if (env.ENGRAM_BIN) return env.ENGRAM_BIN;
 	const home = options.home ?? (env.HOME || homedir());
 	const fromLogin = loginShellEngram(env, home);
