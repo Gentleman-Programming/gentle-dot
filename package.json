@@ -19,7 +19,9 @@
 		"test:real": "GENTLE_DOT_REAL_AGENT=1 vitest run packages/daemon/test/real-agent.test.ts",
 		"package:mac": "node scripts/package/package-mac.mjs",
 		"package:linux": "node scripts/package/package-linux.mjs",
-		"package:linux:check": "node scripts/package/linux-check.mjs"
+		"package:linux:check": "node scripts/package/linux-check.mjs",
+		"package:windows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/package.ps1",
+		"test:windows-contracts": "node --test scripts/windows/test/*.test.mjs"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.15",
