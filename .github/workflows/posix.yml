@@ -1,0 +1,107 @@
+# The macOS and Linux verification channel.
+#
+# Both are platforms this shell is developed on, and they are the only places where its
+# `cfg(unix)` and `cfg(target_os = "…")` arms are compiled at all: an arm the host does not
+# match is not type-checked on that host, so a change to the macOS or Linux half of a shared
+# module can be wrong in a way no other platform can see. The Windows channel is
+# `.github/workflows/windows.yml`, which lives on the Windows port branch until that port
+# merges (odd/tasks/windows-port.md, W3); this one guards the platforms `main` was written for.
+#
+# Nothing here is platform-specific on purpose: the same commands the README names
+# (`pnpm typecheck && pnpm lint && pnpm test`, and `cargo test` in `apps/desktop/src-tauri`) are
+# run on both runners, so a suite that only passes on a developer's machine is a failure here.
+name: POSIX
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A superseded push does not need to finish: the newer commit is what matters.
+concurrency:
+  group: posix-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # `always` keeps cargo's diagnostics colored, so a failure is readable in the log.
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The daemon, the protocol, and the UI. `pnpm install` needs no Go here: the gentle-pi
+  # postinstall builds its binary from source on Windows only, and on Darwin and Linux it
+  # downloads a pinned release archive (the Windows job says so where it installs Go).
+  typescript:
+    name: TypeScript (${{ matrix.os }})
+    strategy:
+      # One platform's failure must not hide the other's: a POSIX suite that fails on macOS and
+      # passes on Linux is the interesting case, not a reason to stop early.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # No `version` input: package.json declares `packageManager: pnpm@11.5.0`.
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Test
+        run: pnpm test
+
+  # The shell itself. `cargo test` is the same command the Windows job runs, so a failure means
+  # the same thing on all three platforms rather than three different things.
+  #
+  # Like the Windows job, it installs no node and no PATH of its own: `build.rs` records the node
+  # and PATH it finds at build time, and `cargo test` never consults them.
+  rust:
+    name: Rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Tauri v2's Linux prerequisites, and `libdbus-1-dev` for the `dbus` dev-dependency the
+      # secret-service tests link against. macOS needs none of this: the runner image already
+      # carries the SDK the `objc2` crates compile against.
+      - name: Tauri's Linux prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libdbus-1-dev \
+            pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      # The first run downloads `sherpa-onnx`'s prebuilt static libraries from its GitHub
+      # release, which its build script does unless `SHERPA_ONNX_LIB_DIR` points at a local copy;
+      # the cache above carries the compiled artifacts from the second run on.
+      - name: cargo test
+        working-directory: apps/desktop/src-tauri
+        run: cargo test
