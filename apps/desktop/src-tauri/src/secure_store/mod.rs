@@ -13,17 +13,19 @@
 //! Secrets are never logged: [`Secret`] and every store redact themselves in `Debug`, have no
 //! `Display`, and errors never carry a secret.
 
-mod memory;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+mod memory;
+#[cfg(windows)]
+mod windows;
 
-pub use memory::MemoryStore;
 #[cfg(target_os = "linux")]
 pub use linux::SecretServiceStore;
 #[cfg(target_os = "macos")]
 pub use macos::Keychain;
+pub use memory::MemoryStore;
 
 /// The keychain service (macOS) or `service` attribute (Linux) of every connector secret.
 pub const SERVICE: &str = "dev.gentleman.gentle-dot.connectors";
@@ -114,7 +116,9 @@ pub fn connector_store() -> Box<dyn SecretStore> {
     return Box::new(Keychain::new());
     #[cfg(target_os = "linux")]
     return Box::new(SecretServiceStore::new());
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    return Box::new(windows::CredentialStore);
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     return Box::new(MemoryStore::new());
 }
 
