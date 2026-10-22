@@ -1,0 +1,14 @@
+[package]
+name = "engram-guard"
+version = "0.1.0"
+description = "Gentle Dot's Engram guard: refuses to run Engram instead of opening a store"
+edition = "2021"
+publish = false
+
+# Standalone on purpose: the Tauri crate's dependency tree is about three hundred crates, and this
+# program is a notice and an exit code. Staging builds it on every platform.
+[workspace]
+
+[[bin]]
+name = "engram-guard"
+path = "src/main.rs"

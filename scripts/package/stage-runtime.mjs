@@ -307,6 +307,29 @@ async function stageEngram(out, target, requested) {
 	return { version, source };
 }
 
+/**
+ * Gentle Dot's own Engram guard.
+ *
+ * The providers reach local Engram data only by running `ENGRAM_BIN`, and the guard they get today
+ * is a `#!/bin/sh` script from Gentle Shell, which Windows cannot start: the notice said the binary
+ * "could not be found" for a file that was right there. This program is the same contract as an
+ * executable — one notice, exit 78, no store touched — so the refusal works on every platform.
+ *
+ * Built here, from its own dependency-free crate, because staging runs before the app is compiled
+ * and the Tauri crate's tree would add minutes to a step that takes seconds.
+ */
+function stageEngramGuard(out, target) {
+	const crate = join(REPO, "apps", "engram-guard");
+	const windows = TARGETS[target].platform === "win32";
+	const name = windows ? "engram-guard.exe" : "engram-guard";
+	run("cargo", ["build", "--release", "--manifest-path", join(crate, "Cargo.toml")]);
+	const built = join(crate, "target", "release", name);
+	if (!lstatSync(built).isFile()) throw new Error(`the guard build left no regular ${name} at ${built}.`);
+	copyFileSync(built, join(out, "bin", name));
+	if (!windows) chmodSync(join(out, "bin", name), 0o755);
+	return name;
+}
+
 function daemonCommit() {
 	const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO, encoding: "utf8" }).trim();
 	const dirty = execFileSync("git", ["status", "--porcelain", "--", "packages"], {
@@ -333,6 +356,9 @@ async function main() {
 	run("pnpm", ["--filter", "@gentle-dot/daemon", "build:runtime", "--", "--out", out], { cwd: REPO });
 	const modules = installDaemonModules(out, target);
 	const engram = await stageEngram(out, target, options.engramVersion);
+	say("Engram guard");
+	const guard = stageEngramGuard(out, target);
+	say(`Staged ${guard}`);
 	say("Web UI");
 	run("pnpm", ["--filter", "@gentle-dot/ui", "build"], { cwd: REPO });
 	cpSync(join(REPO, "packages", "ui", "dist", "app"), join(out, "ui"), { recursive: true });

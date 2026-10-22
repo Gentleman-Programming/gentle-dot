@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.ts";
 import { bundledMcpCli } from "../src/connectors.ts";
 import { isolatedAgentEnv } from "../src/isolation.ts";
-import { engramBinaryName, resolveEngramBin, runtimeDir } from "../src/runtime.ts";
+import { engramBinaryName, refusalGuard, resolveEngramBin, runtimeDir } from "../src/runtime.ts";
 import { tempDir } from "./helpers.ts";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
@@ -183,6 +183,51 @@ describe("resolveEngramBin", () => {
 		const home = tempDir();
 		const userEngram = touch(join(home, "go", "bin", hostBinary), "", 0o755);
 		expect(resolveEngramBin({ SHELL: fakeShell(undefined) }, fakeRuntime(), { home })).toBe(userEngram);
+	});
+});
+
+describe("refusalGuard", () => {
+	// The POSIX guard ships as a `#!/bin/sh` script. On Windows that file exists and still cannot
+	// be started, so the provider used to fail with "could not be found" instead of reporting that
+	// memory was off. The runtime's own guard takes its place, and the refusal becomes a refusal.
+	it("replaces an ENGRAM_BIN that exists but this platform cannot start", () => {
+		const runtime = fakeRuntime();
+		const inherited = touch(join(tempDir(), "engram-guard"), "#!/bin/sh\nexit 78\n", 0o755);
+		const guard = touch(join(runtime, "bin", "engram-guard.exe"), "");
+		expect(refusalGuard({ ENGRAM_BIN: inherited }, runtime, { platform: "win32" })).toBe(guard);
+	});
+
+	it("keeps an ENGRAM_BIN this platform can start, and adds nothing without one", () => {
+		const runtime = fakeRuntime();
+		const exe = touch(join(tempDir(), "engram.exe"), "");
+		touch(join(runtime, "bin", "engram-guard.exe"), "");
+		expect(refusalGuard({ ENGRAM_BIN: exe }, runtime, { platform: "win32" })).toBeUndefined();
+		expect(refusalGuard({}, runtime, { platform: "win32" })).toBeUndefined();
+	});
+
+	// A path that is not there is a different problem, and the provider's own message names it
+	// better than a refusal would: substituting here would hide a typo behind "memory disabled".
+	it("leaves an ENGRAM_BIN that does not exist for the provider to report", () => {
+		const runtime = fakeRuntime();
+		touch(join(runtime, "bin", "engram-guard.exe"), "");
+		expect(
+			refusalGuard({ ENGRAM_BIN: join(tempDir(), "missing", "engram.exe") }, runtime, { platform: "win32" }),
+		).toBeUndefined();
+	});
+
+	// POSIX starts a shebang script, so there is nothing to replace: this is the contract that must
+	// not change for macOS and Linux.
+	it("leaves an executable script alone on POSIX", () => {
+		const runtime = fakeRuntime();
+		const inherited = touch(join(tempDir(), "engram"), "#!/bin/sh\nexit 78\n", 0o755);
+		touch(join(runtime, "bin", "engram-guard"), "");
+		expect(refusalGuard({ ENGRAM_BIN: inherited }, runtime, { platform: "linux" })).toBeUndefined();
+	});
+
+	it("adds nothing when the runtime ships no guard (a source checkout)", () => {
+		const runtime = fakeRuntime();
+		const inherited = touch(join(tempDir(), "engram-guard"), "#!/bin/sh\nexit 78\n", 0o755);
+		expect(refusalGuard({ ENGRAM_BIN: inherited }, runtime, { platform: "win32" })).toBeUndefined();
 	});
 });
 

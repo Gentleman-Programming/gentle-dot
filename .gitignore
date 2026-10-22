@@ -6,6 +6,7 @@ coverage/
 test-results/
 playwright-report/
 apps/desktop/src-tauri/target/
+apps/engram-guard/target/
 apps/desktop/src-tauri/gen/
 *.log
 

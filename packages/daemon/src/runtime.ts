@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { accessSync, constants, statSync } from "node:fs";
+import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
@@ -40,6 +40,64 @@ export function engramBinaryName(platform: NodeJS.Platform = process.platform): 
 /** Where a user's own Engram usually lives, after the login PATH. */
 export function engramKnownDirs(home: string): string[] {
 	return [join(home, "go", "bin"), "/opt/homebrew/bin", "/usr/local/bin", join(home, ".local", "bin")];
+}
+
+/** The guard's file name on a platform, which resolves a program by its extension. */
+export function engramGuardName(platform: NodeJS.Platform = process.platform): string {
+	return platform === "win32" ? "engram-guard.exe" : "engram-guard";
+}
+
+/**
+ * The extensions Windows itself starts from a path, which is how the providers run `ENGRAM_BIN`:
+ * a direct `spawn`, no shell (measured in gentle-engram: `spawn(ENGRAM_BIN, …)` and
+ * `spawnSync(ENGRAM_BIN, ["instance-id"])`). `.bat` and `.cmd` are deliberately absent — Node
+ * refuses to start those without a shell, so they are no more usable here than a script.
+ */
+const WINDOWS_PROGRAM_EXTENSIONS = [".exe", ".com"];
+
+/**
+ * Whether this platform can start `path` at all. Windows starts a program by its extension rather
+ * than by a mode bit, so the POSIX guard — a `#!/bin/sh` script with no extension — exists there and
+ * still cannot run. POSIX starts anything executable, shebang or not.
+ */
+export function isStartableProgram(path: string, platform: NodeJS.Platform): boolean {
+	if (!existsSync(path)) return false;
+	if (platform !== "win32") return isExecutableFile(path);
+	const lower = path.toLowerCase();
+	return WINDOWS_PROGRAM_EXTENSIONS.some((extension) => lower.endsWith(extension));
+}
+
+/**
+ * The guard the engine gets **instead of** an `ENGRAM_BIN` this platform cannot start.
+ *
+ * The POSIX guard ships as a `#!/bin/sh` script, and Windows cannot start it: the provider then
+ * reported "the Engram binary could not be found" for a file that was right there, while nothing
+ * listened on the private port. Substituting the runtime's own guard keeps the guard's real
+ * contract — refuse, print why, touch no store — and makes the notice true on every platform.
+ *
+ * Two cases are deliberately **not** substituted. An `ENGRAM_BIN` this platform starts is the
+ * caller's choice and is left alone. A path that is not there is a different defect, and the
+ * provider's own message names it better than a refusal would: substituting there would hide a
+ * typo behind "memory disabled".
+ */
+export function refusalGuard(
+	env: NodeJS.ProcessEnv,
+	runtime: string,
+	options: {
+		platform?: NodeJS.Platform;
+		startable?: (path: string, platform: NodeJS.Platform) => boolean;
+		exists?: (path: string) => boolean;
+	} = {},
+): string | undefined {
+	const inherited = env.ENGRAM_BIN;
+	if (!inherited) return undefined;
+	const platform = options.platform ?? process.platform;
+	const startable = options.startable ?? isStartableProgram;
+	if (startable(inherited, platform)) return undefined;
+	const exists = options.exists ?? existsSync;
+	if (!exists(inherited)) return undefined;
+	const guard = join(runtime, "bin", engramGuardName(platform));
+	return exists(guard) ? guard : undefined;
 }
 
 const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";

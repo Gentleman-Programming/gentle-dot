@@ -216,7 +216,7 @@ async function startClaimedDaemon(
 	if (options.agentHome) {
 		homeArgs.push("--home", options.agentHome);
 		// The engine also writes under the home folder; it gets one of its own.
-		agentEnv = isolatedAgentEnv(agentEnv, options.dataDir, access);
+		agentEnv = isolatedAgentEnv(agentEnv, options.dataDir, access, (line) => log(`[agent] ${line}`));
 		agentEnv.GENTLE_PI_CONFIG_HOME = join(options.dataDir, "gentle-ai");
 	}
 	const agentHome = options.agentHome ?? resolveAgentHome(process.env, options.dataDir);
