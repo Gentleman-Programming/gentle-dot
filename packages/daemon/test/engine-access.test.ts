@@ -12,12 +12,22 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { engineAccess, insideEngineAccess } from "../src/engine-access.ts";
 import { writePrivateFile } from "../src/private-file.ts";
 import { tempDir } from "./helpers.ts";
 
-const own = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
+// Bracket semantics use an explicit POSIX identity fixture, not a fabricated Windows root.
+const own = { uid: process.getuid?.() ?? 1001, gid: process.getgid?.() ?? 1001 };
+const euidDescriptor = Object.getOwnPropertyDescriptor(process, "geteuid");
+beforeEach(() => {
+	if (!euidDescriptor)
+		Object.defineProperty(process, "geteuid", { configurable: true, value: () => own.uid });
+});
+afterEach(() => {
+	if (euidDescriptor) Object.defineProperty(process, "geteuid", euidDescriptor);
+	else Reflect.deleteProperty(process, "geteuid");
+});
 const SRC = fileURLToPath(new URL("../src/", import.meta.url));
 
 describe("engine access", () => {
@@ -33,6 +43,17 @@ describe("engine access", () => {
 		const access = engineAccess(own);
 		expect(() => access(() => Promise.resolve(1))).toThrow(/synchronously/);
 		expect(insideEngineAccess()).toBe(false);
+	});
+
+	it("fails closed when the host cannot provide a POSIX effective identity", () => {
+		Object.defineProperty(process, "geteuid", { configurable: true, value: undefined });
+		let ran = false;
+		expect(() =>
+			engineAccess(own)(() => {
+				ran = true;
+			}),
+		).toThrow(/without root/);
+		expect(ran).toBe(false);
 	});
 
 	it.skipIf(own.uid === 0)("refuses, without running it, a call as a user it cannot become", () => {

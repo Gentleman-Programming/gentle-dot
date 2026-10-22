@@ -1,0 +1,91 @@
+name: Independent Windows validation
+on:
+  push:
+    branches: [feat/windows-native-independent]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: windows-native-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  typescript:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.10'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: node --test scripts/windows/test/*.test.mjs
+      - name: Parse native installer scripts
+        shell: pwsh
+        run: |
+          Get-ChildItem scripts/windows/*.ps1 | ForEach-Object {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName,[ref]$tokens,[ref]$errors) | Out-Null
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
+  rust:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.10'
+      - run: rustup toolchain install stable --profile minimal
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @gentle-dot/ui build
+      - name: Generate Windows icon from the existing identity
+        run: pnpm --filter @gentle-dot/desktop exec tauri icon src-tauri/icons/icon.png --output src-tauri/icons
+      - run: cargo +stable test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml
+  installer:
+    needs: [typescript, rust]
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.10'
+      - run: rustup toolchain install stable --profile minimal
+      - run: rustup default stable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @gentle-dot/desktop exec tauri icon src-tauri/icons/icon.png --output src-tauri/icons
+      - name: Build self-contained per-user installer
+        shell: pwsh
+        run: ./scripts/windows/package.ps1
+      - name: Install and exercise the packaged app
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe)
+          if ($installers.Count -ne 1) { throw 'Expected exactly one NSIS installer' }
+          ./scripts/windows/smoke-install.ps1 -Installer $installers[0].FullName
+      - name: Upload tested QA installer only
+        uses: actions/upload-artifact@v4
+        with:
+          name: gentle-dot-windows-qa-${{ github.sha }}
+          path: |
+            apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+            build/windows/runtime/WINDOWS-INTEGRITY.json
+          if-no-files-found: error

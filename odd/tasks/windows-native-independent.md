@@ -92,3 +92,11 @@ W4 `45213ba240c6c6e3cc40a2a82b149910c0b76961` (`feat(build): stage and verify Wi
 #### W5a preparation — current integration evidence and handoff docs (2026-10-22)
 
 Prepared documentation-only updates in `docs/windows-native-independent.md` and `LOCAL_AGENT_HANDOFF.md`. The main guide now leads with the current W1–W4 publication/review checkpoint, bounded verification results, native Rust/installer/CI and capability gaps, and the W5a/W5b boundary; older snapshots are labeled historical. The supplied Spanish handoff body is preserved with a brief English banner linking to the current guide and tracker. Readback and `git diff --check` passed. No code, tests, workflow, commit, or completion checkbox changed. W5b remains pending; no CI run currently exists. No PR, merge, or release is authorized.
+
+#### W5a commit and review (2026-10-22)
+
+W5a commit `3a5826333672deadccf7a758ef3137c81389033d` (`docs(windows): preserve handoff and native validation evidence`) received a separate human grant, native approval, and exact acknowledgement; authority is burned. Push is in flight under parent ownership and is not claimed complete here. This documentation review is not functional Windows proof.
+
+#### W5b preparation (2026-10-22)
+
+Prepared `docs/windows-ci-validation.md` for the staged workflow and engine-access fixture unit. `node --test scripts/windows/test/*.test.mjs` passed 15/15 with zero skips; `node node_modules/typescript/bin/tsc -b` passed; PyYAML parsed the workflow and confirmed read-only contents permission, installer prerequisites on TypeScript/Rust, no release trigger, and no `continue-on-error`. The focused `node node_modules/vitest/vitest.mjs run packages/daemon/test/engine-access.test.ts --maxWorkers=2` was partial: 7 passed, 1 failed because Windows `stat.mode & 0o777` returned 0666 instead of the POSIX 0600 expectation. No skip or code change was made. No CI workflow execution, Rust application build/test, installer, or clean-install acceptance is available. W5b remains prepared, without a commit ID or task completion mark; broad acceptance remains open.
