@@ -306,7 +306,7 @@ func verifyACL(handle syscall.Handle, directory bool) error {
 		actual = "D:P" + actual[len("D:PAI"):]
 	}
 	if actual != expected {
-		return errors.New("private-storage DACL contains unexpected principals or permissions")
+		return fmt.Errorf("private-storage DACL contains unexpected principals or permissions: got %q, want %q", actual, expected)
 	}
 	return nil
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"unsafe"
 )
 
 func TestPrivateDirectoryAndAtomicFileOperations(t *testing.T) {
@@ -108,5 +109,45 @@ func TestPrivateDescriptorsSetCurrentUserAsOwner(t *testing.T) {
 				t.Fatalf("private %s descriptor owner is not the current user: %s", name, sddl)
 			}
 		})
+	}
+}
+
+func TestACLRejectionReportsActualAndExpectedDACL(t *testing.T) {
+	root := t.TempDir()
+	handle, _, err := openPath(root, true, readControl|writeDAC|fileReadAttributes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.CloseHandle(handle)
+
+	unsafeSDDL, err := syscall.UTF16PtrFromString("D:P(A;OICI;FA;;;WD)(A;OICI;FA;;;SY)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unsafeSD uintptr
+	var size uint32
+	ok, _, callErr := procConvertSDDL.Call(uintptr(unsafe.Pointer(unsafeSDDL)), securityDescriptorRevision, uintptr(unsafe.Pointer(&unsafeSD)), uintptr(unsafe.Pointer(&size)))
+	if ok == 0 {
+		t.Fatal(callError(callErr))
+	}
+	defer procLocalFree.Call(unsafeSD)
+	var present, defaulted int32
+	var dacl uintptr
+	getDACL := advapi32.NewProc("GetSecurityDescriptorDacl")
+	ok, _, callErr = getDACL.Call(unsafeSD, uintptr(unsafe.Pointer(&present)), uintptr(unsafe.Pointer(&dacl)), uintptr(unsafe.Pointer(&defaulted)))
+	if ok == 0 || present == 0 || dacl == 0 {
+		t.Fatal(callError(callErr))
+	}
+	status, _, _ := procSetSecurityInfo.Call(uintptr(handle), seFileObject, daclSecurityInformation|protectedDACLInformation, 0, 0, dacl, 0)
+	if status != 0 {
+		t.Fatal(syscall.Errno(status))
+	}
+
+	err = verifyACL(handle, true)
+	if err == nil {
+		t.Fatal("unsafe DACL was accepted")
+	}
+	if !strings.Contains(err.Error(), "WD") || !strings.Contains(err.Error(), "SY") {
+		t.Fatalf("ACL rejection omitted actual and expected DACLs: %v", err)
 	}
 }
