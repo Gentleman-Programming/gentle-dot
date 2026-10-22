@@ -414,7 +414,9 @@ fn windows_git_dirs(
 /// folder left behind would put a Git-less entry on the engine's `PATH`. The predicate this
 /// replaces asked whether the **folder** was a *file*, so every default candidate was rejected and
 /// that fallback could never run (W34).
-#[cfg(windows)]
+// No `#[cfg(windows)]`: its only caller sits inside an `if cfg!(windows)`, which is a
+// **runtime** test, so both branches are compiled on every platform. Gating this function made
+// macOS and Linux fail with E0425 at `daemon.rs:491` before they reached any other code.
 fn holds_git(dir: &Path) -> bool {
     dir.join("git.exe").is_file()
 }
