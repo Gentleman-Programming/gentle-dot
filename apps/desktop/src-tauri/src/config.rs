@@ -252,10 +252,15 @@ mod tests {
     fn the_data_dir_never_falls_back_to_a_relative_path() {
         use crate::platform::Os;
         let windows = |pairs: &'static [(&'static str, &'static str)]| resolve_data_dir(Os::Windows, env_of(pairs));
-        assert_eq!(windows(&[("USERPROFILE", r"C:\Users\me")]), Ok(PathBuf::from(r"C:\Users\me\.gentle-dot")));
+        // Built with Path::join rather than written as a literal: this test drives the Windows
+        // resolution on every host, and on macOS and Linux a backslash is not a separator, so the
+        // literal is one component there while the resolved value is two. Comparing the two
+        // constructions is the only portable way to assert the exact result (POSIX run 39869942335).
+        let expected = Path::new(r"C:\Users\me").join(".gentle-dot");
+        assert_eq!(windows(&[("USERPROFILE", r"C:\Users\me")]), Ok(expected.clone()));
         assert_eq!(
             windows(&[("HOMEDRIVE", "C:"), ("HOMEPATH", r"\Users\me")]),
-            Ok(PathBuf::from(r"C:\Users\me\.gentle-dot"))
+            Ok(expected.clone())
         );
         // The W22 bug: a Windows GUI launch has no HOME. That is an error, never `.gentle-dot`.
         assert_eq!(windows(&[]), Err(NO_HOME.to_string()));
