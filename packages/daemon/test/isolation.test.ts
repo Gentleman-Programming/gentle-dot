@@ -28,6 +28,21 @@ describe("isolatedAgentEnv PATH", () => {
 		expect(rest).toEqual(["/usr/bin", "/bin"]);
 	});
 
+	it("carries a `Path` the daemon was handed, under a single name", () => {
+		// Windows names the variable `Path`, and reading only `PATH` here made `rest` empty while the
+		// inherited key stayed: the engine got two path variables anyway, and its own resolution used
+		// the uppercase one — measured on an installed copy, the engine's `PATH` was
+		// `…\runtime\bin` alone, so `git` was not found and the skill registry refused to write. The
+		// daemon's own `Path` had carried git and the system folders all along (W34).
+		const base = { Path: ["/usr/bin", "/bin"].join(delimiter), HOME: tempDir() };
+		const env = isolatedAgentEnv(base, tempDir());
+		const names = Object.keys(env).filter((key) => key.toLowerCase() === "path");
+		expect(names).toEqual(["PATH"]);
+		const [first, ...rest] = (env.PATH ?? "").split(delimiter);
+		expect(first).toMatch(/node_modules[\\/]\.bin$/);
+		expect(rest).toEqual(["/usr/bin", "/bin"]);
+	});
+
 	it("does not add the bundled folder twice", () => {
 		const once = isolatedAgentEnv({ PATH: "/bin", HOME: tempDir() }, tempDir());
 		const twice = isolatedAgentEnv({ PATH: once.PATH, HOME: tempDir() }, tempDir());
