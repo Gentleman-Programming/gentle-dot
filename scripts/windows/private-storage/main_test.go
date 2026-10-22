@@ -65,3 +65,16 @@ func TestPrivateDirectoryRejectsRootsAndRelativePaths(t *testing.T) {
 		t.Fatal("relative path was accepted as private data")
 	}
 }
+
+func TestOwnerMismatchDiagnosticIncludesBothPrincipals(t *testing.T) {
+	ownerSID := "S-1-5-32-544"
+	userSID := "S-1-5-21-1328270225-4188850109-826311960-1001"
+	err := ownerMismatch(ownerSID, userSID)
+	if err == nil {
+		t.Fatal("expected an owner mismatch diagnostic")
+	}
+	want := "private-storage object owner SID " + ownerSID + " does not match current Windows user SID " + userSID
+	if err.Error() != want {
+		t.Fatalf("owner mismatch diagnostic = %q, want %q", err, want)
+	}
+}

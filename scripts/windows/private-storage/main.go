@@ -228,9 +228,21 @@ func verifyOwner(handle syscall.Handle) error {
 	}
 	equal, _, _ := procEqualSid.Call(owner, uintptr(unsafe.Pointer(user)))
 	if equal == 0 {
-		return errors.New("private-storage object is not owned by the current Windows user")
+		ownerSID, err := sidString((*syscall.SID)(unsafe.Pointer(owner)))
+		if err != nil {
+			return fmt.Errorf("private-storage object has a different owner; could not read owner SID: %w", err)
+		}
+		userSID, err := sidString(user)
+		if err != nil {
+			return fmt.Errorf("private-storage object has a different owner; could not read current Windows user SID: %w", err)
+		}
+		return ownerMismatch(ownerSID, userSID)
 	}
 	return nil
+}
+
+func ownerMismatch(ownerSID, userSID string) error {
+	return fmt.Errorf("private-storage object owner SID %s does not match current Windows user SID %s", ownerSID, userSID)
 }
 
 func setProtectedACL(handle syscall.Handle, directory bool) error {
