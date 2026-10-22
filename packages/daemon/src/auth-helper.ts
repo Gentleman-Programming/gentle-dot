@@ -117,6 +117,10 @@ export class AuthHelper {
 				const result = (await this.call("openAIApiKey")) as { key?: unknown } | undefined;
 				return isString(result?.key) && result.key !== "" ? result.key : undefined;
 			},
+			nvidiaApiKey: async () => {
+				const result = (await this.call("nvidiaApiKey")) as { key?: unknown } | undefined;
+				return isString(result?.key) && result.key !== "" ? result.key : undefined;
+			},
 		};
 	}
 
@@ -256,6 +260,8 @@ export function serveAuthHelper(): void {
 			}
 			case "openAIApiKey":
 				return { key: (await runtime.openAIApiKey?.()) ?? null };
+			case "nvidiaApiKey":
+				return { key: (await runtime.nvidiaApiKey?.()) ?? null };
 			case "logout":
 				await runtime.logout(String(params.providerId));
 				return {};
