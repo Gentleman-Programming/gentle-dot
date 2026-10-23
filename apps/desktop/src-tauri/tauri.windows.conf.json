@@ -1,0 +1,22 @@
+{
+	"$schema": "https://schema.tauri.app/config/2",
+	"bundle": {
+		"targets": ["nsis", "msi"],
+		"publisher": "Gentleman Programming",
+		"shortDescription": "Always-on desktop assistant backed by Gentle Shell",
+		"longDescription": "A floating rose, a panel, and a tray icon for an assistant that runs Gentle Shell with Engram memory.",
+		"icon": ["icons/icon.ico"],
+		"windows": {
+			"nsis": {
+				"installMode": "currentUser"
+			},
+			"webviewInstallMode": {
+				"type": "downloadBootstrapper",
+				"silent": true
+			},
+			"wix": {
+				"upgradeCode": "{EFEB5D6D-FA61-5841-8B75-DA089BA35404}"
+			}
+		}
+	}
+}

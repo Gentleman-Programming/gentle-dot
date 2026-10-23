@@ -13,6 +13,7 @@ import {
 } from "../src/rotation.ts";
 import { AgentSupervisor } from "../src/supervisor.ts";
 import { FAKE_AGENT, fakeSupervisor, tempDir, waitFor } from "./helpers.ts";
+import { canMakeDirectoryUnwritable } from "./support/fixture-capabilities.ts";
 
 const supervisors: AgentSupervisor[] = [];
 afterEach(async () => {
@@ -122,7 +123,11 @@ describe("transparent rotation", () => {
 		expect(again.previousSessions).toEqual([first]);
 	});
 
-	it("leaves the current session working when the handoff cannot be written", async () => {
+	it.skipIf(
+		!canMakeDirectoryUnwritable(
+			"rotation: leaves the current session working when the handoff cannot be written",
+		),
+	)("leaves the current session working when the handoff cannot be written", async () => {
 		const { supervisor, logs, say, answers } = await setup({ limits: { compactions: 1 } });
 		const first = supervisor.sessionFile as string;
 		await say("hello");

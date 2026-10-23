@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AppChannel } from "../src/app-channel.ts";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { DAEMON_CLAIM_FILE } from "../src/daemon-claim.ts";
 import { fakeApp } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
@@ -162,5 +163,26 @@ describe("the engine's own home (S35.3)", () => {
 		writeFileSync(join(home, MARKER), own);
 		await start({ dataDir });
 		expect(readFileSync(join(home, MARKER), "utf8")).toBe(own);
+	});
+});
+
+// Two daemons can share one data folder when the port differs (W24): the port bind only stops a
+// second daemon on the same port, and the folder is what they then fight over.
+describe("one daemon per data folder (W24)", () => {
+	it("refuses a second daemon on the same data folder, and frees it when the first stops", async () => {
+		const dataDir = tempDir();
+		const first = await start({ dataDir });
+		await expect(start({ dataDir })).rejects.toThrow(/already running on this data folder/);
+		await first.d.close();
+		const second = await start({ dataDir });
+		expect(await health(second.d.port)).toBe(true);
+	});
+
+	it("claims the engine's home too when it is set outside the data folder", async () => {
+		const home = tempDir();
+		await start({ agentHome: home });
+		expect(existsSync(join(home, DAEMON_CLAIM_FILE))).toBe(true);
+		// A different data folder, the same engine home: the fight over the engine's setup lock.
+		await expect(start({ agentHome: home })).rejects.toThrow(/already running on this data folder/);
 	});
 });

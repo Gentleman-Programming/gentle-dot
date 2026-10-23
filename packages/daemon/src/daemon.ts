@@ -17,6 +17,7 @@ import { AppChannel } from "./app-channel.ts";
 import { AuthManager, type AuthRuntime, createModelAuthRuntime, resolveAgentHome } from "./auth.ts";
 import { AuthHelper } from "./auth-helper.ts";
 import { type BridgeClient, DotBridge } from "./bridge.ts";
+import { type MemoryMode, memoryMode } from "./config.ts";
 import {
 	APPROVAL_GUARD,
 	ConnectorManager,
@@ -24,6 +25,7 @@ import {
 	ConnectorStore,
 	policyEnv,
 } from "./connectors.ts";
+import { claimDaemonDirs, daemonClaimDirs, daemonClaimMessage, releaseDaemonClaims } from "./daemon-claim.ts";
 import { directAccess, type EngineAccess, engineAccess } from "./engine-access.ts";
 import { approvalRequest } from "./extensions/approval-guard.ts";
 import {
@@ -151,8 +153,37 @@ export function startupMessage(url: string, dataDir: string, interactive: boolea
 	return `Gentle Dot is running at ${url.split("#")[0]} (the access key is in ${join(dataDir, "token")})`;
 }
 
+/**
+ * Applies the memory mode (SW9, W26) to the environment the engine starts with. The mode is
+ * written back as `GENTLE_DOT_ENGRAM` — the documented override, and what `isolatedAgentEnv` and
+ * `privateMemory` read — so `config.json`'s `memory` behaves exactly like exporting the variable
+ * does. `shared` leaves the environment as it is: only `private` selects private mode.
+ */
+export function applyMemoryMode(base: NodeJS.ProcessEnv, memory: MemoryMode): NodeJS.ProcessEnv {
+	if (memory !== "private") return base;
+	return { ...base, GENTLE_DOT_ENGRAM: "private" };
+}
+
 export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	const log = options.log ?? (() => {});
+	// One daemon per data folder (W24): the port bind only stops a second daemon on the same port, so
+	// the folders the daemon owns are claimed here, before anything is written into them.
+	const claim = claimDaemonDirs(daemonClaimDirs(options.dataDir, options.agentHome));
+	if (claim.status !== "claimed") throw new Error(daemonClaimMessage(claim));
+	try {
+		return await startClaimedDaemon(options, log, claim.files);
+	} catch (error) {
+		// A daemon that did not start must not leave its claim behind either.
+		releaseDaemonClaims(claim.files);
+		throw error;
+	}
+}
+
+async function startClaimedDaemon(
+	options: DaemonOptions,
+	log: (line: string) => void,
+	claims: string[],
+): Promise<DotDaemon> {
 	const token = ensureToken(options.dataDir);
 	const vps = options.vps;
 	// Server mode (S25.8): the daemon's files stay its own, the engine's folders become the engine's,
@@ -174,12 +205,18 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	let agentEnv = { ...(options.agentEnv ?? process.env) };
 	// The server's secrets key is the daemon's only, whatever the engine is (S25.8).
 	delete agentEnv[SECRETS_KEY_VAR];
+	// Memory is a setting, not an environment variable (SW9, W26): the mode `config.json` names is
+	// applied to the base environment here, before the private server is looked for and before the
+	// isolation, so the engine, its subagents and the private memory server all see one switch.
+	// `GENTLE_DOT_ENGRAM` stays the documented override — `memoryMode` lets it win over the file, as
+	// `GENTLE_DOT_PORT` does for `port` — and it is what `isolatedAgentEnv` and `privateMemory` read.
+	agentEnv = applyMemoryMode(agentEnv, memoryMode(agentEnv, options.dataDir));
 	const homeArgs: string[] = [];
 	const memory = options.agentHome ? await privateMemory(agentEnv, options.dataDir, log, access) : undefined;
 	if (options.agentHome) {
 		homeArgs.push("--home", options.agentHome);
 		// The engine also writes under the home folder; it gets one of its own.
-		agentEnv = isolatedAgentEnv(agentEnv, options.dataDir, access);
+		agentEnv = isolatedAgentEnv(agentEnv, options.dataDir, access, (line) => log(`[agent] ${line}`));
 		agentEnv.GENTLE_PI_CONFIG_HOME = join(options.dataDir, "gentle-ai");
 	}
 	const agentHome = options.agentHome ?? resolveAgentHome(process.env, options.dataDir);
@@ -404,6 +441,9 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		connectorStore.close();
 		authHelper?.close();
 		await memory?.stop();
+		// The folders are free for the next start; a claim left by a kill is taken over by liveness
+		// instead, so this only keeps a clean stop from leaving the file behind.
+		releaseDaemonClaims(claims);
 	};
 	let stopping: Promise<void> | undefined;
 	const close = (): Promise<void> => {

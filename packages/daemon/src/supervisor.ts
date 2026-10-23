@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { encodeRecord, JsonlDecoder } from "./jsonl.ts";
 import { writePrivateFile } from "./private-file.ts";
+import { clearStaleSetupLock, writeSetupLockOwner } from "./setup-lock.ts";
 import type { OsUser } from "./vps.ts";
 
 /** A record the agent wrote to stdout that is not a command response. */
@@ -59,6 +60,23 @@ type Pending = {
 };
 
 const DEFAULT_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
+
+/**
+ * The engine home the daemon passed as `--home`, if any. The daemon owns that home and marks it
+ * (`claimEngineHome`), so its engine lock is ours to mend; without `--home` the engine manages a
+ * home of its own that we never touch.
+ */
+function engineHomeArgument(args: string[]): string | undefined {
+	for (let at = args.length - 1; at >= 0; at -= 1) {
+		const arg = args[at];
+		if (arg === "--home") {
+			const value = args[at + 1];
+			return value && !value.startsWith("--") ? value : undefined;
+		}
+		if (arg?.startsWith("--home=")) return arg.slice("--home=".length) || undefined;
+	}
+	return undefined;
+}
 
 /**
  * Runs the agent (`gentle-shell --mode rpc`) as a child process, correlates
@@ -218,6 +236,11 @@ export class AgentSupervisor {
 
 	private spawnChild(): ChildProcess {
 		const { command, args = [], extraArgs = [], cwd, env, prepareSpawn, user } = this.options;
+		const engineHome = engineHomeArgument(args);
+		// An abrupt stop leaves the engine's empty setup lock behind (it releases it only in a
+		// `finally`), so clear an abandoned one first. The decision never touches a lock our own
+		// owner record proves is live.
+		if (engineHome) clearStaleSetupLock(engineHome);
 		const child = spawn(command, [...args, "--mode", "rpc", "--session-dir", this.sessionDir, ...extraArgs], {
 			cwd,
 			env: { ...(env ?? process.env), ...prepareSpawn?.() },
@@ -225,6 +248,9 @@ export class AgentSupervisor {
 			...(user ? { uid: user.uid, gid: user.gid } : {}),
 		});
 		this.child = child;
+		// Recorded only once the child exists (a failed spawn has no pid): this is the proof a later
+		// start uses to tell an abandoned lock from one a live engine still holds.
+		if (engineHome && child.pid !== undefined) writeSetupLockOwner(engineHome, child.pid);
 		const decoder = new JsonlDecoder(
 			(record) => this.handleRecord(record as AgentRecord),
 			(line) => this.log(`agent wrote a malformed record: ${line.slice(0, 200)}`),

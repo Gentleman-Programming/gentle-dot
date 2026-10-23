@@ -120,7 +120,6 @@ type PendingAsk = {
 	timer?: NodeJS.Timeout;
 };
 const REMEMBERED_REQUEST_IDS = 500;
-const READY_TIMEOUT_MS = 60_000;
 const ANSWER_FAILED = "Something went wrong while answering. Please try again.";
 const HISTORY_PAGE = 100;
 
@@ -620,12 +619,17 @@ export class DotBridge {
 				await this.profileCommand(client, message);
 				return;
 			case "get_history":
-				// Windows ask for history as soon as they connect, often while the agent starts.
-				await this.whenReady();
+				// Windows ask for history as soon as they connect, often while the agent starts, and the
+				// panel asks again when the `ready` event arrives (`packages/ui/src/client.ts`). Waiting
+				// for readiness here turned a cold start — minutes of provisioning companion packages —
+				// into "the agent did not start in time" (W33), so an agent that is not ready answers
+				// from the conversation on disk and the refetch corrects it.
 				this.deliver(client, {
 					type: "history",
 					...this.conversationRef(),
-					...(await this.currentHistory()),
+					...(this.supervisor.state === "ready"
+						? await this.currentHistory()
+						: this.engine(() => pageHistory(this.chain(), this.pageSize()))),
 				});
 				return;
 			case "get_earlier":
@@ -721,26 +725,6 @@ export class DotBridge {
 			const off = this.supervisor.onEvent((event) => {
 				if (event.type === "agent_settled") finish(true);
 				else if (event.type === "supervisor_state" && event.state !== "ready") finish(true);
-			});
-		});
-	}
-
-	/** Waits until the agent can take commands; gives up after a minute or when it stopped. */
-	private whenReady(): Promise<void> {
-		if (this.supervisor.state === "ready") return Promise.resolve();
-		return new Promise((resolve, reject) => {
-			const finish = (error?: Error) => {
-				clearTimeout(timer);
-				off();
-				if (error) reject(error);
-				else resolve();
-			};
-			const timer = setTimeout(() => finish(new Error("the agent did not start in time")), READY_TIMEOUT_MS);
-			timer.unref();
-			const off = this.supervisor.onEvent((event) => {
-				if (event.type !== "supervisor_state") return;
-				if (event.state === "ready") finish();
-				else if (event.state === "stopped") finish(new Error("the agent stopped"));
 			});
 		});
 	}

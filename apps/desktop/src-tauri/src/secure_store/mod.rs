@@ -8,6 +8,8 @@
 //!   the items' access list follows the app's code signature.
 //! - Linux (`SecretServiceStore`): the Secret Service over D-Bus (GNOME Keyring, KWallet).
 //!   Items are encrypted at rest, but any same-user process can read unlocked items (S25.7).
+//! - Windows (`DpapiStore`): one DPAPI-protected file the app owns. Deliberately not the Windows
+//!   Credential Manager, whose generic-credential blob cannot hold a sign-in (L40, L41).
 //! - `MemoryStore`: an in-memory store for tests.
 //!
 //! Secrets are never logged: [`Secret`] and every store redact themselves in `Debug`, have no
@@ -18,12 +20,16 @@ mod memory;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "windows")]
+mod windows;
 
 pub use memory::MemoryStore;
 #[cfg(target_os = "linux")]
 pub use linux::SecretServiceStore;
 #[cfg(target_os = "macos")]
 pub use macos::Keychain;
+#[cfg(target_os = "windows")]
+pub use windows::DpapiStore;
 
 /// The keychain service (macOS) or `service` attribute (Linux) of every connector secret.
 pub const SERVICE: &str = "dev.gentleman.gentle-dot.connectors";
@@ -107,14 +113,18 @@ pub trait SecretStore: Send + Sync {
     fn list_ids(&self) -> Result<Vec<String>, StoreError>;
 }
 
-/// The store the app serves connector secrets from: the login keychain on macOS, the Secret
-/// Service on Linux. Nothing is touched until the first request.
+/// The store the app serves connector secrets from: the login keychain on macOS, the Secret Service
+/// on Linux, and one DPAPI-protected file on Windows. Nothing is touched until the first request.
 pub fn connector_store() -> Box<dyn SecretStore> {
     #[cfg(target_os = "macos")]
     return Box::new(Keychain::new());
     #[cfg(target_os = "linux")]
     return Box::new(SecretServiceStore::new());
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    // Windows never falls back to `MemoryStore`: a token that lives only in memory is gone at the
+    // next restart, which is the silent loss SW4 forbids (L41).
+    #[cfg(target_os = "windows")]
+    return Box::new(DpapiStore::new());
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     return Box::new(MemoryStore::new());
 }
 
@@ -127,8 +137,9 @@ pub fn check_id(id: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// The contract every store keeps, run against `MemoryStore` here and against a throwaway
-/// keychain service in the ignored macOS test.
+/// The contract every store keeps: run against `MemoryStore` here, against the DPAPI file under a
+/// throwaway directory in `windows.rs`, and against a throwaway keychain service in the ignored
+/// macOS test.
 #[cfg(test)]
 pub(crate) fn check_contract(store: &dyn SecretStore) {
     assert!(store.get("contract/missing").unwrap().is_none());

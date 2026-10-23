@@ -27,18 +27,31 @@ describe("AgentSupervisor", () => {
 	});
 
 	it("starts the agent as the configured user, and as the daemon's own user without one (S25.8)", async () => {
-		const own = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
+		// Windows has no uid/gid, so `?? 0` used to fabricate a pair the fixture never reports (W5b).
+		// The expectation is built from what the platform can actually say: the ids where they exist,
+		// and no invented ids where they do not.
+		const hasIds = Boolean(process.getuid && process.getgid);
+		const ids = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
+		// Where the platform has no ids, a configured user is inert and must not invent them.
+		const expected = hasIds ? ids : {};
 		const processFile = join(tempDir(), "process.json");
+		const reported = () => JSON.parse(readFileSync(processFile, "utf8")) as { uid?: number; gid?: number };
 		const env = { ...process.env, FAKE_AGENT_PROCESS_FILE: processFile };
 		// Without a user, the agent runs as the daemon does today.
 		const plain = track(fakeSupervisor({ env }));
 		await plain.supervisor.start();
-		expect(JSON.parse(readFileSync(processFile, "utf8"))).toMatchObject(own);
+		expect(reported()).toMatchObject(expected);
 		await plain.supervisor.stop();
-		const as = track(fakeSupervisor({ env, user: own }));
-		await as.supervisor.start();
-		expect(JSON.parse(readFileSync(processFile, "utf8"))).toMatchObject(own);
-		expect(as.supervisor.state).toBe("ready");
+		const as = track(fakeSupervisor({ env, user: ids }));
+		if (hasIds) {
+			await as.supervisor.start();
+			expect(reported()).toMatchObject(ids);
+			expect(as.supervisor.state).toBe("ready");
+		} else {
+			// Measured on Windows 11: Node does not ignore `uid`/`gid` there, it refuses the spawn with
+			// ENOTSUP, so a configured user is a POSIX capability rather than an inert option.
+			await expect(as.supervisor.start()).rejects.toThrow(/ENOTSUP/);
+		}
 	});
 
 	it.skipIf((process.getuid?.() ?? 0) === 0)(

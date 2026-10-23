@@ -1,13 +1,5 @@
-import {
-	existsSync,
-	mkdirSync,
-	readdirSync,
-	readFileSync,
-	realpathSync,
-	statSync,
-	writeFileSync,
-} from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import {
@@ -17,6 +9,7 @@ import {
 	PRIVATE_ENGRAM_PORT,
 } from "../src/isolation.ts";
 import { FAKE_AGENT, tempDir } from "./helpers.ts";
+import { expectPosixMode } from "./support/posix-modes.ts";
 
 const daemons: DotDaemon[] = [];
 afterEach(async () => {
@@ -25,10 +18,28 @@ afterEach(async () => {
 
 describe("isolatedAgentEnv PATH", () => {
 	it("puts the bundled `pi` first so the engine's first-run setup works on a clean machine", () => {
-		const env = isolatedAgentEnv({ PATH: "/usr/bin:/bin", HOME: tempDir() }, tempDir());
-		const [first, ...rest] = (env.PATH ?? "").split(":");
-		expect(first).toMatch(/node_modules\/\.bin$/);
+		// The input PATH is built with the platform's own separator, and read back the same way: a
+		// POSIX-shaped literal is one segment on Windows, and the test then asserts the drive letter of
+		// a path that does start with the bundled folder (W4a's lesson, at the fixture's own input).
+		const env = isolatedAgentEnv({ PATH: ["/usr/bin", "/bin"].join(delimiter), HOME: tempDir() }, tempDir());
+		const [first, ...rest] = (env.PATH ?? "").split(delimiter);
+		expect(first).toMatch(/node_modules[\\/]\.bin$/);
 		expect(existsSync(join(first ?? "", "pi"))).toBe(true);
+		expect(rest).toEqual(["/usr/bin", "/bin"]);
+	});
+
+	it("carries a `Path` the daemon was handed, under a single name", () => {
+		// Windows names the variable `Path`, and reading only `PATH` here made `rest` empty while the
+		// inherited key stayed: the engine got two path variables anyway, and its own resolution used
+		// the uppercase one — measured on an installed copy, the engine's `PATH` was
+		// `…\runtime\bin` alone, so `git` was not found and the skill registry refused to write. The
+		// daemon's own `Path` had carried git and the system folders all along (W34).
+		const base = { Path: ["/usr/bin", "/bin"].join(delimiter), HOME: tempDir() };
+		const env = isolatedAgentEnv(base, tempDir());
+		const names = Object.keys(env).filter((key) => key.toLowerCase() === "path");
+		expect(names).toEqual(["PATH"]);
+		const [first, ...rest] = (env.PATH ?? "").split(delimiter);
+		expect(first).toMatch(/node_modules[\\/]\.bin$/);
 		expect(rest).toEqual(["/usr/bin", "/bin"]);
 	});
 
@@ -78,8 +89,9 @@ describe("isolatedAgentEnv memory", () => {
 		const env = isolatedAgentEnv(base, dataDir);
 		expect(env.ENGRAM_PORT).toBe(PRIVATE_ENGRAM_PORT);
 		expect(PRIVATE_ENGRAM_PORT).toBe("7438");
-		// Engram then keeps its data under the engine's own home.
-		expect(env.ENGRAM_DATA_DIR).toBeUndefined();
+		// Engram then keeps its data under the engine's own home, and the path is named rather than left
+		// to Engram's default: on Windows that default follows the user profile, not `HOME` (W25).
+		expect(env.ENGRAM_DATA_DIR).toBe(join(dataDir, "home", ".engram"));
 		expect(env.ENGRAM_URL).toBeUndefined();
 		expect(isolatedAgentEnv({ ...base, GENTLE_DOT_ENGRAM_PORT: "17438" }, dataDir).ENGRAM_PORT).toBe("17438");
 	});
@@ -142,7 +154,7 @@ describe("isolatedAgentEnv temporary folder", () => {
 		const dataDir = tempDir();
 		const env = isolatedAgentEnv({ HOME: tempDir() }, dataDir);
 		expect(env.TMPDIR).toBe(join(dataDir, "home", ".cache", "tmp"));
-		expect(statSync(env.TMPDIR ?? "").mode & 0o777).toBe(0o700);
+		expectPosixMode(env.TMPDIR ?? "", 0o700);
 	});
 
 	it("keeps the user's own TMPDIR", () => {
@@ -221,9 +233,9 @@ describe("engine memory and folders", () => {
 	});
 
 	it("keeps the private memory opt-out", async () => {
-		const { env } = await start({ env: { GENTLE_DOT_ENGRAM: "private" } });
+		const { dataDir, env } = await start({ env: { GENTLE_DOT_ENGRAM: "private" } });
 		expect(env.ENGRAM_PORT).toBe("7438");
-		expect(env.ENGRAM_DATA_DIR).toBeUndefined();
+		expect(env.ENGRAM_DATA_DIR).toBe(join(dataDir, "home", ".engram"));
 	});
 
 	it("tells the engine about a custom folder without working or writing in it", async () => {

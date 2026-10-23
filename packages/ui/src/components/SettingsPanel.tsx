@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { loadMemory, type MemoryMode, saveMemory } from "../memory.ts";
 import {
 	formatShortcut,
 	isMac,
@@ -17,13 +18,13 @@ type Status =
 	| { kind: "applied" }
 	| { kind: "failed"; reason: string };
 
-function reasonOf(error: unknown): string {
+function reasonOf(error: unknown, fallback = "Gentle Dot could not change the shortcut."): string {
 	if (typeof error === "string" && error) return error;
 	if (error instanceof Error && error.message) return error.message;
-	return "Gentle Dot could not change the shortcut.";
+	return fallback;
 }
 
-/** The desktop panel's settings (S33.1); for now, the shortcut that opens the panel. */
+/** The desktop panel's settings (S33.1): the panel shortcut, the memory mode, and the voice language. */
 export function SettingsPanel({ close }: { close: () => void }) {
 	const [language, setLanguage] = useState(() => voiceLanguage() ?? "");
 	const mac = isMac();
@@ -31,6 +32,10 @@ export function SettingsPanel({ close }: { close: () => void }) {
 	const [info, setInfo] = useState<ShortcutInfo | undefined>(undefined);
 	const [loadFailed, setLoadFailed] = useState(false);
 	const [status, setStatus] = useState<Status>({ kind: "idle" });
+	const [memory, setMemory] = useState<MemoryMode | undefined>(undefined);
+	const [memoryFailed, setMemoryFailed] = useState(false);
+	const [memoryApplying, setMemoryApplying] = useState(false);
+	const [memoryReason, setMemoryReason] = useState<string | undefined>(undefined);
 	const live = useRef(true);
 	const prompt = useRef<HTMLSpanElement>(null);
 
@@ -42,6 +47,14 @@ export function SettingsPanel({ close }: { close: () => void }) {
 			},
 			() => {
 				if (live.current) setLoadFailed(true);
+			},
+		);
+		loadMemory().then(
+			(found) => {
+				if (live.current) setMemory(found.memory);
+			},
+			() => {
+				if (live.current) setMemoryFailed(true);
 			},
 		);
 		return () => {
@@ -59,6 +72,23 @@ export function SettingsPanel({ close }: { close: () => void }) {
 			},
 			(error: unknown) => {
 				if (live.current) setStatus({ kind: "failed", reason: reasonOf(error) });
+			},
+		);
+	}, []);
+
+	const applyMemory = useCallback((next: MemoryMode) => {
+		setMemoryApplying(true);
+		setMemoryReason(undefined);
+		saveMemory(next).then(
+			(saved) => {
+				if (!live.current) return;
+				setMemory(saved);
+				setMemoryApplying(false);
+			},
+			(error: unknown) => {
+				if (!live.current) return;
+				setMemoryReason(reasonOf(error, "Gentle Dot could not change the memory setting."));
+				setMemoryApplying(false);
 			},
 		);
 	}, []);
@@ -147,6 +177,35 @@ export function SettingsPanel({ close }: { close: () => void }) {
 				>
 					Reset to default
 				</button>
+			</section>
+
+			<section className="provider-section" aria-labelledby="settings-memory">
+				<h3 id="settings-memory">Memory</h3>
+				<p className="muted">
+					Turn this on to give the assistant a memory of its own instead of yours: it starts empty and never
+					reads or writes your Engram.
+				</p>
+				{memoryFailed ? (
+					<p className="settings-error" role="alert">
+						Gentle Dot could not read the memory setting.
+					</p>
+				) : null}
+				<label className="shortcut-row">
+					<input
+						type="checkbox"
+						role="switch"
+						aria-checked={memory === "private"}
+						checked={memory === "private"}
+						disabled={memory === undefined || memoryApplying}
+						onChange={(event) => applyMemory(event.target.checked ? "private" : "shared")}
+					/>
+					<span>Private memory</span>
+				</label>
+				{memoryReason ? (
+					<p className="settings-error" role="alert">
+						{memoryReason}
+					</p>
+				) : null}
 			</section>
 
 			<section className="provider-section" aria-labelledby="settings-voice-language">

@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { bundledGentleShell } from "./config.ts";
 import { directAccess, type EngineAccess } from "./engine-access.ts";
-import { resolveEngramBin, runtimeDir } from "./runtime.ts";
+import { refusalGuard, resolveEngramBin, runtimeDir } from "./runtime.ts";
 
 /**
  * The folder with the `pi` executable bundled with the daemon. The engine's
@@ -123,8 +123,9 @@ export function ensureMemoryProject(workspace: string, access: EngineAccess = di
  * (by default under HOME), so `ENGRAM_DATA_DIR` points at the user's real one
  * (`GENTLE_DOT_ENGRAM_DATA_DIR` overrides it) and the memory plugin accepts the
  * user's server. The user's own `ENGRAM_PORT` and `ENGRAM_URL` are kept.
- * `GENTLE_DOT_ENGRAM=private` instead runs a memory of its own under the
- * engine's home, on port 7438 (`GENTLE_DOT_ENGRAM_PORT` overrides it).
+ * `GENTLE_DOT_ENGRAM=private` instead runs a memory of its own under
+ * the engine's home, on port 7438 (`GENTLE_DOT_ENGRAM_PORT` overrides it), with the store named
+ * (`ENGRAM_DATA_DIR=<dataDir>/home/.engram`) rather than left to Engram's default.
  * The server's connector secrets key (`GENTLE_DOT_SECRETS_KEY`, S25.8) is never passed on.
  * Subagents are on (`GENTLE_PI_AGENTS=1`) unless `GENTLE_DOT_SUBAGENTS=off`: their child engines
  * reach connectors only through the daemon's proxy, like the engine itself (S25.4).
@@ -140,6 +141,7 @@ export function isolatedAgentEnv(
 	base: NodeJS.ProcessEnv,
 	dataDir: string,
 	access: EngineAccess = directAccess,
+	log?: (line: string) => void,
 ): NodeJS.ProcessEnv {
 	const home = join(dataDir, "home");
 	access(() => ensurePrivateDir(home));
@@ -160,7 +162,18 @@ export function isolatedAgentEnv(
 	}
 	const bin = bundledBinDir(base);
 	if (bin) {
-		const rest = (base.PATH ?? "").split(delimiter).filter((part) => part && part !== bin);
+		// Windows hands a process `Path` while the engine resolves the uppercase name, so setting
+		// `PATH` beside an inherited `Path` kept both and the engine's own lookup found the bundled
+		// folder alone — the whole daemon `PATH`, git and the system folders included, was gone (W34,
+		// measured on an installed copy: engine `PATH` = `…\runtime\bin`). One name, then, whichever
+		// case the daemon was handed.
+		const inherited = Object.keys(base).find((key) => key.toLowerCase() === "path");
+		for (const key of Object.keys(env)) {
+			if (key.toLowerCase() === "path") delete env[key];
+		}
+		const rest = (inherited ? (base[inherited] ?? "") : "")
+			.split(delimiter)
+			.filter((part) => part && part !== bin);
 		env.PATH = [bin, ...rest].join(delimiter);
 	}
 	// The user's own Gentle Shell setting is not the assistant's.
@@ -168,13 +181,30 @@ export function isolatedAgentEnv(
 	if (base.GENTLE_DOT_ENGRAM === "private") {
 		env.ENGRAM_PORT = base.GENTLE_DOT_ENGRAM_PORT || PRIVATE_ENGRAM_PORT;
 		delete env.ENGRAM_URL;
-		delete env.ENGRAM_DATA_DIR;
+		// The store is **named**, not left to Engram's default: that default follows `HOME`, which is a
+		// POSIX convention, and on Windows Engram resolves the user profile instead — measured, the
+		// "private" server opened the user's own store there (W25). It is also the path `privateMemory`
+		// already reads when it decides whether the server on the private port is ours to stop.
+		env.ENGRAM_DATA_DIR = join(home, ".engram");
 	} else {
 		env.ENGRAM_DATA_DIR =
 			base.GENTLE_DOT_ENGRAM_DATA_DIR || base.ENGRAM_DATA_DIR || join(realHome, ".engram");
 	}
 	const runtime = runtimeDir(base);
-	if (runtime) env.ENGRAM_BIN = resolveEngramBin(base, runtime, { home: realHome });
+	if (runtime) {
+		// An `ENGRAM_BIN` that exists and cannot be started on this platform — the POSIX guard on
+		// Windows — used to reach the engine as a broken spawn. The runtime's own guard takes its
+		// place, so the refusal is reported as a refusal and no store is touched either way.
+		const guard = refusalGuard(base, runtime);
+		if (guard) {
+			log?.(
+				"the ENGRAM_BIN in the environment exists but cannot be started here; the engine gets the runtime's Engram guard, so memory reports itself disabled",
+			);
+			env.ENGRAM_BIN = guard;
+		} else {
+			env.ENGRAM_BIN = resolveEngramBin(base, runtime, { home: realHome });
+		}
+	}
 	const gitConfig = join(realHome, ".gitconfig");
 	if (!base.GIT_CONFIG_GLOBAL && existsSync(gitConfig)) env.GIT_CONFIG_GLOBAL = gitConfig;
 	return env;
@@ -222,12 +252,58 @@ export async function privateMemory(
 	};
 }
 
-/** The one PID listening on `port` on this computer (`lsof`), if any. */
-function listeningPid(port: string): Promise<number | undefined> {
+/**
+ * The command that lists the local PIDs listening on a TCP `port`. POSIX answers with `lsof`, which
+ * filters by the port itself. Windows has no `lsof` and answers with `netstat -ano`, whose rows
+ * carry the state and PID that `netstatListeningPids` reads. The platform only decides the command.
+ */
+export function listenerCommand(
+	port: string,
+	platform: NodeJS.Platform = process.platform,
+): { command: string; args: string[] } {
+	if (platform === "win32") return { command: "netstat", args: ["-ano"] };
+	return { command: "lsof", args: ["-t", "-n", "-P", `-iTCP:${port}`, "-sTCP:LISTEN"] };
+}
+
+/**
+ * The PIDs `netstat -ano` reports as listening on `port`, deduplicated. Each row is
+ * `Proto  Local Address  Foreign Address  State  PID`: only a `LISTENING` row whose local address
+ * ends in `:<port>` counts, and the PID is the last field. One listener commonly appears once per
+ * address family (`0.0.0.0:<port>` and `[::]:<port>`), so the set collapses them to one PID. Empty
+ * output, no matching row, and a matching port in another state all answer with no PID.
+ */
+export function netstatListeningPids(stdout: string, port: string): number[] {
+	const pids = new Set<number>();
+	for (const line of stdout.split(/\r?\n/)) {
+		const fields = line.trim().split(/\s+/);
+		if (fields.length < 5) continue;
+		const [, localAddress, , state] = fields;
+		const pid = fields[fields.length - 1];
+		if (state !== "LISTENING") continue;
+		if (!localAddress?.endsWith(`:${port}`)) continue;
+		if (!/^\d+$/.test(pid ?? "")) continue;
+		pids.add(Number(pid));
+	}
+	return [...pids];
+}
+
+/** The one PID listening on `port` on this computer (`lsof` on POSIX, `netstat -ano` on Windows). */
+function listeningPid(
+	port: string,
+	platform: NodeJS.Platform = process.platform,
+): Promise<number | undefined> {
 	return new Promise((resolve) => {
-		execFile("lsof", ["-t", "-n", "-P", `-iTCP:${port}`, "-sTCP:LISTEN"], (error, stdout) => {
-			const pids = [...new Set(String(stdout).trim().split("\n").filter(Boolean))];
-			resolve(!error && pids.length === 1 && /^\d+$/.test(pids[0] ?? "") ? Number(pids[0]) : undefined);
+		const { command, args } = listenerCommand(port, platform);
+		execFile(command, args, (error, stdout) => {
+			if (error) {
+				resolve(undefined);
+				return;
+			}
+			const pids: (number | string)[] =
+				platform === "win32"
+					? netstatListeningPids(String(stdout), port)
+					: [...new Set(String(stdout).trim().split("\n").filter(Boolean))];
+			resolve(pids.length === 1 && /^\d+$/.test(String(pids[0])) ? Number(pids[0]) : undefined);
 		});
 	});
 }

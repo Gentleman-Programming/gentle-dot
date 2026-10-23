@@ -3,7 +3,7 @@
 // daemon starts with no connectors, and the user is told once; the first start after T23e signs the
 // current file; without the app the file is loaded unverified, and a write never breaks a signature.
 import { createHmac } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ServerMessage, ServerPayload } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
@@ -23,6 +23,7 @@ import { MemorySecretSource } from "../src/secret-source.ts";
 import { fakeApp } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { expectPosixMode } from "./support/posix-modes.ts";
 
 const TOKEN = "discord-bot-token-5e1d7a90";
 const NOTION_TOKENS = "notion-signin-tokens-secret";
@@ -141,7 +142,7 @@ describe("connectors.json is signed on every write (S25.6)", () => {
 		expect(readRecord(dataDir).connectors.discord?.values).toEqual({
 			token: { secretRef: "connector/discord/value/token" },
 		});
-		expect(statSync(join(dataDir, "connectors.json")).mode & 0o777).toBe(0o600);
+		expectPosixMode(join(dataDir, "connectors.json"), 0o600);
 		const { store } = await started(dataDir, source, logs);
 		expect(Object.keys(store.state().connectors).sort()).toEqual(["discord", "plain"]);
 		expect(rejectedFiles(dataDir)).toEqual([]);
@@ -192,7 +193,7 @@ describe("a file changed while the daemon was down is set aside", () => {
 			expect(more).toEqual([]);
 			expect(aside).toMatch(/^connectors\.rejected-\d{8}T\d{6}(\d{3})?Z(-\d+)?\.json$/);
 			expect(readFileSync(join(dataDir, aside ?? ""), "utf8")).toBe(tampered);
-			expect(statSync(join(dataDir, aside ?? "")).mode & 0o777).toBe(0o600);
+			expectPosixMode(join(dataDir, aside ?? ""), 0o600);
 			expect(store.state().connectors).toEqual({});
 			expect(readRecord(dataDir).connectors).toEqual({});
 			expect(validlySigned(dataDir, source.values)).toBe(true);

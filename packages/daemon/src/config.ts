@@ -9,6 +9,8 @@ export interface DotConfig {
 	port: number;
 	host: string;
 	dataDir: string;
+	/** The memory mode (SW9): the user's global Engram (`shared`) or the assistant's own (`private`). */
+	memory: MemoryMode;
 	/** The engine's own working folder, `<dataDir>/workspace`. */
 	workspace: string;
 	/** The folder the user chose to work in, when it is not the engine's own workspace. */
@@ -22,6 +24,12 @@ export interface DotConfig {
 }
 
 const DEFAULT_UI_DIR = fileURLToPath(new URL("../../ui/dist/app", import.meta.url));
+
+/**
+ * The memory mode (SW9): `shared` talks to the user's **global** Engram (the default), and
+ * `private` runs a memory of the assistant's own under `<dataDir>/home/.engram` (W25).
+ */
+export type MemoryMode = "shared" | "private";
 
 /**
  * Path of the Gentle Shell launcher bundled with the daemon (the `gentle-pi` dependency),
@@ -79,6 +87,35 @@ function parseList(value: string | undefined, name: string): string[] {
 }
 
 /**
+ * `config.json`'s `memory`: absent is `shared`, the user's global Engram. Anything else is refused
+ * with a named error and the file is only ever read, so a refused file is left exactly as it was.
+ */
+function parseMemory(value: unknown): MemoryMode {
+	if (value === undefined || value === "shared") return "shared";
+	if (value === "private") return "private";
+	throw new Error(`Invalid memory in config.json: ${String(value)}`);
+}
+
+/**
+ * The file's `memory` with the environment applied: `GENTLE_DOT_ENGRAM` wins over `config.json`,
+ * as `GENTLE_DOT_PORT` does for `port`. It keeps its present meaning — only `private` selects
+ * private mode, so any other value (and an unset variable) is `shared`.
+ */
+function memoryModeOf(env: NodeJS.ProcessEnv, file: Record<string, unknown>): MemoryMode {
+	if (env.GENTLE_DOT_ENGRAM !== undefined) return env.GENTLE_DOT_ENGRAM === "private" ? "private" : "shared";
+	return parseMemory(file.memory);
+}
+
+/**
+ * Reads a data folder's memory mode the way the daemon does: `memory` in its `config.json`, with
+ * `GENTLE_DOT_ENGRAM` as the override. The daemon resolves it itself (W26) so the setting holds on
+ * every launch path with nothing exported by the app.
+ */
+export function memoryMode(env: NodeJS.ProcessEnv, dataDir: string): MemoryMode {
+	return memoryModeOf(env, readFileConfig(dataDir));
+}
+
+/**
  * The agent is the bundled Gentle Shell by default, run with the assistant's own
  * home so nothing is shared with a Gentle Shell the user may have installed.
  * GENTLE_DOT_AGENT_ARGS marks a custom agent script (tests), which gets no home.
@@ -112,6 +149,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DotConfig {
 			: parsePort(file.port ?? 4317, "config.json"),
 		host: env.GENTLE_DOT_HOST ?? "127.0.0.1",
 		dataDir,
+		memory: memoryModeOf(env, file),
 		workspace,
 		preferredFolder: preferredFolder === workspace ? undefined : preferredFolder,
 		uiDir: resolve(env.GENTLE_DOT_UI_DIR ?? uiDirOf(env)),

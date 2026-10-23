@@ -1,10 +1,12 @@
 import { spawn } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { createServer, type Socket, connect as unixConnect } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { expectPosixMode } from "./support/posix-modes.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 
@@ -35,7 +37,7 @@ describe("gentle-dot command", () => {
 		const token = readFileSync(join(dataDir, "token"), "utf8").trim();
 		expect(output).not.toContain(token);
 		expect(output).toContain(`the access key is in ${join(dataDir, "token")}`);
-		expect(statSync(dataDir).mode & 0o777).toBe(0o700);
+		expectPosixMode(dataDir, 0o700);
 	});
 
 	it.skipIf((process.getuid?.() ?? 0) === 0)(
@@ -71,7 +73,7 @@ describe("gentle-dot command", () => {
 
 	it("a daemon launched with the app's channel exits when the app goes (S35.2, #22)", async () => {
 		const dataDir = join(tempDir(), "data");
-		const { app, daemon } = await socketPair();
+		const channel = await appChannel();
 		const child = spawn(process.execPath, [CLI], {
 			env: {
 				...process.env,
@@ -79,10 +81,11 @@ describe("gentle-dot command", () => {
 				GENTLE_DOT_PORT: "0",
 				GENTLE_DOT_AGENT_BIN: process.execPath,
 				GENTLE_DOT_AGENT_ARGS: JSON.stringify([FAKE_AGENT]),
+				...channel.env,
 			},
-			stdio: ["ignore", "pipe", "pipe", daemon],
+			stdio: ["ignore", "pipe", "pipe", ...(channel.inherited ? [channel.inherited] : [])],
 		});
-		daemon.destroy();
+		channel.inherited?.destroy();
 		let output = "";
 		const collect = (chunk: Buffer) => {
 			output += chunk.toString();
@@ -92,26 +95,53 @@ describe("gentle-dot command", () => {
 		const exited = new Promise<number | null>((resolve) => child.on("close", (code) => resolve(code)));
 		try {
 			// The daemon is up once it asks the app for something (the connectors' integrity key).
+			const app = await channel.app();
 			await new Promise((resolve) => app.once("data", resolve));
-			// The app quits, crashes, or is killed: the kernel closes its end of the pair.
+			// The app quits, crashes, or is killed: the kernel closes its end of the channel.
 			app.destroy();
 			expect(await exited).toBe(0);
 		} finally {
 			child.kill("SIGKILL");
+			channel.close();
 		}
 		expect(output).toContain("the desktop app's channel closed; stopping the assistant");
 	});
 });
 
-/** A connected pair of Unix sockets (Node has no socketpair): the app's end and the daemon's. */
-async function socketPair(): Promise<{ app: Socket; daemon: Socket }> {
-	const path = join(tempDir(), "pair.sock");
+/** The app's end of the private channel (S25.1), and what the daemon is handed to reach it. */
+interface TestAppChannel {
+	/** The app's connected end, once the daemon has connected where it connects by name. */
+	app(): Promise<Socket>;
+	/** The descriptor the daemon inherits where this host has one. */
+	inherited?: Socket;
+	/** The pipe name the daemon is told to connect to where this host has no descriptor. */
+	env?: Record<string, string>;
+	/** Drops the app's end and the listener. */
+	close(): void;
+}
+
+/**
+ * A stand-in app holding the daemon's private channel the way the real one does on this platform: a
+ * connected pair of Unix sockets handed over as fd 3 on POSIX (Node has no socketpair), and a named
+ * pipe whose name the daemon is given in `GENTLE_DOT_CHANNEL_PIPE` on Windows (W7). The subject is
+ * the same one either way — the channel the app owns — so the test keeps exercising the daemon's own
+ * reaction to it closing on both hosts instead of skipping the Windows one.
+ */
+async function appChannel(): Promise<TestAppChannel> {
+	if (process.platform !== "win32") {
+		const path = join(tempDir(), "pair.sock");
+		const server = createServer();
+		await new Promise<void>((done) => server.listen(path, done));
+		const accepted = new Promise<Socket>((resolve) => server.once("connection", resolve));
+		const daemon = unixConnect(path);
+		await new Promise((resolve) => daemon.once("connect", resolve));
+		const app = await accepted;
+		server.close();
+		return { app: async () => app, inherited: daemon, close: () => app.destroy() };
+	}
+	const name = `\\\\.\\pipe\\gentle-dot-test-${randomBytes(8).toString("hex")}`;
 	const server = createServer();
-	await new Promise<void>((done) => server.listen(path, done));
+	await new Promise<void>((done) => server.listen(name, done));
 	const accepted = new Promise<Socket>((resolve) => server.once("connection", resolve));
-	const daemon = unixConnect(path);
-	await new Promise((resolve) => daemon.once("connect", resolve));
-	const app = await accepted;
-	server.close();
-	return { app, daemon };
+	return { app: () => accepted, env: { GENTLE_DOT_CHANNEL_PIPE: name }, close: () => server.close() };
 }

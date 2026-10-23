@@ -6,6 +6,7 @@ coverage/
 test-results/
 playwright-report/
 apps/desktop/src-tauri/target/
+apps/engram-guard/target/
 apps/desktop/src-tauri/gen/
 *.log
 
@@ -16,3 +17,7 @@ apps/desktop/src-tauri/gen/
 
 # Declarations emitted next to sources by accident
 packages/*/src/**/*.d.ts
+
+# Engram memory exports: memory content must never be committed
+/engram-export.json
+/engram-*.json

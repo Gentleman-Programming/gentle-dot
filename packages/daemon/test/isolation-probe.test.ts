@@ -13,6 +13,7 @@ import { createServer } from "node:net";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { listenerCommand, netstatListeningPids } from "../src/isolation.ts";
 import { tempDir, waitFor } from "./helpers.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
@@ -88,6 +89,55 @@ function listener(port: string): number | undefined {
 		return undefined;
 	}
 }
+
+// The daemon finds the private memory server's PID by asking the OS which process listens on the
+// port: `lsof` on POSIX, `netstat -ano` on Windows. The platform decides which command runs, and a
+// pure parser turns that command's stdout into the listening PIDs. The parser and the command line
+// are asserted here with fixed input on every OS, so neither needs the host's own tools.
+describe("listening PIDs", () => {
+	// Real-shaped `netstat -ano` output. Three LISTENING rows belong to one listener on port 7438
+	// (IPv4 any, IPv6 any, and the loopback), one belongs to another port, one is a connection whose
+	// peer is port 7438, and one is a UDP row (which has no state).
+	const netstat = [
+		"",
+		"Active Connections",
+		"",
+		"  Proto  Local Address          Foreign Address        State           PID",
+		"  TCP    0.0.0.0:7438           0.0.0.0:0              LISTENING       12345",
+		"  TCP    [::]:7438              [::]:0                 LISTENING       12345",
+		"  TCP    127.0.0.1:7438         0.0.0.0:0              LISTENING       12345",
+		"  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       888",
+		"  TCP    127.0.0.1:54321        127.0.0.1:7438         ESTABLISHED     12345",
+		"  UDP    0.0.0.0:7438           *:*                                    12345",
+		"",
+	].join("\r\n");
+
+	it("deduplicates the IPv4 and IPv6 rows of one listener to a single PID", () => {
+		expect(netstatListeningPids(netstat, "7438")).toEqual([12345]);
+	});
+
+	it("returns nothing, and does not throw, when the port is absent", () => {
+		expect(() => netstatListeningPids(netstat, "9999")).not.toThrow();
+		expect(netstatListeningPids(netstat, "9999")).toEqual([]);
+	});
+
+	it("ignores a row whose local port matches but whose state is not LISTENING", () => {
+		const closing = "  TCP    127.0.0.1:7438         10.0.0.1:50000         TIME_WAIT       99999";
+		expect(netstatListeningPids(closing, "7438")).toEqual([]);
+	});
+
+	it("returns nothing, and does not throw, for empty output", () => {
+		expect(() => netstatListeningPids("", "7438")).not.toThrow();
+		expect(netstatListeningPids("", "7438")).toEqual([]);
+	});
+
+	it("keeps `lsof` with its arguments on POSIX and uses `netstat -ano` only on Windows", () => {
+		const lsof = { command: "lsof", args: ["-t", "-n", "-P", "-iTCP:7438", "-sTCP:LISTEN"] };
+		expect(listenerCommand("7438", "darwin")).toEqual(lsof);
+		expect(listenerCommand("7438", "linux")).toEqual(lsof);
+		expect(listenerCommand("7438", "win32")).toEqual({ command: "netstat", args: ["-ano"] });
+	});
+});
 
 describe.skipIf(!enabled)("@real-agent isolation probe", () => {
 	it("leaves HOME untouched and keeps memory in the global Engram, project gentle-dot", {

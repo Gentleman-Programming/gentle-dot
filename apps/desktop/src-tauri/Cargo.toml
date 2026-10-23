@@ -63,6 +63,27 @@ dbus-secret-service = "4.1"
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 dbus = "0.9"
 
+# Connector secrets on Windows (SW4): DPAPI guards one file the app owns. The Windows Credential
+# Manager is deliberately not used, and the reason is measured rather than a preference: a generic
+# credential's blob is capped at CRED_MAX_CREDENTIAL_BLOB_SIZE (2560 bytes), while the daemon keeps
+# a sign-in as a single JSON secret that already measures 2744 bytes for a Microsoft-backed
+# connector before any token exists (L40, L41).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_WindowsAndMessaging",
+    "Wdk_System_SystemServices",
+] }
+
 # Debug builds encode screenshots fast too (S24.8): `image` holds the JPEG encoder and `zune-*`
 # decode JPEGs (tests). The encoder is generic, so most of its code is compiled in this crate,
 # which gets opt-level 1 as well (measured on a 1280 × 800 encode: 200 ms unoptimized, 126 ms

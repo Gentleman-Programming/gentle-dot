@@ -18,7 +18,7 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
@@ -29,11 +29,13 @@ import {
 	engramArchiveName,
 	engramReleaseVersion,
 	formatSize,
+	gentleAiProvenance,
 	nodeArchiveName,
 	nodeVersion,
 	npmWrapper,
 	parseArgs,
 	symlinksIn,
+	TARGETS,
 	treeSize,
 	verifyChecksum,
 	versionFromReleaseUrl,
@@ -67,6 +69,35 @@ async function text(url) {
 	const response = await fetch(url);
 	if (!response.ok) throw new Error(`GET ${url} answered ${response.status}.`);
 	return response.text();
+}
+
+/** The first file named `name` under `dir`, wherever an archive nests it, or undefined. */
+function findFile(dir, name) {
+	for (const entry of readdirSync(dir, { withFileTypes: true })) {
+		const path = join(dir, entry.name);
+		if (entry.isFile() && entry.name === name) return path;
+		if (entry.isDirectory()) {
+			const found = findFile(path, name);
+			if (found) return found;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Extracts a Windows `.zip` with PowerShell's `Expand-Archive`, which ships with Windows.
+ * `tar` cannot be relied on there: Git for Windows shadows the bundled bsdtar with a GNU
+ * tar that does not read zip.
+ */
+function extractZip(archive, destination) {
+	mkdirSync(destination, { recursive: true });
+	const ps = (path) => path.replace(/'/g, "''");
+	run("powershell.exe", [
+		"-NoProfile",
+		"-NonInteractive",
+		"-Command",
+		`Expand-Archive -LiteralPath '${ps(archive)}' -DestinationPath '${ps(destination)}' -Force`,
+	]);
 }
 
 /** A cached download of `url` whose SHA-256 is `expected`, fetched again when the cached copy differs. */
@@ -116,6 +147,20 @@ async function stageNode(out, target) {
 		checksumFor(await text(`${base}/SHASUMS256.txt`), archiveName),
 	);
 	const node = join(out, "node");
+	if (TARGETS[target].platform === "win32") {
+		const extracted = mkdtempSync(join(CACHE, "node-"));
+		extractZip(archive, extracted);
+		const found = findFile(extracted, "node.exe");
+		const root = found ? dirname(found) : undefined;
+		if (!root) throw new Error(`${archiveName} has no node.exe.`);
+		// The Windows zip has node.exe at its root, npm one folder down and the cmd shims beside it.
+		mkdirSync(join(node, "node_modules"), { recursive: true });
+		for (const name of ["node.exe", "npm.cmd", "npx.cmd", "LICENSE"])
+			copyFileSync(join(root, name), join(node, name));
+		cpSync(join(root, "node_modules", "npm"), join(node, "node_modules", "npm"), { recursive: true });
+		rmSync(extracted, { recursive: true });
+		return version;
+	}
 	mkdirSync(join(node, "bin"), { recursive: true });
 	const root = archiveName.replace(/\.tar\.gz$/, "");
 	// Only the binary, npm, and the license: headers, docs, and corepack are left out.
@@ -138,12 +183,15 @@ async function stageNode(out, target) {
 function openGentleAi(daemon) {
 	const dir = join(daemon, "node_modules", "gentle-pi", ".gentle-ai");
 	if (!existsSync(dir)) throw new Error(`gentle-pi's postinstall left no ${dir}.`);
+	// Windows carries no execute bit, so a `.exe` there must not read as "not a binary";
+	// `chmod` is a no-op anyway and the file's extension is what makes it runnable.
+	const windows = process.platform === "win32";
 	const open = (path) => {
 		const stat = lstatSync(path);
 		if (stat.isDirectory()) {
 			chmodSync(path, 0o755);
 			for (const name of readdirSync(path)) open(join(path, name));
-		} else if (stat.isFile()) chmodSync(path, stat.mode & 0o111 ? 0o755 : 0o644);
+		} else if (stat.isFile()) chmodSync(path, windows || (stat.mode & 0o111) !== 0 ? 0o755 : 0o644);
 	};
 	open(dir);
 	const versions = readdirSync(dir);
@@ -151,18 +199,21 @@ function openGentleAi(daemon) {
 	return integrity;
 }
 
-function installDaemonModules(out) {
+function installDaemonModules(out, target) {
 	const daemon = join(out, "daemon");
 	const npmHome = join(CACHE, "npm-home");
 	mkdirSync(npmHome, { recursive: true });
 	const npmrc = join(CACHE, "npmrc");
 	writeFileSync(npmrc, "");
 	say("Daemon dependencies (npm install --omit=dev)");
+	const windows = TARGETS[target].platform === "win32";
 	// A clean npm setup: no user npmrc, a cache of its own, and a scratch HOME for install scripts.
 	const result = spawnSync(
-		join(out, "node", "bin", "node"),
+		windows ? join(out, "node", "node.exe") : join(out, "node", "bin", "node"),
 		[
-			join(out, "node", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+			windows
+				? join(out, "node", "node_modules", "npm", "bin", "npm-cli.js")
+				: join(out, "node", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
 			"install",
 			"--omit=dev",
 			"--no-bin-links",
@@ -174,15 +225,26 @@ function installDaemonModules(out) {
 			cwd: daemon,
 			encoding: "utf8",
 			maxBuffer: 64 * 1024 * 1024,
-			env: {
-				HOME: npmHome,
-				PATH: `${join(out, "node", "bin")}:${SYSTEM_PATH}`,
-				TMPDIR: process.env.TMPDIR ?? "/tmp",
-				npm_config_userconfig: npmrc,
-				npm_config_cache: join(CACHE, "npm-cache"),
-				npm_config_registry: "https://registry.npmjs.org/",
-				npm_config_update_notifier: "false",
-			},
+			env: windows
+				? {
+						...process.env,
+						USERPROFILE: npmHome,
+						HOME: npmHome,
+						PATH: [join(out, "node"), join(out, "bin"), process.env.PATH ?? ""].filter(Boolean).join(";"),
+						npm_config_userconfig: npmrc,
+						npm_config_cache: join(CACHE, "npm-cache"),
+						npm_config_registry: "https://registry.npmjs.org/",
+						npm_config_update_notifier: "false",
+					}
+				: {
+						HOME: npmHome,
+						PATH: `${join(out, "node", "bin")}:${SYSTEM_PATH}`,
+						TMPDIR: process.env.TMPDIR ?? "/tmp",
+						npm_config_userconfig: npmrc,
+						npm_config_cache: join(CACHE, "npm-cache"),
+						npm_config_registry: "https://registry.npmjs.org/",
+						npm_config_update_notifier: "false",
+					},
 		},
 	);
 	process.stdout.write(result.stdout ?? "");
@@ -193,7 +255,7 @@ function installDaemonModules(out) {
 		.filter((line) => /Gentle AI|gentle-pi/.test(line) && !/^>/.test(line.trim()));
 	const gentleAi = openGentleAi(daemon);
 	say(`  gentle-pi postinstall: ${postinstall.join(" | ") || "(no output)"}`);
-	say(`  gentle-ai ${gentleAi.version} from ${gentleAi.asset} (sha256 ${gentleAi.assetSha256})`);
+	say(`  gentle-ai ${gentleAi.version} ${gentleAiProvenance(gentleAi)}`);
 	const pkg = (name) =>
 		JSON.parse(readFileSync(join(daemon, "node_modules", name, "package.json"), "utf8")).version;
 	return {
@@ -232,14 +294,40 @@ async function stageEngram(out, target, requested) {
 		archiveName,
 		checksumFor(await text(`${base}/checksums.txt`), archiveName),
 	);
+	const windows = TARGETS[target].platform === "win32";
+	const binaryName = windows ? "engram.exe" : "engram";
 	const extracted = mkdtempSync(join(CACHE, "engram-"));
-	run("tar", ["-xzf", archive, "-C", extracted, "engram"]);
-	const binary = join(extracted, "engram");
-	if (!lstatSync(binary).isFile()) throw new Error(`${archiveName} has no regular engram binary.`);
-	copyFileSync(binary, join(out, "bin", "engram"));
-	chmodSync(join(out, "bin", "engram"), 0o755);
+	if (windows) extractZip(archive, extracted);
+	else run("tar", ["-xzf", archive, "-C", extracted, "engram"]);
+	const binary = findFile(extracted, binaryName);
+	if (!binary || !lstatSync(binary).isFile()) throw new Error(`${archiveName} has no regular ${binaryName}.`);
+	copyFileSync(binary, join(out, "bin", binaryName));
+	if (!windows) chmodSync(join(out, "bin", binaryName), 0o755);
 	rmSync(extracted, { recursive: true });
 	return { version, source };
+}
+
+/**
+ * Gentle Dot's own Engram guard.
+ *
+ * The providers reach local Engram data only by running `ENGRAM_BIN`, and the guard they get today
+ * is a `#!/bin/sh` script from Gentle Shell, which Windows cannot start: the notice said the binary
+ * "could not be found" for a file that was right there. This program is the same contract as an
+ * executable — one notice, exit 78, no store touched — so the refusal works on every platform.
+ *
+ * Built here, from its own dependency-free crate, because staging runs before the app is compiled
+ * and the Tauri crate's tree would add minutes to a step that takes seconds.
+ */
+function stageEngramGuard(out, target) {
+	const crate = join(REPO, "apps", "engram-guard");
+	const windows = TARGETS[target].platform === "win32";
+	const name = windows ? "engram-guard.exe" : "engram-guard";
+	run("cargo", ["build", "--release", "--manifest-path", join(crate, "Cargo.toml")]);
+	const built = join(crate, "target", "release", name);
+	if (!lstatSync(built).isFile()) throw new Error(`the guard build left no regular ${name} at ${built}.`);
+	copyFileSync(built, join(out, "bin", name));
+	if (!windows) chmodSync(join(out, "bin", name), 0o755);
+	return name;
 }
 
 function daemonCommit() {
@@ -266,8 +354,11 @@ async function main() {
 	const node = await stageNode(out, target);
 	say("Daemon (build:runtime)");
 	run("pnpm", ["--filter", "@gentle-dot/daemon", "build:runtime", "--", "--out", out], { cwd: REPO });
-	const modules = installDaemonModules(out);
+	const modules = installDaemonModules(out, target);
 	const engram = await stageEngram(out, target, options.engramVersion);
+	say("Engram guard");
+	const guard = stageEngramGuard(out, target);
+	say(`Staged ${guard}`);
 	say("Web UI");
 	run("pnpm", ["--filter", "@gentle-dot/ui", "build"], { cwd: REPO });
 	cpSync(join(REPO, "packages", "ui", "dist", "app"), join(out, "ui"), { recursive: true });

@@ -27,6 +27,7 @@ import { engineAccess } from "../src/engine-access.ts";
 import { writePrivateFile } from "../src/private-file.ts";
 import { lookupUser } from "../src/vps.ts";
 import { FAKE_AGENT, waitFor } from "./helpers.ts";
+import { expectPosixMode } from "./support/posix-modes.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const ENGINE_USER = process.env.GENTLE_DOT_TEST_ENGINE_USER;
@@ -216,6 +217,6 @@ describe.runIf(asRoot)("server mode as root: the daemon never acts on the engine
 		});
 		expect(response.ok).toBe(false);
 		expect(readdirSync(target.dir)).toEqual(["keep.json"]);
-		expect(statSync(target.dir).mode & 0o777).toBe(0o700);
+		expectPosixMode(target.dir, 0o700);
 	});
 });
