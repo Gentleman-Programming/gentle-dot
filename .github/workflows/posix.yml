@@ -14,7 +14,11 @@ name: POSIX
 
 on:
   push:
-    branches: [main]
+    # `main` is the branch this workflow guards. `feat/windows-port` is listed because that branch
+    # is where the Windows work lives until it merges, and its own pushes would otherwise never run
+    # the Unix arms they change — the same reason `windows.yml` lists it. The line goes away with
+    # the branch, when the port merges into `main`.
+    branches: [main, feat/windows-port]
   pull_request:
   workflow_dispatch:
 
