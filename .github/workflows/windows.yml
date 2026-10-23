@@ -25,7 +25,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # The toolchain the Windows port is built and tested with.
+      # The toolchain the Windows port is built and tested with. The repository has no
+      # rust-toolchain.toml, so this pin is the one place that names it; later PRs keep it.
       - uses: dtolnay/rust-toolchain@1.96.1
 
       - uses: Swatinem/rust-cache@v2.9.2
