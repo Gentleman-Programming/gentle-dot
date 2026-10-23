@@ -6,6 +6,7 @@ use crate::platform::Os;
 /// rendered by `apps/desktop/scripts/make-icon.mjs`. On macOS they are 36 px template
 /// images, drawn at 18 pt on Retina menu bars. Linux panels can be light or dark and
 /// do not tint icons, so Linux gets 32 px glyphs in a light gray with a dark outline.
+/// Windows reuses those colored glyphs without template tinting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayGlyph {
     Ready,
@@ -30,10 +31,10 @@ impl TrayGlyph {
     pub fn image(self, os: Os) -> &'static [u8] {
         match (os, self) {
             (Os::MacOs, _) => self.png(),
-            (Os::Linux, Self::Ready) => include_bytes!("../icons/tray/linux/ready.png"),
-            (Os::Linux, Self::Working) => include_bytes!("../icons/tray/linux/working.png"),
-            (Os::Linux, Self::NeedsYou) => include_bytes!("../icons/tray/linux/needs-you.png"),
-            (Os::Linux, Self::Unavailable) => include_bytes!("../icons/tray/linux/unavailable.png"),
+            (Os::Linux | Os::Windows, Self::Ready) => include_bytes!("../icons/tray/linux/ready.png"),
+            (Os::Linux | Os::Windows, Self::Working) => include_bytes!("../icons/tray/linux/working.png"),
+            (Os::Linux | Os::Windows, Self::NeedsYou) => include_bytes!("../icons/tray/linux/needs-you.png"),
+            (Os::Linux | Os::Windows, Self::Unavailable) => include_bytes!("../icons/tray/linux/unavailable.png"),
         }
     }
 }
@@ -134,6 +135,15 @@ mod tests {
             for b in &glyphs[i + 1..] {
                 assert_ne!(a.image(Os::Linux), b.image(Os::Linux), "{a:?} and {b:?}");
             }
+        }
+    }
+
+    #[test]
+    fn windows_reuses_colored_non_template_tray_glyphs() {
+        assert!(!is_template(Os::Windows));
+        for glyph in [TrayGlyph::Ready, TrayGlyph::Working, TrayGlyph::NeedsYou, TrayGlyph::Unavailable] {
+            assert_eq!(glyph.image(Os::Windows), glyph.image(Os::Linux));
+            assert_ne!(glyph.image(Os::Windows), glyph.image(Os::MacOs));
         }
     }
 
