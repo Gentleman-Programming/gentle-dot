@@ -1,0 +1,48 @@
+# Windows checks for the native Windows port.
+#
+# The desktop shell is mostly written on Linux and macOS, where its `cfg(windows)` code never
+# compiles, so this is where that code meets a real `x86_64-pc-windows-msvc` toolchain.
+name: Windows
+
+on:
+  push:
+    # `ci/**` branches try workflow changes before they reach `main`.
+    branches: [main, 'ci/**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust shell
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The toolchain the Windows port is built and tested with.
+      - uses: dtolnay/rust-toolchain@1.96.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      # `tauri.conf.json` points `frontendDist` at the built UI. A debug build does not embed it,
+      # but the folder has to exist, and building the UI here would add the whole pnpm install.
+      - name: UI folder for the build script
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path packages/ui/dist/app | Out-Null
+
+      - name: cargo check
+        working-directory: apps/desktop/src-tauri
+        run: cargo check --locked --all-targets
+
+      - name: cargo test
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --locked --lib
+
