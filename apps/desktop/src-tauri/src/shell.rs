@@ -552,21 +552,16 @@ fn spawn_snapper(app: AppHandle) -> mpsc::Sender<()> {
     tx
 }
 
-/// The panel's backdrop, translated from the OS-agnostic decision in `platform` (design §9).
-///
-/// The resolved [`WindowEffect`] is threaded in from the one call site that resolves it, so the
-/// material requested here and the URL that decides whether the UI paints a background cannot
-/// disagree. macOS asks for `HudWindow`. Windows asks for `Mica` only when the facts hold (build
-/// ≥ 22000, transparency on, a local session, composition on); the request is **gated, not
-/// proven**, because Tauri discards the result with no readback and a silent failure stays
-/// possible — the gate is the mitigation, and the panel keeps `effects=none` when it does not
-/// fire. Linux gets nothing, and `WebviewWindowBuilder::effects` is documented as unsupported
-/// there.
 /// The material the panel asks the window system for, as a pure decision so every OS can test it
 /// without opening a window: the effect the panel resolved, mapped to the tauri material and the
 /// corner radius it goes with (`HudWindow` takes 20.0; `Mica` uses the builder's default).
 /// `None` means the OS gets no material, which is Linux and Windows whenever the backdrop facts
 /// do not hold.
+///
+/// Which effect each platform gets, and why the Windows request is gated rather than proven, is
+/// [`WindowEffect`]'s to say: this function only translates the answer, never decides it. Taking
+/// the effect rather than the OS is what keeps the window and the page from disagreeing — both
+/// consume the one resolution in `build_windows`.
 fn panel_material(effect: WindowEffect) -> Option<(Effect, Option<f64>)> {
     match effect {
         WindowEffect::HudWindow => Some((Effect::HudWindow, Some(20.0))),
@@ -1107,5 +1102,18 @@ mod tests {
         ));
         assert!(matches!(panel_material(WindowEffect::Mica), Some((Effect::Mica, None))));
         assert!(panel_material(WindowEffect::None).is_none());
+    }
+
+    #[test]
+    fn the_page_and_the_material_agree_on_every_effect() {
+        // The doc on `panel_material` promises that the material and the URL "cannot disagree", and
+        // each side is asserted alone — the mapping here, the URL in `platform` — so the pair is
+        // what this checks: a window asking for a backdrop exactly when the page does not paint its
+        // own background.
+        for effect in [WindowEffect::HudWindow, WindowEffect::Mica, WindowEffect::None] {
+            let url = platform::panel_url(effect);
+            let page_paints_its_own = url.ends_with("effects=none");
+            assert_eq!(panel_material(effect).is_none(), page_paints_its_own, "{effect:?} gives {url}");
+        }
     }
 }

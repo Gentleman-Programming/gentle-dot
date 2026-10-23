@@ -3,8 +3,9 @@
  * encrypted secrets, the PIN hash): a new temporary file next to it, created exclusively (a link or
  * an older file there is never followed), checked to belong to the daemon's real user before
  * anything is written, then renamed over the old one. That ownership check compares uids, so it
- * only applies where the platform reports one — Windows does not, and `assertCreatedBySelf`
- * says so rather than skipping in silence. Refused inside an engine-access bracket
+ * only applies where the platform reports one, and `assertCreatedBySelf` holds both the rule and
+ * the Windows skip: the skip is documented there, never announced at runtime. Refused inside an
+ * engine-access bracket
  * (`engine-access.ts`), where it would be created as the engine's user. Fails closed: a temporary
  * file that is not the daemon's is removed and the write throws.
  */
