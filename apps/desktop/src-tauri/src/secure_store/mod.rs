@@ -14,6 +14,9 @@
 //! `Display`, and errors never carry a secret.
 
 mod memory;
+// The Windows DPAPI store's file format; the store itself uses it on Windows.
+#[cfg(test)]
+mod windows_codec;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
