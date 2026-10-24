@@ -8,12 +8,14 @@ import type { PanelWindowControls } from "../usePanelWindow.ts";
 import { useVoice, type VoiceControls } from "../useVoice.ts";
 import { AccountsPanel } from "./AccountsPanel.tsx";
 import { AskCard } from "./AskCard.tsx";
+import { ChannelsPanel } from "./ChannelsPanel.tsx";
 import { Composer } from "./Composer.tsx";
 import { ComputerBanner, type ComputerControls } from "./Computer.tsx";
 import { ConnectorDraftCard } from "./ConnectorDraftCard.tsx";
 import { ConnectorsPanel } from "./ConnectorsPanel.tsx";
 import {
 	AccountsIcon,
+	ChannelsIcon,
 	CollapseIcon,
 	ConnectorsIcon,
 	ConversationsIcon,
@@ -113,12 +115,20 @@ export function ChatSurface({
 		send({ type: "connectors_list" });
 		dispatch({ type: "connectors", open: true });
 	};
+	const openChannels = () => {
+		setShowSettings(false);
+		send({ type: "channel_list" });
+		send({ type: "channel_allowlist" });
+		send({ type: "channel_pair_status" });
+		dispatch({ type: "channels", open: true });
+	};
 	/** Settings is a screen like the others: opening it closes them, except a sign-in waiting for an answer. */
 	const openSettings = () => {
 		if (state.auth.open && !state.auth.flow?.prompt) dispatch({ type: "accounts", open: false });
 		if (state.profiles.open) dispatch({ type: "profiles", open: false });
 		if (state.connectors.open && !state.connectors.flow?.prompt)
 			dispatch({ type: "connectors", open: false });
+		if (state.channels.open) dispatch({ type: "channels", open: false });
 		setShowSettings(true);
 	};
 	const [showConversations, setShowConversations] = useState(false);
@@ -160,8 +170,9 @@ export function ChatSurface({
 		if (state.profiles.open) dispatch({ type: "profiles", open: false });
 		if (state.connectors.open && !state.connectors.flow?.prompt)
 			dispatch({ type: "connectors", open: false });
+		if (state.channels.open) dispatch({ type: "channels", open: false });
 	};
-	const covered = state.auth.open || state.profiles.open || state.connectors.open;
+	const covered = state.auth.open || state.profiles.open || state.connectors.open || state.channels.open;
 	const settingsShown = settings === true && showSettings && !covered;
 	// One continuous chat unless the daemon turns the conversations list on.
 	const conversations = state.features.conversations;
@@ -214,6 +225,9 @@ export function ChatSurface({
 					onClick={openConnectors}
 				>
 					<ConnectorsIcon />
+				</button>
+				<button type="button" className="icon" aria-label="Channels" title="Channels" onClick={openChannels}>
+					<ChannelsIcon />
 				</button>
 				{voice.mic ? <MuteButton voice={voice} /> : null}
 				{conversations ? (
@@ -313,6 +327,17 @@ export function ChatSurface({
 						openUrl={openUrl}
 						{...(computer?.available ? { computer } : {})}
 						{...(voiceModel ? { voiceModel } : {})}
+					/>
+				</main>
+			) : null}
+
+			{state.channels.open && !state.auth.open && !state.profiles.open && !state.connectors.open ? (
+				<main className="chat-body">
+					<ChannelsPanel
+						channels={state.channels}
+						send={send}
+						{...(changeSend ? { appSend: changeSend } : {})}
+						dispatch={dispatch}
 					/>
 				</main>
 			) : null}
