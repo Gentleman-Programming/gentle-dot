@@ -17,6 +17,7 @@ import { AppChannel } from "./app-channel.ts";
 import { AuthManager, type AuthRuntime, createModelAuthRuntime, resolveAgentHome } from "./auth.ts";
 import { AuthHelper } from "./auth-helper.ts";
 import { type BridgeClient, DotBridge } from "./bridge.ts";
+import { createChannelProxy } from "./channel-proxy.ts";
 import {
 	APPROVAL_GUARD,
 	ConnectorManager,
@@ -313,12 +314,23 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		...(options.uploadLimits ? { limits: options.uploadLimits } : {}),
 	});
 	const historyPage = options.historyPage ?? Number(process.env.GENTLE_DOT_HISTORY_PAGE);
+	// The external channel bridge's admin API (Channels, phase 1): the proxy re-reads its token
+	// from disk on every call and never spawns the bridge (S9).
+	const adminPortRaw = process.env.DOT_WHATSAPP_ADMIN_PORT?.trim();
+	const adminPort = adminPortRaw && Number.isInteger(Number(adminPortRaw)) ? Number(adminPortRaw) : undefined;
+	const adminTokenFile = process.env.DOT_WHATSAPP_ADMIN_TOKEN_FILE?.trim() || undefined;
+	const channelProxy = createChannelProxy({
+		...(adminPort ? { port: adminPort } : {}),
+		...(adminTokenFile ? { tokenFile: adminTokenFile } : {}),
+		log,
+	});
 	const bridge = new DotBridge(supervisor, {
 		dataDir: options.dataDir,
 		log,
 		auth,
 		profiles,
 		connectors,
+		channels: channelProxy,
 		voice,
 		uploads,
 		...(app ? { app } : {}),
