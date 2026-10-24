@@ -25,7 +25,10 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(windows)]
+use unavailable::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -288,7 +291,44 @@ impl AppChannel {
     }
 }
 
-#[cfg(test)]
+/// Temporary seam of the Windows port (gentle-dot#89): the channel's Windows transport lands with
+/// the daemon lifecycle. Until then this stream only lets the module compile on Windows, where no
+/// daemon is spawned, so no value of it can exist.
+#[cfg(windows)]
+mod unavailable {
+    use std::io;
+    use std::net::Shutdown;
+
+    pub enum UnixStream {}
+
+    impl UnixStream {
+        pub fn try_clone(&self) -> io::Result<Self> {
+            match *self {}
+        }
+
+        pub fn shutdown(&self, _how: Shutdown) -> io::Result<()> {
+            match *self {}
+        }
+    }
+
+    impl io::Read for UnixStream {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            match *self {}
+        }
+    }
+
+    impl io::Write for UnixStream {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            match *self {}
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            match *self {}
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::approvals::fake::{Answer, FakePrompt};
