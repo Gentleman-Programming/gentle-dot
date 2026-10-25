@@ -72,6 +72,47 @@ export async function onNativeVoice(handlers: NativeVoiceHandlers): Promise<() =
 	};
 }
 
+/**
+ * The input devices the app offers and the one chosen (S1, S4): the stored identity is the device
+ * UID and the name is display only. `chosen` is `null` when following the system default.
+ */
+export interface VoiceInputDevice {
+	uid: string;
+	name: string;
+}
+
+export interface VoiceInputOptions {
+	devices: VoiceInputDevice[];
+	chosen: string | null;
+	default: string | null;
+}
+
+/** The devices and the stored choice; a malformed answer reads as no devices yet and the system default. */
+export async function loadVoiceInputOptions(): Promise<VoiceInputOptions> {
+	const answer = await invoke<{ devices?: unknown; chosen?: unknown; default?: unknown } | undefined>(
+		"voice_input_options",
+	);
+	const list: unknown[] = Array.isArray(answer?.devices) ? answer.devices : [];
+	const devices: VoiceInputDevice[] = [];
+	for (const entry of list) {
+		const device = entry as { uid?: unknown; name?: unknown } | null | undefined;
+		if (typeof device?.uid !== "string" || !device.uid) continue;
+		devices.push({ uid: device.uid, name: typeof device.name === "string" ? device.name : "" });
+	}
+	return { devices, chosen: deviceId(answer?.chosen), default: deviceId(answer?.default) };
+}
+
+/** A device UID the app gave, or `null` (the system default) when it gave none. */
+function deviceId(value: unknown): string | null {
+	return typeof value === "string" && value ? value : null;
+}
+
+/** Stores the chosen microphone by UID (`null` follows the system default); rejects with the app's reason. */
+export async function saveVoiceInput(uid: string | null): Promise<string | null> {
+	const result = await invoke<{ chosen?: string | null } | undefined>("voice_input_set", { uid });
+	return result?.chosen ?? null;
+}
+
 /** Why `voice_start` refused, in the app's words when it gave some. */
 export function startRefusal(error: unknown): string {
 	if (typeof error === "string" && error) return error;

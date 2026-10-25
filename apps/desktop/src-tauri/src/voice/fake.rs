@@ -32,6 +32,8 @@ pub struct MicLog {
     pub requests: usize,
     pub opened: usize,
     pub closed: usize,
+    /// The device each capture was asked for; `None` is the system default input.
+    pub devices: Vec<Option<String>>,
     pub sink: Option<Sink>,
 }
 
@@ -83,12 +85,13 @@ impl Microphone for FakeMicrophone {
         answer
     }
 
-    fn open(&self, sink: Sink) -> Result<Box<dyn Stream>, VoiceError> {
+    fn open(&self, device: Option<&str>, sink: Sink) -> Result<Box<dyn Stream>, VoiceError> {
         if let Some(error) = self.open_error.lock().unwrap().clone() {
             return Err(error);
         }
         let mut log = self.log.lock().unwrap();
         log.opened += 1;
+        log.devices.push(device.map(str::to_string));
         log.sink = Some(sink);
         Ok(Box::new(FakeStream { log: self.log.clone() }))
     }

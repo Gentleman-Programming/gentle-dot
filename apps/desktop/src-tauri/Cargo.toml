@@ -38,7 +38,7 @@ bzip2 = "0.6"
 
 # The computer-control helper (S24) is macOS only.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
+objc2 = { version = "0.6", features = ["exception"] }
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSArray", "NSDictionary", "NSError", "NSLocale", "NSNotification", "NSOperation", "NSSet", "NSString", "NSValue"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFArray", "CFCGTypes", "CFData", "CFDictionary", "CFNumber", "CFString"] }
