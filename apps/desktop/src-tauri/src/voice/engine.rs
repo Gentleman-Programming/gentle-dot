@@ -122,7 +122,7 @@ mod tests {
         let rig = rig(FakeRecognizer::granted(), true);
         assert_eq!(rig.preferred.engine(), EngineName::Apple);
         *rig.apple.final_text.lock().unwrap() = Some("apple heard".into());
-        rig.voice.start(Some("es-AR"), Recorder::default().events()).unwrap();
+        rig.voice.start(Some("es-AR"), None, Recorder::default().events()).unwrap();
         assert_eq!(rig.apple.log.lock().unwrap().locales, ["es-ES"]);
         assert_eq!(rig.voice.stop(), Ok(Transcript { text: "apple heard".into() }));
     }
@@ -132,7 +132,7 @@ mod tests {
         let rig = rig(FakeRecognizer::granted(), true);
         rig.installed.store(true, Ordering::SeqCst);
         assert_eq!(rig.preferred.engine(), EngineName::Parakeet);
-        rig.voice.start(None, Recorder::default().events()).unwrap();
+        rig.voice.start(None, None, Recorder::default().events()).unwrap();
         rig.mic.sink().audio(&[0.0; 320]);
         assert_eq!(rig.voice.stop(), Ok(Transcript { text: "parakeet heard 320".into() }));
         assert!(rig.apple.log.lock().unwrap().locales.is_empty(), "Apple Speech is not used");
@@ -143,7 +143,7 @@ mod tests {
         let mut apple = FakeRecognizer::granted();
         apple.native = true;
         let rig = rig(apple, true);
-        rig.voice.start(None, Recorder::default().events()).unwrap();
+        rig.voice.start(None, None, Recorder::default().events()).unwrap();
         let buffer = FakeNative { rate: 48_000, frames: 960 };
         rig.mic.sink().audio_native(&[0.0; 320], &buffer);
         let log = rig.apple.log.lock().unwrap();
@@ -157,7 +157,7 @@ mod tests {
         apple.native = true;
         let rig = rig(apple, true);
         rig.installed.store(true, Ordering::SeqCst);
-        rig.voice.start(None, Recorder::default().events()).unwrap();
+        rig.voice.start(None, None, Recorder::default().events()).unwrap();
         rig.mic.sink().audio_native(&[0.0; 320], &FakeNative { rate: 48_000, frames: 960 });
         assert_eq!(rig.voice.stop(), Ok(Transcript { text: "parakeet heard 320".into() }));
         assert!(rig.apple.log.lock().unwrap().native.is_empty(), "Apple Speech is not used");
@@ -169,7 +169,7 @@ mod tests {
         assert_eq!(rig.voice.status(), VoiceStatus::unavailable(VoiceError::SpeechDenied.to_string()));
         rig.installed.store(true, Ordering::SeqCst);
         assert_eq!(rig.voice.status(), VoiceStatus::available());
-        rig.voice.start(None, Recorder::default().events()).unwrap();
+        rig.voice.start(None, None, Recorder::default().events()).unwrap();
         assert_eq!(rig.apple.log.lock().unwrap().requests, 0, "no Speech Recognition prompt");
         rig.voice.cancel().unwrap();
     }
@@ -188,7 +188,7 @@ mod tests {
         let rig = rig(FakeRecognizer::granted(), false);
         assert_eq!(rig.preferred.engine(), EngineName::None);
         assert_eq!(rig.voice.status(), VoiceStatus::unavailable(VoiceError::NoModel.to_string()));
-        assert_eq!(rig.voice.start(None, Recorder::default().events()), Err(VoiceError::NoModel));
+        assert_eq!(rig.voice.start(None, None, Recorder::default().events()), Err(VoiceError::NoModel));
         rig.installed.store(true, Ordering::SeqCst);
         assert_eq!(rig.preferred.engine(), EngineName::Parakeet);
         assert_eq!(rig.voice.status(), VoiceStatus::available());

@@ -21,6 +21,8 @@ const COMMANDS: &[&str] = &[
     "voice_start",
     "voice_stop",
     "voice_cancel",
+    "voice_input_options",
+    "voice_input_set",
     "voice_model_status",
     "voice_model_download",
     "voice_model_cancel",

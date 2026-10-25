@@ -1,14 +1,21 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { formatShortcut, recordKey } from "../src/shortcut.ts";
 import { type DotState, initialState } from "../src/store.ts";
+import { deviceLabel, deviceValue, missingChoice } from "../src/voice-device.ts";
 
 /** The Settings screen and its keyboard shortcut (S33), through the panel and mocked Tauri commands. */
 const h = vi.hoisted(() => ({
 	tauri: true,
 	shortcut: "Alt+Space",
 	setResult: undefined as undefined | ((shortcut: string) => Promise<unknown>),
+	devices: [
+		{ uid: "uid-1", name: "MacBook Pro Microphone" },
+		{ uid: "uid-2", name: "Shure MV7" },
+	],
+	chosen: null as string | null,
+	inputSetResult: undefined as undefined | ((uid: string | null) => Promise<unknown>),
 	invoke: vi.fn(),
 	state: undefined as unknown as DotState,
 }));
@@ -49,6 +56,17 @@ async function openSettings() {
 	return screen.findByRole("region", { name: "Settings" });
 }
 
+const microphoneSection = () => screen.getByRole("region", { name: "Microphone" });
+
+/** The microphone picker, once the app has answered and it stops being disabled. */
+async function openMicrophone() {
+	await openSettings();
+	const section = microphoneSection();
+	const picker = within(section).getByRole("combobox", { name: "Microphone" });
+	await waitFor(() => expect(picker).toBeEnabled());
+	return { section, picker };
+}
+
 async function startRecording() {
 	await openSettings();
 	await screen.findByText("⌥ Space");
@@ -60,6 +78,12 @@ beforeEach(() => {
 	h.tauri = true;
 	h.shortcut = "Alt+Space";
 	h.setResult = undefined;
+	h.devices = [
+		{ uid: "uid-1", name: "MacBook Pro Microphone" },
+		{ uid: "uid-2", name: "Shure MV7" },
+	];
+	h.chosen = null;
+	h.inputSetResult = undefined;
 	h.state = { ...initialState, connection: "open", agentState: "idle" };
 	vi.spyOn(navigator, "userAgent", "get").mockReturnValue(MAC_AGENT);
 	h.invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
@@ -73,6 +97,14 @@ beforeEach(() => {
 				if (h.setResult) return h.setResult(shortcut);
 				h.shortcut = shortcut;
 				return { shortcut };
+			}
+			case "voice_input_options":
+				return { devices: h.devices, chosen: h.chosen, default: "uid-1" };
+			case "voice_input_set": {
+				const uid = args?.uid === null ? null : String(args?.uid);
+				if (h.inputSetResult) return h.inputSetResult(uid);
+				h.chosen = uid;
+				return { chosen: uid };
 			}
 			default:
 				return null;
@@ -257,5 +289,89 @@ describe("changing the shortcut (S33.2, S33.3)", () => {
 		expect(invoked("shortcut_set")[0]?.[1]).toEqual({ shortcut: "Alt+Space" });
 		expect(await screen.findByText("⌥ Space")).toBeInTheDocument();
 		expect(screen.getByRole("button", { name: "Reset to default" })).toBeDisabled();
+	});
+});
+
+describe("the microphone (S1, S3, S4)", () => {
+	it("starts on the system default, which is always the first choice", async () => {
+		const { picker } = await openMicrophone();
+		expect(picker).toHaveValue("");
+		expect(
+			within(picker)
+				.getAllByRole("option")
+				.map((option) => option.textContent),
+		).toEqual(["System default", "MacBook Pro Microphone", "Shure MV7"]);
+	});
+
+	it("renders with no devices yet, as the first release reports them", async () => {
+		h.devices = [];
+		const { picker } = await openMicrophone();
+		expect(picker).toHaveValue("");
+		expect(within(picker).getAllByRole("option")).toHaveLength(1);
+	});
+
+	it("shows the stored device by its name, selected by its UID", async () => {
+		h.chosen = "uid-2";
+		const { picker } = await openMicrophone();
+		expect(picker).toHaveValue("uid-2");
+		expect(within(picker).getByRole("option", { name: "Shure MV7" })).toHaveProperty("selected", true);
+	});
+
+	it("saves the choice by UID and says when it applies", async () => {
+		const { section, picker } = await openMicrophone();
+		await userEvent.selectOptions(picker, "uid-2");
+		await waitFor(() => expect(invoked("voice_input_set")).toHaveLength(1));
+		expect(invoked("voice_input_set")[0]?.[1]).toEqual({ uid: "uid-2" });
+		expect(within(section).getByRole("status")).toHaveTextContent("Saved. It applies to the next recording.");
+		expect(picker).toHaveValue("uid-2");
+
+		// The system-default option is the reset: no button, `null` follows the system again.
+		await userEvent.selectOptions(picker, "");
+		await waitFor(() => expect(invoked("voice_input_set")).toHaveLength(2));
+		expect(invoked("voice_input_set")[1]?.[1]).toEqual({ uid: null });
+	});
+
+	it("shows the app's reason when it refuses the choice and keeps the current one", async () => {
+		h.inputSetResult = async () => {
+			throw "That microphone is no longer connected.";
+		};
+		const { section, picker } = await openMicrophone();
+		await userEvent.selectOptions(picker, "uid-2");
+		expect(await within(section).findByRole("alert")).toHaveTextContent(
+			"That microphone is no longer connected.",
+		);
+		expect(picker).toHaveValue("");
+	});
+
+	it("warns when the stored device is gone, without clearing the choice (S3)", async () => {
+		h.chosen = "uid-gone";
+		const { section, picker } = await openMicrophone();
+		expect(within(section).getByRole("alert")).toHaveTextContent(
+			"The chosen microphone is not connected. The system default is used instead.",
+		);
+		// Nothing is blocked and nothing is rewritten: the browser falls back to the default
+		// option because the stored UID is not offered; the choice itself stays stored.
+		expect(picker).toHaveValue("");
+		expect(invoked("voice_input_set")).toHaveLength(0);
+		await userEvent.selectOptions(picker, "uid-1");
+		await waitFor(() => expect(invoked("voice_input_set")).toHaveLength(1));
+	});
+});
+
+describe("how a microphone is shown (S4)", () => {
+	it("labels a device by its trimmed name, never by its UID", () => {
+		expect(deviceLabel({ uid: "uid-1", name: "  Shure MV7  " })).toBe("Shure MV7");
+		expect(deviceLabel({ uid: "uid-2", name: "   " })).toBe("Unnamed microphone");
+	});
+
+	it("knows when a stored choice is gone and what the select shows", () => {
+		const devices = [{ uid: "uid-1", name: "Built-in" }];
+		expect(missingChoice({ devices, chosen: null, default: "uid-1" })).toBe(false);
+		expect(missingChoice({ devices, chosen: "uid-1", default: "uid-1" })).toBe(false);
+		expect(missingChoice({ devices, chosen: "uid-gone", default: "uid-1" })).toBe(true);
+		// No devices yet: nothing can have gone missing.
+		expect(missingChoice({ devices: [], chosen: "uid-gone", default: null })).toBe(false);
+		expect(deviceValue({ devices, chosen: null, default: "uid-1" })).toBe("");
+		expect(deviceValue({ devices, chosen: "uid-1", default: "uid-1" })).toBe("uid-1");
 	});
 });
