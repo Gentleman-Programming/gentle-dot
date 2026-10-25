@@ -72,3 +72,23 @@ describe("memory scope in the identity (S23, L85)", () => {
 		expect(identity).not.toMatch(/save or search memories, always use that project/);
 	});
 });
+
+describe("presentText — code block exemption", () => {
+	it("preserves commands inside code fences verbatim", () => {
+		const input = 'Run this:\n```bash\nnpm run worker:remote -- --host my-vps\n```\nThat installs the worker.';
+		const result = presentText(input);
+		expect(result).toContain("npm run worker:remote -- --host my-vps");
+	});
+
+	it("still rewrites prose outside code fences", () => {
+		const input = 'The gentle-shell daemon handles it.\n```\nls -la\n```';
+		const result = presentText(input);
+		expect(result).not.toContain("gentle-shell");
+	});
+
+	it("preserves paths with underscores inside code fences", () => {
+		const input = 'Check __pycache__ here:\n```\nrm -rf __pycache__\n```';
+		const result = presentText(input);
+		expect(result).toContain("__pycache__");
+	});
+});
