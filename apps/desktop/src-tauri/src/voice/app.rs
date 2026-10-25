@@ -259,17 +259,35 @@ impl Wake {
                     self.log("failed", serde_json::json!({ "reason": error }));
                 }
             }
+            ListenEvent::Silent => self.stop(),
         }
     }
 
-    /// Starts the note through the path the panel's button uses (S3): the same `Voice::start`
-    /// and the same `voice://*` events. The panel stops it, as it stops its own.
+    /// Starts the note through the path the panel's button uses (S3): the same `Voice::start`,
+    /// the same `voice://*` events, plus the automatic stop (S6).
     fn record(&self) -> Result<(), String> {
         let voice = self.inner.voice.clone().ok_or_else(|| UNSUPPORTED.to_string())?;
-        voice.start(None, self.panel_events()).map_err(|error| error.to_string())?;
+        voice
+            .start_woken(None, self.panel_events(), self.listen_events())
+            .map_err(|error| error.to_string())?;
         // The panel did not press anything, so it needs to know a note is running (S3).
         (self.inner.events)(VoiceEvent::Started);
         Ok(())
+    }
+
+    /// Ends a note the detector started: the transcript reaches the panel in the same shape as
+    /// the `voice_stop` reply, so the panel sends it the way it sends one it stopped (S3).
+    fn stop(&self) {
+        if let Some(voice) = &self.inner.voice {
+            match voice.stop() {
+                Ok(transcript) if !transcript.text.is_empty() => {
+                    (self.inner.events)(VoiceEvent::Transcript(transcript.text))
+                }
+                Ok(_) => {}
+                Err(error) => self.log("failed", serde_json::json!({ "reason": error.to_string() })),
+            }
+        }
+        self.resume();
     }
 
     fn listen_events(&self) -> ListenEvents {
@@ -679,6 +697,29 @@ mod tests {
         assert!(line["at"].as_u64().is_some(), "the line is timestamped: {line}");
     }
 
+    #[test]
+    fn the_note_ends_itself_and_the_transcript_reaches_the_panel() {
+        let rig = wake_rig("transcript", true);
+        *rig.recognizer.final_text.lock().unwrap() = Some(" hola ".into());
+        rig.wake.set(true).unwrap();
+        rig.detector.detect(0.51);
+        rig.mic.sink().audio(&[0.2; 480]);
+        wait_until("the note starts", || rig.mic.log.lock().unwrap().opened == 2);
+        let sink = rig.mic.sink();
+        for _ in 0..20 {
+            sink.audio(&[0.05; 1_600]);
+        }
+        for _ in 0..16 {
+            sink.audio(&[0.0; 1_600]);
+        }
+        wait_until("the transcript arrives", || {
+            rig.recorder.seen().iter().any(|event| matches!(event, VoiceEvent::Transcript(_)))
+        });
+        let transcript = rig.recorder.seen().into_iter().find(|event| matches!(event, VoiceEvent::Transcript(_)));
+        assert_eq!(transcript, Some(VoiceEvent::Transcript("hola".into())));
+        // And the phrase is waited for again, on a capture of its own.
+        wait_until("the detector listens again", || rig.mic.log.lock().unwrap().opened == 3);
+    }
 
     #[test]
     fn a_failed_detector_is_logged_too() {

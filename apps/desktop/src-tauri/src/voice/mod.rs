@@ -56,6 +56,7 @@ pub const ERROR_EVENT: &str = "voice://error";
 /// The transcript of a recording the user did not stop himself, which is the note the wake word
 /// started (S3): `{text}`, the same shape as the `voice_stop` reply, so the panel sends it the
 /// same way it sends one it stopped.
+pub const TRANSCRIPT_EVENT: &str = "voice://transcript";
 /// A talk that the wake word started: `{}`.
 pub const STARTED_EVENT: &str = "voice://started";
 pub const UNSUPPORTED: &str = "Voice input is available on macOS and Linux.";
@@ -90,6 +91,8 @@ pub enum VoiceEvent {
     Partial(String),
     Level(f32),
     Error(String),
+    /// A transcript nobody asked for on the spot: the wake word's automatic stop (S3).
+    Transcript(String),
     /// A recording the wake word started, so the panel can show it as recording (S3).
     Started,
 }
@@ -100,6 +103,7 @@ impl VoiceEvent {
             VoiceEvent::Partial(_) => PARTIAL_EVENT,
             VoiceEvent::Level(_) => LEVEL_EVENT,
             VoiceEvent::Error(_) => ERROR_EVENT,
+            VoiceEvent::Transcript(_) => TRANSCRIPT_EVENT,
             VoiceEvent::Started => STARTED_EVENT,
         }
     }
@@ -109,6 +113,7 @@ impl VoiceEvent {
             VoiceEvent::Partial(text) => serde_json::json!({ "text": text }),
             VoiceEvent::Level(level) => serde_json::json!({ "level": level }),
             VoiceEvent::Error(message) => serde_json::json!({ "message": message }),
+            VoiceEvent::Transcript(text) => serde_json::json!({ "text": text }),
             VoiceEvent::Started => serde_json::json!({}),
         }
     }
@@ -329,6 +334,11 @@ mod tests {
         assert_eq!(configuration_change(false), Some(VoiceError::Interrupted));
     }
 
+    #[test]
+    fn the_transcript_of_a_wake_recording_has_the_voice_stop_shape() {
+        let sent = VoiceEvent::Transcript("hola".into());
+        assert_eq!((sent.name(), sent.payload()), ("voice://transcript", serde_json::json!({ "text": "hola" })));
+    }
 
     #[test]
     fn the_stop_reply_is_the_text() {

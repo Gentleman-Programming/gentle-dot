@@ -364,16 +364,17 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 				if (recording.current?.kind === "native") finish(message);
 			},
 			// The wake word (S30.7): nobody pressed the button, so the panel mirrors the state the
-			// app already entered.
+			// app already entered and sends the transcript through the same path a stopped note uses.
 			started: () => {
 				if (phaseNow.current === "idle") setPhase("recording");
 			},
+			transcript: (text) => sendTranscript(text),
 		}).catch(() => () => {});
 		return () => {
 			live = false;
 			void off.then((stopListening) => stopListening());
 		};
-	}, [desktop, finish, setPhase]);
+	}, [desktop, finish, sendTranscript, setPhase]);
 
 	// Installing or removing the local model changes what the recognizer can do (#25).
 	useEffect(() => {

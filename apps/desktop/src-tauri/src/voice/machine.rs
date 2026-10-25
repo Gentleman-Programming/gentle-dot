@@ -6,7 +6,9 @@
 //! platform call or event is made while the state lock is held.
 //!
 //! While nothing records, the machine can hold the wake word's listener on the same capture
-//! (`arm`, S2); a recording takes the microphone from it.
+//! (`arm`, S2); a recording takes the microphone from it, and the note the wake word starts ends
+//! itself by energy (`start_woken`, S6).
+
 use super::wake::WakeWord;
 use super::{audio, locale, AudioSink, Authorization, Events, Listener, Microphone, NativeAudio, Recognition, Recognizer, Stream, Transcript};
 use super::{VoiceError, VoiceEvent, VoiceStatus};
@@ -20,10 +22,26 @@ pub const LEVEL_INTERVAL_MS: u64 = 1_000 / 15;
 /// How long `stop` waits for the final transcript before using the latest partial.
 pub const FINAL_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Where speech starts on the note the wake word started (S6). Measured with the app's own
+/// meter on this machine: speech sits around -27 dBFS (rms 0.045) and room silence around
+/// -55 dBFS (rms 0.0018), so -44 dBFS (rms 0.006) sits between them with about 17 dB of margin
+/// on the loud side and 11 dB on the quiet one. A fixed threshold is enough here: the note is
+/// recorded in one room, and the cost of guessing wrong is a note that ends early or late.
+pub const SPEECH_RMS: f32 = 0.006;
+/// Silence that ends a wake-word note, counted only after the speaker has been heard.
+pub const SILENCE_MS: u64 = 1_500;
+/// Speech a wake-word note needs before silence can end it, so a pause right after the wake word
+/// does not cut the sentence.
+pub const MIN_SPEECH_MS: u64 = 1_000;
+/// The hard cap on a wake-word note, the same one the panel's own recordings get.
+pub const MAX_RECORDING_MS: u64 = 60_000;
+
 /// What an armed listener reports (S30.7), on a thread of its own.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ListenEvent {
     Detected(super::wake::Detection),
+    /// A wake-word note heard `SILENCE_MS` of silence after speech, or reached the hard cap (S6).
+    Silent,
 }
 
 /// Where the wake word's findings go; called from any thread, never from the audio thread.
@@ -73,6 +91,46 @@ struct Session {
     last_level_ms: Option<u64>,
     /// The loudest chunk since the last level.
     peak: f32,
+    /// Set only for the note the wake word started (S6): it ends itself, and says so here.
+    woken: Option<Woken>,
+}
+
+/// A note the wake word started: it reports its own end, and the machine cuts it by energy.
+struct Woken {
+    listen: ListenEvents,
+    stop: AutoStop,
+}
+
+/// Energy over the same stream (S6): speech and silence, in milliseconds of audio heard.
+struct AutoStop {
+    speech_ms: u64,
+    silence_ms: u64,
+    heard_ms: u64,
+    fired: bool,
+}
+
+impl AutoStop {
+    fn new() -> Self {
+        AutoStop { speech_ms: 0, silence_ms: 0, heard_ms: 0, fired: false }
+    }
+
+    /// Counts one chunk and answers whether the note is over, once and only once.
+    fn accept(&mut self, samples: &[f32]) -> bool {
+        let chunk_ms = samples.len() as u64 * 1_000 / u64::from(audio::SAMPLE_RATE);
+        self.heard_ms += chunk_ms;
+        if audio::rms(samples) >= SPEECH_RMS {
+            self.speech_ms += chunk_ms;
+            self.silence_ms = 0;
+        } else if self.speech_ms >= MIN_SPEECH_MS {
+            self.silence_ms += chunk_ms;
+        }
+        let due = self.heard_ms >= MAX_RECORDING_MS || self.silence_ms >= SILENCE_MS;
+        if due && !self.fired {
+            self.fired = true;
+            return true;
+        }
+        false
+    }
 }
 
 /// The recognition, closed once finished or cancelled so no audio follows `finish`.
@@ -284,10 +342,16 @@ impl Voice {
     /// while a prompt is open, so it runs off the main thread. `events` reach the caller. The
     /// wake word's listener is dropped first: two captures never overlap (S2).
     pub fn start(&self, requested: Option<&str>, events: Events) -> Result<(), VoiceError> {
-        self.begin(requested, events)
+        self.begin(requested, events, None)
     }
 
-    fn begin(&self, requested: Option<&str>, events: Events) -> Result<(), VoiceError> {
+    /// Starts the note the wake word asked for (S3): the same path as the panel's button, plus
+    /// the automatic stop, which reports through `listen` (S6).
+    pub fn start_woken(&self, requested: Option<&str>, events: Events, listen: ListenEvents) -> Result<(), VoiceError> {
+        self.begin(requested, events, Some(Woken { listen, stop: AutoStop::new() }))
+    }
+
+    fn begin(&self, requested: Option<&str>, events: Events, woken: Option<Woken>) -> Result<(), VoiceError> {
         self.disarm();
         let (recording, previous) = {
             let mut state = lock(&self.inner.state);
@@ -329,6 +393,7 @@ impl Voice {
             final_text: None,
             last_level_ms: None,
             peak: 0.0,
+            woken,
         };
         let refused = if cancelled { Some(VoiceError::Cancelled) } else { failure.map(VoiceError::Failed) };
         if let Some(error) = refused {
@@ -463,7 +528,7 @@ impl Sink {
 
     fn capture(&self, samples: &[f32], native: Option<&NativeAudio>) {
         let Some(inner) = self.inner.upgrade() else { return };
-        let (feed, level) = {
+        let (feed, level, silent) = {
             let mut state = lock(&inner.state);
             let State::Recording(session) = &mut *state else { return };
             if session.recording != self.recording {
@@ -477,10 +542,18 @@ impl Sink {
                 let level = audio::level(std::mem::take(&mut session.peak));
                 (session.events.clone(), VoiceEvent::Level(level))
             });
-            (session.feed.clone(), level)
+            // The automatic stop is only for the note the wake word started (S6).
+            let silent = session.woken.as_mut().and_then(|woken| {
+                woken.stop.accept(samples).then(|| woken.listen.clone())
+            });
+            (session.feed.clone(), level, silent)
         };
         if let Some((events, level)) = level {
             events(level);
+        }
+        if let Some(listen) = silent {
+            // Stopping the note waits for the final transcript: never on the audio thread.
+            std::thread::spawn(move || listen(ListenEvent::Silent));
         }
         lock(&feed).push(samples, native);
     }
@@ -890,6 +963,8 @@ mod tests {
         }
     }
 
+    /// Speech at -26 dBFS: above `SPEECH_RMS` with room to spare, as measured on this machine.
+    const SPEECH: f32 = 0.05;
 
     #[test]
     fn the_listener_owns_the_microphone_until_a_recording_takes_it() {
@@ -956,7 +1031,44 @@ mod tests {
         assert_eq!(rig.mic.log.lock().unwrap().opened, 3);
     }
 
+    #[test]
+    fn a_woken_note_is_not_cut_before_a_second_of_speech() {
+        let rig = granted();
+        rig.voice.start_woken(None, rig.recorder.events(), rig.listenings.events()).unwrap();
+        rig.feed(SPEECH, 900);
+        rig.feed(0.0, 5_000);
+        assert!(rig.listenings.settle().is_empty(), "a pause right after the phrase cannot cut the note");
+        assert_eq!(rig.voice.stop().map(|transcript| transcript.text), Ok(String::new()));
+    }
 
+    #[test]
+    fn a_woken_note_is_cut_after_silence_that_follows_speech() {
+        let rig = granted();
+        rig.voice.start_woken(None, rig.recorder.events(), rig.listenings.events()).unwrap();
+        rig.feed(SPEECH, 1_000);
+        rig.feed(0.0, 1_490);
+        assert!(rig.listenings.settle().is_empty(), "the cut waits for a second and a half of silence");
+        rig.feed(0.0, 20);
+        assert_eq!(rig.listenings.wait_for(1), vec![ListenEvent::Silent]);
+        rig.feed(0.0, 1_000);
+        assert_eq!(rig.listenings.settle().len(), 1, "the cut happens once");
+    }
 
+    #[test]
+    fn a_button_note_never_stops_itself() {
+        let rig = granted();
+        rig.start().unwrap();
+        rig.feed(SPEECH, 2_000);
+        rig.feed(0.0, 10_000);
+        assert!(rig.listenings.settle().is_empty(), "the automatic stop is only for the wake word's note");
+    }
 
+    #[test]
+    fn a_woken_note_still_stops_at_the_hard_cap() {
+        let rig = granted();
+        rig.voice.start_woken(None, rig.recorder.events(), rig.listenings.events()).unwrap();
+        // Speech without a pause: nothing but the cap ends this note.
+        rig.feed(SPEECH, MAX_RECORDING_MS + 100);
+        assert_eq!(rig.listenings.wait_for(1), vec![ListenEvent::Silent]);
+    }
 }
