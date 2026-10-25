@@ -266,6 +266,11 @@ async function main() {
 	const node = await stageNode(out, target);
 	say("Daemon (build:runtime)");
 	run("pnpm", ["--filter", "@gentle-dot/daemon", "build:runtime", "--", "--out", out], { cwd: REPO });
+	// voice-tools ships with the daemon so the local transcriber can provision itself
+	// under <data>/voice-tools on packaged installs as well (voice without OpenAI).
+	cpSync(join(REPO, "packages", "daemon", "voice-tools"), join(out, "daemon", "voice-tools"), {
+		recursive: true,
+	});
 	const modules = installDaemonModules(out);
 	const engram = await stageEngram(out, target, options.engramVersion);
 	say("Web UI");

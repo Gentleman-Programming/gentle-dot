@@ -14,6 +14,7 @@ export function fakeAuthRuntime() {
 				auth: { apiKey: { name: "API key" }, oauth: { name: "Claude Pro/Max" } },
 			},
 			{ id: "openai", name: "OpenAI", auth: { apiKey: { name: "API key" } } },
+			{ id: "nvidia", name: "NVIDIA", auth: { apiKey: { name: "API key" } } },
 			{ id: "github-copilot", name: "GitHub Copilot", auth: { oauth: { name: "GitHub Copilot" } } },
 			{ id: "local", name: "Local", auth: {} },
 		],
