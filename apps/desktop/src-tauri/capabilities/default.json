@@ -27,7 +27,7 @@
 		},
 		{
 			"identifier": "voice",
-			"description": "Voice input (S30.1, S30.5): the panel's mic button records and transcribes natively, and the panel downloads, cancels, and removes the optional local voice model; the Dot never records.",
+			"description": "Voice input (S30.1, S30.5, S30.7): the panel's mic button records and transcribes natively, the panel downloads, cancels, and removes the optional local voice model, and the panel reads and turns on the wake word that listens on the same microphone; the Dot never records and never listens.",
 			"windows": ["panel"],
 			"permissions": [
 				"allow-voice-status",
@@ -37,7 +37,9 @@
 				"allow-voice-model-status",
 				"allow-voice-model-download",
 				"allow-voice-model-cancel",
-				"allow-voice-model-remove"
+				"allow-voice-model-remove",
+				"allow-wake-word-status",
+				"allow-wake-word-set"
 			]
 		},
 		{

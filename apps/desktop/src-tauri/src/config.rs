@@ -12,6 +12,9 @@ pub struct DesktopConfig {
     pub data_dir: PathBuf,
     pub port: u16,
     pub shortcut: String,
+    /// Whether the wake word listens (S1, S30.7). Off until the user turns it on in Settings, and
+    /// only then does the detector ever run.
+    pub wake_word: bool,
 }
 
 /// Result of the `connection_info` command (design §9).
@@ -59,7 +62,8 @@ pub fn parse_config(
         .filter(|s| !s.is_empty())
         .unwrap_or(DEFAULT_SHORTCUT)
         .to_string();
-    DesktopConfig { data_dir, port, shortcut }
+    let wake_word = file["wake_word"].as_bool().unwrap_or(false);
+    DesktopConfig { data_dir, port, shortcut, wake_word }
 }
 
 /// HOME keeps precedence on every platform; USERPROFILE is a Windows-only fallback.
@@ -109,6 +113,32 @@ pub fn save_shortcut(path: &Path, shortcut: &str) -> Result<(), String> {
         Err(error) => return Err(format!("Gentle Dot cannot read config.json ({error}), so the shortcut was not saved.")),
     };
     let text = with_shortcut(file.as_deref(), shortcut)?;
+    write_private(path, &text).map_err(|error| format!("Gentle Dot cannot save config.json ({error})."))
+}
+
+/// The text of `config.json` with `wake_word` set and every other key kept (S1).
+pub fn with_wake_word(file: Option<&str>, wake_word: bool) -> Result<String, String> {
+    let mut json = match file {
+        Some(text) => serde_json::from_str::<serde_json::Value>(text)
+            .ok()
+            .filter(serde_json::Value::is_object)
+            .ok_or(INVALID_CONFIG)?,
+        None => serde_json::json!({}),
+    };
+    json["wake_word"] = wake_word.into();
+    let text = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
+    Ok(text + "\n")
+}
+
+/// Saves the wake word's flag in `config.json`, the way the shortcut is saved (S33.3): one key
+/// changes, and a private temporary file is renamed over the old one.
+pub fn save_wake_word(path: &Path, wake_word: bool) -> Result<(), String> {
+    let file = match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("Gentle Dot cannot read config.json ({error}), so the wake word was not saved.")),
+    };
+    let text = with_wake_word(file.as_deref(), wake_word)?;
     write_private(path, &text).map_err(|error| format!("Gentle Dot cannot save config.json ({error})."))
 }
 
@@ -197,7 +227,7 @@ mod tests {
     #[test]
     fn defaults_without_file() {
         let config = parse_config(dir(), None, env_of(&[]));
-        assert_eq!(config, DesktopConfig { data_dir: dir(), port: DEFAULT_PORT, shortcut: DEFAULT_SHORTCUT.into() });
+        assert_eq!(config, DesktopConfig { data_dir: dir(), port: DEFAULT_PORT, shortcut: DEFAULT_SHORTCUT.into(), wake_word: false });
     }
 
     #[test]
@@ -261,11 +291,41 @@ mod tests {
         // The file the app writes reads back like any hand-written one: port, shortcut, defaults.
         let text = with_shortcut(Some(r#"{ "port": 5000, "workspace": "~" }"#), "Shift+Super+K").unwrap();
         let config = parse_config(dir(), Some(&text), env_of(&[]));
-        assert_eq!(config, DesktopConfig { data_dir: dir(), port: 5000, shortcut: "Shift+Super+K".into() });
+        assert_eq!(config, DesktopConfig { data_dir: dir(), port: 5000, shortcut: "Shift+Super+K".into(), wake_word: false });
         let config = parse_config(dir(), Some(&text), env_of(&[("GENTLE_DOT_PORT", "6000")]));
         assert_eq!(config.port, 6000);
         let text = with_shortcut(None, "F5").unwrap();
         assert_eq!(parse_config(dir(), Some(&text), env_of(&[])).port, DEFAULT_PORT);
+    }
+
+    #[test]
+    fn the_wake_word_is_off_unless_the_file_says_so() {
+        assert!(!parse_config(dir(), None, env_of(&[])).wake_word);
+        assert!(!parse_config(dir(), Some(r#"{ "port": 5000 }"#), env_of(&[])).wake_word);
+        assert!(!parse_config(dir(), Some(r#"{ "wake_word": "yes" }"#), env_of(&[])).wake_word);
+        assert!(parse_config(dir(), Some(r#"{ "wake_word": true }"#), env_of(&[])).wake_word);
+    }
+
+    #[test]
+    fn saving_the_wake_word_keeps_every_other_key_and_reads_back() {
+        let text = with_wake_word(Some(r#"{ "port": 5000, "shortcut": "F5" }"#), true).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json, serde_json::json!({ "port": 5000, "shortcut": "F5", "wake_word": true }));
+        assert!(parse_config(dir(), Some(&text), env_of(&[])).wake_word);
+        let off = with_wake_word(Some(&text), false).unwrap();
+        assert!(!parse_config(dir(), Some(&off), env_of(&[])).wake_word);
+        assert_eq!(with_wake_word(Some("{ not json"), true), Err(INVALID_CONFIG.to_string()));
+    }
+
+    #[test]
+    fn the_wake_word_is_saved_next_to_the_shortcut() {
+        let dir = scratch("wake");
+        let file = dir.join("config.json");
+        std::fs::write(&file, r#"{ "port": 5000 }"#).unwrap();
+        save_wake_word(&file, true).unwrap();
+        assert!(parse_config(dir.clone(), std::fs::read_to_string(&file).ok().as_deref(), env_of(&[])).wake_word);
+        std::fs::write(&file, "{ not json").unwrap();
+        assert_eq!(save_wake_word(&file, false), Err(INVALID_CONFIG.to_string()));
     }
 
     fn scratch(name: &str) -> PathBuf {

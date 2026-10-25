@@ -4,10 +4,14 @@
 //! Cancel works in every state. Platform callbacks arrive on arbitrary threads through a
 //! `Sink` bound to one recording, so results from an earlier recording are ignored. No
 //! platform call or event is made while the state lock is held.
-
-use super::{audio, locale, Authorization, Events, Microphone, NativeAudio, Recognition, Recognizer, Stream, Transcript};
+//!
+//! While nothing records, the machine can hold the wake word's listener on the same capture
+//! (`arm`, S2); a recording takes the microphone from it.
+use super::wake::WakeWord;
+use super::{audio, locale, AudioSink, Authorization, Events, Listener, Microphone, NativeAudio, Recognition, Recognizer, Stream, Transcript};
 use super::{VoiceError, VoiceEvent, VoiceStatus};
 use crate::computer::Clock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
@@ -16,6 +20,16 @@ pub const LEVEL_INTERVAL_MS: u64 = 1_000 / 15;
 /// How long `stop` waits for the final transcript before using the latest partial.
 pub const FINAL_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// What an armed listener reports (S30.7), on a thread of its own.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ListenEvent {
+    Detected(super::wake::Detection),
+}
+
+/// Where the wake word's findings go; called from any thread, never from the audio thread.
+pub type ListenEvents = Arc<dyn Fn(ListenEvent) + Send + Sync>;
+
+#[derive(Clone)]
 pub struct Voice {
     inner: Arc<Inner>,
     final_timeout: Duration,
@@ -27,13 +41,26 @@ struct Inner {
     clock: Arc<dyn Clock>,
     state: Mutex<State>,
     changed: Condvar,
+    /// Ids the listener's audio is checked against, so audio from a closed listener is ignored.
+    next_listen: AtomicU64,
 }
 
 enum State {
-    Idle { next: u64 },
+    /// Nothing is recording. `armed` is the wake word's listener, when one is waiting.
+    Idle { next: u64, armed: Option<Armed> },
     Starting { recording: u64, cancelled: bool, failure: Option<String> },
     Recording(Session),
     Stopping(Session),
+}
+
+/// Waiting for the wake word on an open capture, so the detector reads the microphone the app
+/// already has instead of opening a second one (S2).
+struct Armed {
+    id: u64,
+    /// `None` while the capture opens: a recording must not start on top of it.
+    stream: Option<Box<dyn Stream>>,
+    /// Reset when the listener is disarmed, so the next note never starts with old audio in it.
+    wake: Arc<dyn WakeWord>,
 }
 
 struct Session {
@@ -90,7 +117,9 @@ impl State {
     }
 
     fn idle(&self) -> State {
-        State::Idle { next: self.recording().map_or(0, |n| n + 1) }
+        // Nothing is recording, and the listener that made room for the recording stays disarmed:
+        // whoever wants it back arms it again (the app, once the note is delivered).
+        State::Idle { next: self.recording().map_or(0, |n| n + 1), armed: None }
     }
 }
 
@@ -101,6 +130,21 @@ fn discard(session: Session) {
         stream.close();
     }
     lock(&feed).cancel();
+}
+
+/// Releases a listener's capture and its detector state, outside the state lock.
+fn close_listener(armed: Option<Armed>) {
+    if let Some(armed) = armed {
+        armed.wake.reset();
+        if let Some(mut stream) = armed.stream {
+            stream.close();
+        }
+    }
+}
+
+/// Whether the listener `id` is still the one waiting: an id the machine dropped hears nothing.
+fn armed(inner: &Inner, id: u64) -> bool {
+    matches!(&*lock(&inner.state), State::Idle { armed: Some(armed), .. } if armed.id == id && armed.stream.is_some())
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -132,8 +176,86 @@ fn blocked(current: Authorization, denied: VoiceError, restricted: VoiceError) -
 
 impl Voice {
     pub fn new(microphone: Arc<dyn Microphone>, recognizer: Arc<dyn Recognizer>, clock: Arc<dyn Clock>) -> Self {
-        let inner = Inner { microphone, recognizer, clock, state: Mutex::new(State::Idle { next: 0 }), changed: Condvar::new() };
+        let inner = Inner {
+            microphone,
+            recognizer,
+            clock,
+            state: Mutex::new(State::Idle { next: 0, armed: None }),
+            changed: Condvar::new(),
+            next_listen: AtomicU64::new(0),
+        };
         Voice { inner: Arc::new(inner), final_timeout: FINAL_TIMEOUT }
+    }
+
+    /// Waits for the wake word on the microphone's own capture (S2), reporting through `events`.
+    /// Only while idle: a recording owns the microphone, and a second listener would open it
+    /// twice.
+    pub fn arm(&self, wake: Arc<dyn WakeWord>, events: ListenEvents) -> Result<(), VoiceError> {
+        let id = self.inner.next_listen.fetch_add(1, Ordering::SeqCst);
+        {
+            let mut state = lock(&self.inner.state);
+            let State::Idle { armed, .. } = &mut *state else { return Err(VoiceError::Busy) };
+            if armed.is_some() {
+                return Err(VoiceError::Busy);
+            }
+            *armed = Some(Armed { id, stream: None, wake: wake.clone() });
+        }
+        let opened = self.inner.microphone.open(AudioSink::Listener(self.listener(id, wake, events)));
+        let mut state = lock(&self.inner.state);
+        match opened {
+            Ok(stream) => match &mut *state {
+                State::Idle { armed: Some(armed), .. } if armed.id == id => {
+                    armed.stream = Some(stream);
+                    Ok(())
+                }
+                // Disarmed or taken over while the capture was opening: the recording keeps the
+                // microphone, and this stream goes away without ever running beside it.
+                _ => {
+                    drop(state);
+                    let mut stream = stream;
+                    stream.close();
+                    Err(VoiceError::Cancelled)
+                }
+            },
+            Err(error) => {
+                if matches!(&*state, State::Idle { armed: Some(armed), .. } if armed.id == id) {
+                    let idle = state.idle();
+                    *state = idle;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Stops waiting for the wake word; harmless when it is not listening.
+    pub fn disarm(&self) {
+        let armed = {
+            let mut state = lock(&self.inner.state);
+            let State::Idle { armed, .. } = &mut *state else { return };
+            armed.take()
+        };
+        close_listener(armed);
+    }
+
+    /// The detector's end of the capture: it runs on the audio thread, so it only matches, and
+    /// the handler gets its own thread (`ListenEvent` is never fired from the audio thread).
+    fn listener(&self, id: u64, wake: Arc<dyn WakeWord>, events: ListenEvents) -> Listener {
+        let inner = Arc::downgrade(&self.inner);
+        Arc::new(move |samples: &[f32]| {
+            let Some(inner) = inner.upgrade() else { return };
+            // Outside the lock: matching must never wait for a command, and a command must never
+            // wait for the detector.
+            if !armed(&inner, id) {
+                return;
+            }
+            let Some(detection) = wake.accept(samples) else { return };
+            if !armed(&inner, id) {
+                return;
+            }
+            let events = events.clone();
+            // The handler starts a note, which can prompt for a permission: never here.
+            std::thread::spawn(move || events(ListenEvent::Detected(detection)));
+        })
     }
 
     pub fn with_final_timeout(mut self, timeout: Duration) -> Self {
@@ -159,18 +281,32 @@ impl Voice {
     }
 
     /// Starts recording, prompting for permissions first when they were never asked. Blocks
-    /// while a prompt is open, so it runs off the main thread. `events` reach the caller.
+    /// while a prompt is open, so it runs off the main thread. `events` reach the caller. The
+    /// wake word's listener is dropped first: two captures never overlap (S2).
     pub fn start(&self, requested: Option<&str>, events: Events) -> Result<(), VoiceError> {
-        let recording = {
+        self.begin(requested, events)
+    }
+
+    fn begin(&self, requested: Option<&str>, events: Events) -> Result<(), VoiceError> {
+        self.disarm();
+        let (recording, previous) = {
             let mut state = lock(&self.inner.state);
-            let State::Idle { next } = *state else { return Err(VoiceError::Busy) };
+            let State::Idle { next, armed } = &mut *state else { return Err(VoiceError::Busy) };
+            // A listener still opening would open the device a second time.
+            if armed.as_ref().is_some_and(|armed| armed.stream.is_none()) {
+                return Err(VoiceError::Busy);
+            }
+            // An arm that landed since `disarm` is closed outside the lock, not dropped in it.
+            let previous = armed.take();
+            let next = *next;
             *state = State::Starting { recording: next, cancelled: false, failure: None };
-            next
+            (next, previous)
         };
+        close_listener(previous);
         let sink = Sink { inner: Arc::downgrade(&self.inner), recording };
         let begun = self.prepare(requested, recording).and_then(|locale| {
             let mut recognition = self.inner.recognizer.begin(&locale, sink.clone())?;
-            match self.inner.microphone.open(sink) {
+            match self.inner.microphone.open(AudioSink::Recording(sink)) {
                 Ok(stream) => Ok((stream, recognition)),
                 Err(error) => {
                     recognition.cancel();
@@ -179,7 +315,7 @@ impl Voice {
             }
         });
         let mut state = lock(&self.inner.state);
-        let State::Starting { cancelled, failure, .. } = std::mem::replace(&mut *state, State::Idle { next: recording + 1 }) else {
+        let State::Starting { cancelled, failure, .. } = std::mem::replace(&mut *state, State::Idle { next: recording + 1, armed: None }) else {
             unreachable!("only start leaves Starting");
         };
         let (stream, recognition) = begun?;
@@ -230,7 +366,7 @@ impl Voice {
     pub fn stop(&self) -> Result<Transcript, VoiceError> {
         let (recording, mut stream, feed) = {
             let mut state = lock(&self.inner.state);
-            match std::mem::replace(&mut *state, State::Idle { next: 0 }) {
+            match std::mem::replace(&mut *state, State::Idle { next: 0, armed: None }) {
                 State::Recording(mut session) => {
                     let taken = (session.recording, session.stream.take(), session.feed.clone());
                     *state = State::Stopping(session);
@@ -414,8 +550,9 @@ impl Sink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::voice::fake::{FakeClock, FakeMicrophone, FakeNative, FakeRecognizer, Gate, Recorder};
-    use crate::voice::{Authorization, Transcript, VoiceError, VoiceEvent, VoiceStatus};
+    use crate::voice::fake::{FakeClock, FakeMicrophone, FakeNative, FakeRecognizer, Gate, Listenings, Recorder};
+    use crate::voice::wake::FakeWake;
+    use crate::voice::{Authorization, Detection, ListenEvent, Transcript, VoiceError, VoiceEvent, VoiceStatus};
     use std::sync::atomic::AtomicU64;
     use std::sync::Arc;
     use std::time::Duration;
@@ -426,13 +563,14 @@ mod tests {
         recognizer: Arc<FakeRecognizer>,
         clock: Arc<FakeClock>,
         recorder: Recorder,
+        listenings: Listenings,
     }
 
     fn rig(mic: FakeMicrophone, recognizer: FakeRecognizer) -> Rig {
         let (mic, recognizer) = (Arc::new(mic), Arc::new(recognizer));
         let clock = Arc::new(FakeClock(AtomicU64::new(1_000)));
         let voice = Voice::new(mic.clone(), recognizer.clone(), clock.clone()).with_final_timeout(Duration::from_millis(50));
-        Rig { voice, mic, recognizer, clock, recorder: Recorder::default() }
+        Rig { voice, mic, recognizer, clock, recorder: Recorder::default(), listenings: Listenings::default() }
     }
 
     fn granted() -> Rig {
@@ -442,6 +580,18 @@ mod tests {
     impl Rig {
         fn start(&self) -> Result<(), VoiceError> {
             self.voice.start(None, self.recorder.events())
+        }
+
+        fn listen(&self, wake: &Arc<FakeWake>) -> Result<(), VoiceError> {
+            self.voice.arm(wake.clone(), self.listenings.events())
+        }
+
+        /// Feeds the microphone's tap: 10 ms chunks of a constant level, so rms == `level`.
+        fn feed(&self, level: f32, ms: u64) {
+            let sink = self.mic.sink();
+            for _ in 0..(ms / 10) {
+                sink.audio(&[level; 160]);
+            }
         }
     }
 
@@ -734,9 +884,79 @@ mod tests {
             self.0.request_authorization()
         }
 
-        fn open(&self, sink: Sink) -> Result<Box<dyn crate::voice::Stream>, VoiceError> {
+        fn open(&self, sink: crate::voice::AudioSink) -> Result<Box<dyn crate::voice::Stream>, VoiceError> {
             self.1.sink().failed("Siri and Dictation are disabled.");
             self.0.open(sink)
         }
     }
+
+
+    #[test]
+    fn the_listener_owns_the_microphone_until_a_recording_takes_it() {
+        let rig = granted();
+        let wake = Arc::new(FakeWake::default());
+        rig.listen(&wake).unwrap();
+        assert_eq!(rig.mic.log.lock().unwrap().opened, 1);
+        assert_eq!(rig.listen(&wake), Err(VoiceError::Busy), "one listener at a time");
+        assert_eq!(rig.start(), Ok(()));
+        let log = rig.mic.log.lock().unwrap();
+        assert_eq!((log.closed, log.opened), (1, 2), "the listener is closed before the recording opens");
+        drop(log);
+        assert_eq!(wake.resets(), 1, "the detector drops what it had buffered");
+    }
+
+    #[test]
+    fn arming_is_refused_while_recording() {
+        let rig = granted();
+        rig.start().unwrap();
+        let wake = Arc::new(FakeWake::default());
+        assert_eq!(rig.listen(&wake), Err(VoiceError::Busy));
+        assert_eq!(rig.mic.log.lock().unwrap().opened, 1, "no second capture is opened");
+    }
+
+    #[test]
+    fn a_detection_is_reported_once_and_off_the_audio_thread() {
+        let rig = granted();
+        let wake = Arc::new(FakeWake::default());
+        rig.listen(&wake).unwrap();
+        wake.detect(0.51);
+        for _ in 0..3 {
+            rig.mic.sink().audio(&[0.01; 160]);
+        }
+        let seen = rig.listenings.wait_for(1);
+        assert_eq!(seen, vec![ListenEvent::Detected(Detection { name: "oye-dot".into(), score: 0.51 })]);
+        assert_eq!(wake.heard(), 480, "every chunk reached the detector");
+        assert_ne!(rig.listenings.threads()[0], std::thread::current().id(), "the handler gets its own thread");
+    }
+
+    #[test]
+    fn a_disarmed_listener_hears_nothing_and_can_be_armed_again() {
+        let rig = granted();
+        let wake = Arc::new(FakeWake::default());
+        rig.listen(&wake).unwrap();
+        rig.voice.disarm();
+        assert_eq!(rig.mic.log.lock().unwrap().closed, 1);
+        let heard = wake.heard();
+        // Audio that arrives after the capture was closed is ignored, not matched.
+        rig.mic.sink().audio(&[0.1; 160]);
+        assert_eq!(wake.heard(), heard);
+        assert!(rig.listenings.settle().is_empty());
+        rig.listen(&wake).unwrap();
+        assert_eq!(rig.mic.log.lock().unwrap().opened, 2);
+    }
+
+    #[test]
+    fn the_wake_word_waits_again_once_a_recording_ends() {
+        let rig = granted();
+        let wake = Arc::new(FakeWake::default());
+        rig.listen(&wake).unwrap();
+        rig.start().unwrap();
+        rig.voice.stop().unwrap();
+        assert_eq!(rig.listen(&wake), Ok(()), "a finished recording leaves the listener disarmed");
+        assert_eq!(rig.mic.log.lock().unwrap().opened, 3);
+    }
+
+
+
+
 }

@@ -57,6 +57,14 @@ objc2-screen-capture-kit = { version = "0.3", default-features = false, features
 objc2-speech = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-avf-audio", "SFSpeechRecognizer", "SFSpeechRecognitionRequest", "SFSpeechRecognitionResult", "SFSpeechRecognitionTask", "SFTranscription"] }
 objc2-avf-audio = { version = "0.3", default-features = false, features = ["std", "block2", "AVAudioBuffer", "AVAudioEngine", "AVAudioFormat", "AVAudioIONode", "AVAudioNode", "AVAudioTime", "AVAudioTypes"] }
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "AVCaptureDevice", "AVMediaFormat"] }
+# The wake word (S30.7): rustpotter matches the phrase against a reference signature, over the
+# same 16 kHz stream the microphone already produces. `default-features` off drops its training
+# and audio-file backends, which this app does not use.
+rustpotter = { version = "3.0.2", default-features = false }
+# rustpotter's candle-core 0.2 needs rand 0.8, whose `rand_distr` feature is compiled against
+# rand 0.9 from half 2.6 onward: 20 `SampleUniform` errors without this pin. Drop it when
+# candle-core (through rustpotter) accepts rand 0.9.
+half = "=2.4.1"
 # Connector secrets (S25.5): generic password items in the login keychain, created by the app.
 security-framework = "3.7"
 core-foundation = "0.10"

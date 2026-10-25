@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wake-word-status"
+description = "Enables the wake_word_status command without any pre-configured scope."
+commands.allow = ["wake_word_status"]
+
+[[permission]]
+identifier = "deny-wake-word-status"
+description = "Denies the wake_word_status command without any pre-configured scope."
+commands.deny = ["wake_word_status"]

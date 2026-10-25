@@ -14,7 +14,7 @@
 //! and from those callbacks; AVAudioEngine and the Speech request are not tied to a thread.
 
 use super::audio::{self, Resampler, SAMPLE_RATE};
-use super::{Authorization, Microphone, NativeAudio, Recognition, Recognizer, Sink, Stream, VoiceError};
+use super::{AudioSink, Authorization, Microphone, NativeAudio, Recognition, Recognizer, Sink, Stream, VoiceError};
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, ProtocolObject};
@@ -84,7 +84,7 @@ impl Microphone for MacMicrophone {
         }
     }
 
-    fn open(&self, sink: Sink) -> Result<Box<dyn Stream>, VoiceError> {
+    fn open(&self, sink: AudioSink) -> Result<Box<dyn Stream>, VoiceError> {
         // SAFETY: plain constructors and getters on a new engine.
         let engine = unsafe { AVAudioEngine::new() };
         let input = unsafe { engine.inputNode() };

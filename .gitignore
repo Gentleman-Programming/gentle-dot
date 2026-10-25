@@ -16,3 +16,6 @@ apps/desktop/src-tauri/gen/
 
 # Declarations emitted next to sources by accident
 packages/*/src/**/*.d.ts
+
+# The wake word's reference (S4): a voice signature, never committed
+*.rpw

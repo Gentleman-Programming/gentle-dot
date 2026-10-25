@@ -3,7 +3,7 @@
 //! pipewire-pulse) is tried first, then `arecord` (ALSA). Linux has no microphone permission to
 //! ask for. Compiled on every Unix so the tests run on macOS too; only Linux uses it.
 
-use super::{Authorization, Microphone, Sink, Stream, VoiceError};
+use super::{AudioSink, Authorization, Microphone, Stream, VoiceError};
 use std::io::{self, Read};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,7 +59,7 @@ impl Microphone for PipeMicrophone {
         Authorization::Authorized
     }
 
-    fn open(&self, sink: Sink) -> Result<Box<dyn Stream>, VoiceError> {
+    fn open(&self, sink: AudioSink) -> Result<Box<dyn Stream>, VoiceError> {
         for recorder in &self.recorders {
             let Some((program, args)) = recorder.split_first() else { continue };
             let spawned = Command::new(program).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();

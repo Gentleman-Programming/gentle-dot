@@ -25,6 +25,8 @@ const COMMANDS: &[&str] = &[
     "voice_model_download",
     "voice_model_cancel",
     "voice_model_remove",
+    "wake_word_status",
+    "wake_word_set",
     "shortcut_get",
     "shortcut_set",
     "connector_command",

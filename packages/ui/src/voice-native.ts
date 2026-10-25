@@ -48,6 +48,8 @@ export interface NativeVoiceHandlers {
 	partial: (text: string) => void;
 	level: (level: number) => void;
 	error: (message: string) => void;
+	/** The wake word started a note the panel did not ask for (S30.7). */
+	started?: () => void;
 }
 
 /** Listens to the recognizer's events; resolves with a function that stops listening. */
@@ -66,6 +68,7 @@ export async function onNativeVoice(handlers: NativeVoiceHandlers): Promise<() =
 			const message = event.payload?.message;
 			handlers.error(typeof message === "string" && message ? message : "Listening stopped.");
 		}),
+		listen<Record<string, never>>("voice://started", () => handlers.started?.()),
 	]);
 	return () => {
 		for (const stop of stops) stop();

@@ -1,10 +1,12 @@
 //! Fakes for the voice tests: a microphone and a recognizer that record what the machine asks
 //! of them and let a test play the platform's side (audio, results, failures).
 
-use super::{Authorization, Events, Microphone, NativeAudio, Recognition, Recognizer, Sink, Stream, VoiceError, VoiceEvent};
+use super::{AudioSink, Authorization, Events, Microphone, NativeAudio, Recognition, Recognizer, Sink, Stream, VoiceError, VoiceEvent};
+use super::{ListenEvent, ListenEvents};
 use crate::computer::Clock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use std::thread::ThreadId;
 
 /// Blocks a permission prompt until the test answers it.
 #[derive(Default)]
@@ -32,7 +34,7 @@ pub struct MicLog {
     pub requests: usize,
     pub opened: usize,
     pub closed: usize,
-    pub sink: Option<Sink>,
+    pub sink: Option<AudioSink>,
 }
 
 pub struct FakeMicrophone {
@@ -63,7 +65,7 @@ impl FakeMicrophone {
     }
 
     /// The sink of the latest capture, to play the audio thread.
-    pub fn sink(&self) -> Sink {
+    pub fn sink(&self) -> AudioSink {
         self.log.lock().unwrap().sink.clone().expect("the microphone was opened")
     }
 }
@@ -83,7 +85,7 @@ impl Microphone for FakeMicrophone {
         answer
     }
 
-    fn open(&self, sink: Sink) -> Result<Box<dyn Stream>, VoiceError> {
+    fn open(&self, sink: AudioSink) -> Result<Box<dyn Stream>, VoiceError> {
         if let Some(error) = self.open_error.lock().unwrap().clone() {
             return Err(error);
         }
@@ -247,6 +249,44 @@ impl Recorder {
 
     pub fn levels(&self) -> usize {
         self.seen().iter().filter(|event| matches!(event, VoiceEvent::Level(_))).count()
+    }
+}
+
+/// Collects what an armed wake word reported, and on which thread, so a test can check that no
+/// handler ever runs on the audio thread.
+#[derive(Default, Clone)]
+pub struct Listenings(Arc<Mutex<Vec<(ListenEvent, ThreadId)>>>);
+
+impl Listenings {
+    pub fn events(&self) -> ListenEvents {
+        let seen = self.0.clone();
+        Arc::new(move |event| seen.lock().unwrap().push((event, std::thread::current().id())))
+    }
+
+    pub fn seen(&self) -> Vec<ListenEvent> {
+        self.0.lock().unwrap().iter().map(|(event, _)| event.clone()).collect()
+    }
+
+    pub fn threads(&self) -> Vec<ThreadId> {
+        self.0.lock().unwrap().iter().map(|(_, thread)| *thread).collect()
+    }
+
+    /// Waits for `count` reports (they come from spawned threads), then checks there are exactly
+    /// that many.
+    pub fn wait_for(&self, count: usize) -> Vec<ListenEvent> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.0.lock().unwrap().len() < count && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let seen = self.seen();
+        assert_eq!(seen.len(), count, "reports: {seen:?}");
+        seen
+    }
+
+    /// Gives a spawned report time to arrive, so a test can assert there was none.
+    pub fn settle(&self) -> Vec<ListenEvent> {
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        self.seen()
     }
 }
 

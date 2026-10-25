@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wake-word-set"
+description = "Enables the wake_word_set command without any pre-configured scope."
+commands.allow = ["wake_word_set"]
+
+[[permission]]
+identifier = "deny-wake-word-set"
+description = "Denies the wake_word_set command without any pre-configured scope."
+commands.deny = ["wake_word_set"]

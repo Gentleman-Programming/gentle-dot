@@ -1,3 +1,4 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
 	formatShortcut,
@@ -23,9 +24,35 @@ function reasonOf(error: unknown): string {
 	return "Gentle Dot could not change the shortcut.";
 }
 
+/** The wake word's state (S30.7): whether it is on, and if not, why it cannot be. */
+type WakeWord = { enabled: boolean; available: boolean; reason?: string };
+
+const NO_WAKE_WORD = "The wake word is not available on this computer.";
+
+async function wakeWordStatus(): Promise<WakeWord> {
+	try {
+		const status = await invoke<Partial<WakeWord> | undefined>("wake_word_status");
+		return {
+			enabled: status?.enabled === true,
+			available: status?.available === true,
+			reason: typeof status?.reason === "string" ? status.reason : undefined,
+		};
+	} catch {
+		return { enabled: false, available: false, reason: NO_WAKE_WORD };
+	}
+}
+
+function wakeWordReason(error: unknown): string {
+	if (typeof error === "string" && error) return error;
+	if (error instanceof Error && error.message) return error.message;
+	return "Gentle Dot could not change the wake word.";
+}
+
 /** The desktop panel's settings (S33.1); for now, the shortcut that opens the panel. */
 export function SettingsPanel({ close }: { close: () => void }) {
 	const [language, setLanguage] = useState(() => voiceLanguage() ?? "");
+	const [wake, setWake] = useState<WakeWord | undefined>(undefined);
+	const [wakeError, setWakeError] = useState<string | undefined>(undefined);
 	const mac = isMac();
 	const show = (accelerator: string) => formatShortcut(accelerator, mac);
 	const [info, setInfo] = useState<ShortcutInfo | undefined>(undefined);
@@ -59,6 +86,30 @@ export function SettingsPanel({ close }: { close: () => void }) {
 			},
 			(error: unknown) => {
 				if (live.current) setStatus({ kind: "failed", reason: reasonOf(error) });
+			},
+		);
+	}, []);
+
+	useEffect(() => {
+		if (!isTauri()) return;
+		let live = true;
+		wakeWordStatus().then((found) => {
+			if (live) setWake(found);
+		});
+		return () => {
+			live = false;
+		};
+	}, []);
+
+	const setWakeWord = useCallback((enabled: boolean) => {
+		invoke<WakeWord>("wake_word_set", { enabled }).then(
+			(status) => {
+				if (!live.current) return;
+				setWake(status);
+				setWakeError(undefined);
+			},
+			(error: unknown) => {
+				if (live.current) setWakeError(wakeWordReason(error));
 			},
 		);
 	}, []);
@@ -168,6 +219,31 @@ export function SettingsPanel({ close }: { close: () => void }) {
 						</option>
 					))}
 				</select>
+			</section>
+
+			<section className="provider-section" aria-labelledby="settings-wake-word">
+				<h3 id="settings-wake-word">Wake word</h3>
+				<p className="muted">
+					Say “oye dot” and the note starts on its own. It ends after a moment of silence.
+				</p>
+				<label>
+					<input
+						type="checkbox"
+						aria-label="Listen for the wake word"
+						checked={wake?.enabled === true}
+						disabled={wake?.available !== true}
+						onChange={(event) => setWakeWord(event.target.checked)}
+					/>
+					<span>Listen for “oye dot”</span>
+				</label>
+				{wake?.available === false && wake.reason ? (
+					<p className="settings-hint muted">{wake.reason}</p>
+				) : null}
+				{wakeError ? (
+					<p className="settings-error" role="alert">
+						{wakeError}
+					</p>
+				) : null}
 			</section>
 		</section>
 	);

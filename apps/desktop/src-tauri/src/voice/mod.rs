@@ -17,6 +17,10 @@
 //!
 //! SpeechAnalyzer/SpeechTranscriber (macOS 26) are Swift-only, with no Objective-C interface to
 //! bind from Rust, and the app supports macOS 12.3, so `SFSpeechRecognizer` is the recognizer.
+//!
+//! The wake word (S30.7, `wake`) reads that same capture instead of opening one of its own (S2):
+//! `AudioSink` sends the microphone's PCM either to a recording or to the idle listener, never
+//! to both, so there is one AVAudioEngine, one resampler and one tap at a time.
 
 pub mod app;
 pub mod audio;
@@ -31,8 +35,10 @@ pub mod model;
 pub mod parakeet;
 #[cfg(unix)]
 pub mod pipe;
+pub mod wake;
 
-pub use machine::{Sink, Voice};
+pub use machine::{ListenEvent, ListenEvents, Sink, Voice};
+pub use wake::{Detection, WakeWord};
 #[cfg(target_os = "macos")]
 pub use macos::{AppleSpeech, MacMicrophone};
 
@@ -47,6 +53,11 @@ pub const PARTIAL_EVENT: &str = "voice://partial";
 pub const LEVEL_EVENT: &str = "voice://level";
 /// A failure while recording (permission, recognizer, interruption): `{message}`.
 pub const ERROR_EVENT: &str = "voice://error";
+/// The transcript of a recording the user did not stop himself, which is the note the wake word
+/// started (S3): `{text}`, the same shape as the `voice_stop` reply, so the panel sends it the
+/// same way it sends one it stopped.
+/// A talk that the wake word started: `{}`.
+pub const STARTED_EVENT: &str = "voice://started";
 pub const UNSUPPORTED: &str = "Voice input is available on macOS and Linux.";
 
 /// The `voice_status` reply: `{available, reason?}`.
@@ -79,6 +90,8 @@ pub enum VoiceEvent {
     Partial(String),
     Level(f32),
     Error(String),
+    /// A recording the wake word started, so the panel can show it as recording (S3).
+    Started,
 }
 
 impl VoiceEvent {
@@ -87,6 +100,7 @@ impl VoiceEvent {
             VoiceEvent::Partial(_) => PARTIAL_EVENT,
             VoiceEvent::Level(_) => LEVEL_EVENT,
             VoiceEvent::Error(_) => ERROR_EVENT,
+            VoiceEvent::Started => STARTED_EVENT,
         }
     }
 
@@ -95,6 +109,7 @@ impl VoiceEvent {
             VoiceEvent::Partial(text) => serde_json::json!({ "text": text }),
             VoiceEvent::Level(level) => serde_json::json!({ "level": level }),
             VoiceEvent::Error(message) => serde_json::json!({ "message": message }),
+            VoiceEvent::Started => serde_json::json!({}),
         }
     }
 }
@@ -184,15 +199,54 @@ pub(crate) fn configuration_change(engine_running: bool) -> Option<VoiceError> {
 /// it, so it must come from the microphone that recognition was made for.
 pub type NativeAudio = dyn std::any::Any;
 
-/// Native audio capture. Delivers `audio::SAMPLE_RATE` mono f32 chunks to `Sink::audio`, or
-/// to `Sink::audio_native` along with the device's own buffer (on the audio thread), and
-/// reports interruptions with `Sink::failed`.
+/// Native audio capture. Delivers `audio::SAMPLE_RATE` mono f32 chunks to the `AudioSink`, its
+/// one consumer: a recording or the wake word's listener (S2).
 pub trait Microphone: Send + Sync {
     /// The current permission, without prompting.
     fn authorization(&self) -> Authorization;
     /// Prompts when not yet determined. Blocks until the user answers: never on the main thread.
     fn request_authorization(&self) -> Authorization;
-    fn open(&self, sink: Sink) -> Result<Box<dyn Stream>, VoiceError>;
+    fn open(&self, sink: AudioSink) -> Result<Box<dyn Stream>, VoiceError>;
+}
+
+/// Where an open capture delivers its audio. One capture has one consumer, so a recording and
+/// the wake word never share a stream and no device is opened twice.
+#[derive(Clone)]
+pub enum AudioSink {
+    /// A recording: metered, recognized, and reported to the webview.
+    Recording(Sink),
+    /// The wake word's detector, reading the same tap (S30.7). It gets the audio and nothing else.
+    Listener(Listener),
+}
+
+/// The detector's end of a capture, called on the audio thread: it must not block.
+pub type Listener = Arc<dyn Fn(&[f32]) + Send + Sync>;
+
+impl AudioSink {
+    /// A chunk of `audio::SAMPLE_RATE` mono PCM.
+    pub fn audio(&self, samples: &[f32]) {
+        match self {
+            AudioSink::Recording(sink) => sink.audio(samples),
+            AudioSink::Listener(listen) => listen(samples),
+        }
+    }
+
+    /// The same, with the device's own buffer it came from, for a recognition that wants it. The
+    /// listener only ever sees the 16 kHz stream.
+    pub fn audio_native(&self, samples: &[f32], native: &NativeAudio) {
+        match self {
+            AudioSink::Recording(sink) => sink.audio_native(samples, native),
+            AudioSink::Listener(listen) => listen(samples),
+        }
+    }
+
+    /// A failure while capturing. A listener is not recording, so it has nothing to report: the
+    /// app only learns that the detector heard nothing, and the log keeps quiet about it.
+    pub fn failed(&self, message: &str) {
+        if let AudioSink::Recording(sink) = self {
+            sink.failed(message);
+        }
+    }
 }
 
 /// An open capture.
@@ -274,6 +328,7 @@ mod tests {
     fn a_configuration_change_that_stopped_the_engine_is_an_interruption() {
         assert_eq!(configuration_change(false), Some(VoiceError::Interrupted));
     }
+
 
     #[test]
     fn the_stop_reply_is_the_text() {
