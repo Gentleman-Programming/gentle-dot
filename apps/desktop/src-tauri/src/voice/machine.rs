@@ -22,17 +22,29 @@ pub const LEVEL_INTERVAL_MS: u64 = 1_000 / 15;
 /// How long `stop` waits for the final transcript before using the latest partial.
 pub const FINAL_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Where speech starts on the note the wake word started (S6). Measured with the app's own
-/// meter on this machine: speech sits around -27 dBFS (rms 0.045) and room silence around
-/// -55 dBFS (rms 0.0018), so -44 dBFS (rms 0.006) sits between them with about 17 dB of margin
-/// on the loud side and 11 dB on the quiet one. A fixed threshold is enough here: the note is
-/// recorded in one room, and the cost of guessing wrong is a note that ends early or late.
-pub const SPEECH_RMS: f32 = 0.006;
+/// Nothing quieter than this counts as speech, whatever the room claims (-50 dBFS): the floor
+/// measured in a quiet room sits at rms 0.003, twenty times below ordinary speech.
+pub const SPEECH_MIN_RMS: f32 = 0.01;
+/// Speech has to stand this far above the room's own floor. One measurement of this machine's
+/// room, 867 chunks of 30 ms taken while nothing but background was happening: median 0.003,
+/// speech from 0.028 up. A fixed threshold between the two kept the note open whenever a fan, an
+/// air conditioner or a keyboard was louder than that line, because their noise counted as
+/// speech and the silence never started. Judging the room instead of a constant fixes that.
+const SPEECH_OVER_FLOOR: f32 = 3.0;
+/// The room's floor follows quiet audio down at once (quiet audio *is* the room) and creeps up
+/// while it is louder, so one loud sentence does not redefine the room.
+const FLOOR_RISE: f32 = 1.002;
+/// A floor above this is a room too noisy to speak in, not a signal: nothing else would ever be
+/// speech again.
+const FLOOR_MAX: f32 = 0.03;
 /// Silence that ends a wake-word note, counted only after the speaker has been heard.
 pub const SILENCE_MS: u64 = 1_500;
 /// Speech a wake-word note needs before silence can end it, so a pause right after the wake word
 /// does not cut the sentence.
 pub const MIN_SPEECH_MS: u64 = 1_000;
+/// A note that never heard a word ends here instead of running to the cap: with a noisy room the
+/// old rule could keep the microphone open for a full minute after the phrase alone.
+pub const NO_SPEECH_MS: u64 = 4_000;
 /// The hard cap on a wake-word note, the same one the panel's own recordings get.
 pub const MAX_RECORDING_MS: u64 = 60_000;
 
@@ -106,25 +118,36 @@ struct AutoStop {
     speech_ms: u64,
     silence_ms: u64,
     heard_ms: u64,
+    /// The room's own level, learned while the note runs.
+    floor: f32,
     fired: bool,
 }
 
 impl AutoStop {
     fn new() -> Self {
-        AutoStop { speech_ms: 0, silence_ms: 0, heard_ms: 0, fired: false }
+        AutoStop { speech_ms: 0, silence_ms: 0, heard_ms: 0, floor: SPEECH_MIN_RMS, fired: false }
     }
 
     /// Counts one chunk and answers whether the note is over, once and only once.
     fn accept(&mut self, samples: &[f32]) -> bool {
         let chunk_ms = samples.len() as u64 * 1_000 / u64::from(audio::SAMPLE_RATE);
         self.heard_ms += chunk_ms;
-        if audio::rms(samples) >= SPEECH_RMS {
+        let rms = audio::rms(samples);
+        if rms < self.floor {
+            self.floor = rms.max(1e-6);
+        } else {
+            self.floor = (self.floor * FLOOR_RISE).min(FLOOR_MAX);
+        }
+        let speech = rms >= (self.floor * SPEECH_OVER_FLOOR).max(SPEECH_MIN_RMS);
+        if speech {
             self.speech_ms += chunk_ms;
             self.silence_ms = 0;
         } else if self.speech_ms >= MIN_SPEECH_MS {
             self.silence_ms += chunk_ms;
         }
-        let due = self.heard_ms >= MAX_RECORDING_MS || self.silence_ms >= SILENCE_MS;
+        let due = self.heard_ms >= MAX_RECORDING_MS
+            || self.silence_ms >= SILENCE_MS
+            || (self.speech_ms == 0 && self.heard_ms >= NO_SPEECH_MS);
         if due && !self.fired {
             self.fired = true;
             return true;
@@ -1052,6 +1075,30 @@ mod tests {
         assert_eq!(rig.listenings.wait_for(1), vec![ListenEvent::Silent]);
         rig.feed(0.0, 1_000);
         assert_eq!(rig.listenings.settle().len(), 1, "the cut happens once");
+    }
+
+    #[test]
+    fn a_noisy_room_does_not_count_as_speech_and_the_note_still_ends() {
+        let rig = granted();
+        rig.voice.start_woken(None, rig.recorder.events(), rig.listenings.events()).unwrap();
+        // A fan or a keyboard louder than the old fixed threshold: speech has to stand above the
+        // room, so none of this is a word.
+        rig.feed(0.02, 3_900);
+        assert!(rig.listenings.settle().is_empty(), "four seconds have not passed yet");
+        rig.feed(0.02, 200);
+        assert_eq!(rig.listenings.wait_for(1), vec![ListenEvent::Silent], "a note nobody spoke ends");
+    }
+
+    #[test]
+    fn background_noise_after_speech_lets_the_silence_run() {
+        let rig = granted();
+        rig.voice.start_woken(None, rig.recorder.events(), rig.listenings.events()).unwrap();
+        rig.feed(SPEECH, 1_000);
+        // Louder than the old threshold, quiet for this room's scale: the cut must not wait for it.
+        rig.feed(0.02, 1_400);
+        assert!(rig.listenings.settle().is_empty(), "a second and a half of it is still needed");
+        rig.feed(0.02, 150);
+        assert_eq!(rig.listenings.wait_for(1), vec![ListenEvent::Silent]);
     }
 
     #[test]
