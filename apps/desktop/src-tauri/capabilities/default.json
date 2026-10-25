@@ -44,7 +44,12 @@
 			"identifier": "settings",
 			"description": "The panel's Settings screen (S33): read and change the shortcut that opens the panel; the Dot never changes it.",
 			"windows": ["panel"],
-			"permissions": ["allow-shortcut-get", "allow-shortcut-set"]
+			"permissions": [
+				"allow-shortcut-get",
+				"allow-shortcut-set",
+				"allow-voice-shortcut-get",
+				"allow-voice-shortcut-set"
+			]
 		},
 		{
 			"identifier": "connectors",

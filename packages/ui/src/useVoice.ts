@@ -10,6 +10,7 @@ import {
 	type NativeVoiceStatus,
 	nativeVoiceStatus,
 	onNativeVoice,
+	onVoiceHold,
 	onVoiceModel,
 	startNativeVoice,
 	startRefusal,
@@ -39,6 +40,10 @@ export interface VoiceControls {
 	start(): void;
 	stop(): void;
 	cancel(): void;
+	/** The push-to-talk shortcut is held: start recording, like the mic button. */
+	holdStart(): void;
+	/** The push-to-talk shortcut was released: stop and send, whatever the preference says. */
+	holdStop(): void;
 	stopSpeaking(): void;
 	setMuted(muted: boolean): void;
 	/** The user sent a typed message: its reply is not read aloud. */
@@ -118,6 +123,10 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 	const phaseNow = useRef<VoicePhase>("idle");
 	const recording = useRef<Recording | undefined>(undefined);
 	const starting = useRef(false);
+	/** The held shortcut started this recording, so its release sends the transcript. */
+	const held = useRef(false);
+	/** One-shot: send the next transcript even when the stored preference says to review it. */
+	const sendNow = useRef(false);
 	const pendingTranscript = useRef<string | undefined>(undefined);
 	const pendingSpeech = useRef<{ requestId: string; text: string } | undefined>(undefined);
 	const audio = useRef<HTMLAudioElement | undefined>(undefined);
@@ -140,6 +149,9 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 			if (recording.current) stopTimers(recording.current);
 			recording.current = undefined;
 			pendingTranscript.current = undefined;
+			// Every ending passes here: nothing is held, and no forced send survives it.
+			held.current = false;
+			sendNow.current = false;
 			setPhase("idle");
 			setElapsed(0);
 			setLevel(0);
@@ -199,7 +211,10 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 				finish(REASONS.empty);
 				return;
 			}
-			if (sendOnStopNow.current) {
+			// The release of the voice shortcut sends this one transcript; the preference is untouched.
+			const sendIt = sendOnStopNow.current || sendNow.current;
+			sendNow.current = false;
+			if (sendIt) {
 				voiceTurn.current = new Set(latest.current.messages.map((m) => m.id));
 				send({ type: "send", text, requestId: newRequestId() });
 			} else {
@@ -319,6 +334,18 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 		});
 	}, [source.kind, startDaemon, startNative, stopSpeaking]);
 
+	const holdStart = useCallback(() => {
+		if (phaseNow.current !== "idle" || starting.current) return;
+		held.current = true;
+		start();
+	}, [start]);
+
+	const holdStop = useCallback(() => {
+		if (!held.current || phaseNow.current !== "recording") return;
+		sendNow.current = true;
+		stop();
+	}, [stop]);
+
 	const cancel = useCallback(() => {
 		const current = recording.current;
 		if (!current) return;
@@ -382,6 +409,23 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 		}).catch(() => () => {});
 		return () => {
 			live = false;
+			void off.then((stopListening) => stopListening());
+		};
+	}, [desktop]);
+
+	// The push-to-talk shortcut (S1): held starts a recording, released sends it. Refs keep the
+	// subscription from restarting on every render.
+	const holdStartNow = useRef(holdStart);
+	holdStartNow.current = holdStart;
+	const holdStopNow = useRef(holdStop);
+	holdStopNow.current = holdStop;
+	useEffect(() => {
+		if (!desktop) return;
+		const off = onVoiceHold({
+			start: () => holdStartNow.current(),
+			stop: () => holdStopNow.current(),
+		}).catch(() => () => {});
+		return () => {
 			void off.then((stopListening) => stopListening());
 		};
 	}, [desktop]);
@@ -464,6 +508,8 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 		start,
 		stop,
 		cancel,
+		holdStart,
+		holdStop,
 		stopSpeaking,
 		setMuted,
 		typed,

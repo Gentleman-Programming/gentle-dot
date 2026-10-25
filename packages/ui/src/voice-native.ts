@@ -72,6 +72,27 @@ export async function onNativeVoice(handlers: NativeVoiceHandlers): Promise<() =
 	};
 }
 
+export interface VoiceHoldHandlers {
+	start: () => void;
+	stop: () => void;
+}
+
+/** Listens to the push-to-talk shortcut's press and release; resolves with a function that stops listening. */
+export async function onVoiceHold(handlers: VoiceHoldHandlers): Promise<() => void> {
+	const { listen } = await tauriEvents();
+	const stops = await Promise.all([
+		listen("voice://hold-start", () => {
+			handlers.start();
+		}),
+		listen("voice://hold-stop", () => {
+			handlers.stop();
+		}),
+	]);
+	return () => {
+		for (const stop of stops) stop();
+	};
+}
+
 /** Why `voice_start` refused, in the app's words when it gave some. */
 export function startRefusal(error: unknown): string {
 	if (typeof error === "string" && error) return error;

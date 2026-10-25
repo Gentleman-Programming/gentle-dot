@@ -10,6 +10,7 @@ pub const NEEDS_MODIFIER: &str =
 pub const RESERVED_PANIC: &str = "⌥⇧Esc (Alt+Shift+Esc) is reserved for stopping computer control.";
 pub const ESC_ALONE: &str = "Esc alone closes the panel. Add a modifier key or choose another key.";
 pub const TAKEN: &str = "That shortcut is taken by the system or another app.";
+pub const SAME_AS_PANEL: &str = "That shortcut already opens the panel. Choose another one for voice.";
 
 const FUNCTION_KEYS: [Code; 24] = [
     Code::F1,
@@ -90,9 +91,13 @@ pub fn normalize(text: &str) -> Result<String, String> {
 pub trait Host {
     /// Makes the shortcut toggle the panel; fails when the system or another app holds it.
     fn bind_toggle(&self, shortcut: &str) -> Result<(), String>;
+    /// Makes the shortcut record while held and send when released; same failure rule as `bind_toggle`.
+    fn bind_voice(&self, shortcut: &str) -> Result<(), String>;
     fn unbind(&self, shortcut: &str);
     /// Saves the shortcut in `config.json`.
     fn save(&self, shortcut: &str) -> Result<(), String>;
+    /// Saves the voice shortcut in `config.json`, or turns it off with `None`.
+    fn save_voice(&self, shortcut: Option<&str>) -> Result<(), String>;
     /// Shows the shortcut on the tray's "Open" item.
     fn label_tray(&self, shortcut: &str);
 }
@@ -115,6 +120,49 @@ pub fn apply(host: &impl Host, current: Option<&str>, requested: &str) -> Result
         host.unbind(current);
     }
     host.label_tray(&shortcut);
+    Ok(shortcut)
+}
+
+/// Applies a new voice shortcut at once, or `None` to turn it off. The new one is bound before the
+/// old one is released, so a refused or unsaved change leaves the old one working. Returns the
+/// saved spelling. `panel` is the panel shortcut: the same keys cannot hold both gestures.
+pub fn apply_voice(
+    host: &impl Host,
+    panel: &str,
+    current: Option<&str>,
+    requested: Option<&str>,
+) -> Result<Option<String>, String> {
+    let shortcut = match requested {
+        Some(text) => Some(normalize(text)?),
+        None => None,
+    };
+    if let Some(shortcut) = &shortcut {
+        if same_keys(panel, shortcut) {
+            return Err(SAME_AS_PANEL.to_string());
+        }
+    }
+    let rebind = match (&shortcut, current) {
+        (Some(next), Some(current)) => !same_keys(current, next),
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (None, None) => false,
+    };
+    if rebind {
+        host.bind_voice(shortcut.as_deref().unwrap_or_default()).map_err(|_| TAKEN.to_string())?;
+    }
+    if let Err(error) = host.save_voice(shortcut.as_deref()) {
+        if rebind {
+            host.unbind(shortcut.as_deref().unwrap_or_default());
+        }
+        return Err(error);
+    }
+    if shortcut.is_none() {
+        if let Some(current) = current {
+            host.unbind(current);
+        }
+    } else if let Some(current) = current.filter(|_| rebind) {
+        host.unbind(current);
+    }
     Ok(shortcut)
 }
 
@@ -195,11 +243,23 @@ mod tests {
                 Ok(())
             }
         }
+        fn bind_voice(&self, shortcut: &str) -> Result<(), String> {
+            self.calls.borrow_mut().push(format!("bind voice {shortcut}"));
+            if self.taken.contains(&shortcut) {
+                Err("HotKey already registered".into())
+            } else {
+                Ok(())
+            }
+        }
         fn unbind(&self, shortcut: &str) {
             self.calls.borrow_mut().push(format!("unbind {shortcut}"));
         }
         fn save(&self, shortcut: &str) -> Result<(), String> {
             self.calls.borrow_mut().push(format!("save {shortcut}"));
+            self.save_error.map_or(Ok(()), |error| Err(error.to_string()))
+        }
+        fn save_voice(&self, shortcut: Option<&str>) -> Result<(), String> {
+            self.calls.borrow_mut().push(format!("save voice {}", shortcut.unwrap_or("off")));
             self.save_error.map_or(Ok(()), |error| Err(error.to_string()))
         }
         fn label_tray(&self, shortcut: &str) {
@@ -257,5 +317,53 @@ mod tests {
         let host = FakeHost::default();
         assert_eq!(apply(&host, None, "F5"), Ok("F5".to_string()));
         assert_eq!(calls(&host), ["bind F5", "save F5", "tray F5"]);
+    }
+
+    #[test]
+    fn applies_the_voice_shortcut_without_touching_the_tray() {
+        let host = FakeHost::default();
+        assert_eq!(apply_voice(&host, "Alt+Space", None, Some("ctrl+alt+v")), Ok(Some("Ctrl+Alt+V".into())));
+        assert_eq!(calls(&host), ["bind voice Ctrl+Alt+V", "save voice Ctrl+Alt+V"]);
+        // The same keys in another spelling are only saved: a second bind would fail as taken.
+        let host = FakeHost::default();
+        assert_eq!(apply_voice(&host, "Alt+Space", Some("ctrl+alt+v"), Some("Ctrl+Alt+V")), Ok(Some("Ctrl+Alt+V".into())));
+        assert_eq!(calls(&host), ["save voice Ctrl+Alt+V"]);
+        // A changed shortcut is bound before the old one is released.
+        let host = FakeHost::default();
+        assert_eq!(apply_voice(&host, "Alt+Space", Some("Ctrl+Alt+V"), Some("F6")), Ok(Some("F6".into())));
+        assert_eq!(calls(&host), ["bind voice F6", "save voice F6", "unbind Ctrl+Alt+V"]);
+    }
+
+    #[test]
+    fn turning_the_voice_shortcut_off_releases_it() {
+        let host = FakeHost::default();
+        assert_eq!(apply_voice(&host, "Alt+Space", Some("Ctrl+Alt+V"), None), Ok(None));
+        assert_eq!(calls(&host), ["save voice off", "unbind Ctrl+Alt+V"]);
+        // Already off: nothing to release, nothing to bind.
+        let host = FakeHost::default();
+        assert_eq!(apply_voice(&host, "Alt+Space", None, None), Ok(None));
+        assert_eq!(calls(&host), ["save voice off"]);
+    }
+
+    #[test]
+    fn the_voice_shortcut_refuses_the_panel_keys_and_taken_combinations() {
+        let host = FakeHost::default();
+        assert_eq!(apply_voice(&host, "Alt+Space", None, Some("option+space")), Err(SAME_AS_PANEL.to_string()));
+        assert_eq!(apply_voice(&host, "Alt+Space", None, Some("Alt+Shift+Esc")), Err(RESERVED_PANIC.to_string()));
+        assert_eq!(apply_voice(&host, "Alt+Space", None, Some("K")), Err(NEEDS_MODIFIER.to_string()));
+        assert!(calls(&host).is_empty());
+        let host = FakeHost { taken: vec!["F7"], ..FakeHost::default() };
+        assert_eq!(apply_voice(&host, "Alt+Space", Some("F6"), Some("F7")), Err(TAKEN.to_string()));
+        assert_eq!(calls(&host), ["bind voice F7"]);
+    }
+
+    #[test]
+    fn a_voice_shortcut_that_cannot_be_saved_is_released_again() {
+        let host = FakeHost { save_error: Some("config.json is not valid JSON"), ..FakeHost::default() };
+        assert_eq!(
+            apply_voice(&host, "Alt+Space", Some("F6"), Some("F7")),
+            Err("config.json is not valid JSON".to_string())
+        );
+        assert_eq!(calls(&host), ["bind voice F7", "save voice F7", "unbind F7"]);
     }
 }

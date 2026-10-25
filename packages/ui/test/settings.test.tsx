@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { formatShortcut, recordKey } from "../src/shortcut.ts";
@@ -8,7 +8,9 @@ import { type DotState, initialState } from "../src/store.ts";
 const h = vi.hoisted(() => ({
 	tauri: true,
 	shortcut: "Alt+Space",
+	voice: "Alt+Shift+Space" as string | null,
 	setResult: undefined as undefined | ((shortcut: string) => Promise<unknown>),
+	voiceSetResult: undefined as undefined | ((shortcut: string | null) => Promise<unknown>),
 	invoke: vi.fn(),
 	state: undefined as unknown as DotState,
 }));
@@ -49,17 +51,24 @@ async function openSettings() {
 	return screen.findByRole("region", { name: "Settings" });
 }
 
+/** Each shortcut section by its heading: both offer "Change" and "Reset to default". */
+const shortcutSection = () => screen.getByRole("region", { name: "Keyboard shortcut" });
+const voiceSection = () => screen.getByRole("region", { name: "Voice shortcut" });
+
 async function startRecording() {
 	await openSettings();
-	await screen.findByText("⌥ Space");
-	await userEvent.click(screen.getByRole("button", { name: "Change" }));
-	await screen.findByText(/Press the new shortcut/);
+	const section = shortcutSection();
+	await within(section).findByText("⌥ Space");
+	await userEvent.click(within(section).getByRole("button", { name: "Change" }));
+	await within(section).findByText(/Press the new shortcut/);
 }
 
 beforeEach(() => {
 	h.tauri = true;
 	h.shortcut = "Alt+Space";
+	h.voice = "Alt+Shift+Space";
 	h.setResult = undefined;
+	h.voiceSetResult = undefined;
 	h.state = { ...initialState, connection: "open", agentState: "idle" };
 	vi.spyOn(navigator, "userAgent", "get").mockReturnValue(MAC_AGENT);
 	h.invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
@@ -72,6 +81,14 @@ beforeEach(() => {
 				const shortcut = String(args?.shortcut);
 				if (h.setResult) return h.setResult(shortcut);
 				h.shortcut = shortcut;
+				return { shortcut };
+			}
+			case "voice_shortcut_get":
+				return { shortcut: h.voice, default: "Alt+Shift+Space" };
+			case "voice_shortcut_set": {
+				const shortcut = args?.shortcut === null ? null : String(args?.shortcut);
+				if (h.voiceSetResult) return h.voiceSetResult(shortcut);
+				h.voice = shortcut;
 				return { shortcut };
 			}
 			default:
@@ -251,11 +268,58 @@ describe("changing the shortcut (S33.2, S33.3)", () => {
 	it("resets to the default shortcut", async () => {
 		h.shortcut = "Shift+Super+K";
 		await openSettings();
-		await screen.findByText("⇧⌘K");
-		await userEvent.click(screen.getByRole("button", { name: "Reset to default" }));
+		const section = shortcutSection();
+		await within(section).findByText("⇧⌘K");
+		await userEvent.click(within(section).getByRole("button", { name: "Reset to default" }));
 		await waitFor(() => expect(invoked("shortcut_set")).toHaveLength(1));
 		expect(invoked("shortcut_set")[0]?.[1]).toEqual({ shortcut: "Alt+Space" });
-		expect(await screen.findByText("⌥ Space")).toBeInTheDocument();
-		expect(screen.getByRole("button", { name: "Reset to default" })).toBeDisabled();
+		expect(await within(section).findByText("⌥ Space")).toBeInTheDocument();
+		expect(within(section).getByRole("button", { name: "Reset to default" })).toBeDisabled();
+	});
+});
+
+describe("the voice shortcut (S2)", () => {
+	it("shows the stored push-to-talk shortcut with the macOS symbols", async () => {
+		await openSettings();
+		expect(await within(voiceSection()).findByText("⌥⇧ Space")).toBeInTheDocument();
+	});
+
+	it("shows Off when the gesture is turned off", async () => {
+		h.voice = null;
+		await openSettings();
+		const section = voiceSection();
+		expect(await within(section).findByText("Off")).toBeInTheDocument();
+		expect(within(section).getByRole("button", { name: "Reset to default" })).toBeDisabled();
+	});
+
+	it("records the next combination and applies it", async () => {
+		await openSettings();
+		const section = voiceSection();
+		await within(section).findByText("⌥⇧ Space");
+		await userEvent.click(within(section).getByRole("button", { name: "Change" }));
+		await within(section).findByText(/Press the new shortcut/);
+		fireEvent.keyDown(window, { key: "v", code: "KeyV", altKey: true, metaKey: true });
+		await waitFor(() => expect(invoked("voice_shortcut_set")).toHaveLength(1));
+		expect(invoked("voice_shortcut_set")[0]?.[1]).toEqual({ shortcut: "Alt+Super+V" });
+		expect(await within(section).findByText("⌥⌘V")).toBeInTheDocument();
+		expect(within(section).getByRole("status")).toHaveTextContent("Saved. It works right away.");
+		// The panel shortcut is untouched by the voice one.
+		expect(invoked("shortcut_set")).toHaveLength(0);
+	});
+
+	it("shows the app's reason when it refuses the voice shortcut", async () => {
+		h.voiceSetResult = async () => {
+			throw "That shortcut is taken by the system or another app.";
+		};
+		await openSettings();
+		const section = voiceSection();
+		await within(section).findByText("⌥⇧ Space");
+		await userEvent.click(within(section).getByRole("button", { name: "Change" }));
+		await within(section).findByText(/Press the new shortcut/);
+		fireEvent.keyDown(window, { key: " ", code: "Space", metaKey: true });
+		expect(await within(section).findByRole("alert")).toHaveTextContent(
+			"That shortcut is taken by the system or another app.",
+		);
+		expect(within(section).getByText("⌥⇧ Space")).toBeInTheDocument();
 	});
 });

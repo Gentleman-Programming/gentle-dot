@@ -3,9 +3,12 @@ import {
 	formatShortcut,
 	isMac,
 	loadShortcut,
+	loadVoiceShortcut,
 	recordKey,
 	type ShortcutInfo,
 	saveShortcut,
+	saveVoiceShortcut,
+	type VoiceShortcutInfo,
 } from "../shortcut.ts";
 import { setVoiceLanguage, VOICE_LANGUAGES, voiceLanguage } from "../voice-language.ts";
 import "../settings.css";
@@ -31,8 +34,12 @@ export function SettingsPanel({ close }: { close: () => void }) {
 	const [info, setInfo] = useState<ShortcutInfo | undefined>(undefined);
 	const [loadFailed, setLoadFailed] = useState(false);
 	const [status, setStatus] = useState<Status>({ kind: "idle" });
+	const [voice, setVoice] = useState<VoiceShortcutInfo | undefined>(undefined);
+	const [voiceLoadFailed, setVoiceLoadFailed] = useState(false);
+	const [voiceStatus, setVoiceStatus] = useState<Status>({ kind: "idle" });
 	const live = useRef(true);
 	const prompt = useRef<HTMLSpanElement>(null);
+	const voicePrompt = useRef<HTMLSpanElement>(null);
 
 	useEffect(() => {
 		live.current = true;
@@ -42,6 +49,14 @@ export function SettingsPanel({ close }: { close: () => void }) {
 			},
 			() => {
 				if (live.current) setLoadFailed(true);
+			},
+		);
+		loadVoiceShortcut().then(
+			(found) => {
+				if (live.current && found) setVoice(found);
+			},
+			() => {
+				if (live.current) setVoiceLoadFailed(true);
 			},
 		);
 		return () => {
@@ -80,6 +95,39 @@ export function SettingsPanel({ close }: { close: () => void }) {
 	}, [recording, apply]);
 
 	const applying = status.kind === "applying";
+
+	const applyVoice = useCallback((shortcut: string | null) => {
+		setVoiceStatus({ kind: "applying", shortcut: shortcut ?? "" });
+		saveVoiceShortcut(shortcut).then(
+			(saved) => {
+				if (!live.current) return;
+				setVoice((current) => current && { ...current, shortcut: saved });
+				setVoiceStatus({ kind: "applied" });
+			},
+			(error: unknown) => {
+				if (live.current) setVoiceStatus({ kind: "failed", reason: reasonOf(error) });
+			},
+		);
+	}, []);
+
+	const voiceRecording = voiceStatus.kind === "recording";
+	useEffect(() => {
+		if (!voiceRecording) return;
+		voicePrompt.current?.focus();
+		// Captured before the panel's own keys, as in the shortcut above: Esc cancels, and a
+		// combination is recorded instead of doing its usual job.
+		const onKey = (event: KeyboardEvent) => {
+			event.preventDefault();
+			const recorded = recordKey(event);
+			if (recorded.kind === "cancel") setVoiceStatus({ kind: "idle" });
+			else if (recorded.kind === "shortcut") applyVoice(recorded.accelerator);
+		};
+		window.addEventListener("keydown", onKey, true);
+		return () => window.removeEventListener("keydown", onKey, true);
+	}, [voiceRecording, applyVoice]);
+
+	const voiceApplying = voiceStatus.kind === "applying";
+	const voiceOff = voice?.shortcut === null;
 	return (
 		<section className="accounts settings" aria-label="Settings">
 			<header className="accounts-header">
@@ -114,7 +162,10 @@ export function SettingsPanel({ close }: { close: () => void }) {
 							type="button"
 							className="primary"
 							disabled={!info || applying}
-							onClick={() => setStatus({ kind: "recording" })}
+							onClick={() => {
+								setVoiceStatus({ kind: "idle" });
+								setStatus({ kind: "recording" });
+							}}
 						>
 							Change
 						</button>
@@ -144,6 +195,83 @@ export function SettingsPanel({ close }: { close: () => void }) {
 					title={info ? `Default: ${show(info.default)}` : undefined}
 					disabled={!info || info.shortcut === info.default || applying || recording}
 					onClick={() => info && apply(info.default)}
+				>
+					Reset to default
+				</button>
+			</section>
+
+			<section className="provider-section" aria-labelledby="settings-voice-shortcut">
+				<h3 id="settings-voice-shortcut">Voice shortcut</h3>
+				<p className="muted">Hold to record a voice note from any app. Release to send it.</p>
+				{voiceLoadFailed ? (
+					<p className="settings-error" role="alert">
+						Gentle Dot could not read the current voice shortcut.
+					</p>
+				) : null}
+				<div className="shortcut-row">
+					{voiceRecording ? (
+						<span ref={voicePrompt} className="shortcut-recording" tabIndex={-1}>
+							Press the new shortcut… Esc cancels.
+						</span>
+					) : (
+						<kbd className="shortcut-keys">
+							{!voice ? "…" : voice.shortcut === null ? "Off" : show(voice.shortcut)}
+						</kbd>
+					)}
+					{voiceRecording ? (
+						<button type="button" onClick={() => setVoiceStatus({ kind: "idle" })}>
+							Cancel
+						</button>
+					) : (
+						<>
+							<button
+								type="button"
+								className="primary"
+								disabled={!voice || voiceApplying}
+								onClick={() => {
+									setStatus({ kind: "idle" });
+									setVoiceStatus({ kind: "recording" });
+								}}
+							>
+								Change
+							</button>
+							{voice && !voiceOff ? (
+								<button
+									type="button"
+									className="link"
+									disabled={voiceApplying}
+									onClick={() => applyVoice(null)}
+								>
+									Turn off
+								</button>
+							) : null}
+						</>
+					)}
+				</div>
+				{voiceStatus.kind === "applying" ? (
+					<p className="muted" role="status">
+						Applying {voiceStatus.shortcut ? show(voiceStatus.shortcut) : "the change"}…
+					</p>
+				) : null}
+				{voiceStatus.kind === "applied" ? (
+					<p className="settings-ok" role="status">
+						Saved. It works right away.
+					</p>
+				) : null}
+				{voiceStatus.kind === "failed" ? (
+					<p className="settings-error" role="alert">
+						{voiceStatus.reason}
+					</p>
+				) : null}
+				<p className="settings-hint muted">
+					Use at least one modifier key ({mac ? "⌘ ⌥ ⌃ ⇧" : "Super, Alt, Ctrl, Shift"}), or a function key.
+				</p>
+				<button
+					type="button"
+					className="link"
+					title={voice ? `Default: ${show(voice.default)}` : undefined}
+					disabled={!voice || voiceOff || voice.shortcut === voice.default || voiceApplying || voiceRecording}
+					onClick={() => voice && applyVoice(voice.default)}
 				>
 					Reset to default
 				</button>

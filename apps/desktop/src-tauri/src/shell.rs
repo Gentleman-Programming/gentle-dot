@@ -8,7 +8,7 @@ use crate::computer::app as computer;
 use crate::computer::server::Endpoint;
 use crate::computer::session::Reason;
 use crate::computer::working::{self, Part};
-use crate::config::{self, ConnectionInfo, DesktopConfig, DEFAULT_SHORTCUT};
+use crate::config::{self, ConnectionInfo, DesktopConfig, DEFAULT_SHORTCUT, DEFAULT_VOICE_SHORTCUT};
 use crate::daemon::{self, Daemon, RestartOutcome};
 use crate::geometry::{self, Rect};
 use crate::platform::{self, LaunchRequest, Os, DOT_TITLE, PANEL_TITLE};
@@ -52,6 +52,9 @@ const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(20);
 /// launch or after Restart assistant): a window that was refused, or whose `connection_info` gave up
 /// first, asks again and connects without a reopen (S35.2).
 const ASSISTANT_READY: &str = "dot://assistant-ready";
+/// Sent to the panel when the held-to-record shortcut goes down, and again when it comes up.
+const VOICE_HOLD_START: &str = "voice://hold-start";
+const VOICE_HOLD_STOP: &str = "voice://hold-stop";
 
 struct Shell {
     config: DesktopConfig,
@@ -67,6 +70,8 @@ struct Shell {
     full_screen: Mutex<Option<Rect>>,
     /// The shortcut that toggles the panel now; `None` while none is bound (native Wayland).
     shortcut: Mutex<Option<String>>,
+    /// The held-to-record shortcut bound now; `None` while none is bound or it is turned off.
+    voice_shortcut: Mutex<Option<String>>,
 }
 
 /// The Dot and the panel as computer control hides them during a call (S1, S5): never through
@@ -343,6 +348,45 @@ async fn shortcut_set(app: AppHandle, shortcut: String) -> CommandResult<Shortcu
     .map_err(err)?
 }
 
+/// Result of `voice_shortcut_get`: the held-to-record shortcut, or `null` when it is off.
+#[derive(serde::Serialize)]
+struct VoiceShortcutInfo {
+    shortcut: Option<String>,
+    default: String,
+}
+
+/// Result of `voice_shortcut_set`: the shortcut as saved, or `null` when it is off.
+#[derive(serde::Serialize)]
+struct VoiceShortcutChoice {
+    shortcut: Option<String>,
+}
+
+#[tauri::command]
+fn voice_shortcut_get(app: AppHandle) -> VoiceShortcutInfo {
+    let shell = app.state::<Shell>();
+    let current = shell.voice_shortcut.lock().unwrap().clone().and_then(|text| shortcut::normalize(&text).ok());
+    VoiceShortcutInfo { shortcut: current, default: DEFAULT_VOICE_SHORTCUT.to_string() }
+}
+
+/// Binds, saves, and shows a new voice shortcut at once, or turns it off (S2, S6).
+#[tauri::command]
+async fn voice_shortcut_set(app: AppHandle, shortcut: Option<String>) -> CommandResult<VoiceShortcutChoice> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let shell = app.state::<Shell>();
+        if !shell.places_windows {
+            return Err(DESKTOP_OWNS_SHORTCUTS.to_string());
+        }
+        let panel = shell.shortcut.lock().unwrap().clone().unwrap_or_else(|| shell.config.shortcut.clone());
+        let current = shell.voice_shortcut.lock().unwrap().clone();
+        let host = ShortcutHost { app: &app, config_file: shell.config.data_dir.join("config.json") };
+        let saved = shortcut::apply_voice(&host, &panel, current.as_deref(), shortcut.as_deref())?;
+        *shell.voice_shortcut.lock().unwrap() = saved.clone();
+        Ok(VoiceShortcutChoice { shortcut: saved })
+    })
+    .await
+    .map_err(err)?
+}
+
 struct ShortcutHost<'a> {
     app: &'a AppHandle,
     config_file: PathBuf,
@@ -353,6 +397,10 @@ impl shortcut::Host for ShortcutHost<'_> {
         self.app.global_shortcut().on_shortcut(shortcut, toggle_on_press).map_err(err)
     }
 
+    fn bind_voice(&self, shortcut: &str) -> Result<(), String> {
+        self.app.global_shortcut().on_shortcut(shortcut, voice_on_hold).map_err(err)
+    }
+
     fn unbind(&self, shortcut: &str) {
         if let Err(error) = self.app.global_shortcut().unregister(shortcut) {
             eprintln!("gentle-dot: cannot release shortcut `{shortcut}`: {error}");
@@ -361,6 +409,10 @@ impl shortcut::Host for ShortcutHost<'_> {
 
     fn save(&self, shortcut: &str) -> Result<(), String> {
         config::save_shortcut(&self.config_file, shortcut)
+    }
+
+    fn save_voice(&self, shortcut: Option<&str>) -> Result<(), String> {
+        config::save_voice_shortcut(&self.config_file, shortcut)
     }
 
     fn label_tray(&self, shortcut: &str) {
@@ -750,6 +802,26 @@ fn toggle_on_press(app: &AppHandle, _: &Shortcut, event: ShortcutEvent) {
     }
 }
 
+/// What the held-to-record shortcut does: the panel owns the recording, so Rust only reports the
+/// press (showing the panel first, so a hidden panel can capture it) and the release.
+fn voice_on_hold(app: &AppHandle, _: &Shortcut, event: ShortcutEvent) {
+    match event.state() {
+        ShortcutState::Pressed => {
+            if let Err(error) = show_panel(app) {
+                eprintln!("gentle-dot: cannot show the panel for the voice shortcut: {error}");
+            }
+            if let Err(error) = app.emit(VOICE_HOLD_START, ()) {
+                eprintln!("gentle-dot: cannot tell the panel the voice shortcut is held: {error}");
+            }
+        }
+        ShortcutState::Released => {
+            if let Err(error) = app.emit(VOICE_HOLD_STOP, ()) {
+                eprintln!("gentle-dot: cannot tell the panel the voice shortcut was released: {error}");
+            }
+        }
+    }
+}
+
 /// Binds the configured shortcut, or the default one when it is unavailable. Returns the bound one.
 fn register_shortcut(app: &AppHandle, shortcut: &str) -> Option<String> {
     match app.global_shortcut().on_shortcut(shortcut, toggle_on_press) {
@@ -760,6 +832,18 @@ fn register_shortcut(app: &AppHandle, shortcut: &str) -> Option<String> {
         return Some(DEFAULT_SHORTCUT.to_string());
     }
     None
+}
+
+/// Binds the configured voice shortcut, or leaves it off when there is none (turned off). Returns the bound one.
+fn register_voice_shortcut(app: &AppHandle, shortcut: Option<&str>) -> Option<String> {
+    let shortcut = shortcut?;
+    match app.global_shortcut().on_shortcut(shortcut, voice_on_hold) {
+        Ok(()) => Some(shortcut.to_string()),
+        Err(error) => {
+            eprintln!("gentle-dot: the voice shortcut `{shortcut}` is unavailable ({error})");
+            None
+        }
+    }
 }
 
 /// A launch of `gentle-dot` (usually `--toggle` from a desktop shortcut) reaches the running app.
@@ -799,6 +883,8 @@ pub fn run() {
             set_panel_fullscreen,
             shortcut_get,
             shortcut_set,
+            voice_shortcut_get,
+            voice_shortcut_set,
             connector_command,
             computer::computer_endpoint,
             computer::computer_permissions,
@@ -860,6 +946,7 @@ pub fn run() {
                 panel_spot: Mutex::new(None),
                 full_screen: Mutex::new(None),
                 shortcut: Mutex::new(None),
+                voice_shortcut: Mutex::new(None),
             });
             let (voice_input, voice_model) = voice::start(&handle);
             app.manage(voice_input);
@@ -875,6 +962,8 @@ pub fn run() {
                     label_tray_open(&handle, bound);
                 }
                 *app.state::<Shell>().shortcut.lock().unwrap() = bound;
+                let voice = register_voice_shortcut(&handle, config.voice_shortcut.as_deref());
+                *app.state::<Shell>().voice_shortcut.lock().unwrap() = voice;
                 let snap = app.state::<Shell>().snap.clone();
                 window(&handle, DOT)?.on_window_event(move |event| {
                     // A move, or a new monitor scale, re-snaps the Dot and restores its size.

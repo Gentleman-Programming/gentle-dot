@@ -16,6 +16,22 @@ export async function saveShortcut(shortcut: string): Promise<string> {
 	return result.shortcut;
 }
 
+/** The push-to-talk shortcut, as the desktop app reports it: `null` when it is turned off (S2). */
+export interface VoiceShortcutInfo {
+	shortcut: string | null;
+	default: string;
+}
+
+export function loadVoiceShortcut(): Promise<VoiceShortcutInfo> {
+	return invoke<VoiceShortcutInfo>("voice_shortcut_get");
+}
+
+/** Binds and saves the push-to-talk shortcut (`null` turns it off); resolves with its saved spelling or rejects with the app's reason. */
+export async function saveVoiceShortcut(shortcut: string | null): Promise<string | null> {
+	const result = await invoke<{ shortcut: string | null }>("voice_shortcut_set", { shortcut });
+	return result.shortcut;
+}
+
 export function isMac(userAgent: string = navigator.userAgent): boolean {
 	return /Mac|iPhone|iPad/.test(userAgent);
 }

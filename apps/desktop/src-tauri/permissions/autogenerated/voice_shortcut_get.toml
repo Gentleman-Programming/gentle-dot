@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-shortcut-get"
+description = "Enables the voice_shortcut_get command without any pre-configured scope."
+commands.allow = ["voice_shortcut_get"]
+
+[[permission]]
+identifier = "deny-voice-shortcut-get"
+description = "Denies the voice_shortcut_get command without any pre-configured scope."
+commands.deny = ["voice_shortcut_get"]

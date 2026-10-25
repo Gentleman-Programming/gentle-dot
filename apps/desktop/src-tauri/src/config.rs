@@ -5,12 +5,16 @@ use std::path::{Path, PathBuf};
 
 pub const DEFAULT_PORT: u16 = 4317;
 pub const DEFAULT_SHORTCUT: &str = "Alt+Space";
+/// Held down to record and released to send; `voiceShortcut: null` turns it off.
+pub const DEFAULT_VOICE_SHORTCUT: &str = "Alt+Shift+Space";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DesktopConfig {
     pub data_dir: PathBuf,
     pub port: u16,
     pub shortcut: String,
+    /// `None` when the voice shortcut is turned off.
+    pub voice_shortcut: Option<String>,
 }
 
 /// Result of the `connection_info` command (design §9).
@@ -58,7 +62,12 @@ pub fn parse_config(
         .filter(|s| !s.is_empty())
         .unwrap_or(DEFAULT_SHORTCUT)
         .to_string();
-    DesktopConfig { data_dir, port, shortcut }
+    // A missing key keeps the default; an empty string or `null` means the user turned it off.
+    let voice_shortcut = match file.get("voiceShortcut") {
+        None => Some(DEFAULT_VOICE_SHORTCUT.to_string()),
+        Some(value) => value.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string),
+    };
+    DesktopConfig { data_dir, port, shortcut, voice_shortcut }
 }
 
 /// Reads the real environment and `<data dir>/config.json`.
@@ -73,9 +82,9 @@ pub fn load_config() -> DesktopConfig {
 pub const INVALID_CONFIG: &str =
     "config.json is not valid JSON, so Gentle Dot left it as it is. Fix or remove it, then try again.";
 
-/// The text of `config.json` with `shortcut` set and every other key kept.
+/// The text of `config.json` with one key set and every other key kept.
 /// A file that is not a JSON object is refused rather than replaced.
-pub fn with_shortcut(file: Option<&str>, shortcut: &str) -> Result<String, String> {
+fn with_entry(file: Option<&str>, key: &str, value: serde_json::Value) -> Result<String, String> {
     let mut json = match file {
         Some(text) => serde_json::from_str::<serde_json::Value>(text)
             .ok()
@@ -83,21 +92,41 @@ pub fn with_shortcut(file: Option<&str>, shortcut: &str) -> Result<String, Strin
             .ok_or(INVALID_CONFIG)?,
         None => serde_json::json!({}),
     };
-    json["shortcut"] = shortcut.into();
+    json[key] = value;
     let text = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
     Ok(text + "\n")
 }
 
-/// Saves the shortcut in `config.json` (S33.3): read, change one key, then write a private
-/// temporary file and rename it over the old one, so a crash never leaves half a file.
-pub fn save_shortcut(path: &Path, shortcut: &str) -> Result<(), String> {
+/// The text of `config.json` with `shortcut` set and every other key kept.
+pub fn with_shortcut(file: Option<&str>, shortcut: &str) -> Result<String, String> {
+    with_entry(file, "shortcut", shortcut.into())
+}
+
+/// The text of `config.json` with `voiceShortcut` set and every other key kept; `None` turns it off.
+pub fn with_voice_shortcut(file: Option<&str>, shortcut: Option<&str>) -> Result<String, String> {
+    with_entry(file, "voiceShortcut", shortcut.map_or(serde_json::Value::Null, Into::into))
+}
+
+/// Reads `config.json`, changes one key, then writes a private temporary file and renames it over
+/// the old one (S33.3), so a crash never leaves half a file.
+fn save_with(path: &Path, change: impl FnOnce(Option<&str>) -> Result<String, String>) -> Result<(), String> {
     let file = match std::fs::read_to_string(path) {
         Ok(text) => Some(text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(format!("Gentle Dot cannot read config.json ({error}), so the shortcut was not saved.")),
     };
-    let text = with_shortcut(file.as_deref(), shortcut)?;
+    let text = change(file.as_deref())?;
     write_private(path, &text).map_err(|error| format!("Gentle Dot cannot save config.json ({error})."))
+}
+
+/// Saves the panel shortcut in `config.json`.
+pub fn save_shortcut(path: &Path, shortcut: &str) -> Result<(), String> {
+    save_with(path, |file| with_shortcut(file, shortcut))
+}
+
+/// Saves the voice shortcut in `config.json`; `None` turns it off.
+pub fn save_voice_shortcut(path: &Path, shortcut: Option<&str>) -> Result<(), String> {
+    save_with(path, |file| with_voice_shortcut(file, shortcut))
 }
 
 fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
@@ -160,7 +189,15 @@ mod tests {
     #[test]
     fn defaults_without_file() {
         let config = parse_config(dir(), None, env_of(&[]));
-        assert_eq!(config, DesktopConfig { data_dir: dir(), port: DEFAULT_PORT, shortcut: DEFAULT_SHORTCUT.into() });
+        assert_eq!(
+            config,
+            DesktopConfig {
+                data_dir: dir(),
+                port: DEFAULT_PORT,
+                shortcut: DEFAULT_SHORTCUT.into(),
+                voice_shortcut: Some(DEFAULT_VOICE_SHORTCUT.into()),
+            }
+        );
     }
 
     #[test]
@@ -214,11 +251,66 @@ mod tests {
         // The file the app writes reads back like any hand-written one: port, shortcut, defaults.
         let text = with_shortcut(Some(r#"{ "port": 5000, "workspace": "~" }"#), "Shift+Super+K").unwrap();
         let config = parse_config(dir(), Some(&text), env_of(&[]));
-        assert_eq!(config, DesktopConfig { data_dir: dir(), port: 5000, shortcut: "Shift+Super+K".into() });
+        assert_eq!(
+            config,
+            DesktopConfig {
+                data_dir: dir(),
+                port: 5000,
+                shortcut: "Shift+Super+K".into(),
+                voice_shortcut: Some(DEFAULT_VOICE_SHORTCUT.into()),
+            }
+        );
         let config = parse_config(dir(), Some(&text), env_of(&[("GENTLE_DOT_PORT", "6000")]));
         assert_eq!(config.port, 6000);
         let text = with_shortcut(None, "F5").unwrap();
         assert_eq!(parse_config(dir(), Some(&text), env_of(&[])).port, DEFAULT_PORT);
+    }
+
+    #[test]
+    fn the_voice_shortcut_defaults_and_can_be_turned_off() {
+        let read = |file: &str| parse_config(dir(), Some(file), env_of(&[])).voice_shortcut;
+        // Missing: the default, so the gesture works after an upgrade with no other step.
+        assert_eq!(read(r#"{ "port": 5000 }"#), Some(DEFAULT_VOICE_SHORTCUT.into()));
+        // Turned off: `null` or an empty value, never a bound key.
+        assert_eq!(read(r#"{ "voiceShortcut": null }"#), None);
+        assert_eq!(read(r#"{ "voiceShortcut": "   " }"#), None);
+        assert_eq!(read(r#"{ "voiceShortcut": 3 }"#), None);
+        assert_eq!(read(r#"{ "voiceShortcut": " Ctrl+Alt+V " }"#), Some("Ctrl+Alt+V".into()));
+        // Turning it off leaves the panel shortcut alone.
+        assert_eq!(
+            parse_config(dir(), Some(r#"{ "shortcut": "F5", "voiceShortcut": null }"#), env_of(&[])).shortcut,
+            "F5"
+        );
+    }
+
+    #[test]
+    fn saving_the_voice_shortcut_keeps_every_other_key() {
+        let text = with_voice_shortcut(Some(r#"{ "port": 5000, "shortcut": "F5", "extra": [1] }"#), Some("Ctrl+Alt+V"))
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["voiceShortcut"], "Ctrl+Alt+V");
+        assert_eq!(json["port"], 5000);
+        assert_eq!(json["shortcut"], "F5");
+        assert_eq!(json["extra"], serde_json::json!([1]));
+        // Off is saved as `null` and reads back as no shortcut.
+        let off = with_voice_shortcut(Some(&text), None).unwrap();
+        assert_eq!(parse_config(dir(), Some(&off), env_of(&[])).voice_shortcut, None);
+        assert_eq!(with_voice_shortcut(Some("{ not json"), None), Err(INVALID_CONFIG.to_string()));
+    }
+
+    #[test]
+    fn saving_the_voice_shortcut_writes_one_private_file() {
+        let dir = scratch("voice");
+        let file = dir.join("config.json");
+        save_voice_shortcut(&file, Some("Ctrl+Alt+V")).unwrap();
+        assert_eq!(parse_config(dir.clone(), std::fs::read_to_string(&file).ok().as_deref(), env_of(&[])).voice_shortcut, Some("Ctrl+Alt+V".into()));
+        save_voice_shortcut(&file, None).unwrap();
+        assert_eq!(parse_config(dir, std::fs::read_to_string(&file).ok().as_deref(), env_of(&[])).voice_shortcut, None);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+        }
     }
 
     fn scratch(name: &str) -> PathBuf {
