@@ -9,7 +9,7 @@
 use super::engine::{fallback_engine, Preferred};
 use super::model::{HttpFetcher, ModelError, ModelEvent, ModelEvents, ModelManager, ModelSpec, ModelStatus, MODEL_EVENT};
 use super::parakeet::{self, Loader, Locate, Parakeet};
-use super::wake::{self, WakeWord};
+use super::wake::{self, Chime, WakeWord};
 use super::{ListenEvent, ListenEvents};
 use super::{Events, Transcript, Voice, VoiceError, VoiceEvent, VoiceStatus, UNSUPPORTED};
 use crate::computer::SystemClock;
@@ -125,13 +125,15 @@ pub struct Wake {
     inner: Arc<WakeInner>,
     /// Whether this build has a detector at all, and how its reference becomes one.
     detector: Option<Load>,
+    /// The pip that tells the speaker the note started (S30.7).
+    chime: Arc<dyn Chime>,
 }
 
 struct WakeInner {
     voice: Option<Voice>,
     /// `<data dir>/config.json`, where the flag lives (S1).
     config_file: PathBuf,
-    /// `<data dir>/wake-word/oye-dot.rpw` (S4).
+    /// `<data dir>/wake-word/hey-dot.rpw` (S4).
     model: PathBuf,
     /// `<data dir>/wake-word.log` (S5).
     log: PathBuf,
@@ -141,7 +143,7 @@ struct WakeInner {
 
 impl Wake {
     pub fn new(voice: Option<Voice>, config: &DesktopConfig, events: Events) -> Self {
-        Wake {
+        let wake = Wake {
             inner: Arc::new(WakeInner {
                 voice,
                 config_file: config.data_dir.join("config.json"),
@@ -151,7 +153,21 @@ impl Wake {
                 enabled: Mutex::new(false),
             }),
             detector: cfg!(target_os = "macos").then(|| Arc::new(open_model) as Load),
+            chime: wake::platform_chime(),
+        };
+        // The phrase was "oye dot" before this build: an installation that already has its
+        // reference keeps working instead of being asked for the file again (S4).
+        if wake::adopt_legacy(&config.data_dir).is_some() {
+            wake.log("adopted", serde_json::json!({ "from": wake::LEGACY_MODEL_FILE, "to": wake::MODEL_FILE }));
         }
+        wake
+    }
+
+    /// A scripted pip, so the rule that it fires once per note is tested on every platform.
+    #[cfg(test)]
+    fn with_chime(mut self, chime: Arc<dyn Chime>) -> Self {
+        self.chime = chime;
+        self
     }
 
     /// A scripted detector, so the rules around it are tested on every platform.
@@ -270,6 +286,9 @@ impl Wake {
         voice
             .start_woken(None, self.panel_events(), self.listen_events())
             .map_err(|error| error.to_string())?;
+        // The panel did not press anything, so a short system pip says the note is running (S3),
+        // and it is the only sound: the automatic stop is silent.
+        self.chime.note_started();
         // The panel did not press anything, so it needs to know a note is running (S3).
         (self.inner.events)(VoiceEvent::Started);
         Ok(())
@@ -608,12 +627,29 @@ mod tests {
         dir
     }
 
+    /// Counts the pips, so the "once per note, never on the stop" rule is testable.
+    #[derive(Default)]
+    struct CountingChime(std::sync::atomic::AtomicUsize);
+
+    impl Chime for CountingChime {
+        fn note_started(&self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl CountingChime {
+        fn count(&self) -> usize {
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
     struct WakeRig {
         wake: Wake,
         mic: Arc<FakeMicrophone>,
         recognizer: Arc<FakeRecognizer>,
         detector: Arc<FakeWake>,
         recorder: Recorder,
+        chime: Arc<CountingChime>,
         dir: PathBuf,
     }
 
@@ -633,8 +669,11 @@ mod tests {
             let detector = detector.clone();
             Arc::new(move |_| Ok(detector.clone() as Arc<dyn WakeWord>))
         };
-        let wake = Wake::new(Some(voice), &config(dir.clone()), recorder.events()).with_detector(load);
-        WakeRig { wake, mic, recognizer, detector, recorder, dir }
+        let chime = Arc::new(CountingChime::default());
+        let wake = Wake::new(Some(voice), &config(dir.clone()), recorder.events())
+            .with_detector(load)
+            .with_chime(chime.clone());
+        WakeRig { wake, mic, recognizer, detector, recorder, chime, dir }
     }
 
     /// Waits for a background reaction (they all run on spawned threads) before checking it.
@@ -664,7 +703,7 @@ mod tests {
     fn turning_it_on_without_the_reference_fails_with_the_reason_and_saves_nothing() {
         let rig = wake_rig("missing", false);
         let error = rig.wake.set(true).unwrap_err();
-        assert!(error.contains("wake-word/oye-dot.rpw"), "{error}");
+        assert!(error.contains("wake-word/hey-dot.rpw"), "{error}");
         assert!(!rig.wake.status().enabled);
         assert!(!rig.wake.status().available);
         assert!(!rig.dir.join("config.json").exists(), "a flag that cannot work is not saved");
@@ -695,6 +734,31 @@ mod tests {
         assert!((line["score"].as_f64().unwrap() - 0.51).abs() < 1e-5, "{line}");
         assert_eq!(line["model"], serde_json::json!(wake::WAKE_WORD));
         assert!(line["at"].as_u64().is_some(), "the line is timestamped: {line}");
+    }
+
+    #[test]
+    fn a_note_started_by_the_wake_word_pips_once_and_the_stop_is_silent() {
+        let rig = wake_rig("chime", true);
+        *rig.recognizer.final_text.lock().unwrap() = Some("hola".into());
+        rig.wake.set(true).unwrap();
+        assert_eq!(rig.chime.count(), 0, "arming the detector is not a note");
+
+        rig.detector.detect(0.51);
+        rig.mic.sink().audio(&[0.2; 480]);
+        wait_until("the note starts", || rig.mic.log.lock().unwrap().opened == 2);
+        wait_until("the pip plays", || rig.chime.count() == 1);
+
+        let sink = rig.mic.sink();
+        for _ in 0..20 {
+            sink.audio(&[0.05; 1_600]);
+        }
+        for _ in 0..16 {
+            sink.audio(&[0.0; 1_600]);
+        }
+        wait_until("the transcript arrives", || {
+            rig.recorder.seen().iter().any(|event| matches!(event, VoiceEvent::Transcript(_)))
+        });
+        assert_eq!(rig.chime.count(), 1, "the end of the note is silent");
     }
 
     #[test]

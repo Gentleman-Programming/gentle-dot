@@ -999,7 +999,7 @@ mod tests {
             rig.mic.sink().audio(&[0.01; 160]);
         }
         let seen = rig.listenings.wait_for(1);
-        assert_eq!(seen, vec![ListenEvent::Detected(Detection { name: "oye-dot".into(), score: 0.51 })]);
+        assert_eq!(seen, vec![ListenEvent::Detected(Detection { name: "hey-dot".into(), score: 0.51 })]);
         assert_eq!(wake.heard(), 480, "every chunk reached the detector");
         assert_ne!(rig.listenings.threads()[0], std::thread::current().id(), "the handler gets its own thread");
     }

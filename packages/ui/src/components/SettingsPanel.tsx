@@ -224,7 +224,7 @@ export function SettingsPanel({ close }: { close: () => void }) {
 			<section className="provider-section" aria-labelledby="settings-wake-word">
 				<h3 id="settings-wake-word">Wake word</h3>
 				<p className="muted">
-					Say “oye dot” and the note starts on its own. It ends after a moment of silence.
+					Say “hey dot” and the note starts on its own. It ends after a moment of silence.
 				</p>
 				<label>
 					<input
@@ -234,7 +234,7 @@ export function SettingsPanel({ close }: { close: () => void }) {
 						disabled={wake?.available !== true}
 						onChange={(event) => setWakeWord(event.target.checked)}
 					/>
-					<span>Listen for “oye dot”</span>
+					<span>Listen for “hey dot”</span>
 				</label>
 				{wake?.available === false && wake.reason ? (
 					<p className="settings-hint muted">{wake.reason}</p>

@@ -1,4 +1,4 @@
-//! The wake word "oye dot" (S30.7, S1-S7): saying it starts the note the panel's mic button
+//! The wake word "hey dot" (S30.7, S1-S7): saying it starts the note the panel's mic button
 //! starts, without touching anything.
 //!
 //! The detector reads the capture the microphone already opens (S2): the machine arms a listener
@@ -30,17 +30,73 @@ pub trait WakeWord: Send + Sync {
 
 /// The reference's file name. It is a voice signature, so it lives in the data dir (S4), is never
 /// bundled with the build, is never committed, and `*.rpw` is in `.gitignore`.
-pub const MODEL_FILE: &str = "oye-dot.rpw";
+pub const MODEL_FILE: &str = "hey-dot.rpw";
 /// The detector's name for the phrase, and the model name the log records.
-pub const WAKE_WORD: &str = "oye-dot";
+pub const WAKE_WORD: &str = "hey-dot";
 /// The operating point measured on this machine (S7, L4): four samples, leave-one-out margin
 /// 0.062, and no usable threshold from 0.50 up.
 pub const THRESHOLD: f32 = 0.45;
 pub const MIN_SCORES: usize = 5;
 
-/// `<data dir>/wake-word/oye-dot.rpw`, next to `config.json` (S4).
+/// `<data dir>/wake-word/hey-dot.rpw`, next to `config.json` (S4).
 pub fn model_path(data_dir: &Path) -> PathBuf {
     data_dir.join("wake-word").join(MODEL_FILE)
+}
+
+/// The file name this app used before the phrase was called "hey dot". The reference is the same
+/// recording, so an installation that already has one keeps working across the rename.
+pub const LEGACY_MODEL_FILE: &str = "oye-dot.rpw";
+
+/// Copies the reference installed under the old name to the current one, once: an installation
+/// that already worked must not be asked for the file again. Never overwrites, so a reference the
+/// user has since rebuilt always wins. Returns the new path when it copied.
+pub fn adopt_legacy(data_dir: &Path) -> Option<PathBuf> {
+    let current = model_path(data_dir);
+    let legacy = data_dir.join("wake-word").join(LEGACY_MODEL_FILE);
+    if current.exists() || !legacy.is_file() {
+        return None;
+    }
+    std::fs::copy(&legacy, &current).ok().map(|_| current)
+}
+
+/// A short system sound when a note starts, so speaking the phrase is enough to know it did
+/// (S30.7). Played once per note, at the start only, through the system's own output — it reaches
+/// headphones like any other system sound.
+pub trait Chime: Send + Sync {
+    fn note_started(&self);
+}
+
+/// The platforms without a system sound to borrow: nothing is played.
+pub struct Silent;
+
+impl Chime for Silent {
+    fn note_started(&self) {}
+}
+
+/// `Tink`, one of the system sounds macOS already ships: no asset of our own, routed to the
+/// current output device.
+#[cfg(target_os = "macos")]
+pub struct SystemChime;
+
+#[cfg(target_os = "macos")]
+impl Chime for SystemChime {
+    fn note_started(&self) {
+        use objc2_app_kit::NSSound;
+        use objc2_foundation::NSString;
+        // A shared AppKit instance that outlives the call; playing from a worker thread is what
+        // the system sound is for.
+        if let Some(sound) = NSSound::soundNamed(&NSString::from_str("Tink")) {
+            sound.play();
+        }
+    }
+}
+
+/// The chime this build plays, if the platform has one.
+pub fn platform_chime() -> std::sync::Arc<dyn Chime> {
+    #[cfg(target_os = "macos")]
+    return std::sync::Arc::new(SystemChime);
+    #[cfg(not(target_os = "macos"))]
+    std::sync::Arc::new(Silent)
 }
 
 /// Why the detector has no reference to listen for, naming the file the user has to put there:
@@ -181,13 +237,13 @@ mod tests {
 
     #[test]
     fn the_reference_lives_under_the_data_dir() {
-        assert_eq!(model_path(Path::new("/data/dot")), Path::new("/data/dot").join("wake-word").join("oye-dot.rpw"));
+        assert_eq!(model_path(Path::new("/data/dot")), Path::new("/data/dot").join("wake-word").join("hey-dot.rpw"));
     }
 
     #[test]
     fn a_missing_reference_is_reported_with_the_path_and_the_file_name() {
-        let reason = missing(Path::new("/data/dot/wake-word/oye-dot.rpw"));
-        assert!(reason.contains("/data/dot/wake-word/oye-dot.rpw"), "{reason}");
+        let reason = missing(Path::new("/data/dot/wake-word/hey-dot.rpw"));
+        assert!(reason.contains("/data/dot/wake-word/hey-dot.rpw"), "{reason}");
         assert!(reason.contains(MODEL_FILE), "{reason}");
     }
 
@@ -205,6 +261,23 @@ mod tests {
         assert_eq!(wake.heard(), 3);
         wake.reset();
         assert_eq!(wake.resets(), 1);
+    }
+
+    #[test]
+    fn a_reference_under_the_old_name_is_adopted_once_and_never_overwritten() {
+        let dir = std::env::temp_dir().join(format!("gentle-dot-adopt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("wake-word")).unwrap();
+        assert_eq!(adopt_legacy(&dir), None, "nothing to adopt yet");
+
+        std::fs::write(dir.join("wake-word").join(LEGACY_MODEL_FILE), b"old").unwrap();
+        assert_eq!(adopt_legacy(&dir), Some(model_path(&dir)));
+        assert_eq!(std::fs::read(model_path(&dir)).unwrap(), b"old");
+
+        std::fs::write(dir.join("wake-word").join(LEGACY_MODEL_FILE), b"older").unwrap();
+        assert_eq!(adopt_legacy(&dir), None, "the adopted reference wins");
+        assert_eq!(std::fs::read(model_path(&dir)).unwrap(), b"old");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(target_os = "macos")]
