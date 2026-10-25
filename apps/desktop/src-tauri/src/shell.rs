@@ -897,6 +897,8 @@ pub fn run() {
             voice::voice_start,
             voice::voice_stop,
             voice::voice_cancel,
+            voice::voice_input_options,
+            voice::voice_input_set,
             voice::voice_model_status,
             voice::voice_model_download,
             voice::voice_model_cancel,

@@ -10,7 +10,9 @@ import {
 	saveVoiceShortcut,
 	type VoiceShortcutInfo,
 } from "../shortcut.ts";
+import { deviceLabel, deviceValue, missingChoice } from "../voice-device.ts";
 import { setVoiceLanguage, VOICE_LANGUAGES, voiceLanguage } from "../voice-language.ts";
+import { loadVoiceInputOptions, saveVoiceInput, type VoiceInputOptions } from "../voice-native.ts";
 import "../settings.css";
 
 type Status =
@@ -20,10 +22,16 @@ type Status =
 	| { kind: "applied" }
 	| { kind: "failed"; reason: string };
 
-function reasonOf(error: unknown): string {
+type SaveStatus =
+	| { kind: "idle" }
+	| { kind: "saving" }
+	| { kind: "saved" }
+	| { kind: "failed"; reason: string };
+
+function reasonOf(error: unknown, fallback = "Gentle Dot could not change the shortcut."): string {
 	if (typeof error === "string" && error) return error;
 	if (error instanceof Error && error.message) return error.message;
-	return "Gentle Dot could not change the shortcut.";
+	return fallback;
 }
 
 /** The desktop panel's settings (S33.1); for now, the shortcut that opens the panel. */
@@ -37,6 +45,9 @@ export function SettingsPanel({ close }: { close: () => void }) {
 	const [voice, setVoice] = useState<VoiceShortcutInfo | undefined>(undefined);
 	const [voiceLoadFailed, setVoiceLoadFailed] = useState(false);
 	const [voiceStatus, setVoiceStatus] = useState<Status>({ kind: "idle" });
+	const [input, setInput] = useState<VoiceInputOptions | undefined>(undefined);
+	const [inputLoadFailed, setInputLoadFailed] = useState(false);
+	const [inputStatus, setInputStatus] = useState<SaveStatus>({ kind: "idle" });
 	const live = useRef(true);
 	const prompt = useRef<HTMLSpanElement>(null);
 	const voicePrompt = useRef<HTMLSpanElement>(null);
@@ -57,6 +68,14 @@ export function SettingsPanel({ close }: { close: () => void }) {
 			},
 			() => {
 				if (live.current) setVoiceLoadFailed(true);
+			},
+		);
+		loadVoiceInputOptions().then(
+			(found) => {
+				if (live.current) setInput(found);
+			},
+			() => {
+				if (live.current) setInputLoadFailed(true);
 			},
 		);
 		return () => {
@@ -126,8 +145,27 @@ export function SettingsPanel({ close }: { close: () => void }) {
 		return () => window.removeEventListener("keydown", onKey, true);
 	}, [voiceRecording, applyVoice]);
 
+	const applyInput = useCallback((uid: string | null) => {
+		setInputStatus({ kind: "saving" });
+		saveVoiceInput(uid).then(
+			(chosen) => {
+				if (!live.current) return;
+				setInput((current) => current && { ...current, chosen });
+				setInputStatus({ kind: "saved" });
+			},
+			(error: unknown) => {
+				if (live.current)
+					setInputStatus({
+						kind: "failed",
+						reason: reasonOf(error, "Gentle Dot could not change the microphone."),
+					});
+			},
+		);
+	}, []);
+
 	const voiceApplying = voiceStatus.kind === "applying";
 	const voiceOff = voice?.shortcut === null;
+	const inputSaving = inputStatus.kind === "saving";
 	return (
 		<section className="accounts settings" aria-label="Settings">
 			<header className="accounts-header">
@@ -275,6 +313,47 @@ export function SettingsPanel({ close }: { close: () => void }) {
 				>
 					Reset to default
 				</button>
+			</section>
+
+			<section className="provider-section" aria-labelledby="settings-microphone">
+				<h3 id="settings-microphone">Microphone</h3>
+				<p className="muted">
+					The input the voice notes are recorded from. Changing it applies to the next recording.
+				</p>
+				{inputLoadFailed ? (
+					<p className="settings-error" role="alert">
+						Gentle Dot could not read the current microphone.
+					</p>
+				) : (
+					<select
+						aria-label="Microphone"
+						value={input ? deviceValue(input) : ""}
+						disabled={!input || inputSaving}
+						onChange={(event) => applyInput(event.target.value || null)}
+					>
+						<option value="">System default</option>
+						{input?.devices.map((device) => (
+							<option key={device.uid} value={device.uid}>
+								{deviceLabel(device)}
+							</option>
+						))}
+					</select>
+				)}
+				{input && missingChoice(input) ? (
+					<p className="settings-error" role="alert">
+						The chosen microphone is not connected. The system default is used instead.
+					</p>
+				) : null}
+				{inputStatus.kind === "saved" ? (
+					<p className="settings-ok" role="status">
+						Saved. It applies to the next recording.
+					</p>
+				) : null}
+				{inputStatus.kind === "failed" ? (
+					<p className="settings-error" role="alert">
+						{inputStatus.reason}
+					</p>
+				) : null}
 			</section>
 
 			<section className="provider-section" aria-labelledby="settings-voice-language">

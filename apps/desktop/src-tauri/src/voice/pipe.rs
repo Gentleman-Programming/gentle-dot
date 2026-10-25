@@ -59,7 +59,8 @@ impl Microphone for PipeMicrophone {
         Authorization::Authorized
     }
 
-    fn open(&self, sink: Sink) -> Result<Box<dyn Stream>, VoiceError> {
+    // Linux keeps the system default input: a recorder command has no device to be pointed at (S7).
+    fn open(&self, _device: Option<&str>, sink: Sink) -> Result<Box<dyn Stream>, VoiceError> {
         for recorder in &self.recorders {
             let Some((program, args)) = recorder.split_first() else { continue };
             let spawned = Command::new(program).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
@@ -177,7 +178,7 @@ mod tests {
             command(&["/bin/sh", "-c", "head -c 6400 /dev/zero; exec sleep 30"]),
         ]);
         let (voice, recognizer) = voice(mic);
-        voice.start(None, Recorder::default().events()).unwrap();
+        voice.start(None, None, Recorder::default().events()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while recognizer.log.lock().unwrap().fed.len() < 1_600 {
             assert!(Instant::now() < deadline, "the PCM arrives");
@@ -195,7 +196,7 @@ mod tests {
         let mic = PipeMicrophone::with(vec![command(&["/bin/sh", "-c", "head -c 64 /dev/zero; sleep 0.3"])]);
         let (voice, _) = voice(mic);
         let recorder = Recorder::default();
-        voice.start(None, recorder.events()).unwrap();
+        voice.start(None, None, recorder.events()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         let interrupted = crate::voice::VoiceEvent::Error(VoiceError::Interrupted.to_string());
         while !recorder.seen().contains(&interrupted) {
@@ -209,7 +210,7 @@ mod tests {
     fn no_recorder_on_the_system_explains_what_to_install() {
         let mic = PipeMicrophone::with(vec![command(&["gentle-dot-no-such-recorder"])]);
         let (voice, _) = voice(mic);
-        assert_eq!(voice.start(None, Recorder::default().events()), Err(VoiceError::NoRecorder));
+        assert_eq!(voice.start(None, None, Recorder::default().events()), Err(VoiceError::NoRecorder));
         assert!(VoiceError::NoRecorder.to_string().contains("pulseaudio-utils"));
     }
 }

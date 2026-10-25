@@ -27,13 +27,15 @@
 		},
 		{
 			"identifier": "voice",
-			"description": "Voice input (S30.1, S30.5): the panel's mic button records and transcribes natively, and the panel downloads, cancels, and removes the optional local voice model; the Dot never records.",
+			"description": "Voice input (S30.1, S30.5): the panel's mic button records and transcribes natively, the panel reads and changes the microphone it records from, and the panel downloads, cancels, and removes the optional local voice model; the Dot never records.",
 			"windows": ["panel"],
 			"permissions": [
 				"allow-voice-status",
 				"allow-voice-start",
 				"allow-voice-stop",
 				"allow-voice-cancel",
+				"allow-voice-input-options",
+				"allow-voice-input-set",
 				"allow-voice-model-status",
 				"allow-voice-model-download",
 				"allow-voice-model-cancel",

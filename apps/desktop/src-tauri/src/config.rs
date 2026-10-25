@@ -15,6 +15,17 @@ pub struct DesktopConfig {
     pub shortcut: String,
     /// `None` when the voice shortcut is turned off.
     pub voice_shortcut: Option<String>,
+    /// The microphone to record from; `None` follows the system default.
+    pub voice_input: Option<VoiceInput>,
+}
+
+/// The microphone chosen in Settings (S4): the CoreAudio UID is the identity, the name is for
+/// display only.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceInput {
+    pub uid: String,
+    pub name: String,
 }
 
 /// Result of the `connection_info` command (design §9).
@@ -67,7 +78,14 @@ pub fn parse_config(
         None => Some(DEFAULT_VOICE_SHORTCUT.to_string()),
         Some(value) => value.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string),
     };
-    DesktopConfig { data_dir, port, shortcut, voice_shortcut }
+    // A malformed, empty or partial entry is no choice at all: following the default beats
+    // recording from half a device.
+    let voice_input = file.get("voiceInput").and_then(|value| {
+        let uid = value.get("uid")?.as_str()?.trim();
+        let name = value.get("name")?.as_str()?.trim();
+        (!uid.is_empty() && !name.is_empty()).then(|| VoiceInput { uid: uid.to_string(), name: name.to_string() })
+    });
+    DesktopConfig { data_dir, port, shortcut, voice_shortcut, voice_input }
 }
 
 /// Reads the real environment and `<data dir>/config.json`.
@@ -107,6 +125,16 @@ pub fn with_voice_shortcut(file: Option<&str>, shortcut: Option<&str>) -> Result
     with_entry(file, "voiceShortcut", shortcut.map_or(serde_json::Value::Null, Into::into))
 }
 
+/// The text of `config.json` with `voiceInput` set and every other key kept; `None` follows the
+/// system default.
+pub fn with_voice_input(file: Option<&str>, input: Option<&VoiceInput>) -> Result<String, String> {
+    let value = match input {
+        Some(input) => serde_json::json!({ "uid": input.uid, "name": input.name }),
+        None => serde_json::Value::Null,
+    };
+    with_entry(file, "voiceInput", value)
+}
+
 /// Reads `config.json`, changes one key, then writes a private temporary file and renames it over
 /// the old one (S33.3), so a crash never leaves half a file.
 fn save_with(path: &Path, change: impl FnOnce(Option<&str>) -> Result<String, String>) -> Result<(), String> {
@@ -127,6 +155,11 @@ pub fn save_shortcut(path: &Path, shortcut: &str) -> Result<(), String> {
 /// Saves the voice shortcut in `config.json`; `None` turns it off.
 pub fn save_voice_shortcut(path: &Path, shortcut: Option<&str>) -> Result<(), String> {
     save_with(path, |file| with_voice_shortcut(file, shortcut))
+}
+
+/// Saves the chosen microphone in `config.json`; `None` follows the system default.
+pub fn save_voice_input(path: &Path, input: Option<&VoiceInput>) -> Result<(), String> {
+    save_with(path, |file| with_voice_input(file, input))
 }
 
 fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
@@ -196,6 +229,7 @@ mod tests {
                 port: DEFAULT_PORT,
                 shortcut: DEFAULT_SHORTCUT.into(),
                 voice_shortcut: Some(DEFAULT_VOICE_SHORTCUT.into()),
+                voice_input: None,
             }
         );
     }
@@ -258,6 +292,7 @@ mod tests {
                 port: 5000,
                 shortcut: "Shift+Super+K".into(),
                 voice_shortcut: Some(DEFAULT_VOICE_SHORTCUT.into()),
+                voice_input: None,
             }
         );
         let config = parse_config(dir(), Some(&text), env_of(&[("GENTLE_DOT_PORT", "6000")]));
@@ -311,6 +346,64 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn the_chosen_microphone_survives_a_read_and_a_write() {
+        let chosen = VoiceInput { uid: "BuiltInMic:1".into(), name: "MacBook Pro Microphone".into() };
+        let text = with_voice_input(Some(r#"{ "port": 5000, "shortcut": "F5" }"#), Some(&chosen)).unwrap();
+        // Every other key is kept.
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["port"], 5000);
+        assert_eq!(json["shortcut"], "F5");
+        assert_eq!(json["voiceInput"], serde_json::json!({ "uid": "BuiltInMic:1", "name": "MacBook Pro Microphone" }));
+        // And it reads back as the same choice.
+        assert_eq!(parse_config(dir(), Some(&text), env_of(&[])).voice_input, Some(chosen));
+        // The same through the file, where the private write is what makes it stick.
+        let dir = scratch("voice-input");
+        let file = dir.join("config.json");
+        std::fs::write(&file, r#"{ "port": 5000 }"#).unwrap();
+        let chosen = VoiceInput { uid: "USB:2".into(), name: "Yeti".into() };
+        save_voice_input(&file, Some(&chosen)).unwrap();
+        let saved = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(parse_config(dir, Some(&saved), env_of(&[])).voice_input, Some(chosen));
+    }
+
+    #[test]
+    fn a_malformed_voice_input_reads_as_no_choice() {
+        let read = |file: &str| parse_config(dir(), Some(file), env_of(&[])).voice_input;
+        assert_eq!(read(r#"{ "port": 5000 }"#), None);
+        assert_eq!(read(r#"{ "voiceInput": null }"#), None);
+        assert_eq!(read(r#"{ "voiceInput": "BuiltInMic:1" }"#), None);
+        assert_eq!(read(r#"{ "voiceInput": { "uid": "BuiltInMic:1" } }"#), None);
+        assert_eq!(read(r#"{ "voiceInput": { "name": "MacBook Pro Microphone" } }"#), None);
+        assert_eq!(read(r#"{ "voiceInput": { "uid": "", "name": "MacBook Pro Microphone" } }"#), None);
+        assert_eq!(read(r#"{ "voiceInput": { "uid": "BuiltInMic:1", "name": "  " } }"#), None);
+        assert_eq!(read(r#"{ "voiceInput": { "uid": 1, "name": 2 } }"#), None);
+        // A complete entry, with the whitespace the panel may leave around it, is a choice.
+        assert_eq!(
+            read(r#"{ "voiceInput": { "uid": " BuiltInMic:1 ", "name": " MacBook Pro Microphone " } }"#),
+            Some(VoiceInput { uid: "BuiltInMic:1".into(), name: "MacBook Pro Microphone".into() })
+        );
+    }
+
+    #[test]
+    fn saving_no_choice_writes_null_and_reads_back_as_the_default() {
+        let text = with_voice_input(Some(r#"{ "port": 5000, "voiceInput": { "uid": "a", "name": "b" } }"#), None).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["voiceInput"], serde_json::Value::Null);
+        assert_eq!(json["port"], 5000);
+        assert_eq!(parse_config(dir(), Some(&text), env_of(&[])).voice_input, None);
+        // The same through the file, where the other keys survive it.
+        let dir = scratch("voice-input-none");
+        let file = dir.join("config.json");
+        let chosen = VoiceInput { uid: "USB:2".into(), name: "Yeti".into() };
+        save_voice_input(&file, Some(&chosen)).unwrap();
+        save_voice_input(&file, None).unwrap();
+        let saved = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(parse_config(dir, Some(&saved), env_of(&[])).voice_input, None);
+        // A file that is not JSON is refused, as for every other key.
+        assert_eq!(with_voice_input(Some("{ not json"), None), Err(INVALID_CONFIG.to_string()));
     }
 
     fn scratch(name: &str) -> PathBuf {

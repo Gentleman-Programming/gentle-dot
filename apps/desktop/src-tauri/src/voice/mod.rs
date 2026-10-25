@@ -20,6 +20,8 @@
 
 pub mod app;
 pub mod audio;
+#[cfg(target_os = "macos")]
+pub mod core_audio;
 pub mod engine;
 #[cfg(test)]
 mod fake;
@@ -192,7 +194,9 @@ pub trait Microphone: Send + Sync {
     fn authorization(&self) -> Authorization;
     /// Prompts when not yet determined. Blocks until the user answers: never on the main thread.
     fn request_authorization(&self) -> Authorization;
-    fn open(&self, sink: Sink) -> Result<Box<dyn Stream>, VoiceError>;
+    /// Opens the capture from `device` (a CoreAudio UID), or from the system default input when
+    /// it is `None` or when that device is gone.
+    fn open(&self, device: Option<&str>, sink: Sink) -> Result<Box<dyn Stream>, VoiceError>;
 }
 
 /// An open capture.
