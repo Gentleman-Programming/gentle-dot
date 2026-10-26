@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import {
+	closeSync,
 	createWriteStream,
 	existsSync,
 	openSync,
@@ -19,6 +20,7 @@ import {
 } from "@gentle-dot/protocol";
 import { directAccess, type EngineAccess } from "./engine-access.ts";
 import { ensurePrivateDir } from "./isolation.ts";
+import { securePrivateFile } from "./private-file.ts";
 
 /** A stored file, with its absolute path. */
 export interface StoredFile extends AttachmentInfo {
@@ -194,7 +196,17 @@ export class UploadStore {
 			fd = this.access(() => {
 				ensurePrivateDir(this.root);
 				ensurePrivateDir(batch.dir);
-				return openSync(path, "wx", 0o600);
+				const opened = openSync(path, "wx", 0o600);
+				try {
+					// Inheritance alone is not a protected Windows file DACL. Verify and
+					// protect the new file before any uploaded bytes reach its descriptor.
+					securePrivateFile(path);
+					return opened;
+				} catch (error) {
+					closeSync(opened);
+					removeQuietly(path);
+					throw error;
+				}
 			});
 		} catch {
 			if (!known) this.access(() => this.dropIfEmpty(uploadId, batch));

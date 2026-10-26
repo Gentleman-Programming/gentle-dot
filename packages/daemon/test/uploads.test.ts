@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -6,7 +6,28 @@ import type { UploadedFile } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import { type DaemonOptions, type DotDaemon, startDaemon } from "../src/daemon.ts";
 import { composePrompt, sanitizeName, sniffMime, splitAttachments, UploadStore } from "../src/uploads.ts";
-import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { FAKE_AGENT, tempDir as makeTempDir, waitFor } from "./helpers.ts";
+import { inspectWindowsAcl } from "./windows-acl-oracle.ts";
+
+const scratch: string[] = [];
+function tempDir(): string {
+	const directory = makeTempDir();
+	scratch.push(directory);
+	return directory;
+}
+
+function expectPrivate(path: string, directory = false): void {
+	if (process.platform !== "win32") {
+		expect(statSync(path).mode & 0o777).toBe(directory ? 0o700 : 0o600);
+		return;
+	}
+	const acl = inspectWindowsAcl(path);
+	expect(acl.owner).toBe(acl.currentSid);
+	expect(acl.protected).toBe(true);
+	expect(acl.rules).toHaveLength(2);
+	expect(new Set(acl.rules.map((rule) => rule.sid))).toEqual(new Set([acl.currentSid, "S-1-5-18"]));
+	expect(acl.rules.every((rule) => rule.type === "Allow" && !rule.inherited)).toBe(true);
+}
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 1, 2, 3]);
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46]);
@@ -67,9 +88,9 @@ describe("upload store", () => {
 		expect(path).toBe(`uploads/${uploadId}/shot.png`);
 		const file = join(workspace, path);
 		expect(readFileSync(file)).toEqual(PNG);
-		expect(statSync(file).mode & 0o777).toBe(0o600);
-		expect(statSync(join(workspace, "uploads", uploadId)).mode & 0o777).toBe(0o700);
-		expect(statSync(join(workspace, "uploads")).mode & 0o777).toBe(0o700);
+		expectPrivate(file);
+		expectPrivate(join(workspace, "uploads", uploadId), true);
+		expectPrivate(join(workspace, "uploads"), true);
 	});
 
 	it("adds files to the same message folder, renaming duplicates", async () => {
@@ -110,12 +131,30 @@ describe("upload store", () => {
 			name: "b.bin",
 			uploadId,
 		});
-		expect(over).toMatchObject({ ok: false, status: 413, code: "message_too_large" });
-		expect(listUploads(workspace)).toEqual([uploadId, `${uploadId}/a.bin`]);
-		await uploads.receive(Readable.from(["x"]), { name: "c.bin", uploadId });
-		await uploads.receive(Readable.from(["x"]), { name: "d.bin", uploadId });
+		expect(over).toEqual({
+			ok: false, status: 413, code: "message_too_large",
+			message: "These files are too large together: up to 150 bytes per message.",
+		});
+		expect(new Set(listUploads(workspace))).toEqual(new Set([uploadId, join(uploadId, "a.bin")]));
+		expect(readFileSync(join(workspace, first.file.path))).toEqual(Buffer.alloc(100));
+		expect(uploads.resolve([first.file])).toMatchObject({ ok: true, files: [{ size: 100 }] });
+		// A rejected stream refunds its reserved bytes and file slot: exactly 50 bytes still fit.
+		const second = await uploads.receive(Readable.from([Buffer.alloc(49, 0xff)]), { name: "c.bin", uploadId });
+		const third = await uploads.receive(Readable.from(["x"]), { name: "d.bin", uploadId });
+		expect(second.ok).toBe(true);
+		expect(third.ok).toBe(true);
+		const before = listUploads(workspace);
 		const fourth = await uploads.receive(Readable.from(["x"]), { name: "e.bin", uploadId });
-		expect(fourth).toMatchObject({ ok: false, status: 413, code: "too_many_files" });
+		expect(fourth).toEqual({
+			ok: false, status: 413, code: "too_many_files",
+			message: "Too many files: up to 3 per message.",
+		});
+		expect(listUploads(workspace)).toEqual(before);
+		expect(readFileSync(join(workspace, first.file.path))).toEqual(Buffer.alloc(100));
+		if (!second.ok || !third.ok) throw new Error("Expected uploads to fit after rejection");
+		expect(readFileSync(join(workspace, second.file.path))).toEqual(Buffer.alloc(49, 0xff));
+		expect(readFileSync(join(workspace, third.file.path))).toEqual(Buffer.from("x"));
+		expect(uploads.resolve([first.file, second.file, third.file])).toMatchObject({ ok: true });
 	});
 
 	it("removes a partial file when the upload breaks off", async () => {
@@ -274,6 +313,7 @@ describe("the prompt for a message with files", () => {
 const daemons: DotDaemon[] = [];
 afterEach(async () => {
 	await Promise.all(daemons.splice(0).map((d) => d.close()));
+	for (const directory of scratch.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
 async function daemon(extra: Partial<DaemonOptions> = {}) {
@@ -383,8 +423,9 @@ describe("POST /upload", () => {
 		const file = JSON.parse(reply.body) as UploadedFile;
 		expect(file).toMatchObject({ name: "shot.png", size: PNG.length, mime: "image/png" });
 		expect(file.path).toBe(`uploads/${file.uploadId}/shot.png`);
-		expect(statSync(join(workspace, file.path)).mode & 0o777).toBe(0o600);
-		expect(statSync(join(workspace, "uploads", file.uploadId)).mode & 0o777).toBe(0o700);
+		expect(readFileSync(join(workspace, file.path))).toEqual(PNG);
+		expectPrivate(join(workspace, file.path));
+		expectPrivate(join(workspace, "uploads", file.uploadId), true);
 	});
 
 	it("enforces the size limits on the server and cleans up", async () => {
