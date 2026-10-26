@@ -10,6 +10,31 @@ The daemon resolves Engram on Windows without starting a login shell or rewritin
 
 Windows paths are parsed with `win32` rules. Quoted PATH entries are unwrapped, empty and relative entries are skipped (so the current directory is not searched), and duplicate candidates are suppressed case-insensitively. Absolute drive and UNC paths are accepted; drive-relative and root-relative paths are not. File checks establish readable-file discovery, not binary trust. A valid junction is allowed and is not an integrity or ACL verdict.
 
+## Git on the bundled daemon PATH
+
+On Windows, the desktop launcher keeps `<runtime>\bin`, `<runtime>\node`,
+`<SystemRoot>\System32`, and `<SystemRoot>` first. It then appends only the first
+absolute directory on the launch environment's PATH containing a `git.exe` file.
+Custom locations, spaces, and Unicode are supported, including quoted PATH entries.
+The selected directory is serialized with Windows PATH quoting rules: a directory
+containing a semicolon stays one quoted entry. An entry that cannot be serialized
+losslessly is not appended; the existing runtime/system prefix stays unchanged.
+Windows environment-variable lookup is case-insensitive (`PATH` and `Path` name
+the same variable). Empty and relative entries are skipped; missing Git is nonfatal.
+
+The launcher does not import the rest of the ambient PATH, install Git, start a
+shell, or change global environment variables. Bundled Node retains precedence;
+explicit `GENTLE_DOT_NODE` / `GENTLE_DOT_DAEMON_SCRIPT` overrides, source-checkout
+launches without a bundled daemon, and Unix PATH behavior are unchanged. Adding a
+Git directory also makes other executables in that directory discoverable, after
+the runtime and system entries; file discovery is not a binary-integrity check.
+
+Native `launch_spec` tests use temporary, non-executed `git.exe` fixtures to check
+selection order, custom paths with spaces, semicolons and Unicode, emitted PATH
+entry boundaries, environment-name casing, missing Git, restricted PATH contents,
+source fallback, and overrides. These tests establish
+launch configuration, not installed Git execution or installer acceptance.
+
 ## Platform boundary
 
 `resolveEngramBin` delegates to this resolver only on `win32`. The Unix path remains `ENGRAM_BIN`, login-shell PATH, known folders, then packaged fallback. Source-checkout resolution remains unchanged; this Windows discovery applies when an installed runtime is configured.

@@ -231,7 +231,8 @@ pub struct LaunchSpec {
 
 /// `<node> <daemon script>` (S29.5). With a bundled runtime (`<runtime>/daemon/cli.mjs`
 /// exists) that is the runtime's own Node and daemon, a PATH of the runtime plus the
-/// system folders, and `GENTLE_DOT_RUNTIME`; otherwise the build-time paths and PATH.
+/// system folders (plus an existing Git directory from PATH on Windows), and
+/// `GENTLE_DOT_RUNTIME`; otherwise the build-time paths and PATH.
 /// `GENTLE_DOT_NODE` and `GENTLE_DOT_DAEMON_SCRIPT` override the program and script in both.
 pub fn launch_spec(env: impl Fn(&str) -> Option<String>, dev: bool, runtime: Option<&Path>) -> LaunchSpec {
     let pick = |key: &str, fallback: String| env(key).filter(|v| !v.is_empty()).unwrap_or(fallback);
@@ -245,7 +246,22 @@ pub fn launch_spec(env: impl Fn(&str) -> Option<String>, dev: bool, runtime: Opt
             #[cfg(windows)]
             let (node, path) = {
                 let system = env("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-                (format!("{root}/node/node.exe"), format!("{root}/bin;{root}/node;{system}\\System32;{system}"))
+                let mut path = format!("{root}/bin;{root}/node;{system}\\System32;{system}");
+                // std::env::var is case-insensitive on Windows. Import only the first Git
+                // directory, never the whole ambient PATH or a current-directory entry.
+                if let Some(ambient) = env("PATH") {
+                    if let Some(git) = std::env::split_paths(&ambient)
+                        .find(|dir| dir.is_absolute() && dir.join("git.exe").is_file())
+                    {
+                        // Preserve entry boundaries for directories containing semicolons.
+                        // If it cannot be serialized losslessly, leave the restricted PATH alone.
+                        if let Some(entry) = std::env::join_paths([git]).ok().and_then(|value| value.into_string().ok()) {
+                            path.push(';');
+                            path.push_str(&entry);
+                        }
+                    }
+                }
+                (format!("{root}/node/node.exe"), path)
             };
             (
                 node,
@@ -697,6 +713,162 @@ impl Daemon {
             Err(_) if self.refusal().is_some() => RestartOutcome::External,
             Err(message) => RestartOutcome::Failed(message),
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_launch_tests {
+    use super::*;
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+            let dir = std::env::temp_dir().join(format!("gentle-dot-launch-{}-{nanos}", std::process::id()));
+            fs::create_dir_all(dir.join("runtime/daemon")).unwrap();
+            fs::write(dir.join("runtime/daemon/cli.mjs"), "").unwrap();
+            Self(dir)
+        }
+
+        fn git(&self, name: &str) -> PathBuf {
+            let dir = self.0.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("git.exe"), "fixture, never executed").unwrap();
+            // An ambient Node must never take priority over bundled Node.
+            fs::write(dir.join("node.exe"), "fixture, never executed").unwrap();
+            dir
+        }
+
+        fn bundled(&self, git: Option<&Path>, dev: bool) -> LaunchSpec {
+            let root = self.0.join("runtime").display().to_string();
+            let mut path = format!("{root}/bin;{root}/node;C:\\Windows\\System32;C:\\Windows");
+            if let Some(git) = git {
+                path.push(';');
+                path.push_str(&git.display().to_string());
+            }
+            let mut envs = vec![("PATH".into(), path), ("GENTLE_DOT_RUNTIME".into(), root.clone())];
+            if dev {
+                envs.push(("GENTLE_DOT_ALLOWED_ORIGINS".into(), DEV_ALLOWED_ORIGINS.into()));
+            }
+            LaunchSpec { program: format!("{root}/node/node.exe"), args: vec![format!("{root}/daemon/cli.mjs")], envs }
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    // Windows environment names are case-insensitive, as is std::env::var on Windows.
+    fn environment<'a>(pairs: &'a [(&'a str, String)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |key| pairs.iter().find(|(name, _)| name.eq_ignore_ascii_case(key)).map(|(_, value)| value.clone())
+    }
+
+    #[test]
+    fn launch_spec_windows_discovers_only_first_git_directory_after_runtime_and_system() {
+        let fixture = Fixture::new();
+        let first = fixture.git("custom tools/Git cmd");
+        let second = fixture.git("other Git/bin");
+        let unrelated = fixture.0.join("unrelated");
+        fs::create_dir_all(unrelated.join("git.exe")).unwrap(); // A directory is not an executable file.
+        let path = format!(";relative;{};\"{}\";{};", unrelated.display(), first.display(), second.display());
+        for name in ["PATH", "Path", "pAtH"] {
+            let pairs = [(name, path.clone())];
+            assert_eq!(
+                launch_spec(environment(&pairs), false, Some(&fixture.0.join("runtime"))),
+                fixture.bundled(Some(&first), false)
+            );
+            assert_eq!(pairs[0].1, path); // Discovery does not rewrite the supplied environment.
+        }
+    }
+
+    #[test]
+    fn launch_spec_windows_preserves_quoted_git_path_entry_boundaries() {
+        let fixture = Fixture::new();
+        for name in ["custom;Git cmd", "工具 Git", "custom;工具 Git cmd"] {
+            let git = fixture.git(name);
+            let ambient = format!("\"{}\"", git.display());
+            let pairs = [("Path", ambient.clone())];
+            let spec = launch_spec(environment(&pairs), false, Some(&fixture.0.join("runtime")));
+            let mut expected = fixture.bundled(None, false);
+            let mut entries: Vec<_> = std::env::split_paths(&expected.envs[0].1).collect();
+            entries.push(git.clone());
+            let emitted: Vec<_> = std::env::split_paths(&spec.envs[0].1).collect();
+            assert_eq!(emitted, entries, "Git directory must remain one PATH entry");
+            assert_eq!(emitted.iter().filter(|entry| *entry == &git).count(), 1);
+            assert!(emitted.iter().all(|entry| entry.is_absolute()), "no relative entries may be introduced");
+            let serialized = if name.contains(';') { ambient.clone() } else { git.display().to_string() };
+            expected.envs[0].1.push(';');
+            expected.envs[0].1.push_str(&serialized);
+            assert_eq!(spec, expected);
+            assert_eq!(pairs[0].1, ambient);
+        }
+    }
+
+    #[test]
+    fn launch_spec_windows_missing_git_is_nonfatal_and_keeps_restricted_path() {
+        let fixture = Fixture::new();
+        for path in [None, Some(String::new()), Some(fixture.0.join("missing").display().to_string())] {
+            let pairs: Vec<_> = path.into_iter().map(|value| ("PATH", value)).collect();
+            for dev in [false, true] {
+                assert_eq!(
+                    launch_spec(environment(&pairs), dev, Some(&fixture.0.join("runtime"))),
+                    fixture.bundled(None, dev)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn launch_spec_windows_preserves_source_and_incomplete_runtime_with_git_on_path() {
+        let fixture = Fixture::new();
+        let git = fixture.git("source Git");
+        let pairs = [("Path", git.display().to_string())];
+        let expected = LaunchSpec {
+            program: env!("GENTLE_DOT_BUILD_NODE").into(),
+            args: vec![env!("GENTLE_DOT_BUILD_DAEMON_SCRIPT").into()],
+            envs: vec![("PATH".into(), env!("GENTLE_DOT_BUILD_PATH").into())],
+        };
+        for runtime in [None, Some(fixture.0.as_path())] {
+            assert_eq!(launch_spec(environment(&pairs), false, runtime), expected);
+            let overrides = [
+                ("PATH", git.display().to_string()),
+                ("GENTLE_DOT_NODE", "D:\\custom node\\node.exe".into()),
+                ("GENTLE_DOT_DAEMON_SCRIPT", "D:\\source\\cli.ts".into()),
+            ];
+            let mut explicit = expected.clone();
+            explicit.program = overrides[1].1.clone();
+            explicit.args = vec![overrides[2].1.clone()];
+            assert_eq!(launch_spec(environment(&overrides), false, runtime), explicit);
+        }
+    }
+
+    #[test]
+    fn launch_spec_windows_preserves_bundled_overrides_and_custom_system_root() {
+        let fixture = Fixture::new();
+        let git = fixture.git("installed Git");
+        let pairs = [
+            ("Path", git.display().to_string()),
+            ("SystemRoot", "D:\\Windows".into()),
+            ("GENTLE_DOT_NODE", "D:\\override\\node.exe".into()),
+            ("GENTLE_DOT_DAEMON_SCRIPT", "D:\\override\\cli.mjs".into()),
+        ];
+        let mut expected = fixture.bundled(Some(&git), true);
+        expected.program = pairs[2].1.clone();
+        expected.args = vec![pairs[3].1.clone()];
+        expected.envs[0].1 = expected.envs[0].1.replace("C:\\Windows", "D:\\Windows");
+        assert_eq!(launch_spec(environment(&pairs), true, Some(&fixture.0.join("runtime"))), expected);
+        let empty = [
+            ("PATH", git.display().to_string()),
+            ("GENTLE_DOT_NODE", "".into()),
+            ("GENTLE_DOT_DAEMON_SCRIPT", "".into()),
+        ];
+        assert_eq!(
+            launch_spec(environment(&empty), false, Some(&fixture.0.join("runtime"))),
+            fixture.bundled(Some(&git), false)
+        );
     }
 }
 
