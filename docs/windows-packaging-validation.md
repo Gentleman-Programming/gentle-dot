@@ -12,7 +12,26 @@ The Windows packaging path stages a relocatable runtime, records file hashes, bu
 - This detects later tree drift relative to that manifest. It does not authenticate the manifest, establish publisher trust, verify a PE signature, or prove all executable bytes are valid. Upstream archive checksums likewise are not a signature guarantee.
 - `smoke-install.ps1` is a separate acceptance harness: isolated per-user install, runtime-manifest check, daemon health wait, stopped-app reinstall, canary preservation, then uninstall. Its `taskkill /T /F` cleanup is test cleanup, not proof of graceful shutdown or emergency-stop behavior.
 
-## Evidence and boundaries
+## Current checksum correction (S2 / T3)
+
+The single bounded native Windows PowerShell fetch used `Invoke-WebRequest -UseBasicParsing -TimeoutSec 30 "https://github.com/Gentleman-Programming/engram/releases/download/v3.4.0/checksums.txt"` (outer process timeout: 45 seconds). It exited 0 with HTTP 200 under PS `5.1.26100.9711`; `.Content.GetType().FullName` was `System.Byte[]`. The exact listing was logged as base64 and escaped JSON: six UTF-8/ASCII lines, LF endings, final LF, no BOM. Its Windows x64 entry was exactly:
+
+```text
+3065736ec7ff8137eb3fc607275f542ea13bb743a5157318c8a8770f11ce3289  engram_3.4.0_windows_amd64.zip
+```
+
+The production function previously applied a text regex to that byte array. It now decodes byte-array content as UTF-8 before matching; existing string handling, archive hashing, missing-entry rejection, pins and function interface remain unchanged. No executable ZIP was fetched for this diagnosis, and there is no digest fallback.
+
+Observed validation:
+
+- `node --test --test-name-pattern="stage handles observed PS5" scripts/windows/test/stage.test.mjs`: RED exit 1, stdout empty, script stderr `Expected 'Checksum mismatch: engram_3.4.0_windows_amd64.zip'; got 'Missing checksum for engram_3.4.0_windows_amd64.zip'`. GREEN exit 0, 1/1 passed; script stdout `PS5 checksum regression passed`, stderr empty. The fixture replays the exact fetched listing against synthetic `abc` bytes, expecting mismatch, not claiming a real archive download. Additional controlled byte/string listings verify valid bytes, tampering and absent entries. Rejections return no verified path or staged consumer artifact; absent entries initiate zero archive downloads. Tampered downloads remain untrusted temp files until fixture teardown.
+- Initial fixture-runner failures were not behavioral RED: an oversized encoded invocation produced `spawnSync powershell.exe EPERM`; stdin `-Command -` then produced empty stdout without executing the final block. The fixture now evaluates stdin as one script block.
+- Native PS5 differential against `b1c1876` extracted the production function from each version and used unchanged string content with valid and tampered bytes. Both exited 0, stderr empty, with identical stdout: `text: verified abc`, `Checksum mismatch: archive.zip`, `rejected: no staged artifact` (CRLF-terminated). Both temporary fixture directories were removed in teardown.
+- `node --test scripts/windows/test/*.test.mjs`: exit 1, 15 passed / 1 failed. The new PS5 regression passed before the unchanged dual-host test failed on `spawnSync pwsh.exe ENOENT`. Its PS5 portion passed; PowerShell 7 coverage remains required, not waived.
+
+Packaging risk item 5 and download-integrity risk item 2 remain review boundaries. The existing partial `build/windows/runtime` was preserved; no packaging rerun, installation or installed acceptance occurred. This correction does not establish a complete installer or successful real Engram ZIP verification.
+
+## Historical evidence and boundaries (W4, not current-host proof)
 
 - `node --test scripts/windows/test/*.test.mjs` — passed, 15/15 on Windows with zero skips.
 - `node --test scripts/windows/test/integrity.test.mjs scripts/windows/test/stage.test.mjs` — passed, 5/5; fixture-tree integrity and real checksum function with mocked network responses.

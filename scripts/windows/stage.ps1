@@ -15,6 +15,8 @@ function Run([string]$program, [string[]]$arguments) {
 }
 function DownloadVerified([string]$base, [string]$archive, [string]$checksums) {
     $listing = (Invoke-WebRequest -UseBasicParsing "$base/$checksums").Content
+    # PS5 returns byte[] for Engram's application/octet-stream checksum asset.
+    if ($listing -is [byte[]]) { $listing = [Text.Encoding]::UTF8.GetString($listing) }
     $pattern = '(?m)^([a-fA-F0-9]{64})\s+\*?' + [regex]::Escape($archive) + '\s*$'
     if ($listing -notmatch $pattern) { throw "Missing checksum for $archive" }
     $expected = $Matches[1]
