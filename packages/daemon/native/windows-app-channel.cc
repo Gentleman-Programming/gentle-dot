@@ -127,7 +127,7 @@ Adoption AdoptInheritedFd3(ExclusiveFd3Reservation) noexcept {
       !GetNamedPipeHandleStateW(original, &state, nullptr, nullptr, nullptr, nullptr, 0)) {
     fail(Failure::pipe_metadata, GetLastError()); return result;
   }
-  if ((flags & (PIPE_SERVER_END | PIPE_TYPE_MESSAGE)) || (state & PIPE_READMODE_MESSAGE)) {
+  if ((flags & (PIPE_SERVER_END | PIPE_TYPE_MESSAGE)) || (state & (PIPE_READMODE_MESSAGE | PIPE_NOWAIT))) {
     fail(Failure::not_byte_client); return result;
   }
   ULONG server_pid = 0, client_pid = 0;
@@ -194,6 +194,9 @@ Adoption AdoptInheritedFd3(ExclusiveFd3Reservation) noexcept {
   if (!Noninheritable(duplicate)) {
     fail(Failure::duplicate_inheritance, GetLastError()); return result;
   }
+  // A null callback makes libuv close synchronously; that path stores but never
+  // dereferences the loop (verified in src/win/fs.c of libuv 1.50.0-1.52.1, the
+  // range Node 24.0.0-24.22.1 ships). Recheck when the host Node line changes.
   uv_fs_t request = {};
   result.uv_error = uv_fs_close(nullptr, &request, 3, nullptr);
   uv_fs_req_cleanup(&request);

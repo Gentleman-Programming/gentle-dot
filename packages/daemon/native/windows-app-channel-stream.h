@@ -8,6 +8,8 @@ namespace gentle_dot::app_channel {
 // on one host-loop thread; no callbacks, worker, N-API environment or CRT alias.
 // A later adapter must adopt/create before ANY spawn, refuse failed startup, drive
 // poll on its existing loop, and stop then await closed before resolving close.
+// Native read and write buffers are wiped when consumed, delivered or discarded;
+// bytes copied into JS are beyond this boundary and are not scrubbed.
 struct Stream;
 constexpr size_t kStreamReadBytes = 64 * 1024;
 constexpr size_t kStreamQueueBytes = 2 * 1024 * 1024;

@@ -19,7 +19,10 @@ struct Write {
   size_t size = 0;
   size_t offset = 0;
   uint64_t ticket = 0;
-  ~Write() { delete[] bytes; }
+  ~Write() {
+    if (bytes) SecureZeroMemory(bytes, size);
+    delete[] bytes;
+  }
 };
 }
 struct Stream {
@@ -144,6 +147,7 @@ void Finish(Stream& s) noexcept {
   if (s.read.pending || s.write.pending) return;
   if (!s.abort && s.head) return;
   while (s.head) Pop(s);
+  SecureZeroMemory(s.bytes, sizeof(s.bytes));
   s.read_size = s.read_offset = 0;
   // Attempt all independent closes, but never claim success on any failed close.
   bool read_closed = CloseEvent(s, s.read);
@@ -226,7 +230,10 @@ size_t TakeStreamRead(Stream* s, void* destination, size_t capacity) noexcept {
   size_t count = capacity < available ? capacity : available;
   std::memcpy(destination, s->bytes + s->read_offset, count);
   s->read_offset += count;
-  if (s->read_offset == s->read_size) s->read_offset = s->read_size = 0;
+  if (s->read_offset == s->read_size) {
+    SecureZeroMemory(s->bytes, s->read_size);
+    s->read_offset = s->read_size = 0;
+  }
   return count;
 }
 StreamStatus InspectStream(const Stream* s) noexcept {
