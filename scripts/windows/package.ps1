@@ -11,9 +11,12 @@ try {
 & "$PSScriptRoot/stage.ps1"
 $runtime = Join-Path $repo 'build/windows/runtime'
 $config = Join-Path $repo 'build/windows/bundle.json'
+$hooks = Join-Path $repo 'build/windows/installer-path-hooks.nsh'
+& node "$PSScriptRoot/installer-path-guard.mjs" hook $runtime $hooks
+if ($LASTEXITCODE -ne 0) { throw 'Installer path guard generation failed; bundle not built.' }
 $resources = @{}
 $resources[$runtime] = 'runtime'
-$json = @{ bundle = @{ targets = @('nsis'); icon = @((Join-Path $repo 'build/windows/icons/icon.ico')); resources = $resources; windows = @{ nsis = @{ installMode = 'currentUser' } } } } | ConvertTo-Json -Depth 8
+$json = @{ bundle = @{ targets = @('nsis'); icon = @((Join-Path $repo 'build/windows/icons/icon.ico')); resources = $resources; windows = @{ nsis = @{ installMode = 'currentUser'; installerHooks = $hooks } } } } | ConvertTo-Json -Depth 8
 [IO.File]::WriteAllText($config,$json,[Text.UTF8Encoding]::new($false))
 Push-Location $repo
 try {

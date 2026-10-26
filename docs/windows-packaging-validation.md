@@ -12,6 +12,59 @@ The Windows packaging path stages a relocatable runtime, records file hashes, bu
 - This detects later tree drift relative to that manifest. It does not authenticate the manifest, establish publisher trust, verify a PE signature, or prove all executable bytes are valid. Upstream archive checksums likewise are not a signature guarantee.
 - `smoke-install.ps1` is a separate acceptance harness: isolated per-user install, runtime-manifest check, daemon health wait, stopped-app reinstall, canary preservation, then uninstall. Its `taskkill /T /F` cleanup is test cleanup, not proof of graceful shutdown or emergency-stop behavior.
 
+## Destination guard (S2 / S4, T6)
+
+The Windows packager now refuses destinations that cannot contain the **entire verified staged payload** within conservative legacy NSIS path limits. This is a refusal/supported-path correction, not arbitrary-long-path extraction support. No inventory exclusions, global `LongPathsEnabled` changes, elevation requirement, or Unix packaging changes are introduced.
+
+### Build and QA usage
+
+`package.ps1` runs the existing inventory verifier through `installer-path-guard.mjs`, generates `build/windows/installer-path-hooks.nsh`, and sets `bundle.windows.nsis.installerHooks` in its generated config. Malformed manifests, unsafe relative keys, and staged drift stop packaging. The budget also includes the integrity manifest, `gentle-dot.exe`, `uninstall.exe`, all parent directories, and empty staged directories.
+
+Internal helper commands (Node, no dependencies):
+
+```text
+node scripts/windows/installer-path-guard.mjs hook STAGED_ROOT OUTPUT.nsh
+node scripts/windows/installer-path-guard.mjs destination STAGED_ROOT ABSOLUTE_DESTINATION
+```
+
+The second command prints only the accepted destination, or an English error to stderr and exit 2. It accepts local absolute drive paths, preserves spaces/UTF-16 code units, strips trailing separators, and rejects traversal. A rejected length reports the exact staged destination budget. `smoke-install.ps1 -Installer SETUP.exe` keeps its public option and lifecycle, but chooses `build/windows/qa-<unique-id>/Installed Gentle Dot` with repo-local data. It verifies this destination **before creating QA data**; a deeper checkout that cannot fit stops with the computed budget, never falls back outside the repository. NSIS registration/shortcuts remain real user-profile effects: the harness still requires explicit authorization and a separate prior-installation preflight.
+
+### Limits and hook placement
+
+For destination length `D` (excluding trailing separators), every installed file suffix `F` must satisfy `D + 1 + F.length <= 259`; every directory suffix `P` must satisfy `D + 1 + P.length <= 247`. Lengths are UTF-16 code units. The directory ceiling conservatively reserves NUL in addition to the documented `MAX_PATH - 12` directory allowance. See [Microsoft's maximum-path documentation](https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation).
+
+The [official Tauri hook documentation](https://v2.tauri.app/distribute/windows-installer/) describes PREINSTALL before files/registry/shortcuts. However, the [2.12.1 template](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.1/crates/tauri-bundler/src/bundle/windows/nsis/installer.nsi) places previous-uninstaller execution in `PageLeaveReinstall` **before Directory and every section**; WebView2 setup and `SetOutPath` also precede PREINSTALL. A hidden section alone is therefore insufficient.
+
+The hook extension now uses the [documented MUI_CUSTOMFUNCTION_GUIINIT callback](https://nsis.sourceforge.io/Docs/Modern%20UI%202/Readme.html) to validate the initial supplied/default destination before maintenance pages. Silent mode has no GUI/pages, so a mandatory hidden first section guards that route; PREINSTALL rechecks before payload extraction. An existing GUI-init callback definition causes a compile-time error, not silent replacement. No duplicate `.onInit`, full template copy, or registry mutation is added. Recheck these ownership/order assumptions after a Tauri upgrade and in the next generated product installer.
+
+Native and Node validation reject dot/dot-dot components rather than resolving traversal to a sibling. Supplied unsupported `/D` destinations exit 2 before the previous-uninstall branch, destination creation, prerequisites or payload extraction. Ordinary GUI setup displays an actionable English message; `/S` and `/P` suppress the dialog and return 2 with empty stdout/stderr. This is not an upgrade transaction: if a user supplies a valid initial destination, authorizes maintenance, then changes the destination to an invalid one on the later Directory page, rejecting that later path cannot undo the already-authorized uninstall. Existing maintenance behavior for valid initial destinations is retained.
+
+Current staged inventory: 28,345 hashed files; maximum destination **108 UTF-16 code units** (file maximum 150, directory maximum 121). The generated QA destination on this checkout is 98 code units, leaving 10 units of destination headroom. Limiting file suffix:
+
+```text
+runtime/daemon/node_modules/@earendil-works/pi-agent-core/node_modules/@earendil-works/pi-ai/dist/providers/qwen-token-plan-individual.models.d.ts.map
+```
+
+Longest directory suffix:
+
+```text
+runtime/daemon/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/type/engine/constructor_parameters
+```
+
+These are observations, not hard-coded budgets: packaging recomputes them from its staged tree.
+
+### Bounded native evidence and remaining acceptance
+
+- Initial deterministic rule tests failed because the guard module did not exist. The no-guard native fixture returned 0 instead of required 2. A second RED using actual Tauri ordering proved PREINSTALL alone created the rejected destination; the early section fixed that.
+- The isolated NSIS fixture uses the existing Tauri compiler, a shared 30-second deadline, no registry/shortcuts/app, and writes only `build/windows/path-guard-fixtures/run-*`. It checks exact exit/stdout/stderr, rejection before directory creation, unchanged existing sentinel/counter bytes, supported paths with spaces/astral Unicode/trailing separators, and actual directory/file lengths **247/259**. A no-guard valid-case differential preserves bytes and exit/output. The no-guard **248/260** case returns **0 with payload absent**, reproducing the extraction cliff without touching the product.
+- One fixture invocation initially rejected a valid spaced/trailing-separator path because Node applied CRT argument quoting. Using NSIS's documented verbatim final `/D=` argument corrected the fixture; the PowerShell harness already uses that convention.
+- Earlier writer runs reported 5/5 focused and 21/21 suite on this checkout. Independent verification superseded portability confidence: **20 passed / 1 failed**, zero skips, with the Unicode fixture ending in a space at a 97-character base. The corrected fixture reserves the complete astral pair and a final legal character, and derives its boundary suffix from the available base budget rather than assuming a short checkout.
+- Correction RED reproduced all three findings: maintenance `/P` returned 0 and changed the substituted uninstall counter; native traversal was accepted; the 97-character Unicode case raised ENOENT. Correction fixtures model Tauri's `PageLeaveReinstall` upgrade/uninstall branch, substituting only external uninstall effects with an owned file counter. They exercise actual MUI GUI-init under `/P`, the `/S` section route, compile-time callback collision rejection, and unchanged valid maintenance effects. No real uninstaller, app, registry, packaging or lifecycle script is executed.
+- Corrected focused run: **7/7 passed**. The full Windows Node suite was run once for this correction: **23/23 passed**, zero skips. Each guarded maintenance/traversal `/P` and `/S` invocation exited 2 with stdout/stderr empty, unchanged counter `0`, unchanged sentinel, and no rejected destination. The unguarded `/P` maintenance baseline exited 0 and changed the counter to `uninstall-effect`; unguarded `/S` traversal exited 0 and wrote the escaped sibling payload. Valid `/P` maintenance effects matched baseline. PS5 parsing of package/smoke scripts passed. Commands used child-local portable PS7 PATH and scoped telemetry/update/module-cache settings.
+- Native fixtures/evidence are intentionally retained in the ignored fixture directory. The failed product installation/registration and original setup bytes are preserved. No product rebuild, app launch, reinstall, uninstall, or overall Windows acceptance is claimed here; the parent owns the next bundle run and installed verification. Packaging risk **item 5** remains an independent verification boundary.
+
+Rollback boundary: remove this destination-guard helper/test and its wiring in `package.ps1`/`smoke-install.ps1`, plus this documentation section, as one cohesive unit. Do not revert the earlier checksum/runtime fixes or touch preserved installations. The cohesive original-plus-correction source/tests/docs unit forecasts roughly 500 authored changed lines, above the advisory 400-line review size; boundary proof stays with the behavior, with disposition owned by the parent.
+
 ## Current checksum correction (S2 / T3)
 
 The single bounded native Windows PowerShell fetch used `Invoke-WebRequest -UseBasicParsing -TimeoutSec 30 "https://github.com/Gentleman-Programming/engram/releases/download/v3.4.0/checksums.txt"` (outer process timeout: 45 seconds). It exited 0 with HTTP 200 under PS `5.1.26100.9711`; `.Content.GetType().FullName` was `System.Byte[]`. The exact listing was logged as base64 and escaped JSON: six UTF-8/ASCII lines, LF endings, final LF, no BOM. Its Windows x64 entry was exactly:

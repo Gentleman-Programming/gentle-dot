@@ -1,9 +1,20 @@
+<#
+.SYNOPSIS
+Runs the explicitly authorized NSIS lifecycle with repo-local isolated test data.
+.PARAMETER Installer
+Path to the setup executable. Destination must fit the verified staged runtime budget.
+#>
 param([Parameter(Mandatory=$true)][string]$Installer)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repo = (Resolve-Path "$PSScriptRoot/../..").Path
-$scratch = Join-Path ([IO.Path]::GetTempPath()) ('gentle-dot-ci-' + [guid]::NewGuid().ToString('N'))
+$scratch = Join-Path $repo ('build/windows/qa-' + [guid]::NewGuid().ToString('N'))
 $destination = Join-Path $scratch 'Installed Gentle Dot'
+$runtime = Join-Path $repo 'build/windows/runtime'
+# Refuse before any QA writes; do not fall back to paths outside the repository.
+$checkedDestination = & node "$PSScriptRoot/installer-path-guard.mjs" destination $runtime $destination
+if ($LASTEXITCODE -ne 0) { throw 'Repository-local QA destination cannot fit the staged payload; see exact budget above.' }
+$destination = [string]$checkedDestination
 $data = Join-Path $scratch 'data'
 New-Item -ItemType Directory -Path $data -Force | Out-Null
 $canary = Join-Path $data 'upgrade-canary.txt'
