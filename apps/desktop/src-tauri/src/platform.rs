@@ -59,6 +59,12 @@ impl Os {
         self.panel_effect(facts) != WindowEffect::None
     }
 
+    /// Windows uses app-managed placement. Preserve the existing environment-based
+    /// placement decision on the original platforms.
+    pub fn compositor_places_windows(self, env: impl Fn(&str) -> Option<String>) -> bool {
+        self != Os::Windows && compositor_places_windows(env)
+    }
+
     /// The panel shortcut a fresh install binds. macOS and Linux keep `Alt+Space`; Windows uses
     /// `Ctrl+Shift+Space`, because `Alt+Space` opens the window menu in every app and a global
     /// hotkey on it would take that menu away. The OS does not refuse it — measured on Windows 11,
@@ -378,6 +384,16 @@ mod tests {
     }
 
     #[test]
+    fn windows_placement_does_not_change_original_platform_decisions() {
+        assert!(!Os::Windows.compositor_places_windows(env_of(GNOME_WAYLAND)));
+        assert_eq!(
+            Os::MacOs.compositor_places_windows(env_of(GNOME_WAYLAND)),
+            compositor_places_windows(env_of(GNOME_WAYLAND)),
+        );
+        assert!(Os::Linux.compositor_places_windows(env_of(GNOME_WAYLAND)));
+    }
+
+    #[test]
     fn toggle_argument_toggles_the_panel() {
         let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(launch_request(&args(&["gentle-dot", "--toggle"])), LaunchRequest::Toggle);
@@ -476,6 +492,31 @@ mod tests {
                     "{os:?} {facts:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn windows_frontend_dist_is_a_directory_not_a_cannot_be_base_url() {
+        use tauri::utils::config::FrontendDist;
+
+        // Reproduce the production config ambiguity without opening a webview.
+        let absolute: FrontendDist =
+            serde_json::from_value(serde_json::json!(r"C:\staged runtime\ui")).unwrap();
+        let FrontendDist::Url(url) = absolute else {
+            panic!("expected the absolute drive path to reproduce URL classification");
+        };
+        assert_eq!(url.scheme(), "c");
+        assert!(url.cannot_be_a_base());
+        assert!(url.join(panel_url(Os::Windows.panel_effect(WindowsBackdrop::unknown()))).is_err());
+
+        // Packaging emits forward slashes and a ./ prefix, including when the
+        // first component could otherwise look like a URL scheme.
+        for relative in ["./../../../staged runtime/ui", "./ui", "./c:assets/ui"] {
+            let dist: FrontendDist = serde_json::from_value(serde_json::json!(relative)).unwrap();
+            let FrontendDist::Directory(directory) = dist else {
+                panic!("relative frontend must embed a directory: {relative}");
+            };
+            assert_eq!(directory, std::path::PathBuf::from(relative));
         }
     }
 
