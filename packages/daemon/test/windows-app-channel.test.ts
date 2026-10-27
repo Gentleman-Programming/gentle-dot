@@ -33,6 +33,7 @@ function fixture() {
 	let uncertain = false;
 	let released: NativeAppChannelSnapshot | undefined;
 	const calls: string[] = [];
+	const writes: Buffer[] = [];
 	const owner: NativeAppChannelOwner = {
 		status() {
 			expect(this).toBe(owner);
@@ -52,6 +53,7 @@ function fixture() {
 			return result;
 		},
 		write(chunk) {
+			writes.push(chunk);
 			expect(this).toBe(owner);
 			calls.push(`write:${chunk.toString()}`);
 			if (pressure) return { admission: "backpressure", ticket: 0n };
@@ -90,6 +92,7 @@ function fixture() {
 	return {
 		status,
 		calls,
+		writes,
 		factory,
 		stream,
 		data(value: Buffer) {
@@ -121,6 +124,17 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 describe("Windows app channel lifecycle integration", () => {
+	it("decodes string writes into Buffer bytes before native admission", async () => {
+		const f = fixture();
+		const s = f.stream();
+		s.write("é");
+		expect(f.writes).toHaveLength(1);
+		expect(Buffer.isBuffer(f.writes[0])).toBe(true);
+		expect(f.writes[0]).toEqual(Buffer.from("é"));
+		f.status.completedWrite = f.status.acceptedWrite;
+		await tick();
+		await terminate(f, s);
+	});
 	it("a first abort makes later AppChannel drain reject instead of certifying closure", async () => {
 		const f = fixture();
 		const s = f.stream();

@@ -108,7 +108,13 @@ class WindowsAppChannelDuplex extends Duplex {
 	#mode: "drain" | "abort" = "abort";
 
 	constructor(options: WindowsAppChannelOptions, facts: StartupFacts, loadNative: () => NativeAppChannelAPI) {
-		super({ readableHighWaterMark: 65536, writableHighWaterMark: 65536, autoDestroy: true });
+		super({
+			readableHighWaterMark: 65536,
+			writableHighWaterMark: 65536,
+			autoDestroy: true,
+			// _write relies on Buffer chunks: byte length matches the native 2 MiB limit.
+			decodeStrings: true,
+		});
 		if (options.exclusiveFd3Startup !== true || !facts.mainThread)
 			throw new Error("Exclusive main-thread fd3 startup required");
 		if (facts.ipcChannel || facts.ipcConnected || facts.channelFdPresent)
