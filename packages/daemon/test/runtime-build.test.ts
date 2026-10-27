@@ -66,13 +66,24 @@ describe("build:runtime", () => {
 		const manifest = JSON.parse(readFileSync(join(out, "daemon", "package.json"), "utf8"));
 		expect(manifest).toMatchObject({ private: true, type: "module" });
 		expect(manifest.dependencies).toEqual({
-			"@earendil-works/pi-ai": "1.0.4",
-			"@earendil-works/pi-coding-agent": "1.0.4",
-			"@earendil-works/pi-mcp": "1.0.4",
-			"@earendil-works/pi-tui": "1.0.4",
-			"gentle-pi": "4.0.0",
+			"@earendil-works/pi-ai": "1.4.0",
+			"@earendil-works/pi-coding-agent": "1.4.0",
+			"@earendil-works/pi-mcp": "1.4.0",
+			"@earendil-works/pi-tui": "1.4.0",
+			"gentle-pi": "4.3.0",
 			jiti: "2.7.0",
 			ws: "8.22.0",
+		});
+	});
+
+	// The engine asks for its siblings with `^` ranges; a fresh install would take newer ones
+	// that no longer match it (pi-codemode 1.4.0 broke pi-coding-agent 1.0.4).
+	it("pins the engine's own packages to the lockfile's versions", () => {
+		const manifest = JSON.parse(readFileSync(join(out, "daemon", "package.json"), "utf8"));
+		expect(manifest.overrides).toEqual({
+			"@earendil-works/pi-agent-core": "1.4.0",
+			"@earendil-works/pi-codemode": "1.4.0",
+			"@earendil-works/pi-telemetry": "1.4.0",
 		});
 	});
 
