@@ -250,12 +250,15 @@ impl AppChannel {
         self.closer.close_error()
     }
 
+    // Used by the Windows daemon lifecycle tests, which land after the daemon module compiles there.
     #[cfg(all(test, windows))]
+    #[allow(dead_code)]
     pub(crate) fn test_inject_cancel_error(&self, code: i32) {
         self.closer.inject_cancel_error(code);
     }
 
     #[cfg(all(test, windows))]
+    #[allow(dead_code)]
     pub(crate) fn test_close_barriers(&self, entered: Arc<std::sync::Barrier>, release: Arc<std::sync::Barrier>) {
         self.closer.close_barriers(entered, release);
     }

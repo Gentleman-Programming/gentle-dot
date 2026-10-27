@@ -10,8 +10,10 @@
 mod windows_record;
 
 // Exercise the real launch contracts and portable encoding without enabling Windows launch.
+// Not every item is used until the Windows lifecycle replaces this file (runtime_dir, for one).
 #[cfg(test)]
 #[path = "daemon/launch.rs"]
+#[allow(dead_code)]
 mod launch;
 #[cfg(test)]
 pub use launch::{ChildEndpoint, ChildProcess, LaunchSpec};
