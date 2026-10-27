@@ -690,6 +690,45 @@ mod native {
             }
             parent.shutdown().unwrap();
         }
+
+        #[test]
+        fn application_ignores_relative_and_empty_path_entries() {
+            // cargo runs tests from the crate directory; target/ is ignored by git.
+            let relative = PathBuf::from(format!(r"target\gd-relative-path-{}", std::process::id()));
+            let absolute = std::env::temp_dir().join(format!("gd-absolute-path-{}", std::process::id()));
+            for dir in [&relative, &absolute] {
+                std::fs::create_dir_all(dir).unwrap();
+                std::fs::write(dir.join("gd-probe-tool.exe"), b"").unwrap();
+            }
+            let spec = |path: String| LaunchSpec {
+                program: "gd-probe-tool".into(),
+                args: Vec::new(),
+                envs: vec![("PATH".into(), path)],
+            };
+            let found = |path: String| application(&spec(path))
+                .map(|wide| String::from_utf16(&wide[..wide.len() - 1]).unwrap());
+            let only_relative = format!(";.;{}", relative.display());
+            assert_eq!(found(only_relative).unwrap_err().kind(), io::ErrorKind::NotFound);
+            let mixed = format!(";.;{};{}", relative.display(), absolute.display());
+            let resolved = found(mixed).unwrap();
+            assert!(resolved.ends_with(r"\gd-probe-tool.exe"));
+            assert!(resolved.contains(&format!("gd-absolute-path-{}", std::process::id())));
+            for dir in [&relative, &absolute] { let _ = std::fs::remove_dir_all(dir); }
+        }
+
+        #[test]
+        fn retained_record_ancestry_blocks_renaming_an_ancestor() {
+            let base = std::env::temp_dir().join(format!("gd-ancestry-pin-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(base.join(r"a\b")).unwrap();
+            let held = record_ancestry(&base.join(r"a\b\daemon.pid"), false).unwrap();
+            let renamed = base.join("a-renamed");
+            let attempt = std::fs::rename(base.join("a"), &renamed);
+            if attempt.is_ok() { let _ = std::fs::rename(&renamed, base.join("a")); }
+            drop(held);
+            let _ = std::fs::remove_dir_all(&base);
+            assert!(attempt.is_err(), "an ancestor was renamed while the record ancestry was retained");
+        }
     }
 }
 
