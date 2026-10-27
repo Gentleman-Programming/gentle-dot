@@ -220,7 +220,10 @@ mod native {
             let path = spec.envs.iter().rev().find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
                 .map(|(_, value)| OsString::from(value)).or_else(|| std::env::var_os("PATH"));
             let file = if program.extension().is_some() { program.to_path_buf() } else { program.with_extension("exe") };
-            path.as_deref().into_iter().flat_map(std::env::split_paths).map(|dir| dir.join(&file))
+            // Only absolute PATH entries: an empty or relative entry would resolve against the
+            // current directory and could select a planted executable.
+            path.as_deref().into_iter().flat_map(std::env::split_paths).filter(|dir| dir.is_absolute())
+                .map(|dir| dir.join(&file))
                 .find(|candidate| candidate.is_file())
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "daemon executable not found in launch PATH"))?
         };
