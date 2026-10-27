@@ -13,22 +13,28 @@
 #[cfg(any(windows, test))]
 mod windows_record;
 
+mod launch;
+pub use launch::*;
+#[cfg(test)]
+mod windows;
+
 pub use crate::app_channel::APP_FD;
 use crate::app_channel::{AppChannel, Handler};
 use crate::health::check_health;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::io;
+#[cfg(unix)]
 use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ExitStatus};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-
-/// Origins of the `tauri dev` server, allowed only on daemons spawned by debug builds.
-pub const DEV_ALLOWED_ORIGINS: &str = r#"["http://127.0.0.1:5173","http://localhost:5173"]"#;
 
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(300);
 const STOP_GRACE: Duration = Duration::from_secs(5);
@@ -91,6 +97,7 @@ pub fn process_started(_pid: u32) -> Option<u64> {
 
 /// Records the daemon just spawned as `pid` (private, 0600). A new file in the same folder renamed
 /// over the pid file: never written through a symlink there, and never seen half written.
+#[cfg(unix)]
 pub fn record_launch(data_dir: &Path, pid: u32) -> io::Result<()> {
     let started = process_started(pid).ok_or_else(|| io::Error::other("the assistant is not running"))?;
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
@@ -114,10 +121,12 @@ pub fn record_launch(data_dir: &Path, pid: u32) -> io::Result<()> {
 }
 
 /// A pid file holds `<pid> <start time>`, far below this.
+#[cfg(unix)]
 const PID_FILE_MAX: u64 = 64;
 
 /// Whether a pid read from the pid file may name a daemon to signal: never this app, its parent,
 /// init, or the kernel.
+#[cfg(unix)]
 fn may_be_daemon(pid: u32) -> bool {
     // SAFETY: getppid(2) has no preconditions.
     let parent = u32::try_from(unsafe { libc::getppid() }).ok();
@@ -126,6 +135,7 @@ fn may_be_daemon(pid: u32) -> bool {
 
 /// The daemon the pid file names, if it holds a launch. Only a small regular file is read: a
 /// symlink, a FIFO, or anything else there is ignored (opened without following or blocking).
+#[cfg(unix)]
 pub fn recorded_launch(data_dir: &Path) -> Option<Launched> {
     let file = OpenOptions::new()
         .read(true)
@@ -144,11 +154,13 @@ pub fn recorded_launch(data_dir: &Path) -> Option<Launched> {
 }
 
 /// The recorded daemon, while that same process still runs (a reused pid has another start time).
+#[cfg(unix)]
 pub fn live_orphan(data_dir: &Path) -> Option<Launched> {
     recorded_launch(data_dir).filter(|launch| process_started(launch.pid) == Some(launch.started))
 }
 
 /// Removes the pid file when it names `pid`.
+#[cfg(unix)]
 fn forget_launch(data_dir: &Path, pid: u32) {
     if recorded_launch(data_dir).is_some_and(|launch| launch.pid == pid) {
         let _ = fs::remove_file(data_dir.join(PID_FILE));
@@ -157,6 +169,7 @@ fn forget_launch(data_dir: &Path, pid: u32) {
 
 /// SIGTERM to a recorded daemon that is not this app's child, then SIGKILL after `grace`.
 /// Only the process the record names: a pid now used by another process is left alone.
+#[cfg(unix)]
 fn stop_orphan(launch: Launched, grace: Duration) {
     let Ok(pid) = libc::pid_t::try_from(launch.pid) else {
         return;
@@ -206,57 +219,9 @@ pub fn start_plan(healthy: bool, owns_child: bool, wants_channel: bool, orphan: 
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LaunchSpec {
-    pub program: String,
-    pub args: Vec<String>,
-    pub envs: Vec<(String, String)>,
-}
-
-/// `<node> <daemon script>` (S29.5). With a bundled runtime (`<runtime>/daemon/cli.mjs`
-/// exists) that is the runtime's own Node and daemon, a PATH of the runtime plus the
-/// system folders, and `GENTLE_DOT_RUNTIME`; otherwise the build-time paths and PATH.
-/// `GENTLE_DOT_NODE` and `GENTLE_DOT_DAEMON_SCRIPT` override the program and script in both.
-pub fn launch_spec(env: impl Fn(&str) -> Option<String>, dev: bool, runtime: Option<&Path>) -> LaunchSpec {
-    let pick = |key: &str, fallback: String| env(key).filter(|v| !v.is_empty()).unwrap_or(fallback);
-    let bundled = runtime.filter(|dir| dir.join("daemon/cli.mjs").is_file());
-    let (node, script, mut envs) = match bundled {
-        Some(dir) => {
-            let root = dir.display().to_string();
-            let path = format!("{root}/bin:{root}/node/bin:/usr/bin:/bin:/usr/sbin:/sbin");
-            (
-                format!("{root}/node/bin/node"),
-                format!("{root}/daemon/cli.mjs"),
-                vec![("PATH".to_string(), path), ("GENTLE_DOT_RUNTIME".to_string(), root)],
-            )
-        }
-        None => (
-            env!("GENTLE_DOT_BUILD_NODE").to_string(),
-            env!("GENTLE_DOT_BUILD_DAEMON_SCRIPT").to_string(),
-            vec![("PATH".to_string(), env!("GENTLE_DOT_BUILD_PATH").to_string())],
-        ),
-    };
-    if dev {
-        envs.push(("GENTLE_DOT_ALLOWED_ORIGINS".into(), DEV_ALLOWED_ORIGINS.into()));
-    }
-    LaunchSpec {
-        program: pick("GENTLE_DOT_NODE", node),
-        args: vec![pick("GENTLE_DOT_DAEMON_SCRIPT", script)],
-        envs,
-    }
-}
-
-/// Where a bundled runtime would live: `GENTLE_DOT_RUNTIME_DIR`, else the app's `runtime`
-/// resource. `launch_spec` uses it only when it holds `daemon/cli.mjs`.
-pub fn runtime_dir(env: impl Fn(&str) -> Option<String>, resource_dir: Option<PathBuf>) -> Option<PathBuf> {
-    env("GENTLE_DOT_RUNTIME_DIR")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| resource_dir.map(|dir| dir.join("runtime")))
-}
-
 /// Opens `<data_dir>/daemon.log` for appending. The folder is 0700 and the log
 /// 0600 (looser modes are repaired) because the daemon's output is private.
+#[cfg(unix)]
 pub fn open_private_log(data_dir: &Path) -> io::Result<File> {
     fs::DirBuilder::new().recursive(true).mode(0o700).create(data_dir)?;
     fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))?;
@@ -265,37 +230,9 @@ pub fn open_private_log(data_dir: &Path) -> io::Result<File> {
     Ok(log)
 }
 
-/// A spawned process the app polls, stops, and reaps: a `std::process::Child`, or on macOS a
-/// daemon spawned with its TCC responsibility disclaimed (`disclaimed`).
-pub trait ChildProcess: Send {
-    fn id(&self) -> u32;
-    /// The exit status once the process ended (reaping it), `None` while it runs.
-    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>>;
-    /// Sends SIGKILL unless the process was already reaped.
-    fn kill(&mut self) -> io::Result<()>;
-    fn wait(&mut self) -> io::Result<ExitStatus>;
-}
-
-impl ChildProcess for Child {
-    fn id(&self) -> u32 {
-        Child::id(self)
-    }
-
-    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        Child::try_wait(self)
-    }
-
-    fn kill(&mut self) -> io::Result<()> {
-        Child::kill(self)
-    }
-
-    fn wait(&mut self) -> io::Result<ExitStatus> {
-        Child::wait(self)
-    }
-}
-
 /// A connected pair of Unix sockets: the app's end, and the daemon's, numbered above [`APP_FD`] so
 /// placing it on fd 3 in the child never collides with it. Both are close-on-exec here.
+#[cfg(unix)]
 pub fn channel_pair() -> io::Result<(UnixStream, OwnedFd)> {
     let (app, daemon) = UnixStream::pair()?;
     let daemon = OwnedFd::from(daemon);
@@ -326,7 +263,7 @@ fn spawn_daemon(spec: &LaunchSpec, log: File, channel: Option<BorrowedFd<'_>>) -
 /// descriptor some library of the app opened without close-on-exec never reaches the daemon. Node
 /// then marks fd 3 close-on-exec at its own startup (libuv's `uv_disable_stdio_inheritance`), so
 /// the daemon's children never get it either (`app-channel.ts` `childInherits` checks that).
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn spawn_daemon(spec: &LaunchSpec, log: File, channel: Option<BorrowedFd<'_>>) -> io::Result<Box<dyn ChildProcess>> {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
@@ -360,7 +297,7 @@ fn spawn_daemon(spec: &LaunchSpec, log: File, channel: Option<BorrowedFd<'_>>) -
 
 /// Marks every descriptor from `first` up close-on-exec. Called between fork and exec: system
 /// calls only.
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn cloexec_from(first: libc::c_int) {
     #[cfg(target_os = "linux")]
     if let Ok(low) = libc::c_uint::try_from(first) {
@@ -385,6 +322,7 @@ fn cloexec_from(first: libc::c_int) {
 }
 
 /// Sends SIGTERM, waits up to `grace` for a clean exit, then kills.
+#[cfg(unix)]
 pub fn stop_child(child: &mut dyn ChildProcess, grace: Duration) {
     if !matches!(child.try_wait(), Ok(None)) {
         return;
@@ -575,15 +513,27 @@ impl Daemon {
     }
 
     fn spawn(&self) -> Result<(), String> {
-        let mut slot = self.child.lock().unwrap();
+        self.spawn_locked(self.child.lock().unwrap())
+    }
+
+    fn spawn_locked(&self, mut slot: std::sync::MutexGuard<'_, Option<Box<dyn ChildProcess>>>) -> Result<(), String> {
         if let Some(child) = slot.as_mut() {
             if matches!(child.try_wait(), Ok(None)) {
                 return Ok(());
             }
         }
-        let spec = self.launch.clone().unwrap_or_else(|| {
-            launch_spec(|key| std::env::var(key).ok(), cfg!(debug_assertions), self.runtime_dir.as_deref())
-        });
+        let spec = match &self.launch {
+            Some(spec) => spec.clone(),
+            None => {
+                validate_packaged_runtime(
+                    |key| std::env::var(key).ok(),
+                    cfg!(windows) && !cfg!(debug_assertions)
+                        && option_env!("GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED") == Some("1"),
+                    self.runtime_dir.as_deref(),
+                )?;
+                launch_spec(|key| std::env::var(key).ok(), cfg!(debug_assertions), self.runtime_dir.as_deref())
+            }
+        };
         let log = open_private_log(&self.data_dir).map_err(|e| format!("cannot open daemon.log: {e}"))?;
         let pair = match &self.handler {
             Some(_) => Some(channel_pair().map_err(|e| format!("cannot open the assistant's channel: {e}"))?),
@@ -644,7 +594,7 @@ impl Daemon {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::app_channel::{AppChannel, Handler};

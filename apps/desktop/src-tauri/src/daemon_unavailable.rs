@@ -9,6 +9,16 @@
 #[path = "daemon/windows_record.rs"]
 mod windows_record;
 
+// Exercise the real launch contracts and portable encoding without enabling Windows launch.
+#[cfg(test)]
+#[path = "daemon/launch.rs"]
+mod launch;
+#[cfg(test)]
+pub use launch::{ChildEndpoint, ChildProcess, LaunchSpec};
+#[cfg(test)]
+#[path = "daemon/windows.rs"]
+mod windows;
+
 use crate::app_channel::{AppChannel, Handler};
 use crate::health::check_health;
 use std::path::PathBuf;
