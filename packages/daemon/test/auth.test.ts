@@ -1,16 +1,38 @@
-import { readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { linkSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import type { ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { createModelAuthRuntime, resolveAgentHome } from "../src/auth.ts";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
-import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { FAKE_AGENT, tempDir as makeTempDir, waitFor } from "./helpers.ts";
+import { inspectWindowsAcl } from "./windows-acl-oracle.ts";
+
+const scratch: string[] = [];
+function tempDir(): string {
+	const root = makeTempDir();
+	scratch.push(root);
+	return root;
+}
+
+function expectPrivate(path: string, directory = false): void {
+	if (process.platform !== "win32") {
+		expect(statSync(path).mode & 0o777).toBe(directory ? 0o700 : 0o600);
+		return;
+	}
+	const acl = inspectWindowsAcl(path);
+	expect(acl.owner).toBe(acl.currentSid);
+	expect(acl.protected).toBe(true);
+	expect(acl.rules).toHaveLength(2);
+	expect(new Set(acl.rules.map((rule) => rule.sid))).toEqual(new Set([acl.currentSid, "S-1-5-18"]));
+	expect(acl.rules.every((rule) => rule.type === "Allow" && !rule.inherited)).toBe(true);
+}
 
 const daemons: DotDaemon[] = [];
 afterEach(async () => {
 	await Promise.all(daemons.splice(0).map((d) => d.close()));
+	for (const root of scratch.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 async function setup(env: NodeJS.ProcessEnv = process.env) {
@@ -244,7 +266,7 @@ describe("sign-in", () => {
 
 describe("createModelAuthRuntime (Pi's runtime, offline)", () => {
 	it("stores an API key in the assistant's home and a fresh runtime sees it", async () => {
-		const home = tempDir();
+		const home = join(tempDir(), "agent");
 		const saved = process.env.OPENAI_API_KEY;
 		delete process.env.OPENAI_API_KEY;
 		try {
@@ -252,7 +274,9 @@ describe("createModelAuthRuntime (Pi's runtime, offline)", () => {
 			await first.login("openai", "api_key", { prompt: async () => "sk-test-not-real", notify: () => {} });
 			const fresh = await createModelAuthRuntime(home, home);
 			expect(fresh.getProviderAuthStatus("openai")).toEqual({ configured: true, source: "stored" });
-			expect(statSync(join(home, "auth.json")).mode & 0o777).toBe(0o600);
+			expect(await fresh.openAIApiKey?.()).toBe("sk-test-not-real");
+			expectPrivate(home, true);
+			expectPrivate(join(home, "auth.json"));
 			await fresh.logout("openai");
 			expect((await createModelAuthRuntime(home, home)).getProviderAuthStatus("openai").configured).toBe(
 				false,
@@ -260,6 +284,56 @@ describe("createModelAuthRuntime (Pi's runtime, offline)", () => {
 		} finally {
 			if (saved !== undefined) process.env.OPENAI_API_KEY = saved;
 		}
+	});
+
+	it("preserves legacy credential bytes and public runtime writes across fresh runtimes", async () => {
+		const root = tempDir();
+		const home = join(root, "legacy");
+		mkdirSync(home, { mode: 0o700 });
+		const path = join(home, "auth.json");
+		const contents = '\uFEFF{ "openai": { "type": "api_key", "key": "synthetic-offline-key" } }\n';
+		writeFileSync(path, contents, { mode: 0o600 });
+		const parentBefore = process.platform === "win32" ? inspectWindowsAcl(root) : statSync(root).mode;
+		const runtime = await createModelAuthRuntime(home, home);
+		expect(runtime.getProviderAuthStatus("openai")).toEqual({ configured: true, source: "stored" });
+		expect(readFileSync(path)).toEqual(Buffer.from(contents));
+		expectPrivate(home, true);
+		expectPrivate(path);
+		expect(process.platform === "win32" ? inspectWindowsAcl(root) : statSync(root).mode).toEqual(parentBefore);
+		await runtime.login("openai", "api_key", { prompt: async () => "synthetic-replacement", notify: () => {} });
+		const fresh = await createModelAuthRuntime(home, home);
+		expect(await fresh.openAIApiKey?.()).toBe("synthetic-replacement");
+		expectPrivate(path);
+	});
+
+	it("does not overwrite malformed credentials on initialization or a rejected SDK write", async () => {
+		const home = tempDir();
+		const path = join(home, "auth.json");
+		const contents = "{ malformed fixture\n";
+		writeFileSync(path, contents, { mode: 0o600 });
+		const runtime = await createModelAuthRuntime(home, home);
+		await expect(runtime.login("openai", "api_key", { prompt: async () => "synthetic-unused", notify: () => {} })).rejects.toThrow();
+		expect(readFileSync(path)).toEqual(Buffer.from(contents));
+	});
+
+	it("refuses a hard-linked Windows credential file without changing either alias", async () => {
+		const root = tempDir();
+		const home = join(root, "agent");
+		mkdirSync(home, { mode: 0o700 });
+		const path = join(home, "auth.json");
+		const alias = join(root, "alias.json");
+		const contents = '{"openai":{"type":"api_key","key":"synthetic-linked"}}';
+		writeFileSync(path, contents, { mode: 0o600 });
+		linkSync(path, alias);
+		if (process.platform === "win32") {
+			const before = inspectWindowsAcl(alias);
+			await expect(createModelAuthRuntime(home, home)).rejects.toThrow(/secure private file/);
+			expect(inspectWindowsAcl(alias)).toEqual(before);
+		} else {
+			expect((await createModelAuthRuntime(home, home)).getProviderAuthStatus("openai").configured).toBe(true);
+		}
+		expect(readFileSync(path)).toEqual(Buffer.from(contents));
+		expect(readFileSync(alias)).toEqual(Buffer.from(contents));
 	});
 
 	it("loads the engine's providers without writing a transpile cache anywhere (S35.1, #8, #28)", async () => {
@@ -290,10 +364,10 @@ describe("createModelAuthRuntime (Pi's runtime, offline)", () => {
 describe("resolveAgentHome", () => {
 	it("belongs to the assistant: <dataDir>/agent unless overridden, never the user's Gentle Shell home", () => {
 		const dataDir = tempDir();
-		expect(resolveAgentHome({}, dataDir)).toBe(`${dataDir}/agent`);
+		expect(resolveAgentHome({}, dataDir)).toBe(join(dataDir, "agent"));
 		expect(resolveAgentHome({ GENTLE_SHELL_HOME: "/x", PI_CODING_AGENT_DIR: "/z" }, dataDir)).toBe(
-			`${dataDir}/agent`,
+			join(dataDir, "agent"),
 		);
-		expect(resolveAgentHome({ GENTLE_DOT_AGENT_HOME: "/y" }, dataDir)).toBe("/y");
+		expect(resolveAgentHome({ GENTLE_DOT_AGENT_HOME: "/y" }, dataDir)).toBe(resolve("/y"));
 	});
 });
