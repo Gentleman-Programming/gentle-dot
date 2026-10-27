@@ -5,8 +5,9 @@ import { spawn } from "node:child_process";
 import { createServer, type Socket, connect as unixConnect } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import { tempDir } from "./helpers.ts";
+import { describeWithInheritedAppChannel } from "./support/windows.ts";
 
 const CHILD = fileURLToPath(new URL("./fixtures/app-channel-child.ts", import.meta.url));
 
@@ -59,7 +60,7 @@ async function runChild(mode: "normal" | "leak") {
 	return { code, stdout, stderr, lines };
 }
 
-describe("the app channel on fd 3 (S25.1)", () => {
+describeWithInheritedAppChannel("the app channel on fd 3 (S25.1)", () => {
 	it("is opened by the daemon and never reaches the children it spawns", async () => {
 		const { code, stderr, lines } = await runChild("normal");
 		expect(code, stderr).toBe(0);

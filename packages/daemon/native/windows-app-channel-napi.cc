@@ -147,6 +147,10 @@ napi_value Read(napi_env e, napi_callback_info i) {
   // native read cursor. No external Buffer aliases the backend's OVERLAPPED bytes.
   void* destination = nullptr; napi_value buffer;
   if (!Check(e, napi_create_buffer(e, count, &destination, &buffer))) return nullptr;
+  // InspectStream and TakeStreamRead run back to back on the one loop thread with no
+  // Poll/Stop/Release call between them, so the phase stays as inspected and
+  // readable_bytes cannot shrink: TakeStreamRead copies exactly `count` bytes. Its result is
+  // not checked because the cursor has already advanced; there is nothing to undo.
   if (count) TakeStreamRead(b->stream, destination, count);
   return buffer;
 }
