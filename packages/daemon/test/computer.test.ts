@@ -140,7 +140,8 @@ describe("computer control registration (S24.7)", () => {
 		await new Promise((resolve) => setTimeout(resolve, 1300));
 		expect(logs.filter((line) => line.includes("put back"))).toEqual([]);
 		expect(messages.filter((m) => m.type === "toast")).toEqual([]);
-		expect(existsSync(join(dataDir, "connectors.json"))).toBe(false);
+		// The first integrity check writes an empty signed connectors.json; it still holds no connector.
+		expect(JSON.parse(readFileSync(join(dataDir, "connectors.json"), "utf8")).connectors).toEqual({});
 	});
 
 	it("renders the helper as a built-in direct server with the key in its header, and the key goes nowhere else", async () => {

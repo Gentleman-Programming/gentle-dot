@@ -287,6 +287,34 @@ describe("when the check itself cannot run (A1, A3, L120)", () => {
 		const { store, notices } = await started(dataDir, source);
 		expect(notices).toEqual([MISSING_NOTICE]);
 		expect(store.state().connectors).toEqual({});
+		// The empty record is signed in its place, so the next start verifies it and stays quiet.
+		expect(validlySigned(dataDir, source.values)).toBe(true);
+		expect(statSync(join(dataDir, "connectors.json")).mode & 0o777).toBe(0o600);
+		store.close();
+		const { store: next, notices: nextNotices } = await started(dataDir, source);
+		expect(nextNotices).toEqual([]);
+		expect(next.state().connectors).toEqual({});
+	});
+
+	it("a fresh install with no connectors.json is never reported as missing", async () => {
+		const dataDir = tempDir();
+		const source = new MemorySecretSource();
+		const first = await started(dataDir, source);
+		expect(first.notices).toEqual([]);
+		expect(first.store.state().connectors).toEqual({});
+		// The first start signs an empty record, so later starts have a file to verify.
+		expect(existsSync(join(dataDir, "connectors.json"))).toBe(true);
+		expect(validlySigned(dataDir, source.values)).toBe(true);
+		expect(readRecord(dataDir).connectors).toEqual({});
+		expect(statSync(join(dataDir, "connectors.json")).mode & 0o777).toBe(0o600);
+		first.store.close();
+		for (let start = 0; start < 2; start++) {
+			const { store, notices } = await started(dataDir, source);
+			expect(notices).toEqual([]);
+			expect(store.state().connectors).toEqual({});
+			expect(rejectedFiles(dataDir)).toEqual([]);
+			store.close();
+		}
 	});
 });
 
