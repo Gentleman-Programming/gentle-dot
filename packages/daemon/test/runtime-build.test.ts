@@ -13,6 +13,7 @@ import {
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
+import { lockedEnginePackages } from "../src/runtime-build.ts";
 import { tempDir } from "./helpers.ts";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
@@ -78,6 +79,9 @@ describe("build:runtime", () => {
 
 	// The engine asks for its siblings with `^` ranges; a fresh install would take newer ones
 	// that no longer match it (pi-codemode 1.4.0 broke pi-coding-agent 1.0.4).
+	// The manifest is this suite's boundary: proving npm honours `overrides` needs a real
+	// install from the registry, which the packaging step does (scripts/package/stage-runtime.mjs
+	// installs from this manifest, then scripts/package/smoke-runtime.mjs starts the engine).
 	it("pins the engine's own packages to the lockfile's versions", () => {
 		const manifest = JSON.parse(readFileSync(join(out, "daemon", "package.json"), "utf8"));
 		expect(manifest.overrides).toEqual({
@@ -85,6 +89,40 @@ describe("build:runtime", () => {
 			"@earendil-works/pi-codemode": "1.4.0",
 			"@earendil-works/pi-telemetry": "1.4.0",
 		});
+	});
+
+	it("reads the engine packages from a lockfile, without the direct dependencies", () => {
+		const lockfile = [
+			"importers:",
+			"  '@earendil-works/pi-tui@9.9.9':",
+			"packages:",
+			"  '@earendil-works/pi-coding-agent@1.4.0':",
+			"  '@earendil-works/pi-ai@1.4.0':",
+			"  ws@8.22.0:",
+			"snapshots:",
+			"  '@earendil-works/pi-codemode@2.0.0':",
+			"packages:",
+			"  '@earendil-works/pi-agent-core@1.4.0':",
+			"  '@earendil-works/pi-agent-core@1.4.0(ws@8.22.0)':",
+			"  '@earendil-works/pi-agent-core@1.4.0(undici@8.11.2)(ws@8.22.0)':",
+		].join("\n");
+		expect(lockedEnginePackages({ "@earendil-works/pi-coding-agent": "1.4.0" }, lockfile)).toEqual({
+			"@earendil-works/pi-ai": "1.4.0",
+			"@earendil-works/pi-agent-core": "1.4.0",
+		});
+	});
+
+	it("refuses a lockfile holding two versions of one engine package", () => {
+		const lockfile = [
+			"packages:",
+			"  '@earendil-works/pi-codemode@1.4.0':",
+			"  '@earendil-works/pi-codemode@1.5.0(ws@8.22.0)':",
+		].join("\n");
+		expect(() => lockedEnginePackages({}, lockfile)).toThrow(
+			"The lockfile holds two versions of @earendil-works/pi-codemode.",
+		);
+		// Two versions of a direct dependency are pnpm's business, not an override's.
+		expect(lockedEnginePackages({ "@earendil-works/pi-codemode": "1.4.0" }, lockfile)).toEqual({});
 	});
 
 	it("runs its self-check from the output with the engine resolved inside it", () => {

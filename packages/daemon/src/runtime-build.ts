@@ -34,6 +34,18 @@ export function lockedDependencies(
 }
 
 /**
+ * An engine package's key in the lockfile's `packages:` section: two spaces, an optional quote,
+ * the `@earendil-works/` name, `@`, then the version up to a peer suffix `(`, the quote or the `:`.
+ * For `  '@earendil-works/pi-ai@1.4.0(ws@8.22.0)':` that is `@earendil-works/pi-ai` and `1.4.0`.
+ */
+const ENGINE_PACKAGE_KEY = /^ {2}'?(?<name>@earendil-works\/[^@'/]+)@(?<version>[^(':]+)/;
+
+function enginePackageKey(line: string): { name: string; version: string } | undefined {
+	const { name, version } = ENGINE_PACKAGE_KEY.exec(line)?.groups ?? {};
+	return name && version ? { name, version } : undefined;
+}
+
+/**
  * The lockfile's versions of the engine's own packages (`@earendil-works/*`) that the runtime
  * does not list directly. The engine asks for them with `^` ranges, so a fresh `npm install`
  * would take newer releases that may no longer fit it; the runtime pins them as `overrides`.
@@ -46,9 +58,9 @@ export function lockedEnginePackages(
 	let inPackages = false;
 	for (const line of lockfile.split("\n")) {
 		if (/^\S/.test(line)) inPackages = line.trim() === "packages:";
-		const match = inPackages ? /^ {2}'?(@earendil-works\/[^@'/]+)@([^(':]+)/.exec(line) : null;
-		if (!match?.[1] || !match[2] || match[1] in direct) continue;
-		const [, name, version] = match;
+		const entry = inPackages ? enginePackageKey(line) : undefined;
+		if (!entry || entry.name in direct) continue;
+		const { name, version } = entry;
 		if (versions[name] && versions[name] !== version)
 			throw new Error(`The lockfile holds two versions of ${name}.`);
 		versions[name] = version;
