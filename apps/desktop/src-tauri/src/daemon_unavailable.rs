@@ -4,6 +4,11 @@
 //! spawning anything: with [`foreign_daemon_message`] when a daemon this app did not launch holds
 //! the port (as on Unix, an app with a channel never attaches to one), else with [`UNAVAILABLE`].
 
+// The stop/owner record codec is tested on Windows too, ahead of the lifecycle that uses it.
+#[cfg(test)]
+#[path = "daemon/windows_record.rs"]
+mod windows_record;
+
 use crate::app_channel::{AppChannel, Handler};
 use crate::health::check_health;
 use std::path::PathBuf;
