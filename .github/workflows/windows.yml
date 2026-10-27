@@ -47,3 +47,54 @@ jobs:
         working-directory: apps/desktop/src-tauri
         run: cargo test --locked --lib
 
+  app-channel:
+    name: Native app channel
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      # gentle-pi's Windows postinstall requires local Go 1.25.10 or newer.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: false
+      - run: pnpm install --frozen-lockfile
+
+      # The build takes an explicit cl.exe path and needs the SDK's INCLUDE and LIB.
+      - uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+
+      # Provision inputs here, not in the build script; match the running Node exactly.
+      - name: Build app-channel addon
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = node -p process.version
+          $inputs = Join-Path $env:RUNNER_TEMP 'node-addon-inputs'
+          New-Item -ItemType Directory -Force -Path $inputs | Out-Null
+          $release = "https://nodejs.org/download/release/$version"
+          Invoke-WebRequest "$release/node-$version-headers.tar.gz" -OutFile "$inputs/headers.tar.gz"
+          Invoke-WebRequest "$release/win-x64/node.lib" -OutFile "$inputs/node.lib"
+          # Both downloads must match the release's published SHA-256 sums.
+          $sums = (Invoke-WebRequest "$release/SHASUMS256.txt").Content -split "`n"
+          foreach ($pair in @(@("node-$version-headers.tar.gz", 'headers.tar.gz'), @('win-x64/node.lib', 'node.lib'))) {
+            $line = $sums | Where-Object { $_ -match "^[0-9a-f]{64}\s+$([regex]::Escape($pair[0]))$" }
+            if (-not $line) { throw "No published checksum for $($pair[0])" }
+            $actual = (Get-FileHash -Algorithm SHA256 (Join-Path $inputs $pair[1])).Hash.ToLowerInvariant()
+            if ($actual -ne ($line -split '\s+')[0]) { throw "Checksum mismatch for $($pair[0])" }
+          }
+          tar -xf "$inputs/headers.tar.gz" -C $inputs
+          if ($LASTEXITCODE -ne 0) { throw 'Node header extraction failed' }
+          $compiler = (Get-Command cl.exe).Source
+          pnpm --filter @gentle-dot/daemon run build:windows-stop -- --compiler "$compiler" --headers "$inputs/node-$version/include/node" --node-lib "$inputs/node.lib"
+          if ($LASTEXITCODE -ne 0) { throw 'Native addon build failed' }
+
+      # These portable adapter tests and real-addon refusal tests stay together.
+      - name: App-channel tests
+        run: pnpm exec vitest run packages/daemon/test/windows-app-channel.test.ts packages/daemon/test/app-channel-platform.test.ts packages/daemon/test/app-channel.test.ts packages/daemon/test/app-channel-fd.test.ts packages/daemon/test/windows-app-channel-addon.test.ts
+
