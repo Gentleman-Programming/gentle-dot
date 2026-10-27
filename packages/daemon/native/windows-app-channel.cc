@@ -119,8 +119,11 @@ Adoption AdoptInheritedFd3(ExclusiveFd3Reservation) noexcept {
   }
   HANDLE original = HostFd3();  // borrowed: never pass this to CloseHandle
   if (!Valid(original)) { fail(Failure::missing_fd3); return result; }
-  if (GetFileType(original) != FILE_TYPE_PIPE) {
-    fail(Failure::not_pipe, GetLastError()); return result;
+  const DWORD type = GetFileType(original);
+  if (type != FILE_TYPE_PIPE) {
+    // GetLastError is meaningful only when GetFileType itself failed (FILE_TYPE_UNKNOWN);
+    // a disk or character handle is a successful answer with no error to record.
+    fail(Failure::not_pipe, type == FILE_TYPE_UNKNOWN ? GetLastError() : ERROR_SUCCESS); return result;
   }
   DWORD flags = 0, state = 0;
   if (!GetNamedPipeInfo(original, &flags, nullptr, nullptr, nullptr) ||
