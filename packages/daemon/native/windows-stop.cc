@@ -382,8 +382,10 @@ DWORD WINAPI Listen(void* data) {
   s.Stop();
   // Every issued operation has completed before these resources are released.
   s.operation.reset();
-  if (!CloseHandle(s.pipe.value)) s.Fail(GetLastError());
-  else s.pipe.value = INVALID_HANDLE_VALUE;
+  // A failed CloseHandle leaves ownership uncertain; never close the value a second time.
+  HANDLE pipe = s.pipe.value;
+  s.pipe.value = INVALID_HANDLE_VALUE;
+  if (!CloseHandle(pipe)) s.Fail(GetLastError());
   s.nativeComplete.store(true);
   ReleaseParticipant(s, napi_tsfn_release);
   return 0;
