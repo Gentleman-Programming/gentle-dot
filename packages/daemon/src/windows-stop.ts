@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { WindowsAppChannel, type WindowsAppChannelCloseResult } from "./windows-app-channel.ts";
 
 interface StopListener {
 	capability: Buffer;
@@ -54,12 +55,110 @@ async function closeDaemonAndListener(daemon: Stoppable, listener: StopListener)
 	if (daemonFailed) throw originalError;
 }
 
+interface AppTransport {
+	close(mode: "drain" | "abort"): Promise<WindowsAppChannelCloseResult>;
+}
+
+/** Supported Windows CLI route: native stop-record validation precedes fd3
+ * adoption, and BOTH precede start/privateMemory/descendants. The record only
+ * admits the managed launch route; the adopted connection authenticates app IPC.
+ * Injection replaces orchestration participants, never production startup facts. */
+export async function startWithWindowsAppChannel<
+	T extends Stoppable,
+	C extends AppTransport = WindowsAppChannel,
+>(
+	recordPath: string,
+	start: (channel: C) => Promise<T>,
+	options: StopOptions & { createAppChannel?: () => C } = {},
+): Promise<{ daemon: T; close(): Promise<void>; closed: Promise<void> }> {
+	const managed = await startWithWindowsStop(
+		recordPath,
+		async () => {
+			const channel = options.createAppChannel
+				? options.createAppChannel()
+				: (new WindowsAppChannel({ exclusiveFd3Startup: true }) as unknown as C);
+			let daemon: T;
+			try {
+				daemon = await start(channel);
+			} catch (error) {
+				try {
+					await channel.close("abort");
+				} catch {
+					failedWindowsOwners.add(channel);
+				}
+				throw error;
+			}
+			let stopping: Promise<void> | undefined;
+			const owner = {
+				daemon,
+				closed: daemon.closed,
+				close(): Promise<void> {
+					if (!stopping)
+						stopping = Promise.resolve().then(async () => {
+							let failed = false;
+							let firstError: unknown;
+							try {
+								await daemon.close();
+							} catch (error) {
+								failed = true;
+								firstError = error;
+							}
+							// Real daemon.close also drains its AppChannel. Idempotence keeps
+							// this independent fallback safe, including partial close failure.
+							try {
+								const result = await channel.close("drain");
+								if (result.mode !== "drain" || result.drained !== true)
+									throw new Error("Windows app channel was not drained.");
+							} catch (error) {
+								if (!failed) {
+									failed = true;
+									firstError = error;
+								}
+							}
+							if (failed) {
+								failedWindowsOwners.add(owner);
+								throw firstError;
+							}
+						});
+					return stopping;
+				},
+			};
+			return owner;
+		},
+		options,
+	);
+	return { daemon: managed.daemon.daemon, close: managed.close, closed: managed.closed };
+}
+
 /** Source lives in src/, while the bundle lives directly in daemon/. */
 export function windowsStopArtifact(entry = new URL(import.meta.url)): URL {
 	return new URL(
 		entry.pathname.endsWith(".ts") ? "../native/windows-stop.node" : "./native/windows-stop.node",
 		entry,
 	);
+}
+
+/** The CLI's Windows exit arbiter observes the combined close/drain result, not daemon.closed. */
+export function windowsShutdownExitCode(owner: { closed: Promise<void> }): Promise<0 | 1> {
+	return owner.closed.then(
+		() => 0,
+		() => 1,
+	);
+}
+
+/** Failure sets status and retains ownership; it must not force process termination. */
+export async function finishWindowsShutdown(
+	owner: { closed: Promise<void> },
+	processLike: { exit(code: number): void; exitCode: NodeJS.Process["exitCode"] } = process,
+	log: (line: string) => void = () => {},
+): Promise<void> {
+	if ((await windowsShutdownExitCode(owner)) === 0) {
+		processLike.exit(0);
+	} else {
+		failedWindowsOwners.add(owner);
+		processLike.exitCode = 1;
+		log("the assistant did not stop cleanly; retaining failed owner");
+	}
 }
 
 /**
@@ -97,7 +196,12 @@ export async function startWithWindowsStop<T extends Stoppable>(
 	void startup.catch(() => {});
 	const close = (): Promise<void> => {
 		if (!stopping) {
-			stopping = startup.then((daemon) => closeDaemonAndListener(daemon, listener as StopListener));
+			stopping = startup.then((daemon) => {
+				// startup resolves only after the listener is assigned, so this guard never fires.
+				const activeListener = listener;
+				if (!activeListener) throw new Error("Windows stop listener missing after startup");
+				return closeDaemonAndListener(daemon, activeListener);
+			});
 			void stopping.then(stopped, (error) => {
 				failedWindowsOwners.add(lifetimeOwner);
 				failed(error);

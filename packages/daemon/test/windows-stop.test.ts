@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { startWithWindowsStop, windowsStopArtifact } from "../src/windows-stop.ts";
+import type { WindowsAppChannelCloseResult } from "../src/windows-app-channel.ts";
+import * as stopModule from "../src/windows-stop.ts";
+import { startWithWindowsStop, windowsShutdownExitCode, windowsStopArtifact } from "../src/windows-stop.ts";
 
 function deferred<T>() {
 	let resolve!: (value: T) => void;
@@ -36,6 +38,176 @@ function fixture() {
 	};
 }
 
+describe("managed Windows fd3 startup orchestration", () => {
+	it("a first abort cannot become successful managed drain or CLI exit zero", async () => {
+		const f = fixture();
+		let first: Promise<WindowsAppChannelCloseResult> | undefined;
+		const channel = {
+			close: vi.fn(
+				(mode: "drain" | "abort") => (first ??= Promise.resolve({ mode, drained: mode === "drain" })),
+			),
+		};
+		await channel.close("abort");
+		const owner = await stopModule.startWithWindowsAppChannel("data/daemon.pid", async () => f.daemon, {
+			platform: "win32",
+			loadNative: f.loadNative,
+			createAppChannel: () => channel,
+		});
+		const processLike = { exit: vi.fn(), exitCode: undefined as number | undefined };
+		const exitObserved = stopModule.finishWindowsShutdown(owner, processLike);
+		await expect(owner.close()).rejects.toThrow("not drained");
+		await expect(owner.closed).rejects.toThrow("not drained");
+		await exitObserved;
+		expect(channel.close.mock.calls.map((call) => call[0])).toEqual(["abort", "drain"]);
+		expect(f.listenerClose).toHaveBeenCalledTimes(1);
+		expect(processLike.exit).not.toHaveBeenCalled();
+		expect(processLike.exitCode).toBe(1);
+	});
+	it.each<WindowsAppChannelCloseResult>([
+		{ mode: "drain", drained: false },
+		{ mode: "abort", drained: true },
+	])("refuses incomplete or non-drain close result %j", async (result) => {
+		const f = fixture();
+		const channel = { close: vi.fn(async () => result) };
+		const owner = await stopModule.startWithWindowsAppChannel("data/daemon.pid", async () => f.daemon, {
+			platform: "win32",
+			loadNative: f.loadNative,
+			createAppChannel: () => channel,
+		});
+		await expect(owner.close()).rejects.toThrow("not drained");
+		expect(f.listenerClose).toHaveBeenCalledTimes(1);
+	});
+	it("preserves daemon failure over an earlier abort result and listener failure", async () => {
+		const f = fixture();
+		const failure = new Error("first daemon failure");
+		f.daemon.close.mockRejectedValue(failure);
+		f.listenerClose.mockRejectedValue(new Error("listener failure"));
+		const aborted: WindowsAppChannelCloseResult = { mode: "abort", drained: false };
+		const channel = { close: vi.fn(async () => aborted) };
+		const owner = await stopModule.startWithWindowsAppChannel("data/daemon.pid", async () => f.daemon, {
+			platform: "win32",
+			loadNative: f.loadNative,
+			createAppChannel: () => channel,
+		});
+		await expect(owner.close()).rejects.toBe(failure);
+		await expect(owner.closed).rejects.toBe(failure);
+		expect(channel.close).toHaveBeenCalledExactlyOnceWith("drain");
+		expect(f.listenerClose).toHaveBeenCalledTimes(1);
+	});
+	it("startup failure may abort successfully without certifying drain", async () => {
+		const f = fixture();
+		const failure = new Error("startup failure");
+		const channel = {
+			close: vi.fn(async (): Promise<WindowsAppChannelCloseResult> => ({ mode: "abort", drained: false })),
+		};
+		await expect(
+			stopModule.startWithWindowsAppChannel(
+				"data/daemon.pid",
+				async () => {
+					throw failure;
+				},
+				{ platform: "win32", loadNative: f.loadNative, createAppChannel: () => channel },
+			),
+		).rejects.toBe(failure);
+		expect(channel.close).toHaveBeenCalledExactlyOnceWith("abort");
+		expect(f.listenerClose).toHaveBeenCalledTimes(1);
+	});
+	it("validates listener, adopts, then starts; waits for channel and listener drain", async () => {
+		const f = fixture();
+		const order: string[] = [];
+		const drain = deferred<WindowsAppChannelCloseResult>();
+		const channel = { close: vi.fn(() => drain.promise) };
+		const owner = await stopModule.startWithWindowsAppChannel(
+			"data/daemon.pid",
+			async (stream) => {
+				order.push("start");
+				expect(stream).toBe(channel);
+				return f.daemon;
+			},
+			{
+				platform: "win32",
+				loadNative: () => {
+					order.push("listener");
+					return f.loadNative();
+				},
+				createAppChannel: () => {
+					order.push("adopt");
+					return channel;
+				},
+			},
+		);
+		expect(order).toEqual(["listener", "adopt", "start"]);
+		const closed = owner.close();
+		let finished = false;
+		void closed.then(() => {
+			finished = true;
+		});
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(finished).toBe(false);
+		drain.resolve({ mode: "drain", drained: true });
+		await closed;
+		expect(channel.close).toHaveBeenCalledExactlyOnceWith("drain");
+		expect(f.listenerClose).toHaveBeenCalledTimes(1);
+	});
+	it("adoption failure refuses startup, drains listener, and preserves first failure", async () => {
+		const f = fixture();
+		const failure = new Error("missing or invalid fd3");
+		const start = vi.fn();
+		f.listenerClose.mockRejectedValue(new Error("listener drain failed"));
+		await expect(
+			stopModule.startWithWindowsAppChannel("data/daemon.pid", start, {
+				platform: "win32",
+				loadNative: f.loadNative,
+				createAppChannel: () => {
+					throw failure;
+				},
+			}),
+		).rejects.toBe(failure);
+		expect(start).not.toHaveBeenCalled();
+		expect(f.listenerClose).toHaveBeenCalledTimes(1);
+	});
+	it("startup failure independently aborts adopted channel and drains listener", async () => {
+		const f = fixture();
+		const failure = new Error("startup failed");
+		const channel = {
+			close: vi.fn(async () => {
+				throw new Error("channel cleanup failed");
+			}),
+		};
+		await expect(
+			stopModule.startWithWindowsAppChannel(
+				"data/daemon.pid",
+				async () => {
+					throw failure;
+				},
+				{ platform: "win32", loadNative: f.loadNative, createAppChannel: () => channel },
+			),
+		).rejects.toBe(failure);
+		expect(channel.close).toHaveBeenCalledExactlyOnceWith("abort");
+		expect(f.listenerClose).toHaveBeenCalledTimes(1);
+	});
+	it("attempts channel and listener cleanup after daemon failure and preserves it", async () => {
+		const f = fixture();
+		const failure = new Error("daemon failed");
+		f.daemon.close.mockRejectedValue(failure);
+		const channel = {
+			close: vi.fn(async () => {
+				throw new Error("channel drain failed");
+			}),
+		};
+		const owner = await stopModule.startWithWindowsAppChannel("data/daemon.pid", async () => f.daemon, {
+			platform: "win32",
+			loadNative: f.loadNative,
+			createAppChannel: () => channel,
+		});
+		await expect(owner.close()).rejects.toBe(failure);
+		await expect(owner.closed).rejects.toBe(failure);
+		expect(channel.close).toHaveBeenCalledTimes(1);
+		expect(f.listenerClose).toHaveBeenCalledTimes(1);
+	});
+});
+
 describe("Windows production stop bootstrap (S8, S10, S11)", () => {
 	it("does not load native code on Unix", async () => {
 		const f = fixture();
@@ -64,6 +236,7 @@ describe("Windows production stop bootstrap (S8, S10, S11)", () => {
 		await owner.closed;
 		expect(f.daemon.close).toHaveBeenCalledTimes(1);
 		expect(f.listenerClose).toHaveBeenCalledTimes(1);
+		expect(await windowsShutdownExitCode(owner)).toBe(0);
 	});
 	it("rejects wrong capability, version, short and extra frames without shutdown", async () => {
 		const f = fixture();
@@ -126,6 +299,7 @@ describe("Windows production stop bootstrap (S8, S10, S11)", () => {
 		});
 		f.done.resolve();
 		await expect(owner.closed).rejects.toThrow("close failed");
+		expect(await windowsShutdownExitCode(owner)).toBe(1);
 		expect(f.listenerClose).toHaveBeenCalledTimes(1);
 	});
 	it("attempts drain after daemon failure and preserves the original error when both fail", async () => {
@@ -219,6 +393,78 @@ describe("Windows production stop bootstrap (S8, S10, S11)", () => {
 		// The explicit owner still controls shutdown, independently of the native callback.
 		await owner.close();
 		expect(f.listenerClose).toHaveBeenCalledTimes(1);
+	});
+	it("sets a failing CLI status without forcing exit, and exits zero only after success", async () => {
+		const exit = vi.fn();
+		const processLike = { exit, exitCode: undefined as number | undefined };
+		const log = vi.fn();
+		expect(stopModule.finishWindowsShutdown).toBeTypeOf("function");
+		const f = fixture();
+		f.daemon.close.mockRejectedValue(new Error("close failed"));
+		const owner = await startWithWindowsStop("data/daemon.pid", async () => f.daemon, {
+			platform: "win32",
+			loadNative: f.loadNative,
+		});
+		const observed = stopModule.finishWindowsShutdown(owner, processLike, log);
+		await expect(owner.close()).rejects.toThrow("close failed");
+		await observed;
+		expect(processLike.exitCode).toBe(1);
+		expect(exit).not.toHaveBeenCalled();
+		expect(log).toHaveBeenCalledWith("the assistant did not stop cleanly; retaining failed owner");
+		const good = fixture();
+		const success = await startWithWindowsStop("data/daemon.pid", async () => good.daemon, {
+			platform: "win32",
+			loadNative: good.loadNative,
+		});
+		const completed = stopModule.finishWindowsShutdown(success, processLike, log);
+		await success.close();
+		await completed;
+		expect(exit).toHaveBeenCalledExactlyOnceWith(0);
+	});
+	it("does not force exit when native drain rejects", async () => {
+		const f = fixture();
+		f.listenerClose.mockRejectedValue(new Error("drain failed"));
+		const owner = await startWithWindowsStop("data/daemon.pid", async () => f.daemon, {
+			platform: "win32",
+			loadNative: f.loadNative,
+		});
+		const processLike = { exit: vi.fn(), exitCode: undefined as number | undefined };
+		const observed = stopModule.finishWindowsShutdown(owner, processLike);
+		await expect(owner.close()).rejects.toThrow("drain failed");
+		await observed;
+		expect(processLike.exitCode).toBe(1);
+		expect(processLike.exit).not.toHaveBeenCalled();
+	});
+	it("propagates native drain failure instead of claiming shutdown succeeded", async () => {
+		const f = fixture();
+		f.listenerClose.mockRejectedValue(new Error("drain failed"));
+		const owner = await startWithWindowsStop("data/daemon.pid", async () => f.daemon, {
+			platform: "win32",
+			loadNative: f.loadNative,
+		});
+		await expect(owner.close()).rejects.toThrow("drain failed");
+		await expect(owner.closed).rejects.toThrow("drain failed");
+		expect(await windowsShutdownExitCode(owner)).toBe(1);
+	});
+	it("does not report success while native drain remains pending", async () => {
+		const f = fixture();
+		const drain = deferred<void>();
+		f.listenerClose.mockImplementation(() => drain.promise);
+		const owner = await startWithWindowsStop("data/daemon.pid", async () => f.daemon, {
+			platform: "win32",
+			loadNative: f.loadNative,
+		});
+		let exited = false;
+		void windowsShutdownExitCode(owner).then(() => {
+			exited = true;
+		});
+		const stopping = owner.close();
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(exited).toBe(false);
+		drain.resolve();
+		await stopping;
+		expect(await windowsShutdownExitCode(owner)).toBe(0);
 	});
 	it.each(["missing module", "unsafe record"])("fails closed before startup: %s", async (reason) => {
 		const start = vi.fn();
