@@ -10,6 +10,9 @@ use std::time::Duration;
 #[cfg(windows)]
 pub use crate::app_channel::windows::ChildEndpoint;
 
+/// `<data>/daemon.pid`: the ownership record of the daemon this app launched last.
+pub const PID_FILE: &str = "daemon.pid";
+
 /// Origins of the `tauri dev` server, allowed only on daemons spawned by debug builds.
 pub const DEV_ALLOWED_ORIGINS: &str = r#"["http://127.0.0.1:5173","http://localhost:5173"]"#;
 

@@ -16,9 +16,10 @@ mod windows_record;
 #[allow(dead_code)]
 mod launch;
 #[cfg(test)]
-pub use launch::{ChildEndpoint, ChildProcess, LaunchSpec};
+pub use launch::{ChildEndpoint, ChildProcess, LaunchSpec, PID_FILE};
 #[cfg(test)]
 #[path = "daemon/windows.rs"]
+#[allow(dead_code)]
 mod windows;
 
 use crate::app_channel::{AppChannel, Handler};
