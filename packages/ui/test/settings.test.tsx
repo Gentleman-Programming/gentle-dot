@@ -152,6 +152,17 @@ describe("when the app cannot reach its assistant (S35.2)", () => {
 	});
 });
 
+describe("when the web page has no access key", () => {
+	it("tells both a computer user and a server user how to open it", async () => {
+		h.tauri = false;
+		await renderApp("?surface=web");
+		const status = await screen.findByRole("status");
+		expect(status).toHaveTextContent(
+			"This page needs your access key. On your computer, open it from the Gentle Dot menu (Open in browser); on a server, open the link with #token=<your access key>.",
+		);
+	});
+});
+
 describe("the Settings screen (S33.1)", () => {
 	it("opens from a gear in the desktop panel header", async () => {
 		const settings = await openSettings();
