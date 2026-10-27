@@ -17,5 +17,6 @@ The package command is `pnpm run build:windows-stop -- <same arguments>`.
 The compiler emits `native/windows-stop.node` and local compiler/linker artifacts.
 It must not be cross-built with mismatched Node/import-library architecture.
 Source execution loads `packages/daemon/native/windows-stop.node`.
-This slice exports only the app channel; the stop listener and runtime staging
-are not included yet. Windows CI provisions matching build inputs explicitly.
+The addon exports the app channel (`adoptAppChannelFd3`) and the stop listener
+(`createStopListener`); runtime staging is not included yet. Windows CI provisions
+matching build inputs explicitly.

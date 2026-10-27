@@ -140,6 +140,7 @@ if (args.includes("--help")) {
 			`/PDB:${join(native, "windows-stop.pdb")}`,
 			nodeLib,
 			"kernel32.lib",
+			"advapi32.lib",
 		],
 		{ cwd: native, stdio: "inherit", shell: false },
 	);

@@ -62,6 +62,8 @@ describe.skipIf(Boolean(skipReason))(`real Windows app-channel addon (${skipReas
 	it("refuses a regular file at fd3 with not_pipe evidence", () => {
 		const [result] = refuse("file");
 		expectRefusal(result, NOT_PIPE);
+		// GetFileType answered FILE_TYPE_DISK without failing: there is no error code to record.
+		expect(result.evidence.win32Error).toBe(0);
 	});
 	it("refuses a second adoption attempt even after the first failed", () => {
 		const [first, second] = refuse("twice");
