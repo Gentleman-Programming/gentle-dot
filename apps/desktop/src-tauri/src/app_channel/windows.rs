@@ -6,19 +6,53 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
 use std::ptr::{null, null_mut};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use windows_sys::Win32::Foundation::*;
-use windows_sys::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
-use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
+use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER};
 use windows_sys::Win32::Storage::FileSystem::*;
 use windows_sys::Win32::System::IO::*;
 use windows_sys::Win32::System::Pipes::*;
-use windows_sys::Win32::System::Threading::{CreateEventW, GetCurrentProcessId};
+use windows_sys::Win32::System::Threading::{CreateEventW, GetCurrentProcess, GetCurrentProcessId, OpenProcessToken};
 
-const PIPE_SDDL: &str = "D:P(A;;GA;;;OW)";
+/// The process user's SID as owner and sole grantee. Not OWNER RIGHTS ("OW"): under an
+/// elevated token the default owner can be BUILTIN\Administrators, not the user.
+fn pipe_sddl(user: &str) -> String { format!("O:{user}D:P(A;;GA;;;{user})") }
+
+/// String form of the process token's user SID (TokenUser).
+fn current_user_sid() -> io::Result<String> {
+    let mut token = null_mut();
+    // SAFETY: pseudo-handle for this process and a writable output; `owned` takes the token.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let token = owned(token)?;
+    let mut size = 0;
+    // SAFETY: size query with no buffer; the expected failure reports the required size.
+    unsafe { GetTokenInformation(token.as_raw_handle(), TokenUser, null_mut(), 0, &mut size) };
+    if (size as usize) < std::mem::size_of::<TOKEN_USER>() { return Err(io::Error::last_os_error()); }
+    // usize words keep TOKEN_USER and its SID pointer suitably aligned.
+    let mut words = vec![0usize; (size as usize).div_ceil(std::mem::size_of::<usize>())];
+    // SAFETY: the buffer holds `size` bytes, aligned for TOKEN_USER.
+    if unsafe { GetTokenInformation(token.as_raw_handle(), TokenUser, words.as_mut_ptr().cast(), size, &mut size) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: GetTokenInformation filled a TOKEN_USER whose SID points into `words`.
+    let sid = unsafe { (*words.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    let mut text = null_mut();
+    // SAFETY: valid SID from the token; LocalFree releases the converted string below.
+    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 { return Err(io::Error::last_os_error()); }
+    let mut length = 0;
+    // SAFETY: ConvertSidToStringSidW returns a NUL-terminated wide string.
+    while unsafe { *text.add(length) } != 0 { length += 1; }
+    let user = String::from_utf16(unsafe { std::slice::from_raw_parts(text, length) });
+    // SAFETY: allocation returned by ConvertSidToStringSidW, freed exactly once.
+    unsafe { LocalFree(text.cast()) };
+    user.map_err(|_| io::Error::other("invalid user SID"))
+}
 
 struct Descriptor(*mut std::ffi::c_void);
 impl Descriptor {
     fn owner_only() -> io::Result<Self> {
-        let text: Vec<u16> = PIPE_SDDL.encode_utf16().chain(Some(0)).collect();
+        let text: Vec<u16> = pipe_sddl(&current_user_sid()?).encode_utf16().chain(Some(0)).collect();
         let mut descriptor = null_mut();
         // SAFETY: terminated SDDL and writable output; LocalFree owns the resulting allocation.
         if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(text.as_ptr(), SDDL_REVISION_1, &mut descriptor, null_mut()) } == 0 {
@@ -338,7 +372,8 @@ mod tests {
 
     #[test]
     fn acl_is_explicit_protected_owner_only() {
-        assert_eq!(PIPE_SDDL, "D:P(A;;GA;;;OW)");
+        assert_eq!(pipe_sddl("S-1-5-21-1-2-3-1001"), "O:S-1-5-21-1-2-3-1001D:P(A;;GA;;;S-1-5-21-1-2-3-1001)");
+        assert!(current_user_sid().unwrap().starts_with("S-1-5-"));
         let _descriptor = Descriptor::owner_only().unwrap();
     }
 }

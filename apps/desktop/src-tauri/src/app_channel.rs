@@ -326,8 +326,9 @@ impl AppChannel {
     }
 
     fn answer(&self, id: u64, method: &str, params: Value, handler: &dyn Handler) {
-        // Also refuse a worker queued before closure but not yet admitted to the handler.
-        // A handler already entered before closure retains the original completion behavior.
+        // Refuses a worker that reaches this check after closure. It is an admission check,
+        // not a fence: a worker that passed it just before close() may still enter its handler
+        // after close() returns. Its request was received while the channel was open.
         #[cfg(windows)]
         if !self.is_open() { return; }
         let frame = match method {
