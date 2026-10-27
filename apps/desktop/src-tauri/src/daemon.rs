@@ -8,6 +8,11 @@
 //! names the pid and the process start time); otherwise it refuses with
 //! [`foreign_daemon_message`], which names the exit. An app without a channel attaches as before.
 
+// Windows stop/owner record codec. It is pure parsing, so its tests also run here; the
+// Windows lifecycle that writes and reads the record lands later in the chain.
+#[cfg(any(windows, test))]
+mod windows_record;
+
 pub use crate::app_channel::APP_FD;
 use crate::app_channel::{AppChannel, Handler};
 use crate::health::check_health;
