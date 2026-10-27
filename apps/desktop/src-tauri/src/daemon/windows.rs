@@ -85,12 +85,15 @@ mod native {
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::path::{Path, PathBuf};
     use std::ptr::{null, null_mut};
+    use std::time::{Duration, Instant};
     use windows_sys::Win32::Foundation::*;
     use windows_sys::Win32::Globalization::CompareStringOrdinal;
     use windows_sys::Win32::Security::Authorization::*;
     use windows_sys::Win32::Security::*;
     use windows_sys::Win32::Storage::FileSystem::*;
+    use windows_sys::Win32::System::IO::*;
     use windows_sys::Win32::System::JobObjects::*;
+    use windows_sys::Win32::System::Pipes::*;
     use windows_sys::Win32::System::Threading::*;
 
     // SDK winnt.h definitions, scoped here because the enabled windows-sys
@@ -547,9 +550,353 @@ mod native {
         Ok(Some(ValidatedRecord { record, identity, path, file: Some(file), deletion_marked: false, _ancestry: ancestry }))
     }
 
+    const RECOVERED_STOP_LIMIT: Duration = Duration::from_secs(10);
+    const RECOVERY_POLL: Duration = Duration::from_millis(10);
+
+    fn recovery_error(message: &'static str) -> io::Error { io::Error::other(message) }
+    fn require_launch_identity(pid: u32, created: u64, observed_pid: u32, observed_created: u64) -> io::Result<()> {
+        if pid != observed_pid || created != observed_created {
+            return Err(recovery_error("recorded Windows process identity does not match"));
+        }
+        Ok(())
+    }
+    fn require_frame_size(transferred: u32) -> io::Result<()> {
+        if transferred != 36 { return Err(recovery_error("Windows stop frame was not written exactly")); }
+        Ok(())
+    }
+
+    /// Failure is not absence. Even a failed OpenProcess retains validated provenance;
+    /// identity mismatch/death retains the opened handle without admitting a stop request.
+    /// Neither this error nor its owner implements Debug (the record holds a capability).
+    pub(crate) struct RecoveryFailure {
+        pub(crate) error: io::Error,
+        pub(crate) retained: Option<RecoveredLaunch>,
+    }
+    pub(crate) struct RecoveredLaunch {
+        record: Option<ValidatedRecord>,
+        process: Option<OwnedHandle>,
+        admitted: bool,
+        connect: Option<ConnectAttempt>,
+        write: Option<PendingStopWrite>,
+        attempted: bool,
+        written: bool,
+        clean_exit: bool,
+    }
+
+    pub(crate) fn acquire_recovered_launch(data_dir: &Path) -> Result<Option<RecoveredLaunch>, RecoveryFailure> {
+        let record = match read_validated_record(data_dir) {
+            Ok(None) => return Ok(None),
+            Ok(Some(record)) => record,
+            Err(error) => return Err(RecoveryFailure { error, retained: None }),
+        };
+        let mut owner = RecoveredLaunch { record: Some(record), process: None, admitted: false,
+            connect: None, write: None, attempted: false, written: false, clean_exit: false };
+        let acquisition = (|| -> io::Result<()> {
+            let pid = owner.record.as_ref().unwrap().record.pid;
+            // Exactly one non-inheritable open. No termination, enumeration, privilege
+            // adjustment, or reopen-by-PID path exists, including on acquisition failure.
+            owner.process = Some(owned(unsafe { OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) })
+                .map_err(|error| AcquisitionStage::ProcessOpen.error(error))?);
+            owner.require_live().map_err(|error| AcquisitionStage::ProcessAdmission.error(error))?;
+            owner.admitted = true;
+            Ok(())
+        })();
+        match acquisition {
+            Ok(()) => Ok(Some(owner)),
+            Err(error) => Err(RecoveryFailure { error, retained: Some(owner) }),
+        }
+    }
+
+    impl RecoveredLaunch {
+        fn process_handle(&self) -> io::Result<HANDLE> {
+            self.process.as_ref().map(AsRawHandle::as_raw_handle)
+                .ok_or_else(|| recovery_error("recorded Windows process handle was not acquired"))
+        }
+        fn require_identity(&self) -> io::Result<HANDLE> {
+            let handle = self.process_handle()?;
+            let pid = unsafe { GetProcessId(handle) };
+            if pid == 0 { return Err(io::Error::last_os_error()); }
+            let mut created: FILETIME = unsafe { std::mem::zeroed() };
+            let mut exited = created; let mut kernel = created; let mut user = created;
+            unsafe { checked(GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user))?; }
+            let record = &self.record.as_ref().unwrap().record;
+            require_launch_identity(record.pid, record.created, pid,
+                ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64)?;
+            Ok(handle)
+        }
+        fn require_live(&self) -> io::Result<()> {
+            let handle = self.require_identity()?;
+            match unsafe { WaitForSingleObject(handle, 0) } {
+                WAIT_TIMEOUT => Ok(()),
+                WAIT_OBJECT_0 => Err(recovery_error("recorded Windows process is already exited")),
+                _ => Err(io::Error::last_os_error()),
+            }
+        }
+        fn observe_exit(&mut self) -> io::Result<bool> {
+            let handle = self.require_identity()?;
+            match unsafe { WaitForSingleObject(handle, 0) } {
+                WAIT_TIMEOUT => Ok(false),
+                WAIT_OBJECT_0 => {
+                    let mut code = 0;
+                    unsafe { checked(GetExitCodeProcess(handle, &mut code))?; }
+                    if code != 0 { return Err(recovery_error("recorded Windows process did not exit cleanly")); }
+                    self.clean_exit = true;
+                    Ok(true)
+                }
+                _ => Err(io::Error::last_os_error()),
+            }
+        }
+        pub(crate) fn delete_record(&mut self) -> io::Result<()> {
+            if !self.clean_exit || self.connect.is_some() || self.write.is_some() || !self.observe_exit()? {
+                return Err(recovery_error("recorded Windows clean exit/client drain is not established"));
+            }
+            let record = self.record.as_mut().unwrap();
+            // Ancestry stays installed while the read guard is replaced by a separately
+            // validated DELETE handle. Root completion never stands for descendant proof.
+            delete_exact_record(&record.path, &record.record, record.identity,
+                &mut record.file, &mut record.deletion_marked)
+        }
+
+        fn stop_until(&mut self, deadline: Instant) -> io::Result<()> {
+            if !self.admitted { return Err(recovery_error("recorded Windows launch was not admitted")); }
+            loop {
+                // Resolve outstanding open/write results before considering clean exit.
+                // Open-result delivery is not thread termination: worker owners remain
+                // process-lifetime retained. Root exit never proves I/O cancellation.
+                if let Some(write) = self.write.as_mut() {
+                    if let Some(result) = write.poll()? {
+                        self.write.take();
+                        result?;
+                        self.written = true;
+                    }
+                }
+                if let Some(connect) = self.connect.as_mut() {
+                    if let Some(result) = connect.poll()? {
+                        self.connect.take();
+                        let pipe = result?;
+                        if self.observe_exit()? { return Ok(()); }
+                        if Instant::now() >= deadline {
+                            return Err(io::Error::new(io::ErrorKind::TimedOut, "Windows stop connection deadline elapsed"));
+                        }
+                        let mut server = 0;
+                        unsafe { checked(GetNamedPipeServerProcessId(pipe.as_raw_handle(), &mut server))?; }
+                        let process = self.require_identity()?;
+                        if server != unsafe { GetProcessId(process) } {
+                            return Err(recovery_error("Windows stop pipe server identity does not match"));
+                        }
+                        // Verify the retained exact handle again immediately before send.
+                        self.require_live()?;
+                        if Instant::now() >= deadline {
+                            return Err(io::Error::new(io::ErrorKind::TimedOut, "Windows stop write deadline elapsed"));
+                        }
+                        let frame = self.record.as_ref().unwrap().record.frame();
+                        self.attempted = true;
+                        self.write = Some(PendingStopWrite::submit(pipe, frame)?);
+                    }
+                }
+                if self.connect.is_none() && self.write.is_none() {
+                    if self.observe_exit()? { return Ok(()); }
+                    if self.attempted && !self.written {
+                        return Err(recovery_error("Windows stop write failed; replacement remains refused"));
+                    }
+                    if !self.attempted && Instant::now() < deadline {
+                        self.require_live()?;
+                        let name = wide(std::ffi::OsStr::new(&self.record.as_ref().unwrap().record.pipe_name()))?;
+                        self.connect = Some(ConnectAttempt::start(name, deadline)?);
+                    }
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "recorded Windows stop completion was not established"));
+                }
+                std::thread::sleep(RECOVERY_POLL.min(remaining));
+            }
+        }
+        /// One total bounded budget for connection, asynchronous write, and exact-root
+        /// clean exit. Errors keep this owner installed; retries never reopen its PID or
+        /// resend an uncertain/failed frame. No record is mutated by this method.
+        pub(crate) fn stop(&mut self, timeout: Duration) -> io::Result<()> {
+            let result = self.stop_until(Instant::now() + timeout.min(RECOVERED_STOP_LIMIT));
+            if result.is_err() {
+                if let Some(connect) = &self.connect { connect.cancel(); }
+                if let Some(write) = &self.write {
+                    if let Err(cancel) = write.cancel() {
+                        return Err(recovery_error_with_cancel(result.unwrap_err(), cancel));
+                    }
+                }
+            }
+            result
+        }
+    }
+    fn recovery_error_with_cancel(primary: io::Error, cancel: io::Error) -> io::Error {
+        io::Error::other(format!("{primary}; Windows stop cancellation unconfirmed: {cancel}"))
+    }
+    impl Drop for RecoveredLaunch {
+        fn drop(&mut self) {
+            if self.connect.is_some() || self.write.is_some() {
+                if let Some(connect) = &self.connect { connect.cancel(); }
+                if let Some(write) = &self.write { let _ = write.cancel(); }
+                // Defensive process-lifetime retention if a caller discards uncertainty.
+                // Preserve provenance/process AND native/thread I/O owners together;
+                // never join, close handles, or free kernel-referenced storage here.
+                std::mem::forget(Box::new((self.record.take(), self.process.take(),
+                    self.connect.take(), self.write.take())));
+            }
+        }
+    }
+
+    fn pin_recovery_module() -> io::Result<()> {
+        // LibraryLoader is not an enabled windows-sys feature. Bind only this
+        // documented Kernel32 ABI locally, without changing dependency features.
+        // FROM_ADDRESS interprets lpModuleName as a code address, not a string;
+        // PIN keeps our worker/drop code loaded until process exit, even in a DLL.
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetModuleHandleExW(flags: u32, address: *const u16, module: *mut HMODULE) -> i32;
+        }
+        const FROM_ADDRESS: u32 = 0x00000004;
+        const PIN: u32 = 0x00000001;
+        let mut module = null_mut();
+        unsafe { checked(GetModuleHandleExW(FROM_ADDRESS | PIN,
+            pin_recovery_module as *const () as *const u16, &mut module))?; }
+        if module.is_null() { return Err(recovery_error("Windows recovery module lifetime was not retained")); }
+        Ok(())
+    }
+
+    /// FILE_FLAG_OVERLAPPED does not make CreateFileW itself cancellable. Isolate
+    /// that open on an explicitly owned worker; the controller never blocks joining it.
+    /// At most one unresolved open exists per retained recovered owner. Workers never
+    /// send frames; after result delivery their lifetime is retained until process exit.
+    struct ConnectAttempt {
+        thread: Option<std::thread::JoinHandle<()>>,
+        result: std::sync::mpsc::Receiver<io::Result<OwnedHandle>>,
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl ConnectAttempt {
+        fn start(name: Vec<u16>, deadline: Instant) -> io::Result<Self> {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            pin_recovery_module()?;
+            let cancelled = std::sync::Arc::new(AtomicBool::new(false));
+            let flag = cancelled.clone();
+            let (sender, result) = std::sync::mpsc::channel();
+            let thread = std::thread::Builder::new().name("gentle-dot-stop-connect".into()).spawn(move || {
+                let outcome = (|| -> io::Result<OwnedHandle> {
+                    loop {
+                        if flag.load(Ordering::Acquire) || Instant::now() >= deadline {
+                            return Err(io::Error::new(io::ErrorKind::TimedOut, "Windows stop pipe connection unfinished"));
+                        }
+                        // Derived local name only. Narrow WRITE_DATA omits CREATE_PIPE_INSTANCE;
+                        // null security attributes means non-inheritable. Identification SQOS
+                        // prevents the server acquiring an impersonation/delegation token.
+                        let raw = unsafe { CreateFileW(name.as_ptr(), FILE_WRITE_DATA, 0, null(), OPEN_EXISTING,
+                            FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, null_mut()) };
+                        if raw != INVALID_HANDLE_VALUE { return owned(raw); }
+                        let error = io::Error::last_os_error();
+                        if !matches!(error.raw_os_error(), Some(code) if code == ERROR_PIPE_BUSY as i32 || code == ERROR_FILE_NOT_FOUND as i32) {
+                            return Err(error);
+                        }
+                        std::thread::sleep(RECOVERY_POLL.min(deadline.saturating_duration_since(Instant::now())));
+                    }
+                })();
+                let _ = sender.send(outcome);
+            })?;
+            Ok(Self { thread: Some(thread), result, cancelled })
+        }
+        fn cancel(&self) { self.cancelled.store(true, std::sync::atomic::Ordering::Release); }
+        fn poll(&mut self) -> io::Result<Option<io::Result<OwnedHandle>>> {
+            // Delivery transfers the sole open result, not thread/TLS completion.
+            // Neither is_finished nor join can establish a bounded retirement here.
+            match self.result.try_recv() {
+                Ok(result) => Ok(Some(result)),
+                Err(std::sync::mpsc::TryRecvError::Empty) => Ok(None),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) =>
+                    Ok(Some(Err(recovery_error("Windows stop connection result was not retained")))),
+            }
+        }
+    }
+    impl Drop for ConnectAttempt {
+        fn drop(&mut self) {
+            self.cancel();
+            if self.thread.is_some() {
+                // No portable nonblocking proof of OS-thread/TLS retirement exists.
+                // Retain the worker, receiver and cancellation state until process exit,
+                // even after delivery/disconnection. An unconsumed late handle stays
+                // owned in the queue; the already-pinned module cannot unload beneath
+                // the worker. Never join in the deadline-bearing controller or Drop.
+                let (sender, empty) = std::sync::mpsc::channel(); drop(sender);
+                std::mem::forget(Box::new((self.thread.take(),
+                    std::mem::replace(&mut self.result, empty), self.cancelled.clone())));
+            }
+        }
+    }
+
+    struct StopWriteStorage {
+        operation: std::cell::UnsafeCell<OVERLAPPED>,
+        frame: [u8; 36],
+        _event: OwnedHandle,
+        pipe: OwnedHandle,
+    }
+    // SAFETY: the unique controller may move the Box between threads, never its
+    // allocation. Only Windows accesses the mutable OVERLAPPED through UnsafeCell;
+    // frame/event/pipe remain stable until independently observed completion.
+    unsafe impl Send for StopWriteStorage {}
+    struct PendingStopWrite { storage: Option<Box<StopWriteStorage>> }
+    impl PendingStopWrite {
+        fn submit(pipe: OwnedHandle, frame: [u8; 36]) -> io::Result<Self> {
+            let event = owned(unsafe { CreateEventW(null(), 1, 0, null()) })?;
+            let mut operation: OVERLAPPED = unsafe { std::mem::zeroed() };
+            operation.hEvent = event.as_raw_handle();
+            let mut this = Self { storage: Some(Box::new(StopWriteStorage {
+                operation: std::cell::UnsafeCell::new(operation), frame, _event: event, pipe })) };
+            let storage = this.storage.as_ref().unwrap();
+            // One message, one WriteFile, never partial-write retries. All referenced
+            // storage is heap-stable before submission; NULL byte count for overlapped I/O.
+            if unsafe { WriteFile(storage.pipe.as_raw_handle(), storage.frame.as_ptr(), 36,
+                null_mut(), storage.operation.get()) } != 0 { return Ok(this); }
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(ERROR_IO_PENDING as i32) { return Ok(this); }
+            // WriteFile rejected submission: no outstanding OVERLAPPED was established.
+            this.storage.take();
+            Err(error)
+        }
+        fn poll(&mut self) -> io::Result<Option<io::Result<()>>> {
+            let storage = self.storage.as_ref().unwrap();
+            let mut transferred = 0;
+            if unsafe { GetOverlappedResult(storage.pipe.as_raw_handle(), storage.operation.get(), &mut transferred, 0) } != 0 {
+                self.storage.take();
+                return Ok(Some(require_frame_size(transferred)));
+            }
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(ERROR_IO_INCOMPLETE as i32) { return Ok(None); }
+            if error.raw_os_error() == Some(ERROR_OPERATION_ABORTED as i32) {
+                self.storage.take();
+                return Ok(Some(Err(error)));
+            }
+            // An unexpected query failure does not prove that kernel ownership ended.
+            Err(error)
+        }
+        fn cancel(&self) -> io::Result<()> {
+            let storage = self.storage.as_ref().unwrap();
+            if unsafe { CancelIoEx(storage.pipe.as_raw_handle(), storage.operation.get()) } != 0 { return Ok(()); }
+            let error = io::Error::last_os_error();
+            // NOT_FOUND is not a completion result either. Storage stays retained.
+            if error.raw_os_error() == Some(ERROR_NOT_FOUND as i32) { return Ok(()); }
+            Err(error)
+        }
+    }
+    impl Drop for PendingStopWrite {
+        fn drop(&mut self) {
+            if self.storage.is_some() {
+                let _ = self.cancel();
+                std::mem::forget(self.storage.take());
+            }
+        }
+    }
+
     #[cfg(test)]
     mod recovery_contract_tests {
-        use super::{require_complete_record, AcquisitionStage, FileIdentity};
+        use super::{require_complete_record, require_frame_size, require_launch_identity, AcquisitionStage, FileIdentity};
         use super::super::super::windows_record::Record;
 
         #[test]
@@ -622,6 +969,17 @@ mod native {
                 assert!(require_complete_record(identity, &expected, identity, &changed).is_err());
             }
         }
+        #[test]
+        fn pid_reuse_or_creation_mismatch_is_not_exact_identity() {
+            assert!(require_launch_identity(42, 123, 42, 123).is_ok());
+            assert!(require_launch_identity(42, 123, 43, 123).is_err());
+            assert!(require_launch_identity(42, 123, 42, 124).is_err());
+        }
+        #[test]
+        fn only_a_complete_single_frame_is_accepted() {
+            assert!(require_frame_size(36).is_ok());
+            for count in [0, 1, 35, 37, u32::MAX] { assert!(require_frame_size(count).is_err()); }
+        }
     }
 
     struct Descriptor(*mut std::ffi::c_void);
@@ -660,6 +1018,207 @@ mod native {
         }
     }
     impl Drop for Descriptor { fn drop(&mut self) { unsafe { LocalFree(self.0) }; } }
+
+    fn delete_exact_record(path: &Path, expected: &super::super::windows_record::Record,
+        identity: FileIdentity, guard: &mut Option<File>, marked: &mut bool) -> io::Result<()> {
+        let name = wide(path.as_os_str())?;
+        if !*marked {
+            // Callers retain ancestry and checked exact-process completion throughout.
+            // The old reader disallows DELETE; close only that guard before reopening.
+            drop(guard.take());
+            let raw = unsafe { CreateFileW(name.as_ptr(), GENERIC_READ | READ_CONTROL | DELETE,
+                FILE_SHARE_READ, null(), OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, null_mut()) };
+            *guard = Some(File::from(owned(raw)?));
+            let file = guard.as_mut().unwrap();
+            let (observed, observed_identity) = read_record_file(file)?;
+            require_complete_record(identity, expected, observed_identity, &observed)?;
+            let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+            unsafe { checked(SetFileInformationByHandle(file.as_raw_handle(), FileDispositionInfo,
+                (&disposition as *const FILE_DISPOSITION_INFO).cast(), std::mem::size_of_val(&disposition) as u32))?; }
+            *marked = true;
+            drop(guard.take());
+        }
+        // Mark-for-delete alone is not reclamation: another reader may defer deletion.
+        // Only absence confirms retirement. Once marked, never delete a path replacement.
+        let raw = unsafe { CreateFileW(name.as_ptr(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+            null(), OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, null_mut()) };
+        if raw == INVALID_HANDLE_VALUE {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) { return Ok(()); }
+            return Err(error);
+        }
+        drop(owned(raw)?);
+        Err(recovery_error("Windows launch record deletion/absence is not confirmed"))
+    }
+
+    #[cfg(test)]
+    mod recovered_io_tests {
+        use super::*;
+        use super::super::super::windows_record::Record;
+        use std::io::Write;
+
+        struct Fixture { dir: PathBuf, record: Record }
+        impl Fixture {
+            fn new() -> Self {
+                let mut random = [0u8; 48];
+                getrandom::fill(&mut random).unwrap();
+                let mut created: FILETIME = unsafe { std::mem::zeroed() };
+                let mut exited = created; let mut kernel = created; let mut user = created;
+                unsafe { checked(GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited,
+                    &mut kernel, &mut user)).unwrap(); }
+                let record = Record::new(std::process::id(),
+                    ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64,
+                    random[..16].try_into().unwrap(), random[16..].try_into().unwrap()).unwrap();
+                let dir = std::env::temp_dir().join(format!("gd-recovery-{:032x}",
+                    u128::from_le_bytes(random[..16].try_into().unwrap())));
+                ensure_record_directory(&dir).unwrap();
+                let fixture = Self { dir, record };
+                fixture.write_record(&fixture.record);
+                fixture
+            }
+            fn path(&self) -> PathBuf { self.dir.join(super::super::super::PID_FILE) }
+            fn write_record(&self, record: &Record) {
+                let sid = current_user_sid().unwrap();
+                let descriptor = Descriptor::for_user(sid.as_ptr() as PSID).unwrap();
+                let name = wide(self.path().as_os_str()).unwrap();
+                let mut file = File::from(owned(unsafe { CreateFileW(name.as_ptr(), GENERIC_WRITE,
+                    0, &descriptor.attributes(), CREATE_NEW, FILE_ATTRIBUTE_NORMAL, null_mut()) }).unwrap());
+                file.write_all(&record.encode()).unwrap();
+                file.sync_all().unwrap();
+            }
+            fn owner(&self) -> RecoveredLaunch {
+                match acquire_recovered_launch(&self.dir) {
+                    Ok(Some(owner)) => owner,
+                    _ => panic!("fixture's exact live process must be admitted"),
+                }
+            }
+            fn server(&self) -> OwnedHandle {
+                let name = wide(std::ffi::OsStr::new(&self.record.pipe_name())).unwrap();
+                let sid = current_user_sid().unwrap();
+                let descriptor = Descriptor::for_user(sid.as_ptr() as PSID).unwrap();
+                owned(unsafe { CreateNamedPipeW(name.as_ptr(), PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                    1, 4096, 4096, 0, &descriptor.attributes()) }).unwrap()
+            }
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.dir); }
+        }
+
+        fn connected_client(fixture: &Fixture, server: &OwnedHandle) -> OwnedHandle {
+            let name = wide(std::ffi::OsStr::new(&fixture.record.pipe_name())).unwrap();
+            let client = owned(unsafe { CreateFileW(name.as_ptr(), FILE_WRITE_DATA, 0, null(), OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, null_mut()) }).unwrap();
+            let result = unsafe { ConnectNamedPipe(server.as_raw_handle(), null_mut()) };
+            assert!(result != 0 || io::Error::last_os_error().raw_os_error() == Some(ERROR_PIPE_CONNECTED as i32));
+            client
+        }
+
+        #[test]
+        fn stop_deadline_and_cancellation_retain_pending_write_storage() {
+            let fixture = Fixture::new();
+            let server = fixture.server();
+            let client = connected_client(&fixture, &server);
+            let mut owner = fixture.owner();
+            // Fill the real pipe's quota without a reader. Never rely on a specific
+            // Windows minimum quota or on the first write completing synchronously.
+            let fill_deadline = Instant::now() + Duration::from_secs(3);
+            let pending = loop {
+                assert!(Instant::now() < fill_deadline, "pipe quota did not become bounded backpressure");
+                // A non-inheritable test-only duplicate lets each completed write
+                // release its own handle without disconnecting the quota-fill client.
+                let mut write = PendingStopWrite::submit(client.try_clone().unwrap(), fixture.record.frame()).unwrap();
+                let probe_deadline = Instant::now() + Duration::from_millis(30);
+                loop {
+                    match write.poll().unwrap() {
+                        Some(result) => { result.unwrap(); break; }
+                        None if Instant::now() >= probe_deadline => break,
+                        None => std::thread::sleep(Duration::from_millis(1)),
+                    }
+                }
+                if write.storage.is_some() { break write; }
+            };
+            drop(client);
+            owner.attempted = true;
+            owner.write = Some(pending);
+            let allocation = owner.write.as_ref().unwrap().storage.as_ref().unwrap().operation.get();
+            let started = Instant::now();
+            assert_eq!(owner.stop(Duration::from_millis(40)).unwrap_err().kind(), io::ErrorKind::TimedOut);
+            assert!(started.elapsed() < Duration::from_secs(2), "stop ignored its bounded deadline");
+            // CancelIoEx is only a request: even an already-completed cancellation
+            // must not free kernel-referenced memory until poll observes completion.
+            assert_eq!(owner.write.as_ref().unwrap().storage.as_ref().unwrap().operation.get(), allocation);
+            owner.write.as_ref().unwrap().cancel().unwrap();
+            assert_eq!(owner.write.as_ref().unwrap().storage.as_ref().unwrap().operation.get(), allocation);
+            let completion_deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                if let Some(result) = owner.write.as_mut().unwrap().poll().unwrap() {
+                    assert_eq!(result.unwrap_err().raw_os_error(), Some(ERROR_OPERATION_ABORTED as i32));
+                    owner.write.take();
+                    break;
+                }
+                assert!(Instant::now() < completion_deadline, "cancelled write did not settle");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(owner.stop(Duration::from_millis(40)).is_err());
+            assert!(owner.attempted && !owner.written);
+            assert!(owner.connect.is_none() && owner.write.is_none());
+            assert!(owner.record.is_some() && owner.process.is_some());
+            assert!(owner.delete_record().is_err());
+        }
+
+        #[test]
+        fn recovered_stop_sends_one_authenticated_frame_and_retains_timeout_state() {
+            let fixture = Fixture::new();
+            let server = fixture.server();
+            let mut owner = fixture.owner();
+            // The pipe server is this exact recorded process. It deliberately stays
+            // alive after receiving the authenticated frame, forcing a retained error.
+            assert_eq!(owner.stop(Duration::from_secs(2)).unwrap_err().kind(), io::ErrorKind::TimedOut);
+            assert!(owner.attempted && owner.written);
+            assert_eq!(owner.stop(Duration::from_millis(40)).unwrap_err().kind(), io::ErrorKind::TimedOut);
+            let mut available = 0;
+            unsafe { checked(PeekNamedPipe(server.as_raw_handle(), null_mut(), 0, null_mut(),
+                &mut available, null_mut())).unwrap(); }
+            assert_eq!(available, 36, "a retry sent another authenticated frame");
+            let mut frame = [0u8; 36];
+            let mut read = 0;
+            unsafe { checked(ReadFile(server.as_raw_handle(), frame.as_mut_ptr(), 36, &mut read, null_mut())).unwrap(); }
+            assert_eq!(read, 36);
+            assert_eq!(frame, fixture.record.frame());
+            assert!(owner.record.is_some() && owner.process.is_some());
+            assert!(owner.connect.is_none() && owner.write.is_none());
+            assert!(owner.delete_record().is_err());
+            assert!(fixture.path().exists());
+        }
+
+        #[test]
+        fn exact_deletion_refuses_replaced_file_and_changed_launch_identity() {
+            let fixture = Fixture::new();
+            let mut validated = read_validated_record(&fixture.dir).unwrap().unwrap();
+            let identity = validated.identity;
+            drop(validated.file.take());
+            // Keep the old file alive under another name, so the replacement cannot
+            // reuse its file ID even on filesystems with aggressive ID reuse.
+            std::fs::rename(fixture.path(), fixture.dir.join("old-record")).unwrap();
+            fixture.write_record(&fixture.record);
+            assert!(delete_exact_record(&validated.path, &fixture.record, identity,
+                &mut validated.file, &mut validated.deletion_marked).is_err());
+            assert!(!validated.deletion_marked);
+            assert!(validated.file.is_some());
+            drop(validated.file.take());
+            let mut replacement = read_validated_record(&fixture.dir).unwrap().unwrap();
+            let changed = Record::new(fixture.record.pid, fixture.record.created + 1,
+                [3; 16], [4; 32]).unwrap();
+            assert!(delete_exact_record(&replacement.path, &changed, replacement.identity,
+                &mut replacement.file, &mut replacement.deletion_marked).is_err());
+            assert!(!replacement.deletion_marked);
+            assert!(replacement.file.is_some());
+            assert!(fixture.path().exists());
+            drop(replacement);
+            drop(validated);
+        }
+    }
 
     #[cfg(test)]
     mod launch_tests {
