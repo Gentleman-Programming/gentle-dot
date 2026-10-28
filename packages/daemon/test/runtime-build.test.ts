@@ -43,6 +43,7 @@ describe("build:runtime", () => {
 			"bin/pi",
 			"daemon/cli.mjs",
 			"daemon/extensions/approval-guard.ts",
+			"daemon/extensions/command-code.ts",
 			"daemon/extensions/screenshot-context.ts",
 			"daemon/identity.md",
 			"daemon/package.json",
@@ -52,6 +53,9 @@ describe("build:runtime", () => {
 		);
 		expect(readFileSync(join(out, "daemon", "extensions", "approval-guard.ts"), "utf8")).toBe(
 			readFileSync(join(PACKAGE, "src", "extensions", "approval-guard.ts"), "utf8"),
+		);
+		expect(readFileSync(join(out, "daemon", "extensions", "command-code.ts"), "utf8")).toBe(
+			readFileSync(join(PACKAGE, "src", "extensions", "command-code.ts"), "utf8"),
 		);
 	});
 
