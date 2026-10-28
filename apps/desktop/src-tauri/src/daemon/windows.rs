@@ -94,6 +94,9 @@ mod native {
     use windows_sys::Win32::Security::Authorization::*;
     use windows_sys::Win32::Security::*;
     use windows_sys::Win32::Storage::FileSystem::*;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
     use windows_sys::Win32::System::IO::*;
     use windows_sys::Win32::System::JobObjects::*;
     use windows_sys::Win32::System::Pipes::*;
@@ -841,6 +844,100 @@ mod native {
         file.sync_all()?;
         if read_owner_file(&mut file)? != owner { return Err(unsafe_record()); }
         Ok(())
+    }
+
+    fn read_validated_owner(data_dir: &Path) -> io::Result<Option<super::super::windows_record::Owner>> {
+        let path = data_dir.join(OWNER_FILE);
+        let _ancestry = record_ancestry(&path, false)?;
+        let name = wide(path.as_os_str())?;
+        let raw = unsafe { CreateFileW(name.as_ptr(), GENERIC_READ | READ_CONTROL, FILE_SHARE_READ,
+            null(), OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, null_mut()) };
+        if raw == INVALID_HANDLE_VALUE {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) { return Ok(None); }
+            return Err(error);
+        }
+        read_owner_file(&mut File::from(owned(raw)?)).map(Some)
+    }
+
+    fn snapshot_contains(pid: u32) -> io::Result<bool> {
+        let snapshot = owned(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) })?;
+        let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        unsafe { checked(Process32FirstW(snapshot.as_raw_handle(), &mut entry))?; }
+        loop {
+            if entry.th32ProcessID == pid { return Ok(true); }
+            if unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) } == 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) { return Ok(false); }
+                return Err(error);
+            }
+        }
+    }
+
+    enum Observed { Gone, Exited, Running(OwnedHandle) }
+    /// Exact-identity state, never a termination route. OpenProcess error 87 alone is
+    /// not absence: a full process snapshot must also lack the PID. A different creation
+    /// time means the PID was reused, which the recorded process object cannot outlive.
+    fn observe_process(pid: u32, created: u64) -> io::Result<Observed> {
+        let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) };
+        if raw.is_null() {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) && !snapshot_contains(pid)? {
+                return Ok(Observed::Gone);
+            }
+            return Err(error);
+        }
+        let process = owned(raw)?;
+        if process_created(process.as_raw_handle())? != created { return Ok(Observed::Gone); }
+        match unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } {
+            WAIT_OBJECT_0 => Ok(Observed::Exited),
+            WAIT_TIMEOUT => Ok(Observed::Running(process)),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
+    /// Retires a stop record only when its bound witness names an app process that has
+    /// exited. That process held the only handle to the launch's KILL_ON_JOB_CLOSE Job, and
+    /// Windows closes a process's handles before signaling its exit, so the kernel already
+    /// terminated every process in that Job. Nothing is terminated here; processes created
+    /// outside the Job (WMI, Task Scheduler, COM) were never part of the owned group.
+    ///
+    /// Ok(false) only when there is no readable record or no witness at all (a legacy v1
+    /// launch), which keeps the existing admission route. A witnessed launch whose owner
+    /// lives, or whose witness is invalid, unbound or unverifiable, is refused: the recovered
+    /// stop route proves only root exit, and a live owner keeps its Job's descendants alive.
+    pub(crate) fn retire_if_owner_exited(data_dir: &Path) -> io::Result<bool> {
+        let Ok(Some(mut record)) = read_validated_record(data_dir) else { return Ok(false) };
+        let owner = match read_validated_owner(data_dir) {
+            Ok(None) => return Ok(false),
+            Ok(Some(owner)) => owner,
+            Err(_) => return Err(recovery_error("Windows owner witness is invalid or unreadable; record retained")),
+        };
+        if !owner.binds(&record.record) {
+            return Err(recovery_error("Windows owner witness does not match the recorded launch; record retained"));
+        }
+        match observe_process(owner.pid, owner.created) {
+            Ok(Observed::Gone | Observed::Exited) => {}
+            Ok(Observed::Running(_)) => return Err(recovery_error(
+                "the previous launch's owning app is still running; record retained")),
+            Err(_) => return Err(recovery_error("Windows owner state is unverifiable; record retained")),
+        }
+        // Termination is asynchronous and waits for pending I/O: never overlap a root that
+        // is still finishing. A root that keeps running contradicts the proof; refuse.
+        match observe_process(record.record.pid, record.record.created)? {
+            Observed::Gone | Observed::Exited => {}
+            Observed::Running(root) => match unsafe {
+                WaitForSingleObject(root.as_raw_handle(), RECOVERED_STOP_LIMIT.as_millis() as u32)
+            } {
+                WAIT_OBJECT_0 => {}
+                WAIT_TIMEOUT => return Err(recovery_error(
+                    "recorded Windows root is still running after its owner exited; record retained")),
+                _ => return Err(io::Error::last_os_error()),
+            },
+        }
+        delete_exact_record(&record.path, &record.record, record.identity, &mut record.file, &mut record.deletion_marked)?;
+        Ok(true)
     }
 
     // The validation/live stages cover multiple checks; they do not identify a syscall.
@@ -1816,6 +1913,213 @@ try {{
             assert!(fixture.path().exists());
             drop(replacement);
             drop(validated);
+        }
+    }
+
+    #[cfg(test)]
+    mod owner_exit_tests {
+        use super::*;
+        use super::super::super::{windows_record, PID_FILE};
+        use crate::app_channel::windows::channel_pair;
+        use std::{fs, thread};
+        use std::sync::mpsc;
+
+        // Owner-exit recovery runs the launching app in a child copy of this test binary, so
+        // killing that exact child handle (never a PID lookup) closes the only Job handle.
+        const OWNER_HELPER: &str = "daemon::windows::native::owner_exit_tests::recovery_owner_helper";
+        const OWNER_HELPER_DIR: &str = "GENTLE_DOT_TEST_RECOVERY_OWNER_DIR";
+        const OWNER_FILE: &str = "daemon.owner";
+
+        #[test]
+        #[ignore = "launching-app child for owner-exit recovery tests; returns at once without its environment"]
+        fn recovery_owner_helper() {
+            let Some(dir) = std::env::var_os(OWNER_HELPER_DIR) else { return };
+            let dir = PathBuf::from(dir);
+            let script = r#"
+const {spawn} = require('node:child_process');
+// Outlive the Node root while still inheriting the retained outer owned Job.
+const child = spawn(process.execPath, ['-e', "process.stdout.write('CHILD_READY\\n');setTimeout(()=>{},60000)"],
+  {stdio:['ignore','pipe','ignore'],windowsHide:true,detached:true});
+child.stdout.once('data', bytes => {
+  if (bytes.toString() !== 'CHILD_READY\n') process.exit(75);
+  console.log('DESCENDANT ' + child.pid);
+});
+setTimeout(()=>process.exit(74),60000);
+"#;
+            let launch = LaunchSpec { program: env!("GENTLE_DOT_BUILD_NODE").into(),
+                args: vec!["-e".into(), script.into()], envs: vec![("NODE_OPTIONS".into(), String::new())] };
+            let (_parent, endpoint) = channel_pair().unwrap();
+            let child = super::spawn(&launch, super::open_private_log(&dir).unwrap(), &endpoint, &dir).unwrap();
+            drop(endpoint);
+            println!("OWNER_READY {}", child.id());
+            thread::sleep(Duration::from_secs(60));
+        }
+
+        struct OwnerRun {
+            helper: std::process::Child,
+            dir: PathBuf,
+            root: std::os::windows::io::OwnedHandle,
+            descendant: std::os::windows::io::OwnedHandle,
+        }
+        impl Drop for OwnerRun {
+            fn drop(&mut self) { let _ = self.helper.kill(); let _ = self.helper.wait(); }
+        }
+        // Test witness only, opened while the fixture reports the process live.
+        fn open_witness(pid: u32) -> std::os::windows::io::OwnedHandle {
+            use std::os::windows::io::FromRawHandle;
+            use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+            let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION
+                | windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE, 0, pid) };
+            assert!(!raw.is_null(), "fixture process witness");
+            unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(raw) }
+        }
+        fn exits_within(process: &std::os::windows::io::OwnedHandle, millis: u32) -> bool {
+            use std::os::windows::io::AsRawHandle;
+            let result = unsafe { windows_sys::Win32::System::Threading::WaitForSingleObject(process.as_raw_handle(), millis) };
+            result == windows_sys::Win32::Foundation::WAIT_OBJECT_0
+        }
+        fn start_owner(name: &str) -> OwnerRun {
+            let mut nonce = [0u8; 8];
+            getrandom::fill(&mut nonce).unwrap();
+            let token: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+            let dir = std::env::temp_dir().join(format!("gentle-owner-{name}-{token}"));
+            super::ensure_record_directory(&dir).unwrap();
+            let mut helper = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([OWNER_HELPER, "--exact", "--ignored", "--nocapture", "--test-threads=1"])
+                .env(OWNER_HELPER_DIR, &dir)
+                .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null()).spawn().unwrap();
+            let stdout = helper.stdout.take().unwrap();
+            let (lines, ready) = mpsc::channel();
+            thread::spawn(move || {
+                for line in io::BufRead::lines(io::BufReader::new(stdout)).map_while(Result::ok) {
+                    if lines.send(line).is_err() { break; }
+                }
+            });
+            let root: u32 = loop {
+                let line = ready.recv_timeout(Duration::from_secs(30)).expect("owner helper readiness");
+                // libtest prints `test <name> ... ` without a newline before the helper's output.
+                if let Some((_, pid)) = line.split_once("OWNER_READY ") { break pid.trim().parse().unwrap(); }
+            };
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let descendant: u32 = loop {
+                let log = fs::read_to_string(dir.join("daemon.log")).unwrap_or_default();
+                if let Some(pid) = log.lines().find_map(|line| line.strip_prefix("DESCENDANT ")) {
+                    break pid.trim().parse().unwrap();
+                }
+                assert!(Instant::now() < deadline, "fixture descendant readiness: {log}");
+                thread::sleep(Duration::from_millis(20));
+            };
+            OwnerRun { root: open_witness(root), descendant: open_witness(descendant), helper, dir }
+        }
+        fn kill_owner(run: &mut OwnerRun) {
+            run.helper.kill().unwrap();
+            run.helper.wait().unwrap();
+        }
+        struct Sentinel(std::process::Child);
+        impl Drop for Sentinel {
+            fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+        }
+
+        #[test]
+        fn owner_exit_retires_record_after_kernel_ends_owned_group() {
+            use std::os::windows::process::CommandExt;
+            // Same executable, independently launched: never part of the owned Job.
+            let mut sentinel = Sentinel(std::process::Command::new(env!("GENTLE_DOT_BUILD_NODE"))
+                .args(["-e", "setTimeout(()=>{},60000)"]).env_remove("NODE_OPTIONS")
+                .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
+                .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()).spawn().unwrap());
+            let mut run = start_owner("exit");
+            let record = fs::read(run.dir.join(PID_FILE)).unwrap();
+            let witness = fs::read(run.dir.join(OWNER_FILE)).unwrap();
+            // Guards: a live witnessed owner refuses retirement; only its exit plus root
+            // exit permits exact deletion. Removing the live-owner check must fail here.
+            let error = retire_if_owner_exited(&run.dir).unwrap_err();
+            assert_eq!(error.to_string(), "the previous launch's owning app is still running; record retained");
+            assert_eq!(fs::read(run.dir.join(PID_FILE)).unwrap(), record);
+            assert_eq!(fs::read(run.dir.join(OWNER_FILE)).unwrap(), witness);
+            assert!(!exits_within(&run.root, 0) && !exits_within(&run.descendant, 0), "nothing was stopped");
+            kill_owner(&mut run);
+            assert!(retire_if_owner_exited(&run.dir).unwrap());
+            assert!(!run.dir.join(PID_FILE).exists(), "exact record retired");
+            assert!(exits_within(&run.root, 0), "retirement waits for the recorded root");
+            assert!(exits_within(&run.descendant, 5000), "the kernel ended the whole owned Job");
+            assert_eq!(fs::read(run.dir.join(OWNER_FILE)).unwrap(), witness,
+                "retirement leaves the witness without authority");
+            assert!(!retire_if_owner_exited(&run.dir).unwrap(), "no record is a no-op");
+            assert!(sentinel.0.try_wait().unwrap().is_none(), "same executable outside the Job survives");
+        }
+
+        #[test]
+        fn record_without_owner_witness_is_not_retired_after_owner_exit() {
+            // Guard: no witness returns Ok(false), not successful retirement or an error.
+            let mut run = start_owner("legacy");
+            let record = fs::read(run.dir.join(PID_FILE)).unwrap();
+            fs::remove_file(run.dir.join(OWNER_FILE)).unwrap();
+            assert!(!retire_if_owner_exited(&run.dir).unwrap(), "missing witness is a no-op even with a live root");
+            assert!(run.dir.join(PID_FILE).exists());
+            kill_owner(&mut run);
+            assert!(exits_within(&run.root, 5000));
+            assert!(!retire_if_owner_exited(&run.dir).unwrap(), "a legacy launch is not retired");
+            assert_eq!(fs::read(run.dir.join(PID_FILE)).unwrap(), record,
+                "legacy records still need authorized manual recovery");
+            assert!(!run.dir.join(OWNER_FILE).exists());
+        }
+
+        #[test]
+        fn invalid_or_unbound_witness_refuses_and_retains_record() {
+            // Guards: invalid witnesses fail closed; valid witnesses must bind this nonce.
+            // Removing either refusal changes the asserted error or deletes the record.
+            let mut run = start_owner("mismatch");
+            let record = fs::read(run.dir.join(PID_FILE)).unwrap();
+            let path = run.dir.join(OWNER_FILE);
+            let witness = fs::read(&path).unwrap();
+            // A damaged witness is not a legacy record: refuse rather than try the recovered stop.
+            fs::write(&path, b"not an owner witness\n").unwrap();
+            let error = retire_if_owner_exited(&run.dir).unwrap_err();
+            assert_eq!(error.to_string(), "Windows owner witness is invalid or unreadable; record retained");
+            assert_eq!(fs::read(run.dir.join(PID_FILE)).unwrap(), record);
+            assert_eq!(fs::read(&path).unwrap(), b"not an owner witness\n");
+            assert!(!exits_within(&run.root, 0) && !exits_within(&run.descendant, 0), "nothing was stopped");
+            // A witness for another record proves nothing, even after this owner exits.
+            let owner = windows_record::Owner::parse(&witness).unwrap();
+            let unbound = windows_record::Owner::new([0x5a; 16], owner.pid, owner.created).unwrap().encode();
+            fs::write(&path, &unbound).unwrap();
+            kill_owner(&mut run);
+            assert!(exits_within(&run.root, 5000));
+            let error = retire_if_owner_exited(&run.dir).unwrap_err();
+            assert_eq!(error.to_string(), "Windows owner witness does not match the recorded launch; record retained");
+            assert_eq!(fs::read(run.dir.join(PID_FILE)).unwrap(), record);
+            assert_eq!(fs::read(&path).unwrap(), unbound);
+        }
+
+        #[test]
+        fn exited_witness_with_running_root_retains_record_and_refuses() {
+            // Guard: owner exit alone is insufficient; a live root must time out, not retire.
+            use std::os::windows::io::AsRawHandle;
+            let run = start_owner("contradiction");
+            let bytes = fs::read(run.dir.join(PID_FILE)).unwrap();
+            let record = windows_record::Record::parse(&bytes).unwrap();
+            // An exited process that never held the Job: its exit proves nothing about the root.
+            let mut other = std::process::Command::new(env!("GENTLE_DOT_BUILD_NODE"))
+                .args(["-e", ""]).env_remove("NODE_OPTIONS").stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+            other.wait().unwrap();
+            let mut created: windows_sys::Win32::Foundation::FILETIME = unsafe { std::mem::zeroed() };
+            let (mut exited, mut kernel, mut user) = (created, created, created);
+            assert_ne!(unsafe { windows_sys::Win32::System::Threading::GetProcessTimes(other.as_raw_handle(),
+                &mut created, &mut exited, &mut kernel, &mut user) }, 0);
+            let created = ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64;
+            let witness = windows_record::Owner::new(record.nonce(), other.id(), created).unwrap().encode();
+            fs::write(run.dir.join(OWNER_FILE), &witness).unwrap();
+            let started = Instant::now();
+            let error = retire_if_owner_exited(&run.dir).unwrap_err();
+            assert_eq!(error.to_string(), "recorded Windows root is still running after its owner exited; record retained");
+            assert!(started.elapsed() >= Duration::from_secs(9), "bounded wait for the recorded root");
+            assert_eq!(fs::read(run.dir.join(PID_FILE)).unwrap(), bytes);
+            assert_eq!(fs::read(run.dir.join(OWNER_FILE)).unwrap(), witness);
+            assert!(!exits_within(&run.root, 0) && !exits_within(&run.descendant, 0), "nothing was terminated");
         }
     }
 
