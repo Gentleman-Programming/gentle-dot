@@ -280,6 +280,10 @@ mod native {
         pid: u32,
         assigned: bool,
         failed: bool,
+        // Set once the daemon resumed. An established launch whose status later turns
+        // uncertain is retained as failed (no replacement, no health) but still stops
+        // through the authenticated, channel-open path, never as a failed startup.
+        established: bool,
         record: Option<OwnedRecord>,
         // Reuse the authenticated client with a duplicate of the created process
         // handle, never a fresh PID lookup. Keep pending I/O installed on errors.
@@ -374,7 +378,7 @@ mod native {
     impl ChildProcess for WindowsChild {
         fn id(&self) -> u32 { self.pid }
         fn launch_failed(&self) -> bool { self.failed || self.stopping }
-        fn shutdown_requires_channel(&self) -> bool { !self.failed || self.stopping }
+        fn shutdown_requires_channel(&self) -> bool { !self.failed || self.stopping || self.established }
         fn retain_failure(&mut self) { self.failed = true; }
         fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
             if self.launch_failed() { return Err(io::Error::other("retained failed launch requires checked shutdown")); }
@@ -392,7 +396,7 @@ mod native {
         }
         fn shutdown_owned(&mut self, grace: Duration) -> io::Result<()> {
             if self.completed { return self.finish_record(); }
-            if self.failed && !self.stopping {
+            if self.failed && !self.stopping && !self.established {
                 // Failed startup may never have installed its listener.
                 self.complete(grace)?;
                 self.completed = true;
@@ -532,7 +536,7 @@ mod native {
         let mut child = WindowsChild {
             process: unsafe { OwnedHandle::from_raw_handle(process.hProcess) },
             thread: Some(unsafe { OwnedHandle::from_raw_handle(process.hThread) }), job,
-            pid: process.dwProcessId, assigned: false, failed: false, record: None, stop: None, stopping: false,
+            pid: process.dwProcessId, assigned: false, failed: false, established: false, record: None, stop: None, stopping: false,
             force_requested: false, completed: false,
             #[cfg(test)] faults,
         };
@@ -556,6 +560,7 @@ mod native {
             let previous = unsafe { ResumeThread(child.thread.as_ref().unwrap().as_raw_handle()) };
             if previous == u32::MAX { return Err(io::Error::last_os_error()); }
             if previous != 1 { return Err(io::Error::other("unexpected daemon suspension state")); }
+            child.established = true;
             drop(child.thread.take());
             Ok(())
         })();
@@ -2475,6 +2480,26 @@ setTimeout(()=>process.exit(74),30000);
         }
 
         #[test]
+        fn uncertain_status_keeps_an_established_launch_on_the_channel_open_stop() {
+            let (mut child, parent, root) = owned_fixture("setTimeout(()=>{},30000)");
+            assert!(child.established);
+            // What the lifecycle does when an established launch's status query fails.
+            child.retain_failure();
+            assert!(child.launch_failed(), "uncertain status still refuses replacement and health");
+            assert!(child.try_wait().is_err());
+            assert!(child.shutdown_requires_channel(), "an established launch is not a failed startup");
+            // No stop listener here: the authenticated attempt fails and the force path
+            // waits out the caller's grace instead of the failed-startup zero grace.
+            let stopping = Instant::now();
+            child.shutdown_owned(Duration::from_millis(200)).unwrap();
+            assert!(stopping.elapsed() >= Duration::from_millis(200), "established stop must honor its grace");
+            assert!(child.force_requested);
+            assert_eq!(child.query().unwrap(), 0);
+            assert!(!root.join("daemon.pid").exists());
+            parent.shutdown().unwrap();
+        }
+
+        #[test]
         fn owned_force_failures_retain_record_and_allow_checked_retry() {
             for faults in [
                 Faults { terminate: true, ..Faults::default() },
@@ -2507,6 +2532,8 @@ setTimeout(()=>process.exit(74),30000);
             assert!(detail.contains("terminate") && detail.contains("wait") && detail.contains("job query"));
             let mut owner = failure.unfinished.take().unwrap();
             assert!(owner.launch_failed());
+            // Never resumed: cleanup may close the channel first, its listener may not exist.
+            assert!(!owner.shutdown_requires_channel());
             assert!(owner.try_wait().is_err());
             owner.faults = Faults::default();
             owner.shutdown_owned(Duration::ZERO).unwrap();
