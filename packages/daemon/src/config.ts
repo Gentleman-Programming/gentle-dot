@@ -1,8 +1,8 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { runtimeDir, runtimeModules } from "./runtime.ts";
 
 export interface DotConfig {
@@ -23,6 +23,25 @@ export interface DotConfig {
 
 const DEFAULT_UI_DIR = fileURLToPath(new URL("../../ui/dist/app", import.meta.url));
 
+/** Node's CLI uses JS realpath, which cannot resolve a Windows verbatim entry. */
+function engineEntryPath(path: string): string {
+	if (process.platform !== "win32" || !path.startsWith("\\\\?\\")) return path;
+	try {
+		const ordinary = fileURLToPath(pathToFileURL(path));
+		// Namespace-only trailing dots/spaces have ambiguous ordinary Win32 aliases.
+		// Even where Node preserves them, do not export that spelling as ordinary.
+		// Also check JS realpath (the CLI resolver), not just two native spellings.
+		if (
+			!ordinary.startsWith("\\\\?\\") &&
+			!ordinary.split("\\").some((component) => /[. ]$/.test(component)) &&
+			realpathSync.native(realpathSync(ordinary)) === realpathSync.native(path)
+		) return ordinary;
+	} catch {
+		// Conversion, missing targets, and unrepresentable aliases all fail closed.
+	}
+	throw new Error(`The bundled assistant engine has no equivalent Node entry path: ${path}`);
+}
+
 /**
  * Path of the Gentle Shell launcher bundled with the daemon (the `gentle-pi` dependency),
  * from the runtime's `node_modules` in an installed app.
@@ -31,7 +50,7 @@ export function bundledGentleShell(env: NodeJS.ProcessEnv = process.env): string
 	const runtime = runtimeDir(env);
 	if (runtime) {
 		const bin = join(runtimeModules(runtime), "gentle-pi", "bin", "gentle-shell.mjs");
-		if (existsSync(bin)) return bin;
+		if (existsSync(bin)) return engineEntryPath(bin);
 		throw new Error(`The bundled assistant engine is missing from ${runtimeModules(runtime)}.`);
 	}
 	const require = createRequire(import.meta.url);
