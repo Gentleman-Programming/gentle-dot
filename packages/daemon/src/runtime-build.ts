@@ -118,7 +118,10 @@ export async function buildRuntime(outDir: string): Promise<void> {
 	for (const name of ["approval-guard.ts", "screenshot-context.ts"]) {
 		copyFileSync(join(PACKAGE, "src", "extensions", name), join(daemon, "extensions", name));
 	}
-	const manifest = { name: "gentle-dot-runtime", private: true, type: "module", dependencies };
+	// The SDK imports the 1.0.x declarations API; its transitive range alone can
+	// select an incompatible release. Match the direct locked pin (npm EOVERRIDE).
+	const overrides = { "@earendil-works/pi-codemode": dependencies["@earendil-works/pi-codemode"] };
+	const manifest = { name: "gentle-dot-runtime", private: true, type: "module", dependencies, overrides };
 	writeFileSync(join(daemon, "package.json"), `${JSON.stringify(manifest, null, "\t")}\n`);
 	const entry = engineEntry();
 	if (process.platform === "win32") {

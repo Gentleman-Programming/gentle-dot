@@ -12,6 +12,14 @@ The Windows packaging path stages a relocatable runtime, records file hashes, bu
 - This detects later tree drift relative to that manifest. It does not authenticate the manifest, establish publisher trust, verify a PE signature, or prove all executable bytes are valid. Upstream archive checksums likewise are not a signature guarantee.
 - `smoke-install.ps1` is a separate acceptance harness: isolated per-user install, runtime-manifest check, daemon health wait, stopped-app reinstall, canary preservation, then uninstall. Its `taskkill /T /F` cleanup is test cleanup, not proof of graceful shutdown or emergency-stop behavior.
 
+## SDK compatibility pin (S2 / T14)
+
+The daemon explicitly pins `@earendil-works/pi-codemode` to the workspace-compatible `1.0.4`. The runtime producer reads that exact direct selection from `pnpm-lock.yaml` and emits it both in generated `daemon/package.json` dependencies and in npm `overrides`. Matching values avoid npm's direct-dependency `EOVERRIDE` and prevent nested SDK ranges from selecting incompatible codemode `1.4.0`.
+
+SDK `1.0.4` imports `MCP_TYPESCRIPT_PREAMBLE` from the public `@earendil-works/pi-codemode/declarations` export; codemode `1.4.0` removed that symbol. This is a producer compatibility constraint, not an upstream export patch, vendored stub, SDK/Gentle upgrade or full transitive lock. Other transitive ranges still resolve normally. The regression checks the real generated manifest and the workspace SDK's actual public declarations module without importing SDK auth or initializing providers.
+
+This source correction does not update existing staged or installed runtimes. T13's engine-entry correction is likewise source-only; installed acceptance and the unrelated global test failures remain open. No new CLI flag or installer lifecycle is introduced.
+
 ## Destination guard (S2 / S4, T6)
 
 The Windows packager now refuses destinations that cannot contain the **entire verified staged payload** within conservative legacy NSIS path limits. This is a refusal/supported-path correction, not arbitrary-long-path extraction support. No inventory exclusions, global `LongPathsEnabled` changes, elevation requirement, or Unix packaging changes are introduced.

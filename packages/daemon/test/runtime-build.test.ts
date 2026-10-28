@@ -13,6 +13,7 @@ import {
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
+import { lockedDependencies } from "../src/runtime-build.ts";
 import { tempDir } from "./helpers.ts";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
@@ -25,7 +26,12 @@ beforeAll(() => {
 	const root = tempDir();
 	out = process.platform === "win32" ? join(root, "runtime Ω &") : root;
 	const build = spawnSync(process.execPath, [BUILD, "--out", out], { encoding: "utf8" });
-	expect(build.stderr).toBe("");
+	// Go's explicit retention mode reports its scratch paths, not build diagnostics.
+	const stderr = process.env.GOFLAGS?.split(/\s+/).includes("-work")
+		? build.stderr.replace(/^WORK=[^\r\n]+\r?\n/gm, "")
+		: build.stderr;
+	expect(stderr).toBe("");
+	expect(build.stdout).toBe("");
 	expect(build.status).toBe(0);
 }, 60_000);
 
@@ -68,6 +74,7 @@ describe("build:runtime", () => {
 		expect(manifest).toMatchObject({ private: true, type: "module" });
 		expect(manifest.dependencies).toEqual({
 			"@earendil-works/pi-ai": "1.0.4",
+			"@earendil-works/pi-codemode": "1.0.4",
 			"@earendil-works/pi-coding-agent": "1.0.4",
 			"@earendil-works/pi-mcp": "1.0.4",
 			"@earendil-works/pi-tui": "1.0.4",
@@ -75,6 +82,57 @@ describe("build:runtime", () => {
 			jiti: "2.7.0",
 			ws: "8.22.0",
 		});
+	});
+
+	it("pins SDK-compatible codemode in the generated dependencies and npm overrides", () => {
+		const manifest = JSON.parse(readFileSync(join(out, "daemon", "package.json"), "utf8"));
+		const source = JSON.parse(readFileSync(join(PACKAGE, "package.json"), "utf8"));
+		const codemode = "@earendil-works/pi-codemode";
+		expect(manifest.dependencies[codemode]).toBe("1.0.4");
+		expect(source.dependencies[codemode]).toBe(manifest.dependencies[codemode]);
+		expect(lockedDependencies()[codemode]).toBe(manifest.dependencies[codemode]);
+		expect(manifest.overrides).toEqual({ [codemode]: manifest.dependencies[codemode] });
+	});
+
+	it("selects workspace codemode 1.0.4 with the SDK's required public declarations export", () => {
+		const sdk = realpathSync(join(PACKAGE, "node_modules", "@earendil-works", "pi-coding-agent"));
+		// Resolve the public import from the actual SDK's workspace dependency context.
+		// Only the pure declarations module runs: no SDK/auth, startup or providers.
+		const check = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+			import { readFileSync } from 'node:fs';
+			import { MCP_TYPESCRIPT_PREAMBLE } from '@earendil-works/pi-codemode/declarations';
+			const entry = import.meta.resolve('@earendil-works/pi-codemode/declarations');
+			const manifest = JSON.parse(readFileSync(new URL('../package.json', entry), 'utf8'));
+			process.stdout.write(JSON.stringify({ version: manifest.version, preamble: MCP_TYPESCRIPT_PREAMBLE }));
+		`], { cwd: sdk, encoding: "utf8" });
+		expect(check.error).toBeUndefined();
+		expect(check.status).toBe(0);
+		expect(check.stderr).toBe("");
+		const report = JSON.parse(check.stdout);
+		expect(report.version).toBe("1.0.4");
+		expect(typeof report.preamble).toBe("string");
+		expect(report.preamble).toContain("type CallToolResult<");
+	});
+
+	it("keeps lockedDependencies compatible with direct-only fixtures and peer suffixes", () => {
+		expect(lockedDependencies([
+			"importers:",
+			"  packages/daemon:",
+			"    dependencies:",
+			"      'old-engine':",
+			"        specifier: ^2.0.0",
+			"        version: 2.1.0(peer@3.0.0)",
+			"      '@gentle-dot/protocol':",
+			"        specifier: workspace:*",
+			"        version: link:../protocol",
+			"    devDependencies:",
+			"      test-only:",
+			"        version: 4.0.0",
+			"  packages/other:",
+			"    dependencies:",
+			"      unrelated:",
+			"        version: 5.0.0",
+		].join("\n"))).toEqual({ "old-engine": "2.1.0" });
 	});
 
 	it("runs its self-check from the output with the engine resolved inside it", () => {
