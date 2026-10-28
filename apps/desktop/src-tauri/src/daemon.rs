@@ -42,9 +42,6 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 const ORPHAN_GRACE: Duration = Duration::from_secs(10);
 /// How long the port may take to be free after a recorded orphan stopped.
 const PORT_RELEASE: Duration = Duration::from_secs(5);
-/// `<data>/daemon.pid`: `<pid> <start time>` of the daemon this app launched last.
-pub const PID_FILE: &str = "daemon.pid";
-
 /// Why the app neither starts nor uses the assistant: one it did not launch holds the port.
 pub fn foreign_daemon_message(port: u16) -> String {
     format!(
