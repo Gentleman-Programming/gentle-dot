@@ -10,6 +10,7 @@
 			"!odd",
 			"!build",
 			"!.cache",
+			"!.atl",
 			"!.vitest",
 			"!docs",
 			"!test-results",

@@ -194,7 +194,7 @@ function Assistant({ surface }: { surface: Surface }) {
 			<div className="chat chat-web">
 				<div className="status" role="status">
 					{unreachable ??
-						"This page needs your access key. Open it from the Gentle Dot menu (Open in browser)."}
+						"This page needs your access key. On your computer, open it from the Gentle Dot menu (Open in browser); on a server, open the link with #token=<your access key>."}
 				</div>
 			</div>
 		);

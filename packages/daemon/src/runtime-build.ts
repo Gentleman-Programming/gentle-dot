@@ -33,6 +33,41 @@ export function lockedDependencies(
 	return versions;
 }
 
+/**
+ * An engine package's key in the lockfile's `packages:` section: two spaces, an optional quote,
+ * the `@earendil-works/` name, `@`, then the version up to a peer suffix `(`, the quote or the `:`.
+ * For `  '@earendil-works/pi-ai@1.4.0(ws@8.22.0)':` that is `@earendil-works/pi-ai` and `1.4.0`.
+ */
+const ENGINE_PACKAGE_KEY = /^ {2}'?(?<name>@earendil-works\/[^@'/]+)@(?<version>[^(':]+)/;
+
+function enginePackageKey(line: string): { name: string; version: string } | undefined {
+	const { name, version } = ENGINE_PACKAGE_KEY.exec(line)?.groups ?? {};
+	return name && version ? { name, version } : undefined;
+}
+
+/**
+ * The lockfile's versions of the engine's own packages (`@earendil-works/*`) that the runtime
+ * does not list directly. The engine asks for them with `^` ranges, so a fresh `npm install`
+ * would take newer releases that may no longer fit it; the runtime pins them as `overrides`.
+ */
+export function lockedEnginePackages(
+	direct: Record<string, string>,
+	lockfile: string = readFileSync(LOCKFILE, "utf8"),
+): Record<string, string> {
+	const versions: Record<string, string> = {};
+	let inPackages = false;
+	for (const line of lockfile.split("\n")) {
+		if (/^\S/.test(line)) inPackages = line.trim() === "packages:";
+		const entry = inPackages ? enginePackageKey(line) : undefined;
+		if (!entry || entry.name in direct) continue;
+		const { name, version } = entry;
+		if (versions[name] && versions[name] !== version)
+			throw new Error(`The lockfile holds two versions of ${name}.`);
+		versions[name] = version;
+	}
+	return versions;
+}
+
 /** A `pi` command that runs the runtime's own Node on the engine, from wherever the runtime folder is. */
 export function piWrapper(engineEntry: string): string {
 	return `#!/bin/sh
@@ -92,7 +127,13 @@ export async function buildRuntime(outDir: string): Promise<void> {
 	for (const name of ["approval-guard.ts", "screenshot-context.ts"]) {
 		copyFileSync(join(PACKAGE, "src", "extensions", name), join(daemon, "extensions", name));
 	}
-	const manifest = { name: "gentle-dot-runtime", private: true, type: "module", dependencies };
+	const manifest = {
+		name: "gentle-dot-runtime",
+		private: true,
+		type: "module",
+		dependencies,
+		overrides: lockedEnginePackages(dependencies),
+	};
 	writeFileSync(join(daemon, "package.json"), `${JSON.stringify(manifest, null, "\t")}\n`);
 	writeFileSync(join(outDir, "bin", "pi"), piWrapper(engineEntry()), { mode: 0o755 });
 }

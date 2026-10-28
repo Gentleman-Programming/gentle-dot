@@ -14,6 +14,12 @@ apps/desktop/src-tauri/gen/
 /build/
 .DS_Store
 
-# Declarations emitted next to sources by accident, except hand-written ones
+# Declarations emitted next to sources by accident
 packages/*/src/**/*.d.ts
-!packages/daemon/src/builderbot.d.ts
+
+# Explicit Windows addon build outputs
+/packages/daemon/native/*.node
+/packages/daemon/native/*.obj
+/packages/daemon/native/*.lib
+/packages/daemon/native/*.exp
+/packages/daemon/native/*.pdb

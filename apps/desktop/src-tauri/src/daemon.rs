@@ -8,22 +8,34 @@
 //! names the pid and the process start time); otherwise it refuses with
 //! [`foreign_daemon_message`], which names the exit. An app without a channel attaches as before.
 
+// Windows native launch adapter; Node channel adoption/exclusion remains separately guarded.
+#[cfg(any(windows, test))]
+mod windows_record;
+
+mod launch;
+pub use launch::*;
+#[cfg(any(windows, test))]
+mod windows;
+
 pub use crate::app_channel::APP_FD;
 use crate::app_channel::{AppChannel, Handler};
 use crate::health::check_health;
-use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::fs;
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::OpenOptions;
 use std::io;
+#[cfg(unix)]
 use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ExitStatus};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-
-/// Origins of the `tauri dev` server, allowed only on daemons spawned by debug builds.
-pub const DEV_ALLOWED_ORIGINS: &str = r#"["http://127.0.0.1:5173","http://localhost:5173"]"#;
 
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(300);
 const STOP_GRACE: Duration = Duration::from_secs(5);
@@ -31,9 +43,6 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 const ORPHAN_GRACE: Duration = Duration::from_secs(10);
 /// How long the port may take to be free after a recorded orphan stopped.
 const PORT_RELEASE: Duration = Duration::from_secs(5);
-/// `<data>/daemon.pid`: `<pid> <start time>` of the daemon this app launched last.
-pub const PID_FILE: &str = "daemon.pid";
-
 /// Why the app neither starts nor uses the assistant: one it did not launch holds the port.
 pub fn foreign_daemon_message(port: u16) -> String {
     format!(
@@ -45,6 +54,7 @@ runs, or quit the process listening on port {port}), then choose \"Restart assis
 }
 
 /// A daemon this app launched, as the pid file records it.
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Launched {
     pub pid: u32,
@@ -79,13 +89,14 @@ pub fn process_started(pid: u32) -> Option<u64> {
     fields.get(19)?.parse().ok()
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
 pub fn process_started(_pid: u32) -> Option<u64> {
     None
 }
 
 /// Records the daemon just spawned as `pid` (private, 0600). A new file in the same folder renamed
 /// over the pid file: never written through a symlink there, and never seen half written.
+#[cfg(unix)]
 pub fn record_launch(data_dir: &Path, pid: u32) -> io::Result<()> {
     let started = process_started(pid).ok_or_else(|| io::Error::other("the assistant is not running"))?;
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
@@ -109,10 +120,12 @@ pub fn record_launch(data_dir: &Path, pid: u32) -> io::Result<()> {
 }
 
 /// A pid file holds `<pid> <start time>`, far below this.
+#[cfg(unix)]
 const PID_FILE_MAX: u64 = 64;
 
 /// Whether a pid read from the pid file may name a daemon to signal: never this app, its parent,
 /// init, or the kernel.
+#[cfg(unix)]
 fn may_be_daemon(pid: u32) -> bool {
     // SAFETY: getppid(2) has no preconditions.
     let parent = u32::try_from(unsafe { libc::getppid() }).ok();
@@ -121,6 +134,7 @@ fn may_be_daemon(pid: u32) -> bool {
 
 /// The daemon the pid file names, if it holds a launch. Only a small regular file is read: a
 /// symlink, a FIFO, or anything else there is ignored (opened without following or blocking).
+#[cfg(unix)]
 pub fn recorded_launch(data_dir: &Path) -> Option<Launched> {
     let file = OpenOptions::new()
         .read(true)
@@ -139,11 +153,13 @@ pub fn recorded_launch(data_dir: &Path) -> Option<Launched> {
 }
 
 /// The recorded daemon, while that same process still runs (a reused pid has another start time).
+#[cfg(unix)]
 pub fn live_orphan(data_dir: &Path) -> Option<Launched> {
     recorded_launch(data_dir).filter(|launch| process_started(launch.pid) == Some(launch.started))
 }
 
 /// Removes the pid file when it names `pid`.
+#[cfg(unix)]
 fn forget_launch(data_dir: &Path, pid: u32) {
     if recorded_launch(data_dir).is_some_and(|launch| launch.pid == pid) {
         let _ = fs::remove_file(data_dir.join(PID_FILE));
@@ -152,6 +168,7 @@ fn forget_launch(data_dir: &Path, pid: u32) {
 
 /// SIGTERM to a recorded daemon that is not this app's child, then SIGKILL after `grace`.
 /// Only the process the record names: a pid now used by another process is left alone.
+#[cfg(unix)]
 fn stop_orphan(launch: Launched, grace: Duration) {
     let Ok(pid) = libc::pid_t::try_from(launch.pid) else {
         return;
@@ -174,6 +191,7 @@ fn stop_orphan(launch: Launched, grace: Duration) {
 }
 
 /// What [`Daemon::ensure_running`] does, from what it finds.
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartPlan {
     /// Use the daemon that answers (an app without a channel loses nothing by attaching).
@@ -186,6 +204,7 @@ pub enum StartPlan {
     Refuse,
 }
 
+#[cfg(unix)]
 pub fn start_plan(healthy: bool, owns_child: bool, wants_channel: bool, orphan: bool) -> StartPlan {
     if !wants_channel {
         return if healthy { StartPlan::Attach } else { StartPlan::Spawn };
@@ -201,57 +220,14 @@ pub fn start_plan(healthy: bool, owns_child: bool, wants_channel: bool, orphan: 
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LaunchSpec {
-    pub program: String,
-    pub args: Vec<String>,
-    pub envs: Vec<(String, String)>,
-}
-
-/// `<node> <daemon script>` (S29.5). With a bundled runtime (`<runtime>/daemon/cli.mjs`
-/// exists) that is the runtime's own Node and daemon, a PATH of the runtime plus the
-/// system folders, and `GENTLE_DOT_RUNTIME`; otherwise the build-time paths and PATH.
-/// `GENTLE_DOT_NODE` and `GENTLE_DOT_DAEMON_SCRIPT` override the program and script in both.
-pub fn launch_spec(env: impl Fn(&str) -> Option<String>, dev: bool, runtime: Option<&Path>) -> LaunchSpec {
-    let pick = |key: &str, fallback: String| env(key).filter(|v| !v.is_empty()).unwrap_or(fallback);
-    let bundled = runtime.filter(|dir| dir.join("daemon/cli.mjs").is_file());
-    let (node, script, mut envs) = match bundled {
-        Some(dir) => {
-            let root = dir.display().to_string();
-            let path = format!("{root}/bin:{root}/node/bin:/usr/bin:/bin:/usr/sbin:/sbin");
-            (
-                format!("{root}/node/bin/node"),
-                format!("{root}/daemon/cli.mjs"),
-                vec![("PATH".to_string(), path), ("GENTLE_DOT_RUNTIME".to_string(), root)],
-            )
-        }
-        None => (
-            env!("GENTLE_DOT_BUILD_NODE").to_string(),
-            env!("GENTLE_DOT_BUILD_DAEMON_SCRIPT").to_string(),
-            vec![("PATH".to_string(), env!("GENTLE_DOT_BUILD_PATH").to_string())],
-        ),
-    };
-    if dev {
-        envs.push(("GENTLE_DOT_ALLOWED_ORIGINS".into(), DEV_ALLOWED_ORIGINS.into()));
-    }
-    LaunchSpec {
-        program: pick("GENTLE_DOT_NODE", node),
-        args: vec![pick("GENTLE_DOT_DAEMON_SCRIPT", script)],
-        envs,
-    }
-}
-
-/// Where a bundled runtime would live: `GENTLE_DOT_RUNTIME_DIR`, else the app's `runtime`
-/// resource. `launch_spec` uses it only when it holds `daemon/cli.mjs`.
-pub fn runtime_dir(env: impl Fn(&str) -> Option<String>, resource_dir: Option<PathBuf>) -> Option<PathBuf> {
-    env("GENTLE_DOT_RUNTIME_DIR")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| resource_dir.map(|dir| dir.join("runtime")))
+#[cfg(windows)]
+pub fn open_private_log(data_dir: &Path) -> io::Result<File> {
+    windows::open_private_log(data_dir)
 }
 
 /// Opens `<data_dir>/daemon.log` for appending. The folder is 0700 and the log
 /// 0600 (looser modes are repaired) because the daemon's output is private.
+#[cfg(unix)]
 pub fn open_private_log(data_dir: &Path) -> io::Result<File> {
     fs::DirBuilder::new().recursive(true).mode(0o700).create(data_dir)?;
     fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))?;
@@ -260,37 +236,14 @@ pub fn open_private_log(data_dir: &Path) -> io::Result<File> {
     Ok(log)
 }
 
-/// A spawned process the app polls, stops, and reaps: a `std::process::Child`, or on macOS a
-/// daemon spawned with its TCC responsibility disclaimed (`disclaimed`).
-pub trait ChildProcess: Send {
-    fn id(&self) -> u32;
-    /// The exit status once the process ended (reaping it), `None` while it runs.
-    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>>;
-    /// Sends SIGKILL unless the process was already reaped.
-    fn kill(&mut self) -> io::Result<()>;
-    fn wait(&mut self) -> io::Result<ExitStatus>;
-}
-
-impl ChildProcess for Child {
-    fn id(&self) -> u32 {
-        Child::id(self)
-    }
-
-    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-        Child::try_wait(self)
-    }
-
-    fn kill(&mut self) -> io::Result<()> {
-        Child::kill(self)
-    }
-
-    fn wait(&mut self) -> io::Result<ExitStatus> {
-        Child::wait(self)
-    }
+#[cfg(windows)]
+pub fn channel_pair() -> io::Result<(crate::app_channel::ChannelStream, ChildEndpoint)> {
+    crate::app_channel::windows::channel_pair()
 }
 
 /// A connected pair of Unix sockets: the app's end, and the daemon's, numbered above [`APP_FD`] so
 /// placing it on fd 3 in the child never collides with it. Both are close-on-exec here.
+#[cfg(unix)]
 pub fn channel_pair() -> io::Result<(UnixStream, OwnedFd)> {
     let (app, daemon) = UnixStream::pair()?;
     let daemon = OwnedFd::from(daemon);
@@ -321,7 +274,7 @@ fn spawn_daemon(spec: &LaunchSpec, log: File, channel: Option<BorrowedFd<'_>>) -
 /// descriptor some library of the app opened without close-on-exec never reaches the daemon. Node
 /// then marks fd 3 close-on-exec at its own startup (libuv's `uv_disable_stdio_inheritance`), so
 /// the daemon's children never get it either (`app-channel.ts` `childInherits` checks that).
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn spawn_daemon(spec: &LaunchSpec, log: File, channel: Option<BorrowedFd<'_>>) -> io::Result<Box<dyn ChildProcess>> {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
@@ -353,9 +306,22 @@ fn spawn_daemon(spec: &LaunchSpec, log: File, channel: Option<BorrowedFd<'_>>) -
     Ok(Box::new(command.spawn()?))
 }
 
+#[cfg(windows)]
+fn spawn_daemon(spec: &LaunchSpec, log: File, channel: Option<&ChildEndpoint>, data_dir: &Path) -> Result<windows::WindowsChild, windows::SpawnFailure> {
+    let channel = channel.ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported,
+        "Windows channel-less launch awaits its equivalent graceful-stop adapter"))?;
+    windows::spawn(spec, log, channel, data_dir)
+}
+
+/// Checked Windows owned shutdown; keep the dedicated channel open until this succeeds.
+#[cfg(windows)]
+pub fn stop_child(child: &mut dyn ChildProcess, grace: Duration) -> io::Result<()> {
+    child.shutdown_owned(grace)
+}
+
 /// Marks every descriptor from `first` up close-on-exec. Called between fork and exec: system
 /// calls only.
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn cloexec_from(first: libc::c_int) {
     #[cfg(target_os = "linux")]
     if let Ok(low) = libc::c_uint::try_from(first) {
@@ -380,6 +346,7 @@ fn cloexec_from(first: libc::c_int) {
 }
 
 /// Sends SIGTERM, waits up to `grace` for a clean exit, then kills.
+#[cfg(unix)]
 pub fn stop_child(child: &mut dyn ChildProcess, grace: Duration) {
     if !matches!(child.try_wait(), Ok(None)) {
         return;
@@ -410,11 +377,21 @@ pub enum RestartOutcome {
     Failed(String),
 }
 
+#[cfg(windows)]
+struct WindowsRecovery {
+    owner: windows::RecoveredLaunch,
+    // First failure is latched: never reconnect/re-send or reacquire this launch.
+    failure: Option<String>,
+}
+
 pub struct Daemon {
     port: u16,
     data_dir: PathBuf,
     runtime_dir: Option<PathBuf>,
     child: Mutex<Option<Box<dyn ChildProcess>>>,
+    /// Every access is serialized by child first, including partial recovery owners.
+    #[cfg(windows)]
+    recovered: Mutex<Option<WindowsRecovery>>,
     /// The private channel to the daemon this app spawned; attached daemons have none.
     channel: Mutex<Option<Arc<AppChannel>>>,
     /// Serves the daemon's requests; without it no channel is made.
@@ -437,6 +414,8 @@ impl Daemon {
             data_dir,
             runtime_dir,
             child: Mutex::new(None),
+            #[cfg(windows)]
+            recovered: Mutex::new(None),
             channel: Mutex::new(None),
             handler: None,
             refused: Mutex::new(None),
@@ -460,13 +439,13 @@ impl Daemon {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn with_launch(mut self, spec: LaunchSpec) -> Self {
         self.launch = Some(spec);
         self
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn with_health(mut self, health: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
         self.health = Some(health);
         self
@@ -535,6 +514,142 @@ impl Daemon {
         Ok(())
     }
 
+    #[cfg(windows)]
+    fn windows_child_admission(&self, child: &Option<Box<dyn ChildProcess>>) -> Result<(), String> {
+        if child.as_ref().is_some_and(|child| child.launch_failed()) {
+            let mut refused = self.refused.lock().unwrap();
+            // Keep the original startup and cleanup errors for this retained owner. A later
+            // admission refusal must not erase the evidence explaining why it is retained.
+            let reason = refused.get_or_insert_with(||
+                "a failed Windows launch retains unfinished owned cleanup; stop must be retried".to_string());
+            return Err(reason.clone());
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn windows_channel_admission(&self, channel: &Option<Arc<AppChannel>>) -> Result<(), String> {
+        // Caller holds child -> channel. A retained logically closed channel must be cleared
+        // by explicit successful checked stop, never forgotten or implicitly replaced by start.
+        if let Some(channel) = channel.as_ref().filter(|channel| !channel.is_open()) {
+            let detail = channel.close_error().map_or_else(
+                || "native closure not yet established".to_string(),
+                |code| format!("Windows error {code}"),
+            );
+            let reason = format!("the assistant's channel shutdown is unfinished ({detail})");
+            *self.refused.lock().unwrap() = Some(reason.clone());
+            return Err(reason);
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn windows_refuse(&self, reason: String) -> String {
+        self.refused.lock().unwrap().get_or_insert(reason).clone()
+    }
+
+    // Stop callers need this attempt's reason, not an unrelated sticky admission refusal.
+    #[cfg(windows)]
+    fn windows_stop_failure(&self, reason: String) -> Result<(), String> {
+        self.windows_refuse(reason.clone());
+        Err(reason)
+    }
+
+    #[cfg(windows)]
+    fn windows_wait_port(&self) -> Result<(), String> {
+        let deadline = Instant::now() + PORT_RELEASE;
+        while self.is_healthy() && Instant::now() < deadline { thread::sleep(Duration::from_millis(100)); }
+        if self.is_healthy() { return Err(foreign_daemon_message(self.port)); }
+        Ok(())
+    }
+
+    /// Caller holds child throughout acquisition, stop, exact deletion and port release.
+    /// The installed failure latch prevents all later admissions and stop reconnects.
+    /// Retirement deletes the exact launch record but leaves the owner witness as a
+    /// non-authoritative tombstone, removed by the next launch's `publish_owner`.
+    /// A leftover witness never becomes stop authority (#129).
+    #[cfg(windows)]
+    fn windows_recovery_admission(&self, child: &Option<Box<dyn ChildProcess>>) -> Result<(), String> {
+        if child.is_some() { return Ok(()); }
+        let mut slot = self.recovered.lock().unwrap();
+        if slot.is_none() {
+            windows::ensure_record_directory(&self.data_dir)
+                .map_err(|error| self.windows_refuse(format!("Windows record ancestry admission failed: {error}")))?;
+            // A launch whose owning app exited needs no stop: the kernel already ended its
+            // Job. A witnessed launch that is not proven ended is refused; only legacy records
+            // without a witness continue to the existing recovered-launch route.
+            match windows::retire_if_owner_exited(&self.data_dir) {
+                Ok(true) => {
+                    eprintln!("gentle-dot: previous Windows launch retired after its owning app exited");
+                    return Ok(());
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    let reason = format!("Windows previous launch admission refused: {error}");
+                    *self.refused.lock().unwrap() = Some(reason.clone());
+                    return Err(reason);
+                }
+            }
+            match windows::acquire_recovered_launch(&self.data_dir) {
+                Ok(None) => return Ok(()),
+                Ok(Some(owner)) => *slot = Some(WindowsRecovery { owner, failure: None }),
+                Err(failure) => {
+                    let reason = format!("Windows recorded launch admission refused: {}", failure.error);
+                    if let Some(owner) = failure.retained {
+                        *slot = Some(WindowsRecovery { owner, failure: Some(reason.clone()) });
+                    }
+                    *self.refused.lock().unwrap() = Some(reason.clone());
+                    return Err(reason);
+                }
+            }
+        }
+        let recovery = slot.as_mut().unwrap();
+        if let Some(reason) = &recovery.failure {
+            *self.refused.lock().unwrap() = Some(reason.clone());
+            return Err(reason.clone());
+        }
+        let completion = recovery.owner.stop(ORPHAN_GRACE)
+            .and_then(|()| recovery.owner.delete_record())
+            .map_err(|error| format!("Windows recorded launch shutdown/deletion is unfinished: {error}"))
+            .and_then(|()| self.windows_wait_port());
+        if let Err(reason) = completion {
+            recovery.failure = Some(reason.clone());
+            *self.refused.lock().unwrap() = Some(reason.clone());
+            return Err(reason);
+        }
+        drop(slot.take());
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn start(&self, timeout: Duration) -> Result<(), String> {
+        let mut slot = self.child.lock().unwrap();
+        self.windows_child_admission(&slot)?;
+        self.windows_channel_admission(&self.channel.lock().unwrap())?;
+        self.windows_recovery_admission(&slot)?;
+        let owns_child = match slot.as_mut() {
+            Some(child) => match child.try_wait() {
+                Ok(None) => true,
+                Ok(Some(_)) => false,
+                Err(error) => {
+                    child.retain_failure();
+                    return Err(self.windows_refuse(format!("Windows owned launch status is uncertain: {error}")));
+                }
+            },
+            None => false,
+        };
+        *self.refused.lock().unwrap() = None;
+        if !owns_child && slot.is_none() && self.is_healthy() {
+            if self.handler.is_none() { return Ok(()); }
+            let reason = foreign_daemon_message(self.port);
+            *self.refused.lock().unwrap() = Some(reason.clone());
+            return Err(reason);
+        }
+        self.spawn_locked(slot)?;
+        self.wait_ready(timeout)
+    }
+
+    #[cfg(unix)]
     fn start(&self, timeout: Duration) -> Result<(), String> {
         let wants_channel = self.handler.is_some();
         let owns_child = self.owns_running();
@@ -569,32 +684,131 @@ impl Daemon {
         self.wait_ready(timeout)
     }
 
+    #[cfg(any(unix, test))]
     fn spawn(&self) -> Result<(), String> {
-        let mut slot = self.child.lock().unwrap();
+        self.spawn_locked(self.child.lock().unwrap())
+    }
+
+    fn spawn_locked(&self, mut slot: std::sync::MutexGuard<'_, Option<Box<dyn ChildProcess>>>) -> Result<(), String> {
+        #[cfg(windows)]
+        let mut channel_slot = self.channel.lock().unwrap();
+        // Recheck under both ownership guards before any launch work; keep the channel
+        // installed/locked until replacement installation has completed.
+        #[cfg(windows)]
+        self.windows_child_admission(&slot)?;
+        #[cfg(windows)]
+        self.windows_channel_admission(&channel_slot)?;
         if let Some(child) = slot.as_mut() {
-            if matches!(child.try_wait(), Ok(None)) {
-                return Ok(());
+            #[cfg(unix)]
+            if matches!(child.try_wait(), Ok(None)) { return Ok(()); }
+            #[cfg(windows)]
+            match child.try_wait() {
+                Ok(None) => return Ok(()),
+                Ok(Some(_)) => child.shutdown_owned(Duration::ZERO)
+                    .map_err(|error| self.windows_refuse(format!("cannot replace unfinished owned Windows daemon: {error}")))?,
+                Err(error) => {
+                    child.retain_failure();
+                    return Err(self.windows_refuse(format!("cannot establish owned Windows daemon status: {error}")));
+                }
             }
         }
-        let spec = self.launch.clone().unwrap_or_else(|| {
-            launch_spec(|key| std::env::var(key).ok(), cfg!(debug_assertions), self.runtime_dir.as_deref())
-        });
+        #[cfg(windows)]
+        {
+            if slot.is_some() {
+                if let Err(reason) = self.windows_wait_port() {
+                    slot.as_mut().unwrap().retain_failure();
+                    return Err(self.windows_refuse(reason));
+                }
+                if let Some(channel) = channel_slot.as_ref() {
+                    if let Err(error) = channel.close() {
+                        return Err(self.windows_refuse(format!("cannot replace unfinished Windows channel: {error}")));
+                    }
+                }
+                drop(channel_slot.take());
+                drop(slot.take());
+            }
+            // Direct spawn has the same fallible admission, under the same guard.
+            self.windows_recovery_admission(&slot)?;
+            if self.is_healthy() { return Err(self.windows_refuse(foreign_daemon_message(self.port))); }
+            *self.refused.lock().unwrap() = None;
+        }
+        #[cfg(windows)]
+        if self.handler.is_none() {
+            let reason = "Windows channel-less launch awaits its equivalent graceful-stop adapter".to_string();
+            *self.refused.lock().unwrap() = Some(reason.clone());
+            return Err(reason);
+        }
+        let spec = match &self.launch {
+            Some(spec) => spec.clone(),
+            None => {
+                validate_packaged_runtime(
+                    |key| std::env::var(key).ok(),
+                    cfg!(windows) && !cfg!(debug_assertions)
+                        && option_env!("GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED") == Some("1"),
+                    self.runtime_dir.as_deref(),
+                )?;
+                launch_spec(|key| std::env::var(key).ok(), cfg!(debug_assertions), self.runtime_dir.as_deref())
+            }
+        };
         let log = open_private_log(&self.data_dir).map_err(|e| format!("cannot open daemon.log: {e}"))?;
         let pair = match &self.handler {
             Some(_) => Some(channel_pair().map_err(|e| format!("cannot open the assistant's channel: {e}"))?),
             None => None,
         };
+        #[cfg(unix)]
         let channel_end = pair.as_ref().map(|(_, daemon_end)| {
             use std::os::fd::AsFd;
             daemon_end.as_fd()
         });
+        #[cfg(unix)]
         let child = spawn_daemon(&spec, log, channel_end).map_err(|e| format!("cannot start {}: {e}", spec.program))?;
+        #[cfg(windows)]
+        let mut child = match spawn_daemon(&spec, log, pair.as_ref().map(|(_, endpoint)| endpoint), &self.data_dir) {
+            Ok(child) => child,
+            Err(mut failure) => {
+                let reason = format!("cannot start Windows daemon: {}; cleanup: {}", failure.primary,
+                    failure.cleanup.as_ref().map_or_else(|| "no unfinished cleanup".to_string(), ToString::to_string));
+                if let Some(owner) = failure.unfinished.take() { *slot = Some(Box::new(owner)); }
+                *self.refused.lock().unwrap() = Some(reason.clone());
+                return Err(reason);
+            }
+        };
         // A relaunched app can then tell this daemon from one it did not launch (S35.2).
+        #[cfg(unix)]
         if let Err(error) = record_launch(&self.data_dir, child.id()) {
             eprintln!("gentle-dot: cannot record the assistant's pid: {error}");
         }
-        *slot = Some(child);
+        #[cfg(windows)]
+        {
+            // No channel-less adapter is claimed. Constructor above refuses that route.
+            let reader = match (pair, self.handler.as_ref()) {
+                (Some((endpoint, _)), Some(handler)) => AppChannel::start(endpoint, handler.clone()),
+                _ => Err(io::Error::new(io::ErrorKind::Unsupported, "Windows channel-present launch required")),
+            };
+            let channel = match reader {
+                Ok(channel) => channel,
+                Err(error) => {
+                    child.reject_launch();
+                    let cleanup = child.shutdown_owned(Duration::ZERO);
+                    let reason = format!("cannot establish Windows daemon channel: {error}; cleanup: {}",
+                        cleanup.as_ref().err().map_or_else(|| "completed".to_string(), ToString::to_string));
+                    // Even completed channel-start failure retires only after an explicit
+                    // checked stop/port release; do not discard its launch diagnosis.
+                    *slot = Some(Box::new(child));
+                    *self.refused.lock().unwrap() = Some(reason.clone());
+                    return Err(reason);
+                }
+            };
+            *slot = Some(Box::new(child));
+            *channel_slot = Some(channel.clone());
+            drop(channel_slot);
+            drop(slot);
+            if let Some(handler) = &self.handler { handler.opened(&channel); }
+        }
+        #[cfg(unix)]
+        { *slot = Some(child); }
         // The daemon's end now lives only in the daemon.
+        #[cfg(unix)]
         if let (Some((app_end, _)), Some(handler)) = (pair, &self.handler) {
             match AppChannel::start(app_end, handler.clone()) {
                 Ok(channel) => {
@@ -610,19 +824,86 @@ impl Daemon {
     /// True while a daemon spawned by this app is still running.
     pub fn owns_running(&self) -> bool {
         let mut slot = self.child.lock().unwrap();
-        slot.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+        #[cfg(unix)]
+        { slot.as_mut().is_some_and(|child| matches!(child.try_wait(), Ok(None))) }
+        #[cfg(windows)]
+        {
+            match slot.as_mut() {
+                None => false,
+                Some(child) => match child.try_wait() {
+                    Ok(None) => true,
+                    Ok(Some(_)) => false,
+                    Err(error) => {
+                        child.retain_failure();
+                        self.windows_refuse(format!("Windows owned launch status is uncertain: {error}"));
+                        false
+                    }
+                },
+            }
+        }
     }
 
     /// Stops the daemon only if this app spawned it, and closes its channel.
+    #[cfg(unix)]
     pub fn stop(&self) {
         let child = self.child.lock().unwrap().take();
         if let Some(mut child) = child {
             stop_child(child.as_mut(), STOP_GRACE);
             forget_launch(&self.data_dir, child.id());
         }
-        if let Some(channel) = self.channel.lock().unwrap().take() {
+        let channel = self.channel.lock().unwrap().take();
+        if let Some(channel) = channel {
             channel.close();
         }
+    }
+
+    /// Windows keeps ownership installed until checked close succeeds. The child guard
+    /// serializes stop with both start-plan admission and actual launch/replacement.
+    /// Returns this checked stop's outcome independently of the admission refusal latch.
+    #[cfg(windows)]
+    pub fn stop(&self) -> Result<(), String> {
+        let mut child_slot = self.child.lock().unwrap();
+        let mut channel_slot = self.channel.lock().unwrap();
+        // Only failed-launch cleanup may close first: its listener may not exist.
+        // Established launches must authenticate while fd3 remains open, otherwise
+        // daemon-side EOF aborts drain and prevents a clean managed root exit.
+        let close_first = child_slot.as_ref().map_or(true, |child| !child.shutdown_requires_channel());
+        if close_first {
+            if let Some(channel) = channel_slot.as_ref() {
+                if let Err(error) = channel.close() {
+                    return self.windows_stop_failure(format!("the assistant's channel shutdown is unfinished: {error}"));
+                }
+            }
+        }
+        if let Some(child) = child_slot.as_mut() {
+            if child.shutdown_requires_channel() && channel_slot.is_none() {
+                let reason = "Windows channel-less graceful shutdown awaits its equivalent adapter".to_string();
+                *self.refused.lock().unwrap() = Some(reason.clone());
+                return Err(reason);
+            }
+            let grace = if child.shutdown_requires_channel() { STOP_GRACE } else { Duration::ZERO };
+            if let Err(error) = stop_child(child.as_mut(), grace) {
+                return self.windows_stop_failure(format!("owned Windows daemon shutdown/deletion is unfinished: {error}"));
+            }
+            if let Err(reason) = self.windows_wait_port() {
+                child.retain_failure();
+                return self.windows_stop_failure(reason);
+            }
+        }
+        if !close_first {
+            if let Some(channel) = channel_slot.as_ref() {
+                if let Err(error) = channel.close() {
+                    // Even after exact retirement, unfinished parent I/O retains both
+                    // installed owners. Never turn cancellation uncertainty into success.
+                    return self.windows_stop_failure(format!("the assistant's channel shutdown is unfinished: {error}"));
+                }
+            }
+        }
+        let has_recovered = self.recovered.lock().unwrap().is_some();
+        if has_recovered { self.windows_recovery_admission(&child_slot)?; }
+        drop(child_slot.take());
+        drop(channel_slot.take());
+        Ok(())
     }
 
     /// Blocking: call off the main thread.
@@ -630,7 +911,22 @@ impl Daemon {
         if self.handler.is_none() && !self.owns_running() && self.is_healthy() {
             return RestartOutcome::External;
         }
+        #[cfg(unix)]
         self.stop();
+        #[cfg(windows)]
+        if let Err(reason) = self.stop() { return RestartOutcome::Failed(reason); }
+        #[cfg(windows)]
+        {
+            let child = self.child.lock().unwrap();
+            let channel = self.channel.lock().unwrap();
+            if self.recovered.lock().unwrap().is_some()
+                || child.as_ref().is_some_and(|child| child.launch_failed())
+                || channel.as_ref().is_some_and(|channel| !channel.is_open())
+                || (child.is_some() && channel.is_none()) {
+                return RestartOutcome::Failed(self.refusal().unwrap_or_else(||
+                    "owned Windows daemon shutdown is unfinished".into()));
+            }
+        }
         match self.ensure_running(timeout) {
             Ok(()) => RestartOutcome::Restarted,
             Err(_) if self.refusal().is_some() => RestartOutcome::External,
@@ -639,7 +935,341 @@ impl Daemon {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
+mod windows_ownership_tests {
+    use super::*;
+    use std::process::ExitStatus;
+    use std::sync::{mpsc, Barrier, TryLockError};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RefusingHandler;
+    impl Handler for RefusingHandler {
+        fn approve(&self, _: &crate::approvals::ApprovalRequest) -> bool { false }
+    }
+    // Only the existing-child readiness branch is synthetic. No process is launched and
+    // these tests make no native-launch, adoption, or descendant-exclusion claim.
+    struct LiveChild;
+    impl ChildProcess for LiveChild {
+        fn id(&self) -> u32 { 1 }
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> { Ok(None) }
+        fn kill(&mut self) -> io::Result<()> { panic!("no native child in ownership test") }
+        fn wait(&mut self) -> io::Result<ExitStatus> { panic!("no native child in ownership test") }
+    }
+
+    struct FailedChild;
+    impl ChildProcess for FailedChild {
+        fn id(&self) -> u32 { 2 }
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> { Err(io::Error::other("unfinished launch")) }
+        fn kill(&mut self) -> io::Result<()> { panic!("no native child in admission test") }
+        fn wait(&mut self) -> io::Result<ExitStatus> { panic!("no native child in admission test") }
+        fn launch_failed(&self) -> bool { true }
+    }
+
+    /// A daemon this app did not launch: it answers `/health` on a port of its own.
+    fn foreign_daemon() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                use std::io::{Read, Write};
+                let _ = stream.read(&mut [0u8; 512]);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+            }
+        });
+        port
+    }
+
+    // Formerly the unavailable seam's Windows test (#99); now through the real admission.
+    #[test]
+    fn an_app_with_a_channel_refuses_a_daemon_it_did_not_launch() {
+        let port = foreign_daemon();
+        // An empty private directory: no launch record, so admission reaches the health check.
+        let dir = std::env::temp_dir().join(format!("gentle-foreign-{}-{port}", std::process::id()));
+        windows::ensure_record_directory(&dir).unwrap();
+        let daemon = Daemon::new(port, dir.clone(), None).with_channel(Arc::new(RefusingHandler));
+        assert_eq!(daemon.ensure_running(Duration::from_secs(5)), Err(foreign_daemon_message(port)));
+        assert_eq!(daemon.refusal(), Some(foreign_daemon_message(port)));
+        assert!(!daemon.owns_running());
+        assert!(daemon.channel().is_none());
+        assert_eq!(daemon.wait_ready(Duration::from_millis(300)), Err(foreign_daemon_message(port)));
+        assert_eq!(daemon.restart(Duration::from_secs(2)), RestartOutcome::External);
+        assert!(!dir.join(PID_FILE).exists());
+    }
+
+    #[test]
+    fn repeated_failed_launch_admission_preserves_primary_and_cleanup_errors() {
+        let ready = Arc::new(AtomicUsize::new(0));
+        let daemon = Daemon::new(1, PathBuf::new(), None).on_ready(Arc::new({
+            let ready = ready.clone(); move || { ready.fetch_add(1, Ordering::SeqCst); }
+        }));
+        *daemon.child.lock().unwrap() = Some(Box::new(FailedChild));
+        let original = "cannot start node.exe: resume failed; owned cleanup failed".to_string();
+        *daemon.refused.lock().unwrap() = Some(original.clone());
+        for with_closed_channel in [false, true] {
+            let peer = if with_closed_channel {
+                let (endpoint, peer) = channel_pair().unwrap();
+                let channel = AppChannel::start(endpoint, Arc::new(RefusingHandler)).unwrap();
+                channel.close().unwrap();
+                assert!(!channel.is_open());
+                *daemon.channel.lock().unwrap() = Some(channel);
+                Some(peer)
+            } else { None };
+            for _ in 0..2 {
+                assert_eq!(daemon.ensure_running(Duration::ZERO), Err(original.clone()));
+                assert_eq!(daemon.spawn(), Err(original.clone()));
+                assert_eq!(daemon.refusal(), Some(original.clone()));
+                assert!(daemon.child.lock().unwrap().as_ref().unwrap().launch_failed());
+                assert_eq!(ready.load(Ordering::SeqCst), 0);
+            }
+            drop(peer);
+        }
+        drop(daemon.channel.lock().unwrap().take());
+        drop(daemon.child.lock().unwrap().take());
+    }
+
+    #[test]
+    fn authenticated_stop_failure_keeps_channel_open_and_both_owners() {
+        struct StopChild { channel: Arc<AppChannel>, calls: Arc<AtomicUsize> }
+        impl ChildProcess for StopChild {
+            fn id(&self) -> u32 { 2 }
+            fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> { Ok(None) }
+            fn kill(&mut self) -> io::Result<()> { panic!("no native process in ordering test") }
+            fn wait(&mut self) -> io::Result<ExitStatus> { panic!("no native process in ordering test") }
+            fn shutdown_owned(&mut self, _: Duration) -> io::Result<()> {
+                assert!(self.channel.is_open(), "authenticated request must precede channel close");
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(io::Error::other("synthetic authenticated stop uncertainty"))
+            }
+        }
+        let daemon = Daemon::new(1, PathBuf::new(), None);
+        let (endpoint, peer) = channel_pair().unwrap();
+        let channel = AppChannel::start(endpoint, Arc::new(RefusingHandler)).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        *daemon.child.lock().unwrap() = Some(Box::new(StopChild {
+            channel: channel.clone(), calls: calls.clone(),
+        }));
+        *daemon.channel.lock().unwrap() = Some(channel.clone());
+        let stale = "synthetic unrelated startup refusal".to_string();
+        *daemon.refused.lock().unwrap() = Some(stale.clone());
+        for _ in 0..2 {
+            // Debug permits a behavioral RED against the existing unit-returning stop,
+            // without requiring a missing diagnostic API to fail compilation instead.
+            let diagnostic = format!("{:?}", daemon.stop());
+            assert!(channel.is_open());
+            assert!(daemon.child.lock().unwrap().is_some());
+            assert!(Arc::ptr_eq(daemon.channel.lock().unwrap().as_ref().unwrap(), &channel));
+            assert_eq!(daemon.refusal(), Some(stale.clone()), "retain the admission latch independently");
+            assert_eq!(diagnostic, format!("{:?}", Err::<(), String>(
+                "owned Windows daemon shutdown/deletion is unfinished: synthetic authenticated stop uncertainty".into())),
+                "exit needs this stop attempt's exact reason, not the stale admission refusal");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        drop(daemon.child.lock().unwrap().take());
+        let _ = daemon.stop(); // Cleanup only: the child was already dropped.
+        drop(peer);
+    }
+
+    #[test]
+    fn successful_windows_stop_has_no_exit_diagnostic_despite_stale_refusal() {
+        let mut daemon = Daemon::new(1, PathBuf::new(), None);
+        daemon.health = Some(Arc::new(|| false));
+        let (endpoint, peer) = channel_pair().unwrap();
+        let channel = AppChannel::start(endpoint, Arc::new(RefusingHandler)).unwrap();
+        *daemon.channel.lock().unwrap() = Some(channel.clone());
+        let stale = "synthetic unrelated startup refusal".to_string();
+        *daemon.refused.lock().unwrap() = Some(stale.clone());
+        let diagnostic = format!("{:?}", daemon.stop());
+        assert!(!channel.is_open());
+        assert!(daemon.child.lock().unwrap().is_none());
+        assert!(daemon.channel.lock().unwrap().is_none());
+        assert_eq!(daemon.refusal(), Some(stale));
+        assert_eq!(diagnostic, format!("{:?}", Ok::<(), String>(())),
+            "successful checked stop must not report a stale refusal at exit");
+        drop(peer);
+    }
+
+    #[test]
+    fn retained_failed_launch_cannot_be_healthy_or_replaced_and_failed_stop_keeps_both_owners() {
+        let ready = Arc::new(AtomicUsize::new(0));
+        let mut daemon = Daemon::new(1, PathBuf::new(), None)
+            .with_channel(Arc::new(RefusingHandler))
+            .on_ready(Arc::new({ let ready = ready.clone(); move || { ready.fetch_add(1, Ordering::SeqCst); } }));
+        daemon.health = Some(Arc::new(|| true));
+        *daemon.child.lock().unwrap() = Some(Box::new(FailedChild));
+        let (endpoint, peer) = channel_pair().unwrap();
+        let retained = AppChannel::start(endpoint, Arc::new(RefusingHandler)).unwrap();
+        *daemon.channel.lock().unwrap() = Some(retained.clone());
+        retained.test_inject_cancel_error(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32);
+        assert!(daemon.stop().is_err());
+        assert!(daemon.child.lock().unwrap().is_some());
+        assert!(Arc::ptr_eq(daemon.channel.lock().unwrap().as_ref().unwrap(), &retained));
+        assert!(!daemon.owns_running());
+        assert!(daemon.ensure_running(Duration::ZERO).is_err());
+        assert!(daemon.spawn().is_err());
+        assert_eq!(ready.load(Ordering::SeqCst), 0);
+        retained.test_inject_cancel_error(0);
+        assert!(daemon.stop().is_err()); // Synthetic child's unsupported checked cleanup must also retain both.
+        assert!(daemon.child.lock().unwrap().is_some());
+        assert!(Arc::ptr_eq(daemon.channel.lock().unwrap().as_ref().unwrap(), &retained));
+        assert!(matches!(daemon.restart(Duration::ZERO), RestartOutcome::Failed(_)));
+        drop(daemon.child.lock().unwrap().take());
+        let _ = daemon.stop(); // Cleanup only: the child was already dropped.
+        drop(peer);
+    }
+
+    struct CompletedChild(Arc<AtomicUsize>);
+    impl ChildProcess for CompletedChild {
+        fn id(&self) -> u32 { 3 }
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            use std::os::windows::process::ExitStatusExt;
+            Ok(Some(ExitStatus::from_raw(1))) // A forced exit is not a clean exit.
+        }
+        fn kill(&mut self) -> io::Result<()> { panic!("synthetic completed child") }
+        fn wait(&mut self) -> io::Result<ExitStatus> { panic!("synthetic completed child") }
+        fn shutdown_owned(&mut self, _: Duration) -> io::Result<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn completed_child_close_failure_blocks_restart_until_checked_retry() {
+        let mut daemon = Daemon::new(1, PathBuf::new(), None).with_channel(Arc::new(RefusingHandler));
+        daemon.health = Some(Arc::new(|| false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        *daemon.child.lock().unwrap() = Some(Box::new(CompletedChild(calls.clone())));
+        let (endpoint, peer) = channel_pair().unwrap();
+        let retained = AppChannel::start(endpoint, Arc::new(RefusingHandler)).unwrap();
+        *daemon.channel.lock().unwrap() = Some(retained.clone());
+        retained.test_inject_cancel_error(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32);
+        let error = daemon.stop().unwrap_err();
+        assert!(error.starts_with("the assistant's channel shutdown is unfinished:"));
+        match daemon.restart(Duration::ZERO) {
+            RestartOutcome::Failed(reason) => assert_eq!(reason, error),
+            _ => panic!("restart must propagate checked stop failure"),
+        }
+        assert!(daemon.child.lock().unwrap().is_some());
+        assert!(Arc::ptr_eq(daemon.channel.lock().unwrap().as_ref().unwrap(), &retained));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        retained.test_inject_cancel_error(0);
+        daemon.stop().unwrap();
+        assert!(daemon.child.lock().unwrap().is_none());
+        assert!(daemon.channel.lock().unwrap().is_none());
+        drop(peer);
+    }
+
+    #[test]
+    fn exited_root_replacement_retains_both_owners_when_old_channel_close_fails() {
+        let mut daemon = Daemon::new(1, PathBuf::new(), None).with_channel(Arc::new(RefusingHandler));
+        daemon.health = Some(Arc::new(|| false));
+        // Regression must stop before this deliberately invalid launcher is reached.
+        daemon.launch = Some(LaunchSpec { program: "must-not-launch".into(), args: vec![], envs: vec![] });
+        let calls = Arc::new(AtomicUsize::new(0));
+        *daemon.child.lock().unwrap() = Some(Box::new(CompletedChild(calls.clone())));
+        let (endpoint, peer) = channel_pair().unwrap();
+        let retained = AppChannel::start(endpoint, Arc::new(RefusingHandler)).unwrap();
+        *daemon.channel.lock().unwrap() = Some(retained.clone());
+        retained.test_inject_cancel_error(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32);
+        assert!(daemon.spawn().unwrap_err().starts_with("cannot replace unfinished Windows channel:"));
+        assert!(daemon.child.lock().unwrap().is_some());
+        assert!(Arc::ptr_eq(daemon.channel.lock().unwrap().as_ref().unwrap(), &retained));
+        assert!(retained.close_error().is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(daemon.spawn().is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "admission rejects a logically closed retained channel");
+        retained.test_inject_cancel_error(0);
+        daemon.stop().unwrap();
+        assert!(daemon.child.lock().unwrap().is_none());
+        assert!(daemon.channel.lock().unwrap().is_none());
+        drop(peer);
+    }
+
+    fn failed_close_serializes_start(direct_spawn: bool) {
+        let ready = Arc::new(AtomicUsize::new(0));
+        let mut daemon = Daemon::new(1, PathBuf::new(), None)
+            .with_channel(Arc::new(RefusingHandler))
+            .on_ready(Arc::new({
+                let ready = ready.clone();
+                move || { ready.fetch_add(1, Ordering::SeqCst); }
+            }));
+        daemon.health = Some(Arc::new(|| true));
+        let daemon = Arc::new(daemon);
+        let (endpoint, peer) = channel_pair().unwrap();
+        let retained = AppChannel::start(endpoint, Arc::new(RefusingHandler)).unwrap();
+        *daemon.channel.lock().unwrap() = Some(retained.clone());
+        retained.test_inject_cancel_error(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32);
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        retained.test_close_barriers(entered.clone(), release.clone());
+        let stopping = thread::spawn({ let daemon = daemon.clone(); move || daemon.stop() });
+        entered.wait();
+        // A controlled pause INSIDE checked close proves both ownership guards remain held:
+        // no empty slot can be observed and neither admission nor replacement can pass.
+        let child_locked = matches!(daemon.child.try_lock(), Err(TryLockError::WouldBlock));
+        let channel_locked = matches!(daemon.channel.try_lock(), Err(TryLockError::WouldBlock));
+        let (attempt_tx, attempt_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let starting = thread::spawn({
+            let daemon = daemon.clone();
+            move || {
+                attempt_tx.send(()).unwrap();
+                let result = if direct_spawn { daemon.spawn() } else { daemon.ensure_running(Duration::ZERO) };
+                result_tx.send(result).unwrap();
+            }
+        });
+        attempt_rx.recv().unwrap();
+        let premature_result = result_rx.try_recv().ok();
+        let completed_early = premature_result.is_some();
+        // Release/join the controlled stop before asserting invariants, including on a
+        // regression: an assertion must not strand a thread at the test-only barrier.
+        release.wait();
+        let stopped = stopping.join().unwrap();
+        let result = premature_result.unwrap_or_else(|| result_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+        starting.join().unwrap();
+        assert!(child_locked, "start admission must remain blocked by checked stop");
+        assert!(channel_locked, "retained channel must remain installed and guarded");
+        assert!(!completed_early, "start must not complete during checked close");
+        assert!(result.is_err());
+        assert!(stopped.is_err(), "the controlled checked close must fail");
+        assert!(Arc::ptr_eq(daemon.channel.lock().unwrap().as_ref().unwrap(), &retained));
+        assert!(retained.close_error().is_some());
+        assert!(daemon.refusal().is_some());
+        assert_eq!(ready.load(Ordering::SeqCst), 0);
+
+        // Explicit checked retry, not start, is what permits the slot to be cleared.
+        retained.test_inject_cancel_error(0);
+        assert_eq!(daemon.stop(), Ok(()));
+        assert!(daemon.channel.lock().unwrap().is_none());
+        assert_eq!(retained.close_error(), None);
+        drop(peer);
+        // Exercise successful readiness after retry without invoking the absent launcher.
+        let (endpoint, next_peer) = channel_pair().unwrap();
+        let replacement = AppChannel::start(endpoint, Arc::new(RefusingHandler)).unwrap();
+        {
+            let mut child = daemon.child.lock().unwrap();
+            let mut channel = daemon.channel.lock().unwrap();
+            daemon.windows_channel_admission(&channel).unwrap();
+            *child = Some(Box::new(LiveChild));
+            *channel = Some(replacement.clone());
+        }
+        daemon.ensure_running(Duration::ZERO).unwrap();
+        assert_eq!(ready.load(Ordering::SeqCst), 1);
+        drop(daemon.child.lock().unwrap().take()); // Drop the synthetic child, never signal a PID.
+        let _ = daemon.stop(); // Cleanup only: the child was already dropped.
+        drop(next_peer);
+    }
+
+    #[test]
+    fn failed_close_blocks_start_plan_and_ready_until_checked_retry() {
+        failed_close_serializes_start(false);
+    }
+    #[test]
+    fn failed_close_blocks_actual_spawn_replacement_until_checked_retry() {
+        failed_close_serializes_start(true);
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::app_channel::{AppChannel, Handler};

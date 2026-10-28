@@ -2,7 +2,7 @@
 
 This guide puts the same daemon you run locally on a server, so you can open Gentle Dot from any browser. It targets a HostGator VPS with cPanel/WHM, and also covers a plain VPS.
 
-> Status: documented, not executed. The local setup is the supported path today.
+> Status: deployed on a HostGator VPS (cPanel/WHM, Apache with `mod_proxy_wstunnel`) in October 2026, with the steps below. The local setup is still the primary path.
 
 ## Before you start: what you are exposing
 
@@ -106,7 +106,8 @@ cPanel's Apache already owns ports 80 and 443, so Apache proxies to the containe
    ```bash
    sudo htpasswd -c /etc/apache2/gentle-dot.htpasswd me
    ```
-3. Copy `docker/apache-gentle-dot.conf` into the HTTPS include folder for the subdomain, for example `/etc/apache2/conf.d/userdata/ssl/2_4/<cpanel-user>/dot.example.com/gentle-dot.conf`. Change the port if you changed `DOT_PORT`.
+3. Copy `docker/apache-gentle-dot.conf` into the HTTPS include folder for the subdomain, for example `/etc/apache2/conf.d/userdata/ssl/2_4/<cpanel-user>/dot.example.com/gentle-dot.conf`. Change the port if you changed `DOT_PORT`. If the subdomain belongs to no cPanel account, put the same lines inside your own `<VirtualHost <server-ip>:443>` block (with `ServerName`, `SSLEngine on` and the certificate paths) in `/etc/apache2/conf.d/includes/post_virtualhost_global.conf`, and add a `:80` block that redirects to HTTPS. Back the file up first and run `apachectl configtest` before reloading.
+   Keep the `ErrorDocument 401` line: cPanel maps 401 to a local page that Apache would send to Gentle Dot, which answers it with 200, so the browser never asks for the password.
 4. Rebuild and restart Apache:
    ```bash
    sudo /scripts/rebuildhttpdconf && sudo /scripts/restartsrv_httpd
@@ -145,6 +146,7 @@ Never run `docker compose down -v`: `-v` deletes the volume with your conversati
 | Symptom | Cause and fix |
 |---|---|
 | The page says the link is not valid | Wrong or old access key. Read it with `docker compose exec gentle-dot cat /home/dot/.gentle-dot/token`. |
+| The browser never asks for the password, and the page loads but never connects | The `ErrorDocument 401` line is missing from the Apache include (step 5a). Check that `curl -I https://dot.example.com/` without a password returns `401`. |
 | The page loads but never connects | The proxy does not forward WebSockets (enable `mod_proxy_wstunnel`), or `DOT_DOMAIN` does not match the address you opened, so the Origin check refuses it. |
 | You want no usage metrics | The companion packages send anonymous usage metrics by default. Opt out with `docker compose exec gentle-dot gentle-ai telemetry disable`. |
 | "The assistant is restarting" stays on | The agent cannot start; check `docker compose logs gentle-dot` for the reason. |

@@ -912,7 +912,12 @@ pub fn run() {
         .expect("failed to build Gentle Dot")
         .run(|app, event| {
             if let RunEvent::Exit = event {
+                #[cfg(unix)]
                 app.state::<Shell>().daemon.stop();
+                #[cfg(windows)]
+                if let Err(reason) = app.state::<Shell>().daemon.stop() {
+                    eprintln!("gentle-dot: Windows shutdown was not confirmed: {reason}");
+                }
             }
         });
 }
