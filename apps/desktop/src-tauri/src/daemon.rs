@@ -965,6 +965,37 @@ mod windows_ownership_tests {
         fn launch_failed(&self) -> bool { true }
     }
 
+    /// A daemon this app did not launch: it answers `/health` on a port of its own.
+    fn foreign_daemon() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                use std::io::{Read, Write};
+                let _ = stream.read(&mut [0u8; 512]);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");
+            }
+        });
+        port
+    }
+
+    // Formerly the unavailable seam's Windows test (#99); now through the real admission.
+    #[test]
+    fn an_app_with_a_channel_refuses_a_daemon_it_did_not_launch() {
+        let port = foreign_daemon();
+        // An empty private directory: no launch record, so admission reaches the health check.
+        let dir = std::env::temp_dir().join(format!("gentle-foreign-{}-{port}", std::process::id()));
+        windows::ensure_record_directory(&dir).unwrap();
+        let daemon = Daemon::new(port, dir.clone(), None).with_channel(Arc::new(RefusingHandler));
+        assert_eq!(daemon.ensure_running(Duration::from_secs(5)), Err(foreign_daemon_message(port)));
+        assert_eq!(daemon.refusal(), Some(foreign_daemon_message(port)));
+        assert!(!daemon.owns_running());
+        assert!(daemon.channel().is_none());
+        assert_eq!(daemon.wait_ready(Duration::from_millis(300)), Err(foreign_daemon_message(port)));
+        assert_eq!(daemon.restart(Duration::from_secs(2)), RestartOutcome::External);
+        assert!(!dir.join(PID_FILE).exists());
+    }
+
     #[test]
     fn repeated_failed_launch_admission_preserves_primary_and_cleanup_errors() {
         let ready = Arc::new(AtomicUsize::new(0));
