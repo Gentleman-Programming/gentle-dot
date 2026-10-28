@@ -120,7 +120,7 @@ type PendingAsk = {
 	timer?: NodeJS.Timeout;
 };
 const REMEMBERED_REQUEST_IDS = 500;
-const READY_TIMEOUT_MS = 60_000;
+const READY_TIMEOUT_MS = Number(process.env.GENTLE_DOT_READY_TIMEOUT_MS) || 180_000;
 const ANSWER_FAILED = "Something went wrong while answering. Please try again.";
 const HISTORY_PAGE = 100;
 
