@@ -1490,12 +1490,6 @@ mod native {
                 &mut descriptor, null_mut()))?; }
             Ok(Self(descriptor))
         }
-        fn new() -> io::Result<Self> {
-            let text = wide(std::ffi::OsStr::new("D:P(A;;GA;;;OW)"))?;
-            let mut descriptor = null_mut();
-            unsafe { checked(ConvertStringSecurityDescriptorToSecurityDescriptorW(text.as_ptr(), SDDL_REVISION_1, &mut descriptor, null_mut()))?; }
-            Ok(Self(descriptor))
-        }
         fn attributes(&self) -> SECURITY_ATTRIBUTES {
             SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
                 lpSecurityDescriptor: self.0, bInheritHandle: 0 }
@@ -1527,8 +1521,13 @@ mod native {
         if result != ERROR_SUCCESS { return Err(io::Error::from_raw_os_error(result as i32)); }
         Ok(File::from(handle))
     }
+    /// The daemon itself opens this directory by path (its token, config and logs), without
+    /// an inherited handle. An OWNER RIGHTS entry would follow the owner, which is the
+    /// Administrators group when an elevated app created it, and then shut out the same
+    /// user unelevated. Both the directory and the log name the user's SID instead.
     pub(crate) fn open_private_log(data_dir: &Path) -> io::Result<File> {
-        let descriptor = Descriptor::new()?;
+        let sid = current_user_sid()?;
+        let descriptor = Descriptor::for_user(sid.as_ptr() as PSID)?;
         if let Some(parent) = data_dir.parent().filter(|path| !path.as_os_str().is_empty()) { std::fs::create_dir_all(parent)?; }
         let name = wide(data_dir.as_os_str())?;
         let attributes = descriptor.attributes();
@@ -2212,6 +2211,28 @@ setTimeout(()=>process.exit(74),60000);
             assert!(resolved.ends_with(r"\gd-probe-tool.exe"));
             assert!(resolved.contains(&format!("gd-absolute-path-{}", std::process::id())));
             for dir in [&relative, &absolute] { let _ = std::fs::remove_dir_all(dir); }
+        }
+
+        #[test]
+        fn private_log_directory_and_file_name_only_the_user() {
+            // Owner and every DACL entry must be this user's SID, never OWNER RIGHTS: the
+            // daemon reopens the directory by path, possibly unelevated (#128).
+            let mut nonce = [0u8; 16];
+            getrandom::fill(&mut nonce).unwrap();
+            let token: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+            let root = std::env::temp_dir().join(format!("gentle-private-log-{token}"));
+            let log = open_private_log(&root).unwrap();
+            let sid = current_user_sid().unwrap();
+            validate_record_security(log.as_raw_handle(), sid.as_ptr() as PSID).expect("log names only the user");
+            let name = wide(root.as_os_str()).unwrap();
+            let directory = owned(unsafe { CreateFileW(name.as_ptr(), READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                null(), OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, null_mut()) }).unwrap();
+            validate_record_security(directory.as_raw_handle(), sid.as_ptr() as PSID).expect("directory names only the user");
+            // Reopening repairs, never loosens: the same check holds on the second call.
+            drop(log);
+            let log = open_private_log(&root).unwrap();
+            validate_record_security(log.as_raw_handle(), sid.as_ptr() as PSID).unwrap();
+            validate_record_security(directory.as_raw_handle(), sid.as_ptr() as PSID).unwrap();
         }
 
         #[test]
