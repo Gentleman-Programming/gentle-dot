@@ -10,6 +10,42 @@ The daemon resolves Engram on Windows without starting a login shell or rewritin
 
 Windows paths are parsed with `win32` rules. Quoted PATH entries are unwrapped, empty and relative entries are skipped (so the current directory is not searched), and duplicate candidates are suppressed case-insensitively. Absolute drive and UNC paths are accepted; drive-relative and root-relative paths are not. File checks establish readable-file discovery, not binary trust. A valid junction is allowed and is not an integrity or ACL verdict.
 
+## Bundled Windows launch paths
+
+The desktop launcher constructs the bundled Node program, CLI script, and runtime
+PATH directories with native path-component joins. This preserves ordinary drive,
+UNC, and canonical verbatim (`\\?\`) roots. OS program and PATH entries retain
+their namespace.
+Forward-slash suffixes under a verbatim root are not valid Windows executable
+paths: an isolated native `launch_spec` fixture reproduced OS error 123 at process
+creation before this correction. The bundled-runtime presence check also joins
+`daemon` and `cli.mjs` separately.
+
+The regression copies the build-time Node into an owned temporary runtime with
+spaces and a semicolon, canonicalizes its root, and executes only a tiny fixture
+CLI through the generated program, arguments, and environment. Native proof on
+Node 24.14.0 passes with exit 0, exact stdout, empty stderr, native program
+components, canonical script identity, and restricted PATH entry boundaries.
+Component joins alone cleared OS error 123 but exposed Node CLI `EISDIR`
+(`lstat 'C:'`) for the raw verbatim script argument.
+
+Only the bundled Node entry argument uses a purpose-specific bridge: verbatim
+Disk/UNC paths round-trip through `tauri::Url::from_file_path` / `to_file_path`.
+The resulting ordinary path is selected only when both paths canonicalize to the
+same existing script. Failed or ambiguous conversions retain the original path,
+not an alternative file. The negative native fixture creates distinct trailing-dot
+and ordinary directories: the bridge rejects the alias, and Node exits 1 with
+empty stdout rather than executing either script. No experimental flags, loader,
+namespace string stripping, new dependency, or override mutation is introduced.
+This check is not an atomic file-integrity guarantee against concurrent changes.
+
+The tests do not execute the installed app, real daemon, or runtime engine.
+Verbatim UNC conversion is subject to the same filesystem-equivalence check;
+execution from a live UNC share was not exercised.
+Every emitted Windows PATH directory uses `join_paths` quoting; unserializable
+entries are omitted rather than split into additional search directories. Unix
+launch strings and source/build-time fallback are unchanged.
+
 ## Git on the bundled daemon PATH
 
 On Windows, the desktop launcher keeps `<runtime>\bin`, `<runtime>\node`,
@@ -35,6 +71,17 @@ entry boundaries, environment-name casing, missing Git, restricted PATH contents
 source fallback, and overrides. These tests establish
 launch configuration, not installed Git execution or installer acceptance.
 
+## Key Learnings
+
+1. A canonical Windows runtime root can carry a verbatim namespace prefix; adding
+   slash-delimited suffixes as strings reproduced native executable error 123.
+2. Native component joins clear the executable spawn failure, while Node's CLI
+   needs a separate representation bridge verified against canonical identity.
+   PATH serialization separately preserves semicolon-containing directories.
+3. Source fixture execution proves this launch-spec boundary only. Windows Job
+   ownership, private channel transport, permissions, installed readiness, and the
+   remaining installer lifecycle are not revalidated by this regression.
+
 ## Platform boundary
 
 `resolveEngramBin` delegates to this resolver only on `win32`. The Unix path remains `ENGRAM_BIN`, login-shell PATH, known folders, then packaged fallback. Source-checkout resolution remains unchanged; this Windows discovery applies when an installed runtime is configured.
@@ -43,11 +90,35 @@ This unit does not prove standalone Windows ACL/private-data safety, native life
 
 ## Evidence and rollback
 
-Focused checks for this unit:
+Native desktop correction checks:
+
+- `cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml launch_spec`
+  — passed, 7/7, including benign Node execution and ambiguous-alias rejection.
+- `cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  — passed, 367 tests, 2 existing ignored tests; main/doc tests passed with no cases.
+- Isolated baseline/candidate launch-spec comparison — ordinary, source, explicit
+  override, and incomplete-runtime fixtures all matched exit 0, exact stdout, and
+  empty stderr. Scratch sources were extracted outside the repository; committed
+  tests do not read Git history.
+
+These are previously observed results, not new checks at local closure. The
+independent Cargo launch-spec run also passed 7/7. Its supplementary extracted
+probe did not establish additional independent comparison evidence: after a CRLF
+extraction correction, malformed JavaScript in the probe fixture prevented three
+cases from running meaningfully. That is an unavailable supplement, not a
+candidate failure or a passing independent differential. The maintainer accepted
+this limitation for local closure; no additional verification round was run.
+Installed readiness and the remaining installer lifecycle are still unverified.
+
+Earlier resolver checks (not rerun by the desktop correction):
 
 - `node --test scripts/windows/test/runtime.test.mjs` — passed, 9/9.
 - `node node_modules/vitest/vitest.mjs run packages/daemon/test/runtime.test.ts --maxWorkers=2` — passed, 9/9.
 - `node node_modules/typescript/bin/tsc -b` — passed.
 - `git diff --check` — passed.
 
-These tests check resolution and runtime selection, not an actual Windows process launch or installer acceptance; runtime harness: N/A because this resolver change adds no process-launch boundary. Rollback is the whole work-unit change in `packages/daemon/src/windows-runtime.ts`, `packages/daemon/src/runtime.ts`, `packages/daemon/src/isolation.ts`, their focused tests, `scripts/windows/test/runtime.test.mjs`, and this document; consider downstream consumers before reverting it.
+The earlier resolver checks establish resolution and runtime selection only. The
+native desktop fixture additionally proves benign Node process creation and CLI
+entry execution, not installed acceptance. Desktop rollback is the cohesive
+`daemon.rs` launch-spec correction plus its tests and this documentation.
+The earlier resolver rollback is the whole work-unit change in `packages/daemon/src/windows-runtime.ts`, `packages/daemon/src/runtime.ts`, `packages/daemon/src/isolation.ts`, their focused tests, `scripts/windows/test/runtime.test.mjs`, and this document; consider downstream consumers before reverting it.

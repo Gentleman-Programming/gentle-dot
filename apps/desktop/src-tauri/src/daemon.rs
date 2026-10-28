@@ -229,6 +229,26 @@ pub struct LaunchSpec {
     pub envs: Vec<(String, String)>,
 }
 
+/// Node's CLI realpath handling rejects verbatim paths. Use its ordinary file-path
+/// representation only when the file-URL round trip resolves to the same script.
+/// An unrepresentable or ambiguous path stays unchanged, never selecting an alias.
+#[cfg(windows)]
+fn node_entry_path(script: &Path) -> PathBuf {
+    use std::path::{Component, Prefix};
+    if !matches!(
+        script.components().next(),
+        Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::VerbatimDisk(_) | Prefix::VerbatimUNC(_, _))
+    ) {
+        return script.to_path_buf();
+    }
+    let equivalent = || {
+        let candidate = tauri::Url::from_file_path(script).ok()?.to_file_path().ok()?;
+        let intended = fs::canonicalize(script).ok()?;
+        (fs::canonicalize(&candidate).ok()? == intended).then_some(candidate)
+    };
+    equivalent().unwrap_or_else(|| script.to_path_buf())
+}
+
 /// `<node> <daemon script>` (S29.5). With a bundled runtime (`<runtime>/daemon/cli.mjs`
 /// exists) that is the runtime's own Node and daemon, a PATH of the runtime plus the
 /// system folders (plus an existing Git directory from PATH on Windows), and
@@ -236,36 +256,46 @@ pub struct LaunchSpec {
 /// `GENTLE_DOT_NODE` and `GENTLE_DOT_DAEMON_SCRIPT` override the program and script in both.
 pub fn launch_spec(env: impl Fn(&str) -> Option<String>, dev: bool, runtime: Option<&Path>) -> LaunchSpec {
     let pick = |key: &str, fallback: String| env(key).filter(|v| !v.is_empty()).unwrap_or(fallback);
-    let bundled = runtime.filter(|dir| dir.join("daemon/cli.mjs").is_file());
+    let bundled = runtime.filter(|dir| dir.join("daemon").join("cli.mjs").is_file());
     let (node, script, mut envs) = match bundled {
         Some(dir) => {
             let root = dir.display().to_string();
             #[cfg(unix)]
-            let (node, path) =
-                (format!("{root}/node/bin/node"), format!("{root}/bin:{root}/node/bin:/usr/bin:/bin:/usr/sbin:/sbin"));
+            let (node, path, script) = (
+                format!("{root}/node/bin/node"),
+                format!("{root}/bin:{root}/node/bin:/usr/bin:/bin:/usr/sbin:/sbin"),
+                format!("{root}/daemon/cli.mjs"),
+            );
             #[cfg(windows)]
-            let (node, path) = {
-                let system = env("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-                let mut path = format!("{root}/bin;{root}/node;{system}\\System32;{system}");
+            let (node, path, script) = {
+                let system = PathBuf::from(env("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()));
+                // Verbatim Windows paths require native separators in every component.
+                let mut entries = vec![dir.join("bin"), dir.join("node"), system.join("System32"), system];
                 // std::env::var is case-insensitive on Windows. Import only the first Git
                 // directory, never the whole ambient PATH or a current-directory entry.
                 if let Some(ambient) = env("PATH") {
                     if let Some(git) = std::env::split_paths(&ambient)
                         .find(|dir| dir.is_absolute() && dir.join("git.exe").is_file())
                     {
-                        // Preserve entry boundaries for directories containing semicolons.
-                        // If it cannot be serialized losslessly, leave the restricted PATH alone.
-                        if let Some(entry) = std::env::join_paths([git]).ok().and_then(|value| value.into_string().ok()) {
-                            path.push(';');
-                            path.push_str(&entry);
-                        }
+                        entries.push(git);
                     }
                 }
-                (format!("{root}/node/node.exe"), path)
+                // Quote semicolons in any entry, including the runtime. Never introduce
+                // extra entries or import ambient PATH when a directory cannot be serialized.
+                let path = entries
+                    .into_iter()
+                    .filter_map(|entry| std::env::join_paths([entry]).ok()?.into_string().ok())
+                    .collect::<Vec<_>>()
+                    .join(";");
+                (
+                    dir.join("node").join("node.exe").display().to_string(),
+                    path,
+                    node_entry_path(&dir.join("daemon").join("cli.mjs")).display().to_string(),
+                )
             };
             (
                 node,
-                format!("{root}/daemon/cli.mjs"),
+                script,
                 vec![("PATH".to_string(), path), ("GENTLE_DOT_RUNTIME".to_string(), root)],
             )
         }
@@ -741,8 +771,13 @@ mod windows_launch_tests {
         }
 
         fn bundled(&self, git: Option<&Path>, dev: bool) -> LaunchSpec {
-            let root = self.0.join("runtime").display().to_string();
-            let mut path = format!("{root}/bin;{root}/node;C:\\Windows\\System32;C:\\Windows");
+            let runtime = self.0.join("runtime");
+            let root = runtime.display().to_string();
+            let mut path = format!(
+                "{};{};C:\\Windows\\System32;C:\\Windows",
+                runtime.join("bin").display(),
+                runtime.join("node").display(),
+            );
             if let Some(git) = git {
                 path.push(';');
                 path.push_str(&git.display().to_string());
@@ -751,7 +786,11 @@ mod windows_launch_tests {
             if dev {
                 envs.push(("GENTLE_DOT_ALLOWED_ORIGINS".into(), DEV_ALLOWED_ORIGINS.into()));
             }
-            LaunchSpec { program: format!("{root}/node/node.exe"), args: vec![format!("{root}/daemon/cli.mjs")], envs }
+            LaunchSpec {
+                program: runtime.join("node").join("node.exe").display().to_string(),
+                args: vec![runtime.join("daemon").join("cli.mjs").display().to_string()],
+                envs,
+            }
         }
     }
 
@@ -764,6 +803,70 @@ mod windows_launch_tests {
     // Windows environment names are case-insensitive, as is std::env::var on Windows.
     fn environment<'a>(pairs: &'a [(&'a str, String)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |key| pairs.iter().find(|(name, _)| name.eq_ignore_ascii_case(key)).map(|(_, value)| value.clone())
+    }
+
+    #[test]
+    fn launch_spec_windows_executes_verbatim_runtime_with_spaces() {
+        let fixture = Fixture::new();
+        let ordinary = fixture.0.join("Installed; Gentle Dot").join("runtime");
+        fs::create_dir_all(ordinary.join("node")).unwrap();
+        fs::create_dir_all(ordinary.join("daemon")).unwrap();
+        fs::copy(env!("GENTLE_DOT_BUILD_NODE"), ordinary.join("node").join("node.exe")).unwrap();
+        fs::write(
+            ordinary.join("daemon").join("cli.mjs"),
+            "process.stdout.write('launch fixture ok\\n'); process.exitCode = 0;",
+        )
+        .unwrap();
+        let runtime = fs::canonicalize(&ordinary).unwrap();
+        assert!(runtime.to_str().unwrap().starts_with(r"\\?\"));
+        let spec = launch_spec(|_| None, false, Some(&runtime));
+        let output = std::process::Command::new(&spec.program)
+            .args(&spec.args)
+            .envs(spec.envs.iter().map(|(key, value)| (key, value)))
+            .env_remove("NODE_OPTIONS")
+            .env_remove("NODE_PATH")
+            .output()
+            .unwrap_or_else(|error| panic!("LaunchSpec program {:?}: {error:?}", spec.program));
+        assert_eq!(
+            output.status.code(), Some(0),
+            "stdout={:?}, stderr={:?}", output.stdout, String::from_utf8_lossy(&output.stderr),
+        );
+        assert_eq!(output.stdout, b"launch fixture ok\n");
+        assert_eq!(output.stderr, b"");
+        assert_eq!(spec.program, runtime.join("node").join("node.exe").display().to_string());
+        assert_eq!(spec.args.len(), 1);
+        assert_eq!(fs::canonicalize(&spec.args[0]).unwrap(), runtime.join("daemon").join("cli.mjs"));
+        assert_eq!(spec.args[0], ordinary.join("daemon").join("cli.mjs").display().to_string());
+        let entries: Vec<_> = std::env::split_paths(&spec.envs[0].1).collect();
+        assert_eq!(
+            entries,
+            [runtime.join("bin"), runtime.join("node"), PathBuf::from(r"C:\Windows\System32"), PathBuf::from(r"C:\Windows")],
+        );
+        assert_eq!(spec.envs[1], ("GENTLE_DOT_RUNTIME".into(), runtime.display().to_string()));
+    }
+
+    #[test]
+    fn launch_spec_windows_does_not_bridge_to_a_different_trailing_dot_directory() {
+        let fixture = Fixture::new();
+        let root = fs::canonicalize(&fixture.0).unwrap();
+        let intended = root.join("runtime.");
+        fs::create_dir_all(intended.join("daemon")).unwrap();
+        fs::write(intended.join("daemon").join("cli.mjs"), "process.stdout.write('intended');").unwrap();
+        fs::write(root.join("runtime").join("daemon").join("cli.mjs"), "process.stdout.write('WRONG FILE');").unwrap();
+        let script = intended.join("daemon").join("cli.mjs");
+        let candidate = tauri::Url::from_file_path(&script).unwrap().to_file_path().unwrap();
+        assert_ne!(fs::canonicalize(&candidate).unwrap(), fs::canonicalize(&script).unwrap());
+        let spec = launch_spec(|_| None, false, Some(&intended));
+        assert_eq!(spec.args, [script.display().to_string()], "never select the ordinary-path alias");
+        // Only the harmless Node fixture is run; a rejected bridge must not run either script.
+        let output = std::process::Command::new(env!("GENTLE_DOT_BUILD_NODE"))
+            .args(&spec.args)
+            .env_remove("NODE_OPTIONS")
+            .env_remove("NODE_PATH")
+            .output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(output.stdout, b"");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("EISDIR"));
     }
 
     #[test]
