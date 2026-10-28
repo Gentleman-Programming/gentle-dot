@@ -1055,7 +1055,39 @@ mod native {
     mod recovered_io_tests {
         use super::*;
         use super::super::super::windows_record::Record;
-        use std::io::Write;
+        use std::io::{BufRead, BufReader, Write};
+        use std::process::{Child, Command, Stdio};
+        use std::sync::mpsc;
+
+        const TEST_WAIT: Duration = Duration::from_secs(20);
+
+        // Open through the real production worker with a generous scheduling budget,
+        // then requeue its exact native result before testing a shorter stop deadline.
+        fn ready_connection(fixture: &Fixture) -> ConnectAttempt {
+            let name = wide(std::ffi::OsStr::new(&fixture.record.pipe_name())).unwrap();
+            let mut connect = ConnectAttempt::start(name, Instant::now() + TEST_WAIT).unwrap();
+            let pipe = connect.result.recv_timeout(TEST_WAIT).expect("stop worker did not connect").unwrap();
+            let (sender, receiver) = mpsc::channel();
+            sender.send(Ok(pipe)).unwrap();
+            connect.result = receiver;
+            connect
+        }
+
+        // Every panic path kills the helper. No wait()/reader join can hang the test.
+        struct PipeHost(Child);
+        impl PipeHost {
+            fn exit(&mut self) -> std::process::ExitStatus {
+                let deadline = Instant::now() + TEST_WAIT;
+                loop {
+                    if let Some(status) = self.0.try_wait().unwrap() { return status; }
+                    assert!(Instant::now() < deadline, "foreign pipe host did not exit");
+                    std::thread::sleep(RECOVERY_POLL);
+                }
+            }
+        }
+        impl Drop for PipeHost {
+            fn drop(&mut self) { let _ = self.0.kill(); }
+        }
 
         struct Fixture { dir: PathBuf, record: Record }
         impl Fixture {
@@ -1122,7 +1154,7 @@ mod native {
             let mut owner = fixture.owner();
             // Fill the real pipe's quota without a reader. Never rely on a specific
             // Windows minimum quota or on the first write completing synchronously.
-            let fill_deadline = Instant::now() + Duration::from_secs(3);
+            let fill_deadline = Instant::now() + TEST_WAIT;
             let pending = loop {
                 assert!(Instant::now() < fill_deadline, "pipe quota did not become bounded backpressure");
                 // A non-inheritable test-only duplicate lets each completed write
@@ -1144,13 +1176,13 @@ mod native {
             let allocation = owner.write.as_ref().unwrap().storage.as_ref().unwrap().operation.get();
             let started = Instant::now();
             assert_eq!(owner.stop(Duration::from_millis(40)).unwrap_err().kind(), io::ErrorKind::TimedOut);
-            assert!(started.elapsed() < Duration::from_secs(2), "stop ignored its bounded deadline");
+            assert!(started.elapsed() < TEST_WAIT, "stop ignored its bounded deadline");
             // CancelIoEx is only a request: even an already-completed cancellation
             // must not free kernel-referenced memory until poll observes completion.
             assert_eq!(owner.write.as_ref().unwrap().storage.as_ref().unwrap().operation.get(), allocation);
             owner.write.as_ref().unwrap().cancel().unwrap();
             assert_eq!(owner.write.as_ref().unwrap().storage.as_ref().unwrap().operation.get(), allocation);
-            let completion_deadline = Instant::now() + Duration::from_secs(2);
+            let completion_deadline = Instant::now() + TEST_WAIT;
             loop {
                 if let Some(result) = owner.write.as_mut().unwrap().poll().unwrap() {
                     assert_eq!(result.unwrap_err().raw_os_error(), Some(ERROR_OPERATION_ABORTED as i32));
@@ -1172,6 +1204,9 @@ mod native {
             let fixture = Fixture::new();
             let server = fixture.server();
             let mut owner = fixture.owner();
+            owner.connect = Some(ready_connection(&fixture));
+            // The real worker has already delivered its connection, so scheduling it
+            // cannot consume the two-second budget being tested below.
             // The pipe server is this exact recorded process. It deliberately stays
             // alive after receiving the authenticated frame, forcing a retained error.
             assert_eq!(owner.stop(Duration::from_secs(2)).unwrap_err().kind(), io::ErrorKind::TimedOut);
@@ -1188,6 +1223,77 @@ mod native {
             assert_eq!(frame, fixture.record.frame());
             assert!(owner.record.is_some() && owner.process.is_some());
             assert!(owner.connect.is_none() && owner.write.is_none());
+            assert!(owner.delete_record().is_err());
+            assert!(fixture.path().exists());
+        }
+
+        #[test]
+        fn recovered_stop_refuses_foreign_pipe_server_without_sending_frame() {
+            let fixture = Fixture::new();
+            let full_name = fixture.record.pipe_name();
+            let bare_name = full_name.strip_prefix(r"\\.\pipe\").unwrap();
+            // Only a generated lowercase-hex nonce enters this PowerShell literal.
+            assert!(bare_name.strip_prefix("gentle-dot-stop-").unwrap()
+                .bytes().all(|byte| byte.is_ascii_hexdigit()));
+            let script = format!(r#"
+$ErrorActionPreference = 'Stop'
+$pipe = [System.IO.Pipes.NamedPipeServerStream]::new(
+    '{bare_name}', [System.IO.Pipes.PipeDirection]::InOut, 1,
+    [System.IO.Pipes.PipeTransmissionMode]::Byte,
+    [System.IO.Pipes.PipeOptions]::Asynchronous)
+try {{
+    # Wait for a connection before announcing readiness: the refused client may
+    # connect and close at once, before a later wait could begin.
+    $connect = $pipe.WaitForConnectionAsync()
+    [Console]::WriteLine('READY')
+    if (-not $connect.Wait(20000)) {{ throw 'connection timeout' }}
+    $buffer = New-Object byte[] 256
+    $total = 0
+    $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    # The refused client closes its end: a broken pipe ends the read like EOF does.
+    try {{
+        while ($timer.ElapsedMilliseconds -lt 20000) {{
+            $read = $pipe.ReadAsync($buffer, 0, $buffer.Length)
+            if (-not $read.Wait([int][Math]::Max(1, 20000 - $timer.ElapsedMilliseconds))) {{ break }}
+            $count = $read.Result
+            if ($count -eq 0) {{ break }}
+            $total += $count
+        }}
+    }} catch {{ }}
+    [Console]::WriteLine('BYTES:' + $total)
+}} catch {{
+    # Surface the host's failure in the test's assertion instead of losing it with stderr.
+    [Console]::WriteLine('ERR:' + ($_.Exception.ToString() -replace '\s+', ' '))
+}} finally {{ $pipe.Dispose() }}
+"#);
+            let system_root = std::env::var_os("SystemRoot").expect("Windows system directory missing");
+            let powershell = PathBuf::from(system_root)
+                .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+            let mut host = PipeHost(Command::new(powershell)
+                .args(["-NoProfile", "-Command", &script])
+                .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+                .spawn().expect("start foreign same-user pipe host"));
+            assert_ne!(host.0.id(), fixture.record.pid);
+            let stdout = host.0.stdout.take().unwrap();
+            let (sender, lines) = mpsc::channel();
+            // A blocking pipe read lives only on this observer; recv_timeout bounds
+            // the controller, and PipeHost kills Q on every failure path.
+            let _reader = std::thread::spawn(move || {
+                for line in BufReader::new(stdout).lines() {
+                    if sender.send(line).is_err() { break; }
+                }
+            });
+            assert_eq!(lines.recv_timeout(TEST_WAIT).expect("foreign pipe readiness timed out").unwrap(), "READY");
+            let mut owner = fixture.owner();
+            owner.connect = Some(ready_connection(&fixture));
+            let error = owner.stop(Duration::from_secs(2)).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::Other);
+            assert_eq!(error.to_string(), "Windows stop pipe server identity does not match");
+            assert!(!owner.attempted && !owner.written);
+            assert!(owner.connect.is_none() && owner.write.is_none());
+            assert!(owner.record.is_some() && owner.process.is_some());
+            assert_eq!(lines.recv_timeout(TEST_WAIT).expect("foreign pipe byte count timed out").unwrap(), "BYTES:0");
+            assert!(host.exit().success());
             assert!(owner.delete_record().is_err());
             assert!(fixture.path().exists());
         }
