@@ -393,6 +393,7 @@ mod native {
                 return self.finish_record();
             }
             self.stopping = true;
+            // The caller owns the grace; the authenticated attempt never exceeds the cap.
             let deadline = Instant::now() + grace.min(RECOVERED_STOP_LIMIT);
             let graceful = if self.force_requested { false }
                 else { self.graceful_owned_until(deadline).is_ok() };
@@ -902,6 +903,9 @@ mod native {
         Ok(Some(ValidatedRecord { record, identity, path, file: Some(file), deletion_marked: false, _ancestry: ancestry }))
     }
 
+    // Hard cap on any caller's stop budget: the stop deadline is also how long a
+    // capability-bearing connection may be pending. Callers choose their own grace
+    // (the lifecycle passes its shutdown grace); this module only shortens it.
     const RECOVERED_STOP_LIMIT: Duration = Duration::from_secs(10);
     const RECOVERY_POLL: Duration = Duration::from_millis(10);
 
@@ -1027,6 +1031,8 @@ mod native {
                     if let Some(result) = connect.poll()? {
                         self.connect.take();
                         let pipe = result?;
+                        // A clean exit before the server check already achieved the stop.
+                        // Return without writing: the opened pipe is dropped unauthenticated.
                         if self.observe_exit()? { return Ok(()); }
                         if Instant::now() >= deadline {
                             return Err(io::Error::new(io::ErrorKind::TimedOut, "Windows stop connection deadline elapsed"));
