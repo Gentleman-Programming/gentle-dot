@@ -243,4 +243,19 @@ describe("AgentSupervisor", () => {
 		expect(supervisor.state).toBe("stopped");
 		await expect(supervisor.request({ type: "get_state" })).rejects.toThrow(/not ready/i);
 	});
+
+	it("bounds the run with turnTimeoutMs: the deadline fires while the run hangs, a settle disarms it", async () => {
+		const { supervisor, events } = track(fakeSupervisor({ turnTimeoutMs: 300 }));
+		await supervisor.start();
+		// "hang" acks the prompt at once and the run never answers: the RUN deadline fires.
+		await supervisor.request({ type: "prompt", message: "hang" });
+		await waitFor(() => events.some((e) => e.type === "turn_timeout_error"), 2_000);
+		expect(events.find((e) => e.type === "turn_timeout")).toMatchObject({ timeoutMs: 300 });
+		// Aborting the run ends it: the settle disarms the deadline (no re-fire).
+		await supervisor.request({ type: "abort" });
+		await waitFor(() => events.some((e) => e.type === "agent_settled"), 2_000);
+		const fired = events.filter((e) => e.type === "turn_timeout_error").length;
+		await new Promise((resolve) => setTimeout(resolve, 400));
+		expect(events.filter((e) => e.type === "turn_timeout_error").length).toBe(fired);
+	}, 15_000);
 });

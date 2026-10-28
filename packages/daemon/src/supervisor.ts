@@ -22,7 +22,9 @@ export type SupervisorState = "stopped" | "starting" | "ready" | "restarting";
 export type SupervisorEvent =
 	| AgentRecord
 	| { type: "supervisor_state"; state: SupervisorState }
-	| { type: "interrupted" };
+	| { type: "interrupted" }
+	| { type: "turn_timeout"; command: string; timeoutMs: number }
+	| { type: "turn_timeout_error"; error: string };
 
 export interface SupervisorOptions {
 	/** Executable to run, for example `gentle-shell`. */
@@ -45,6 +47,8 @@ export interface SupervisorOptions {
 	stableMs?: number;
 	/** Deadline for one command response. Default 5 minutes. */
 	requestTimeoutMs?: number;
+	/** Deadline for an LLM turn (prompt with tools). Default 10 minutes. */
+	turnTimeoutMs?: number;
 	/** Deadline for the agent to answer its first `get_state`. Default 60s. */
 	startTimeoutMs?: number;
 	/** Grace period after closing stdin before SIGTERM. Default 5s. */
@@ -77,6 +81,8 @@ export class AgentSupervisor {
 	private child: ChildProcess | undefined;
 	private readonly pending = new Map<string, Pending>();
 	private readonly listeners = new Set<(event: SupervisorEvent) => void>();
+	/** Run deadline (the turn): armed when a prompt starts, disarmed when the run settles. */
+	private turnTimer?: NodeJS.Timeout;
 	private nextId = 0;
 	/** Count of `agent_settled` records seen, to order them against prompt responses. */
 	private settledRuns = 0;
@@ -153,6 +159,9 @@ export class AgentSupervisor {
 			this.settledRuns === settledBefore
 		) {
 			this.busy = true;
+			// The prompt RPC acks at once ("started"); the deadline bounds the RUN,
+			// not the RPC — otherwise it could never fire with the real protocol.
+			this.armTurnDeadline();
 		}
 		if (command.type === "new_session" || command.type === "switch_session") await this.refreshSession();
 		// A switch answers with the new model.
@@ -310,6 +319,7 @@ export class AgentSupervisor {
 		if (record.type === "agent_settled") {
 			this.settledRuns += 1;
 			this.busy = false;
+			this.disarmTurnDeadline();
 			void this.refreshSession().catch(() => {});
 		}
 		this.emit(record);
@@ -318,6 +328,7 @@ export class AgentSupervisor {
 	private handleClose(child: ChildProcess, code: number | null, signal: NodeJS.Signals | null): void {
 		if (child !== this.child) return;
 		this.child = undefined;
+		this.disarmTurnDeadline();
 		const reason = new Error(`Agent exited (${signal ?? `code ${code}`})`);
 		for (const [id, pending] of this.pending) {
 			clearTimeout(pending.timer);
@@ -410,6 +421,25 @@ export class AgentSupervisor {
 		if (this.state === state) return;
 		this.state = state;
 		this.emit({ type: "supervisor_state", state });
+	}
+
+	/** Arms the per-turn deadline; the prompt RPC acks at once, so this bounds the RUN. */
+	private armTurnDeadline(): void {
+		const timeoutMs = this.options.turnTimeoutMs;
+		if (!timeoutMs) return;
+		this.disarmTurnDeadline();
+		this.turnTimer = setTimeout(() => {
+			this.turnTimer = undefined;
+			this.emit({ type: "turn_timeout", command: "prompt", timeoutMs });
+			this.emit({ type: "turn_timeout_error", error: `Turn timed out after ${timeoutMs} ms` });
+		}, timeoutMs);
+	}
+
+	private disarmTurnDeadline(): void {
+		if (this.turnTimer) {
+			clearTimeout(this.turnTimer);
+			this.turnTimer = undefined;
+		}
 	}
 
 	private emit(event: SupervisorEvent): void {
