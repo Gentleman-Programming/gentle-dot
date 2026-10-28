@@ -122,6 +122,7 @@ impl ChannelStream {
         self.0.cancel_error.store(code, std::sync::atomic::Ordering::SeqCst);
     }
     #[cfg(test)]
+    #[allow(dead_code)] // through AppChannel::test_close_barriers, for the lifecycle tests
     pub(super) fn close_barriers(&self, entered: Arc<std::sync::Barrier>, release: Arc<std::sync::Barrier>) {
         *self.0.cancel_barriers.lock().unwrap() = Some((entered, release));
     }
