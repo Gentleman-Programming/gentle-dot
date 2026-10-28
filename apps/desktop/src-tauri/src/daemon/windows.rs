@@ -1,6 +1,6 @@
 //! Windows launch encoding and the native owned, channel-present process adapter.
 //! Explicit transfer, suspended Job assignment and verification precede child execution.
-//! Owner-exit retirement and the daemon lifecycle that calls these land in later slices.
+//! The daemon lifecycle in daemon.rs drives these adapters, including owner-exit retirement.
 
 use std::io;
 
@@ -74,6 +74,9 @@ pub(super) fn command_line(program: &str, args: &[String]) -> io::Result<Vec<u16
     wide.push(0);
     Ok(wide)
 }
+
+#[cfg(windows)]
+pub(super) use native::{acquire_recovered_launch, ensure_record_directory, open_private_log, retire_if_owner_exited, spawn, RecoveredLaunch, SpawnFailure, WindowsChild};
 
 #[cfg(windows)]
 mod native {
@@ -1919,10 +1922,10 @@ try {{
     #[cfg(test)]
     mod owner_exit_tests {
         use super::*;
-        use super::super::super::{windows_record, PID_FILE};
+        use super::super::super::{windows_record, Daemon, PID_FILE};
         use crate::app_channel::windows::channel_pair;
         use std::{fs, thread};
-        use std::sync::mpsc;
+        use std::sync::{mpsc, Arc};
 
         // Owner-exit recovery runs the launching app in a child copy of this test binary, so
         // killing that exact child handle (never a PID lookup) closes the only Job handle.
@@ -2016,6 +2019,11 @@ setTimeout(()=>process.exit(74),60000);
             run.helper.kill().unwrap();
             run.helper.wait().unwrap();
         }
+        fn recovering_daemon(dir: &Path) -> Daemon {
+            let mut daemon = Daemon::new(1, dir.to_path_buf(), None);
+            daemon.health = Some(Arc::new(|| false));
+            daemon
+        }
         struct Sentinel(std::process::Child);
         impl Drop for Sentinel {
             fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
@@ -2035,13 +2043,19 @@ setTimeout(()=>process.exit(74),60000);
             let witness = fs::read(run.dir.join(OWNER_FILE)).unwrap();
             // Guards: a live witnessed owner refuses retirement; only its exit plus root
             // exit permits exact deletion. Removing the live-owner check must fail here.
-            let error = retire_if_owner_exited(&run.dir).unwrap_err();
-            assert_eq!(error.to_string(), "the previous launch's owning app is still running; record retained");
+            let live = recovering_daemon(&run.dir);
+            let error = live.windows_recovery_admission(&None).unwrap_err();
+            assert_eq!(error, "Windows previous launch admission refused: \
+                the previous launch's owning app is still running; record retained");
+            assert_eq!(live.refusal(), Some(error));
             assert_eq!(fs::read(run.dir.join(PID_FILE)).unwrap(), record);
             assert_eq!(fs::read(run.dir.join(OWNER_FILE)).unwrap(), witness);
             assert!(!exits_within(&run.root, 0) && !exits_within(&run.descendant, 0), "nothing was stopped");
+            drop(live);
             kill_owner(&mut run);
-            assert!(retire_if_owner_exited(&run.dir).unwrap());
+            let daemon = recovering_daemon(&run.dir);
+            assert_eq!(daemon.windows_recovery_admission(&None), Ok(()));
+            assert_eq!(daemon.refusal(), None);
             assert!(!run.dir.join(PID_FILE).exists(), "exact record retired");
             assert!(exits_within(&run.root, 0), "retirement waits for the recorded root");
             assert!(exits_within(&run.descendant, 5000), "the kernel ended the whole owned Job");
@@ -2065,6 +2079,12 @@ setTimeout(()=>process.exit(74),60000);
             assert_eq!(fs::read(run.dir.join(PID_FILE)).unwrap(), record,
                 "legacy records still need authorized manual recovery");
             assert!(!run.dir.join(OWNER_FILE).exists());
+            let daemon = recovering_daemon(&run.dir);
+            let error = daemon.windows_recovery_admission(&None).unwrap_err();
+            assert!(error.starts_with("Windows recorded launch admission refused:"), "{error}");
+            assert_eq!(daemon.refusal(), Some(error));
+            assert_eq!(fs::read(run.dir.join(PID_FILE)).unwrap(), record,
+                "failed recovered admission retains the legacy record");
         }
 
         #[test]
@@ -2077,8 +2097,11 @@ setTimeout(()=>process.exit(74),60000);
             let witness = fs::read(&path).unwrap();
             // A damaged witness is not a legacy record: refuse rather than try the recovered stop.
             fs::write(&path, b"not an owner witness\n").unwrap();
-            let error = retire_if_owner_exited(&run.dir).unwrap_err();
-            assert_eq!(error.to_string(), "Windows owner witness is invalid or unreadable; record retained");
+            let daemon = recovering_daemon(&run.dir);
+            let error = daemon.windows_recovery_admission(&None).unwrap_err();
+            assert_eq!(error, "Windows previous launch admission refused: \
+                Windows owner witness is invalid or unreadable; record retained");
+            assert_eq!(daemon.refusal(), Some(error));
             assert_eq!(fs::read(run.dir.join(PID_FILE)).unwrap(), record);
             assert_eq!(fs::read(&path).unwrap(), b"not an owner witness\n");
             assert!(!exits_within(&run.root, 0) && !exits_within(&run.descendant, 0), "nothing was stopped");
@@ -2088,8 +2111,11 @@ setTimeout(()=>process.exit(74),60000);
             fs::write(&path, &unbound).unwrap();
             kill_owner(&mut run);
             assert!(exits_within(&run.root, 5000));
-            let error = retire_if_owner_exited(&run.dir).unwrap_err();
-            assert_eq!(error.to_string(), "Windows owner witness does not match the recorded launch; record retained");
+            let daemon = recovering_daemon(&run.dir);
+            let error = daemon.windows_recovery_admission(&None).unwrap_err();
+            assert_eq!(error, "Windows previous launch admission refused: \
+                Windows owner witness does not match the recorded launch; record retained");
+            assert_eq!(daemon.refusal(), Some(error));
             assert_eq!(fs::read(run.dir.join(PID_FILE)).unwrap(), record);
             assert_eq!(fs::read(&path).unwrap(), unbound);
         }
@@ -2113,9 +2139,12 @@ setTimeout(()=>process.exit(74),60000);
             let created = ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64;
             let witness = windows_record::Owner::new(record.nonce(), other.id(), created).unwrap().encode();
             fs::write(run.dir.join(OWNER_FILE), &witness).unwrap();
+            let daemon = recovering_daemon(&run.dir);
             let started = Instant::now();
-            let error = retire_if_owner_exited(&run.dir).unwrap_err();
-            assert_eq!(error.to_string(), "recorded Windows root is still running after its owner exited; record retained");
+            let error = daemon.windows_recovery_admission(&None).unwrap_err();
+            assert_eq!(error, "Windows previous launch admission refused: \
+                recorded Windows root is still running after its owner exited; record retained");
+            assert_eq!(daemon.refusal(), Some(error));
             assert!(started.elapsed() >= Duration::from_secs(9), "bounded wait for the recorded root");
             assert_eq!(fs::read(run.dir.join(PID_FILE)).unwrap(), bytes);
             assert_eq!(fs::read(run.dir.join(OWNER_FILE)).unwrap(), witness);
