@@ -1575,7 +1575,9 @@ done"#;
         let dir = scratch_dir("stop-replacement");
         let handler = Arc::new(Opened::default());
         let probes = AtomicUsize::new(0);
-        // Each start sees an unoccupied port, then a healthy newly spawned child.
+        // Each start sees an unoccupied port, then a healthy newly spawned child. This assumes
+        // exactly two health probes per start (admission's plan, then wait_ready): a start that
+        // probes more often breaks this test for a reason unrelated to the race.
         let health = Arc::new(move || probes.fetch_add(1, Ordering::SeqCst) % 2 == 1);
         let script = format!(r#"
 trap 'echo stopping > "{0}/stopping"; i=0; while [ ! -f "{0}/release" ] && [ "$i" -lt 300 ]; do sleep 0.01; i=$((i+1)); done; exit 0' TERM
@@ -1616,6 +1618,8 @@ while :; do sleep 0.01; done
         attempting.wait();
         // With the buggy unlocked stop, force replacement installation before
         // allowing stop to take its channel. With serialization, start must wait.
+        // The unfixed code takes this first branch (the child mutex is free while
+        // stop waits); the fixed code takes the second one below (stop holds it).
         if !serialized {
             completed.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();
         }
