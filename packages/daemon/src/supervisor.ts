@@ -265,18 +265,19 @@ export class AgentSupervisor {
 			};
 			const onClose = () => finish();
 			let forced = false;
+			// A root that already exited may still be current until its children release the pipes,
+			// but its PID is free then and may be reused: never escalate on it.
+			const running = () => this.child === child && child.exitCode === null && child.signalCode === null;
 			const escalate = (force: boolean) => {
-				if (this.child !== child || (force && forced)) return;
+				if (!running() || (force && forced)) return;
 				if (force) forced = true;
-				void terminate(child, force, { platform, isCurrent: () => this.child === child }).catch(
-					(error: Error) => {
-						errors.push(error.message);
-						this.log(error.message);
-						// taskkill /T without /F cannot end a windowless console process and fails at once:
-						// force the tree now instead of waiting out the hard window.
-						if (!force && platform === "win32") escalate(true);
-					},
-				);
+				void terminate(child, force, { platform, isCurrent: running }).catch((error: Error) => {
+					errors.push(error.message);
+					this.log(error.message);
+					// taskkill /T without /F cannot end a windowless console process and fails at once:
+					// force the tree now instead of waiting out the hard window.
+					if (!force && platform === "win32") escalate(true);
+				});
 			};
 			this.closeWaiters.push(onClose);
 			child.stdin?.end();
