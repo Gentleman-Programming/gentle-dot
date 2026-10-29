@@ -18,6 +18,9 @@ export const UNMANAGED_CLI =
 export const POSIX_LOGIN_SHELL =
 	"Windows intentionally ignores POSIX login shells; Linux and macOS cover login-shell Engram discovery";
 
+export const WINDOWS_STOP_ADDON =
+	"the runtime build needs the Windows stop addon, built with MSVC (build:windows-stop) on the Windows build machine; runs there and on Linux and macOS";
+
 const windows = process.platform === "win32";
 
 /** Keep the test and its stat/lstat running; only POSIX permission bits are platform-specific. */

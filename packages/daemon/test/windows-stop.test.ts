@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { runtimeWindowsStopArtifact } from "../src/runtime-build.ts";
 import type { WindowsAppChannelCloseResult } from "../src/windows-app-channel.ts";
 import * as stopModule from "../src/windows-stop.ts";
 import { startWithWindowsStop, windowsShutdownExitCode, windowsStopArtifact } from "../src/windows-stop.ts";
@@ -520,6 +521,13 @@ describe("Windows production stop bootstrap (S8, S10, S11)", () => {
 				{ platform: "win32", loadNative: f.loadNative },
 			),
 		).rejects.toThrow("startup failed");
+	});
+	it("fails Windows staging without an explicit native build and leaves Unix unchanged", () => {
+		const present = vi.fn(() => false);
+		expect(runtimeWindowsStopArtifact("linux", "/addon.node", present)).toBeUndefined();
+		expect(present).not.toHaveBeenCalled();
+		expect(() => runtimeWindowsStopArtifact("win32", "/addon.node", present)).toThrow("build:windows-stop");
+		expect(runtimeWindowsStopArtifact("win32", "/addon.node", () => true)).toBe("/addon.node");
 	});
 	it("uses the same native artifact relative to source and staged daemon entry", () => {
 		expect(windowsStopArtifact(new URL("file:///repo/packages/daemon/src/windows-stop.ts")).pathname).toBe(

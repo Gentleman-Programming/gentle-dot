@@ -13,8 +13,9 @@ import {
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
-import { lockedEnginePackages } from "../src/runtime-build.ts";
+import { lockedEnginePackages, piWrapper } from "../src/runtime-build.ts";
 import { tempDir } from "./helpers.ts";
+import { WINDOWS_STOP_ADDON } from "./support/windows.ts";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
 const BUILD = join(PACKAGE, "scripts", "build-runtime.ts");
@@ -22,7 +23,14 @@ const ENGINE_CLI = join("@earendil-works", "pi-coding-agent", "dist", "bundle", 
 
 let out: string;
 
+// The real build stages the Windows stop addon, which is built with MSVC (build:windows-stop) and
+// is absent on CI runners; staging rightly refuses without it.
+const addonMissing =
+	process.platform === "win32" && !existsSync(join(PACKAGE, "native", "windows-stop.node"));
+if (addonMissing) console.info(`Windows-only test skip: ${WINDOWS_STOP_ADDON}`);
+
 beforeAll(() => {
+	if (addonMissing) return;
 	out = tempDir();
 	const build = spawnSync(process.execPath, [BUILD, "--out", out], { encoding: "utf8" });
 	expect(build.stderr).toBe("");
@@ -37,7 +45,22 @@ function listFiles(dir: string, prefix = ""): string[] {
 	);
 }
 
-describe("build:runtime", () => {
+describe.skipIf(addonMissing)("build:runtime", () => {
+	it("emits a relocatable Windows cmd wrapper without relying on sh or ambient Node", () => {
+		expect(piWrapper("@earendil-works/pi-coding-agent/dist/bundle/cli.js", "win32")).toBe(
+			'@echo off\r\nsetlocal DisableDelayedExpansion\r\n"%~dp0..\\node\\bin\\node.exe" "%~dp0..\\daemon\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js" %*\r\nexit /b %errorlevel%\r\n',
+		);
+	});
+
+	it("preserves the Unix shell wrapper for Linux and macOS", () => {
+		for (const platform of ["linux", "darwin"] as const) {
+			const wrapper = piWrapper("@earendil-works/pi-coding-agent/dist/bundle/cli.js", platform);
+			expect(wrapper).toContain("#!/bin/sh\n");
+			expect(wrapper).toContain('exec "$runtime/node/bin/node"');
+			expect(wrapper).toContain('"$@"');
+		}
+	});
+
 	it("emits the daemon part of the runtime layout, without node_modules", () => {
 		expect(listFiles(out).sort()).toEqual([
 			"bin/pi",
@@ -61,6 +84,10 @@ describe("build:runtime", () => {
 		expect(bundle).not.toContain("@gentle-dot/protocol");
 		expect(bundle).toMatch(/from "ws"/);
 		expect(bundle).toContain('import("@earendil-works/pi-coding-agent")');
+		// The production addon stays external and resolves beside the staged entry,
+		// not relative to the source checkout; Unix's file layout remains unchanged.
+		expect(bundle).toContain("./native/windows-stop.node");
+		expect(bundle).not.toContain("NAPI_MODULE");
 	});
 
 	it("lists the external dependencies with the lockfile's exact versions", () => {
