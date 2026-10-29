@@ -62,14 +62,18 @@ describe.skipIf(addonMissing)("build:runtime", () => {
 	});
 
 	it("emits the daemon part of the runtime layout, without node_modules", () => {
-		expect(listFiles(out).sort()).toEqual([
-			"bin/pi",
-			"daemon/cli.mjs",
-			"daemon/extensions/approval-guard.ts",
-			"daemon/extensions/screenshot-context.ts",
-			"daemon/identity.md",
-			"daemon/package.json",
-		]);
+		const windows = process.platform === "win32";
+		expect(listFiles(out).sort()).toEqual(
+			[
+				windows ? "bin/pi.cmd" : "bin/pi",
+				"daemon/cli.mjs",
+				"daemon/extensions/approval-guard.ts",
+				"daemon/extensions/screenshot-context.ts",
+				"daemon/identity.md",
+				...(windows ? ["daemon/native/windows-stop.node"] : []),
+				"daemon/package.json",
+			].sort(),
+		);
 		expect(readFileSync(join(out, "daemon", "identity.md"), "utf8")).toBe(
 			readFileSync(join(PACKAGE, "src", "identity.md"), "utf8"),
 		);
@@ -180,29 +184,61 @@ describe.skipIf(addonMissing)("build:runtime", () => {
 		expect(realpathSync(report.identity)).toBe(join(real, "daemon", "identity.md"));
 	});
 
-	it("emits a `pi` wrapper that runs the runtime's node and engine wherever the runtime is", () => {
-		expect(statSync(join(out, "bin", "pi")).mode & 0o111).toBe(0o111);
-		const moved = tempDir();
-		mkdirSync(join(moved, "bin"));
-		mkdirSync(join(moved, "node", "bin"), { recursive: true });
-		copyFileSync(join(out, "bin", "pi"), join(moved, "bin", "pi"));
-		writeFileSync(join(moved, "node", "bin", "node"), '#!/bin/sh\nprintf "%s\\n" "$0" "$@"\n', {
-			mode: 0o755,
-		});
-		const linked = join(tempDir(), "pi");
-		symlinkSync(join(moved, "bin", "pi"), linked);
-		const real = realpathSync(moved);
-		for (const entry of [join(moved, "bin", "pi"), linked]) {
-			const run = spawnSync(entry, ["--version", "a b"], { encoding: "utf8" });
+	it.runIf(process.platform === "win32")(
+		"emits a `pi.cmd` that runs the runtime's node.exe and engine wherever the runtime is, arguments intact",
+		() => {
+			const moved = join(tempDir(), "moved runtime");
+			mkdirSync(join(moved, "bin"), { recursive: true });
+			mkdirSync(join(moved, "node", "bin"), { recursive: true });
+			copyFileSync(join(out, "bin", "pi.cmd"), join(moved, "bin", "pi.cmd"));
+			copyFileSync(process.execPath, join(moved, "node", "bin", "node.exe"));
+			const engine = join(moved, "daemon", "node_modules", ENGINE_CLI);
+			mkdirSync(join(engine, ".."), { recursive: true });
+			writeFileSync(engine, "console.log(JSON.stringify([process.execPath, ...process.argv.slice(1)]));\n");
+			// .cmd files run through cmd.exe; /s strips only the outer quotes, so the quoted path and arguments stay as written.
+			const run = spawnSync(
+				"cmd.exe",
+				["/d", "/s", "/c", `""${join(moved, "bin", "pi.cmd")}" --version "a b" "wow!""`],
+				{ encoding: "utf8", windowsVerbatimArguments: true },
+			);
+			expect(run.stderr).toBe("");
 			expect(run.status).toBe(0);
-			expect(run.stdout.split("\n")).toEqual([
-				join(real, "node", "bin", "node"),
-				join(real, "daemon", "node_modules", ENGINE_CLI),
+			expect(JSON.parse(run.stdout)).toEqual([
+				join(moved, "node", "bin", "node.exe"),
+				engine,
 				"--version",
 				"a b",
-				"",
+				"wow!",
 			]);
-		}
-		expect(existsSync(join(PACKAGE, "node_modules", ENGINE_CLI))).toBe(true);
-	});
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"emits a `pi` wrapper that runs the runtime's node and engine wherever the runtime is",
+		() => {
+			expect(statSync(join(out, "bin", "pi")).mode & 0o111).toBe(0o111);
+			const moved = tempDir();
+			mkdirSync(join(moved, "bin"));
+			mkdirSync(join(moved, "node", "bin"), { recursive: true });
+			copyFileSync(join(out, "bin", "pi"), join(moved, "bin", "pi"));
+			writeFileSync(join(moved, "node", "bin", "node"), '#!/bin/sh\nprintf "%s\\n" "$0" "$@"\n', {
+				mode: 0o755,
+			});
+			const linked = join(tempDir(), "pi");
+			symlinkSync(join(moved, "bin", "pi"), linked);
+			const real = realpathSync(moved);
+			for (const entry of [join(moved, "bin", "pi"), linked]) {
+				const run = spawnSync(entry, ["--version", "a b"], { encoding: "utf8" });
+				expect(run.status).toBe(0);
+				expect(run.stdout.split("\n")).toEqual([
+					join(real, "node", "bin", "node"),
+					join(real, "daemon", "node_modules", ENGINE_CLI),
+					"--version",
+					"a b",
+					"",
+				]);
+			}
+			expect(existsSync(join(PACKAGE, "node_modules", ENGINE_CLI))).toBe(true);
+		},
+	);
 });
