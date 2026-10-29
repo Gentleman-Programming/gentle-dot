@@ -235,7 +235,9 @@ interface PrivateMemoryOptions {
 
 /**
  * Owns cleanup only after confirming an empty private port before startup.
- * A failed or ambiguous lookup refuses ownership. Before termination, both the
+ * A failed or ambiguous lookup refuses ownership, not startup: the daemon starts,
+ * logs it, and leaves that memory server running when it closes. An invalid port
+ * is a configuration error and does stop startup. Before termination, both the
  * private data identity and a repeated stable listener PID must match.
  * PID reuse after the final check remains possible; nothing is killed by name.
  */
@@ -259,7 +261,9 @@ export async function privateMemory(
 	const before = await listeningPid(port, options);
 	if (before.kind === "one") return undefined;
 	if (before.kind !== "empty") {
-		throw new Error(`Cannot start private memory: ${before.kind} listener lookup on port ${port}`);
+		// Not knowing is no reason to keep the assistant from starting, nor to claim the server.
+		log(`cannot verify private memory listener on port ${port} (${before.kind} lookup); will not stop it`);
+		return undefined;
 	}
 	return {
 		async stop() {
@@ -347,7 +351,7 @@ async function listeningPid(port: string, options: PrivateMemoryOptions): Promis
 				"-Command",
 				`$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; try { Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { $_.LocalPort -eq ${Number(port)} } | Select-Object -ExpandProperty OwningProcess } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }`,
 			]
-		: ["-t", "-n", "-P", `-iTCP:${port}`, "-sTCP:LISTEN"];
+		: ["-w", "-t", "-n", "-P", `-iTCP:${port}`, "-sTCP:LISTEN"];
 	try {
 		const result = await (options.runListenerCommand ?? runListenerCommand)(command, args);
 		const text = result.stdout.trim();

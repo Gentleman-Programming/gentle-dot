@@ -164,10 +164,12 @@ describe("private memory ownership safeguards", () => {
 		{ code: 0, stdout: "0" },
 		{ code: 0, stdout: "garbage" },
 		{ code: 0, stdout: "12345\n12346" },
-	])("refuses uncertain startup ownership: %j", async (output) => {
+	])("starts without claiming ownership when the startup lookup is uncertain: %j", async (output) => {
 		const f = await fixture([output]);
-		await expect(privateMemory(f.base, f.dataDir, () => {}, undefined, f.options)).rejects.toThrow(
-			"private memory",
+		const log = vi.fn();
+		expect(await privateMemory(f.base, f.dataDir, log, undefined, f.options)).toBeUndefined();
+		expect(log).toHaveBeenCalledWith(
+			`cannot verify private memory listener on port ${f.port} (${output.code === 0 && output.stdout.includes("\n") ? "ambiguous" : "failed"} lookup); will not stop it`,
 		);
 		expect(f.kill).not.toHaveBeenCalled();
 	});
@@ -200,12 +202,12 @@ describe("private memory ownership safeguards", () => {
 		expect(f.kill).not.toHaveBeenCalled();
 	});
 
-	it("rejects a failed command instead of assuming an empty port", async () => {
+	it("does not take a failed command for an empty port, and still starts", async () => {
 		const f = await fixture([]);
 		f.runListenerCommand.mockRejectedValueOnce(new Error("spawn failed"));
-		await expect(privateMemory(f.base, f.dataDir, () => {}, undefined, f.options)).rejects.toThrow(
-			"private memory",
-		);
+		const log = vi.fn();
+		expect(await privateMemory(f.base, f.dataDir, log, undefined, f.options)).toBeUndefined();
+		expect(log).toHaveBeenCalledWith(expect.stringMatching(/cannot verify .* will not stop it/));
 		expect(f.kill).not.toHaveBeenCalled();
 	});
 
@@ -216,6 +218,14 @@ describe("private memory ownership safeguards", () => {
 		)?.stop();
 		expect(f.kill).toHaveBeenCalledExactlyOnceWith(12345, "SIGTERM");
 		expect(f.runListenerCommand.mock.calls[0]?.[0]).toBe("lsof");
+	});
+
+	it("asks lsof for no warnings, so a successful lookup is not read as failed", async () => {
+		// lsof warns on stderr even when the lookup works (gvfs, Docker overlay mounts), and any
+		// stderr is a failed lookup: `-w` keeps those warnings out, real failures keep their exit code.
+		const f = await fixture([{ code: 1, stdout: "" }]);
+		await privateMemory(f.base, f.dataDir, () => {}, undefined, { ...f.options, platform: "linux" });
+		expect(f.runListenerCommand.mock.calls[0]?.[1]).toContain("-w");
 	});
 
 	it("does not terminate when health is unavailable or the stored instance id is empty", async () => {
