@@ -209,8 +209,10 @@ export class AgentSupervisor {
 		try {
 			await this.closeChild(child);
 		} catch (error) {
-			// The old process is still running: never spawn a second engine over it.
+			// The old process is still running: never spawn a second engine over it. Its stdin is
+			// closed, so it is not ready any more; its close schedules the replacement.
 			this.restarting = false;
+			if (this.child === child) this.setState("restarting");
 			throw error;
 		}
 		// Stopped while the old process was closing: nothing is started again.
@@ -262,12 +264,17 @@ export class AgentSupervisor {
 				else resolve();
 			};
 			const onClose = () => finish();
+			let forced = false;
 			const escalate = (force: boolean) => {
-				if (this.child !== child) return;
+				if (this.child !== child || (force && forced)) return;
+				if (force) forced = true;
 				void terminate(child, force, { platform, isCurrent: () => this.child === child }).catch(
 					(error: Error) => {
 						errors.push(error.message);
 						this.log(error.message);
+						// taskkill /T without /F cannot end a windowless console process and fails at once:
+						// force the tree now instead of waiting out the hard window.
+						if (!force && platform === "win32") escalate(true);
 					},
 				);
 			};

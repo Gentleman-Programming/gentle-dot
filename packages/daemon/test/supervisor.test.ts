@@ -368,6 +368,40 @@ describe("AgentSupervisor", () => {
 		},
 	);
 
+	it("forces a Windows tree at once when the soft taskkill fails, without waiting the hard window", async () => {
+		// taskkill /T without /F cannot end a windowless console process: it exits 255 at once.
+		const escalations: boolean[] = [];
+		const { supervisor } = track(
+			fakeSupervisor({
+				platform: "win32",
+				command: process.execPath,
+				args: ["-e", STUBBORN_AGENT, "--"],
+				stopTimeoutMs: 1,
+				terminateProcessTree: async (child, force) => {
+					escalations.push(force);
+					if (!force) throw new Error("taskkill failed for process tree with exit code 255");
+					child.kill("SIGKILL");
+					return true;
+				},
+			}),
+		);
+		await supervisor.start();
+		vi.useFakeTimers();
+		const stopped = supervisor.stop();
+		void stopped.catch(() => {});
+		try {
+			await vi.advanceTimersByTimeAsync(1);
+			expect(escalations).toEqual([false, true]);
+			vi.useRealTimers();
+			await stopped;
+			expect(supervisor.state).toBe("stopped");
+			// The hard window's own escalation finds the child gone: nothing is forced twice.
+			expect(escalations).toEqual([false, true]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("keeps both Windows default stages bounded without rejecting before taskkill can finish", async () => {
 		const escalations: boolean[] = [];
 		const { supervisor } = track(
@@ -430,6 +464,34 @@ describe("AgentSupervisor", () => {
 		if (!pid || pid <= 0) throw new Error("Missing owned test child PID");
 		process.kill(pid, "SIGKILL");
 		await waitFor(() => supervisor.state === "stopped");
+	});
+
+	it("a failed restart does not report ready, and the engine comes back once the old process closes", async () => {
+		const { supervisor, events } = fakeSupervisor({
+			command: process.execPath,
+			args: ["-e", STUBBORN_AGENT, "--"],
+			stopTimeoutMs: 10,
+			hardStopTimeoutMs: 10,
+			terminationFailureTimeoutMs: 10,
+			terminateProcessTree: async () => false,
+		});
+		await supervisor.start();
+		const pid = supervisor.pid;
+		if (!pid || pid <= 0) throw new Error("Missing owned test child PID");
+		await expect(supervisor.restart()).rejects.toThrow(/failed to stop agent process/i);
+		// The old engine is still current but no longer reachable: not shown as ready.
+		expect(supervisor.state).toBe("restarting");
+		expect(events.at(-1)).toEqual({ type: "supervisor_state", state: "restarting" });
+		await expect(supervisor.request({ type: "get_state" })).rejects.toThrow(/not ready/i);
+		process.kill(pid, "SIGKILL");
+		await waitFor(() => supervisor.state === "ready" && supervisor.pid !== pid);
+		// The replacement ignores escalation too: end it here, as the test owns both processes.
+		const next = supervisor.pid;
+		if (!next || next <= 0) throw new Error("Missing replacement test child PID");
+		const stopped = supervisor.stop();
+		process.kill(next, "SIGKILL");
+		await stopped;
+		expect(supervisor.state).toBe("stopped");
 	});
 
 	it("rejects restart actionably instead of spawning over a child that did not terminate", async () => {
