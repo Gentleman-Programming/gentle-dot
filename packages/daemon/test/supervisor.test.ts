@@ -402,6 +402,48 @@ describe("AgentSupervisor", () => {
 		}
 	});
 
+	it("never escalates on a root that already exited while its children still hold the pipes", async () => {
+		// The engine exits once its stdin closes, but close waits for children holding the inherited
+		// pipes: its PID is already free then, and Windows may reuse it.
+		const agent = `
+const { spawn } = require("node:child_process");
+spawn(process.execPath, ["-e", "setTimeout(() => {}, 1500)"], { stdio: "inherit" });
+process.stdin.setEncoding("utf8");
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+	buffer += chunk;
+	for (;;) {
+		const newline = buffer.indexOf("\\n");
+		if (newline < 0) break;
+		const record = JSON.parse(buffer.slice(0, newline));
+		buffer = buffer.slice(newline + 1);
+		if (record.type === "get_state")
+			process.stdout.write(JSON.stringify({ type: "response", id: record.id, command: "get_state", success: true, data: {} }) + "\\n");
+	}
+});
+process.stdin.on("end", () => process.exit(0));
+`;
+		const escalations: boolean[] = [];
+		const { supervisor } = track(
+			fakeSupervisor({
+				platform: "win32",
+				command: process.execPath,
+				args: ["-e", agent, "--"],
+				stopTimeoutMs: 200,
+				hardStopTimeoutMs: 200,
+				terminationFailureTimeoutMs: 5000,
+				terminateProcessTree: async (_child, force) => {
+					escalations.push(force);
+					return true;
+				},
+			}),
+		);
+		await supervisor.start();
+		await supervisor.stop();
+		expect(supervisor.state).toBe("stopped");
+		expect(escalations).toEqual([]);
+	});
+
 	it("keeps both Windows default stages bounded without rejecting before taskkill can finish", async () => {
 		const escalations: boolean[] = [];
 		const { supervisor } = track(
