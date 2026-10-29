@@ -124,8 +124,8 @@ export function ensureMemoryProject(workspace: string, access: EngineAccess = di
 
 /**
  * The engine's environment: its own HOME (`<dataDir>/home`, mode 0700) with
- * the XDG folders under it, because parts of the engine write to fixed places
- * under the home folder. PATH is kept (on Windows as one `PATH` key, whatever its spelling), with the bundled `pi` folder first, and so is the user's git identity,
+ * the XDG folders under it (on Windows `USERPROFILE`, `APPDATA` and `LOCALAPPDATA`), because
+ * parts of the engine write to fixed places under the home folder. PATH is kept (on Windows as one `PATH` key, whatever its spelling), with the bundled `pi` folder first, and so is the user's git identity,
  * through `GIT_CONFIG_GLOBAL` pointing at their real `~/.gitconfig`.
  *
  * Memory is the user's global Engram: Engram ties a server to its data folder
@@ -168,7 +168,14 @@ export function isolatedAgentEnv(
 		const tmp = join(home, ".cache", "tmp");
 		env.USERPROFILE = home;
 		env.TEMP = env.TMP = env.TMPDIR = tmp;
-		access(() => ensurePrivateDir(tmp));
+		// Windows' counterparts of the XDG folders, so the engine's tools keep no state in the user's.
+		env.APPDATA = join(home, "AppData", "Roaming");
+		env.LOCALAPPDATA = join(home, "AppData", "Local");
+		access(() => {
+			ensurePrivateDir(tmp);
+			ensurePrivateDir(env.APPDATA as string);
+			ensurePrivateDir(env.LOCALAPPDATA as string);
+		});
 	} else if (!base.TMPDIR) {
 		const tmp = join(home, ".cache", "tmp");
 		env.TMPDIR = tmp;

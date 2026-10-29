@@ -43,6 +43,23 @@ describe("Windows isolation", () => {
 		expect(env.ENGRAM_DATA_DIR).toBe(join(realHome, ".engram"));
 	});
 
+	it("gives the engine its own AppData on Windows, as XDG on Unix, and leaves Unix AppData alone", () => {
+		const data = tempDir();
+		const user = {
+			USERPROFILE: tempDir(),
+			APPDATA: "C:\\Users\\me\\AppData\\Roaming",
+			LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local",
+		};
+		const env = isolatedAgentEnv(user, data, undefined, { platform: "win32" });
+		expect(env.APPDATA).toBe(join(data, "home", "AppData", "Roaming"));
+		expect(env.LOCALAPPDATA).toBe(join(data, "home", "AppData", "Local"));
+		expect(existsSync(env.APPDATA as string)).toBe(true);
+		expect(existsSync(env.LOCALAPPDATA as string)).toBe(true);
+		const unix = isolatedAgentEnv({ ...user, HOME: tempDir() }, tempDir(), undefined, { platform: "linux" });
+		expect(unix.APPDATA).toBe(user.APPDATA);
+		expect(unix.LOCALAPPDATA).toBe(user.LOCALAPPDATA);
+	});
+
 	it("recognizes a source pi.cmd without a POSIX shim", () => {
 		const bin = tempDir();
 		writeFileSync(join(bin, "pi.cmd"), "@echo off\r\n");
