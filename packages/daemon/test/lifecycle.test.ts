@@ -3,12 +3,13 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppChannel } from "../src/app-channel.ts";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import { fakeApp } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { itWithAppChannel } from "./support/windows.ts";
 
 const MARKER = ".gentle-shell-home";
 
@@ -60,7 +61,7 @@ const alive = (pid: number) => {
 };
 
 describe("the daemon's lifetime (S35.2)", () => {
-	it("a daemon started by the app stops when its app channel closes", async () => {
+	itWithAppChannel("a daemon started by the app stops when its app channel closes", async () => {
 		const app = fakeApp();
 		const { d, logs } = await start({ appChannel: app });
 		const engine = d.supervisor.pid;
@@ -91,13 +92,90 @@ describe("the daemon's lifetime (S35.2)", () => {
 		expect(await health(d.port)).toBe(true);
 	});
 
-	it("closing twice, or closing while the app quits, stops once", async () => {
+	itWithAppChannel(
+		"daemon close and closed settlement wait for channel drain without a close-event cycle",
+		async () => {
+			const app = fakeApp();
+			const { d } = await start({ appChannel: app });
+			const original = AppChannel.prototype.close;
+			let drain!: () => void;
+			const pending = new Promise<void>((resolve) => {
+				drain = resolve;
+			});
+			const spy = vi.spyOn(AppChannel.prototype, "close").mockImplementation(function (this: AppChannel) {
+				void original.call(this); // real logical refusal and onClose reentry
+				return pending;
+			});
+			let settled = false;
+			void d.closed.then(() => {
+				settled = true;
+			});
+			try {
+				const closing = d.close();
+				expect(d.close()).toBe(closing);
+				await waitFor(() => d.supervisor.state === "stopped");
+				expect(settled).toBe(false);
+				expect(spy).toHaveBeenCalled();
+				drain();
+				await closing;
+				await d.closed;
+				expect(settled).toBe(true);
+			} finally {
+				drain();
+				spy.mockRestore();
+			}
+		},
+	);
+
+	itWithAppChannel("channel drain failure propagates after other daemon cleanup completes", async () => {
+		const app = fakeApp();
+		const { d } = await start({ appChannel: app });
+		const original = AppChannel.prototype.close;
+		const failure = new Error("channel drain failed");
+		const spy = vi.spyOn(AppChannel.prototype, "close").mockImplementation(function (this: AppChannel) {
+			void original.call(this);
+			const rejected = Promise.reject(failure);
+			void rejected.catch(() => {});
+			return rejected;
+		});
+		try {
+			await expect(d.close()).rejects.toBe(failure);
+			await d.closed;
+			expect(d.supervisor.state).toBe("stopped");
+			expect(await health(d.port)).toBe(false);
+		} finally {
+			spy.mockRestore();
+			daemons.splice(daemons.indexOf(d), 1);
+		}
+	});
+
+	itWithAppChannel("closing twice, or closing while the app quits, stops once", async () => {
 		const app = fakeApp();
 		const { d } = await start({ appChannel: app });
 		const first = d.close();
 		app.close();
 		await Promise.all([first, d.close(), d.closed]);
 		expect(d.supervisor.state).toBe("stopped");
+	});
+});
+
+describe.runIf(process.platform === "win32")("Windows app channel admission", () => {
+	it("refuses a generic Duplex as the app channel before anything starts", async () => {
+		const dataDir = tempDir();
+		await expect(
+			startDaemon({
+				port: 0,
+				host: "127.0.0.1",
+				dataDir,
+				workspace: join(dataDir, "workspace"),
+				uiDir: dataDir,
+				agentCommand: process.execPath,
+				agentArgs: [FAKE_AGENT],
+				appChannel: fakeApp().daemonEnd,
+			}),
+		).rejects.toThrow("Windows app channel requires validated production ownership before startup");
+		// Refused before the token, the engine or any descendant.
+		expect(existsSync(join(dataDir, "token"))).toBe(false);
 	});
 });
 

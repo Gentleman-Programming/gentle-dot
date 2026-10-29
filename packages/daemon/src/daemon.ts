@@ -45,6 +45,7 @@ import { VoiceService } from "./voice.ts";
 import { CONNECTOR_HOME, chownHandOver, prepareVpsLayout, type VpsOptions } from "./vps.ts";
 import { PIN_FILE, PinGate } from "./web-pin.ts";
 import { identityArgs } from "./white-label.ts";
+import { isProductionWindowsAppChannel } from "./windows-app-channel.ts";
 
 export interface DaemonOptions {
 	port: number;
@@ -152,7 +153,26 @@ export function startupMessage(url: string, dataDir: string, interactive: boolea
 }
 
 export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
+	// A generic Duplex or fd number is not Windows descendant-exclusion admission.
+	// Only actual main-thread/native ownership transfer on the production startup
+	// path admits a requested channel, before privateMemory can spawn PowerShell.
+	if (
+		process.platform === "win32" &&
+		options.appChannel &&
+		!isProductionWindowsAppChannel(options.appChannel)
+	)
+		throw new Error("Windows app channel requires validated production ownership before startup");
 	const log = options.log ?? (() => {});
+	const openApp = () =>
+		options.appChannel
+			? new AppChannel(options.appChannel, {
+					log,
+					...(options.approvalWaitMs ? { approvalWaitMs: options.approvalWaitMs } : {}),
+				})
+			: undefined;
+	// Observe Windows transport errors during asynchronous memory bootstrap.
+	// Unix retains its original channel-construction timing below.
+	const earlyWindowsApp = process.platform === "win32" ? openApp() : undefined;
 	const token = ensureToken(options.dataDir);
 	const vps = options.vps;
 	// Server mode (S25.8): the daemon's files stay its own, the engine's folders become the engine's,
@@ -183,12 +203,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		agentEnv.GENTLE_PI_CONFIG_HOME = join(options.dataDir, "gentle-ai");
 	}
 	const agentHome = options.agentHome ?? resolveAgentHome(process.env, options.dataDir);
-	const app = options.appChannel
-		? new AppChannel(options.appChannel, {
-				log,
-				...(options.approvalWaitMs ? { approvalWaitMs: options.approvalWaitMs } : {}),
-			})
-		: undefined;
+	const app = earlyWindowsApp ?? openApp();
 	// The approved connectors are read once, here; the engine cannot change them (docs/design.md).
 	// Their secrets come from the app's secure store over its channel, and only into memory (S25.5).
 	const connectorStore = new ConnectorStore({
@@ -339,6 +354,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		// Nothing the app asks changes connectors before connectors.json was checked (S25.6).
 		app.handler = async (method, params) => {
 			await integrity;
+			if (!app.connected) throw new Error("The Gentle Dot app closed its channel.");
 			return appRequest(method, params, bridge, connectors, app);
 		};
 		// The computer helper belongs to the app that registered it (S24.7).
@@ -394,21 +410,46 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	const shutdown = async () => {
 		// Not listening any more first, so an app relaunched meanwhile starts a daemon of its own.
 		const serverClosed = new Promise<void>((done) => server.close(() => done()));
-		app?.close();
-		for (const client of wss.clients) client.terminate();
-		wss.close();
-		// Stops waiting approvals and the connectors' servers (stdio ones are processes of the daemon).
-		await proxy.close();
-		await serverClosed;
-		await supervisor.stop();
-		connectorStore.close();
-		authHelper?.close();
-		await memory?.stop();
+		let failed = false;
+		let firstError: unknown;
+		const attempt = async (cleanup: () => unknown) => {
+			try {
+				await cleanup();
+			} catch (error) {
+				if (!failed) {
+					failed = true;
+					firstError = error;
+				}
+			}
+		};
+		// Logical refusal and secret invalidation happen NOW, not after native drain.
+		// Start drain independently so a pending/failed channel cannot skip cleanup.
+		const channelClosed = attempt(() => app?.close());
+		await attempt(() => {
+			for (const client of wss.clients) client.terminate();
+			wss.close();
+		});
+		await attempt(() => proxy.close());
+		await attempt(() => serverClosed);
+		await attempt(() => supervisor.stop());
+		await attempt(() => connectorStore.close());
+		await attempt(() => authHelper?.close());
+		await attempt(() => memory?.stop());
+		await channelClosed;
+		if (failed) throw firstError;
 	};
 	let stopping: Promise<void> | undefined;
 	const close = (): Promise<void> => {
 		if (!stopping) {
-			stopping = shutdown();
+			// Publish before synchronous logical close notifies app.onClose; do not
+			// defer refusal, and do not recursively start another shutdown.
+			let resolveClose!: () => void;
+			let rejectClose!: (error: unknown) => void;
+			stopping = new Promise<void>((resolve, reject) => {
+				resolveClose = resolve;
+				rejectClose = reject;
+			});
+			void shutdown().then(resolveClose, rejectClose);
 			stopping.then(stopped, (error: Error) => {
 				log(`the assistant did not stop cleanly: ${error.message}`);
 				stopped();

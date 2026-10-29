@@ -12,6 +12,9 @@ export const SERVER_MODE =
 export const POSIX_FILE_MODE =
 	"Windows has no POSIX permission bits; private files rely on the user profile's ACL. Linux and macOS cover these mode assertions";
 
+export const UNMANAGED_CLI =
+	"Windows CLI startup requires a native exact-launch owner record; Linux and macOS cover unmanaged CLI startup";
+
 export const POSIX_LOGIN_SHELL =
 	"Windows intentionally ignores POSIX login shells; Linux and macOS cover login-shell Engram discovery";
 
@@ -24,6 +27,7 @@ export function expectPosixMode(actualMode: number, expectedMode: number): void 
 
 /** Only daemon tests requiring a generic Duplex app channel lack Windows coverage. */
 export const describeWithAppChannel: ReturnType<typeof describe.skipIf> = describe.skipIf(windows);
+export const itWithAppChannel: ReturnType<typeof it.skipIf> = it.skipIf(windows);
 
 /** Server-mode tests are absent on Windows; desktop and generic file behavior remain active. */
 export const itServerMode: ReturnType<typeof it.skipIf> = it.skipIf(windows);
@@ -31,10 +35,13 @@ export const itServerMode: ReturnType<typeof it.skipIf> = it.skipIf(windows);
 export const itWithPosixShell: ReturnType<typeof it.skipIf> = it.skipIf(windows);
 
 export const describeWithInheritedAppChannel: ReturnType<typeof describe.skipIf> = describe.skipIf(windows);
+export const itWithInheritedAppChannel: ReturnType<typeof it.skipIf> = it.skipIf(windows);
+export const itWithUnmanagedCli: ReturnType<typeof it.skipIf> = it.skipIf(windows);
 
 if (windows) {
 	console.info(`Windows-only test skip: ${WINDOWS_APP_CHANNEL}`);
 	console.info(`Windows-only test skip: ${SERVER_MODE}`);
 	console.info(`Windows-only test skip: ${INHERITED_APP_CHANNEL}`);
+	console.info(`Windows-only test skip: ${UNMANAGED_CLI}`);
 	console.info(`Windows-only test skip: ${POSIX_LOGIN_SHELL}`);
 }
