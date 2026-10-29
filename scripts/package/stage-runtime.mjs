@@ -30,9 +30,11 @@ import {
 	engramReleaseVersion,
 	formatSize,
 	nodeArchiveName,
+	nodeExtractionPlan,
 	nodeVersion,
 	npmWrapper,
 	parseArgs,
+	renameWhenReleased,
 	symlinksIn,
 	treeSize,
 	verifyChecksum,
@@ -117,20 +119,20 @@ async function stageNode(out, target) {
 	);
 	const node = join(out, "node");
 	mkdirSync(join(node, "bin"), { recursive: true });
-	const root = archiveName.replace(/\.tar\.gz$/, "");
+	const plan = nodeExtractionPlan(version, target);
 	// Only the binary, npm, and the license: headers, docs, and corepack are left out.
-	run("tar", [
-		"-xzf",
-		archive,
-		"-C",
-		node,
-		"--strip-components=1",
-		`${root}/bin/node`,
-		`${root}/lib/node_modules/npm`,
-		`${root}/LICENSE`,
-	]);
-	writeFileSync(join(node, "bin", "npm"), npmWrapper("npm-cli.js"), { mode: 0o755 });
-	writeFileSync(join(node, "bin", "npx"), npmWrapper("npx-cli.js"), { mode: 0o755 });
+	run("tar", [plan.flag, archive, "-C", node, "--strip-components=1", ...plan.members]);
+	for (const [from, to] of plan.moves) {
+		mkdirSync(join(node, "lib"), { recursive: true });
+		renameWhenReleased(join(node, from), join(node, to));
+	}
+	const windows = target === "windows-x64";
+	for (const name of ["npm", "npx"])
+		writeFileSync(
+			join(node, "bin", `${name}${windows ? ".cmd" : ""}`),
+			npmWrapper(`${name}-cli.js`, windows ? "win32" : "unix"),
+			{ mode: 0o755 },
+		);
 	return version;
 }
 
@@ -226,18 +228,20 @@ async function stageEngram(out, target, requested) {
 	const { version, source } = await engramVersion(requested);
 	say(`Engram ${version} (${source})`);
 	const base = `${ENGRAM_RELEASES}/download/v${version}`;
-	const archiveName = engramArchiveName(version, target);
+	const listing = await text(`${base}/checksums.txt`);
+	const archiveName = engramArchiveName(version, target, listing);
 	const archive = await verifiedDownload(
 		`${base}/${archiveName}`,
 		archiveName,
-		checksumFor(await text(`${base}/checksums.txt`), archiveName),
+		checksumFor(listing, archiveName),
 	);
 	const extracted = mkdtempSync(join(CACHE, "engram-"));
-	run("tar", ["-xzf", archive, "-C", extracted, "engram"]);
-	const binary = join(extracted, "engram");
-	if (!lstatSync(binary).isFile()) throw new Error(`${archiveName} has no regular engram binary.`);
-	copyFileSync(binary, join(out, "bin", "engram"));
-	chmodSync(join(out, "bin", "engram"), 0o755);
+	const name = target === "windows-x64" ? "engram.exe" : "engram";
+	run("tar", [archiveName.endsWith(".zip") ? "-xf" : "-xzf", archive, "-C", extracted, name]);
+	const binary = join(extracted, name);
+	if (!lstatSync(binary).isFile()) throw new Error(`${archiveName} has no regular ${name} binary.`);
+	copyFileSync(binary, join(out, "bin", name));
+	chmodSync(join(out, "bin", name), 0o755);
 	rmSync(extracted, { recursive: true });
 	return { version, source };
 }
@@ -255,6 +259,9 @@ async function main() {
 	const options = parseArgs(process.argv.slice(2));
 	const { target } = options;
 	assertHostTarget(target);
+	// The Windows downloads are in place; its isolated dependency install is not yet.
+	if (target === "windows-x64")
+		throw new Error("Staging the Windows runtime is not available yet: its isolated install comes next.");
 	const out = resolve(
 		process.env.INIT_CWD ?? process.cwd(),
 		options.out ?? join(REPO, "build", "runtime", target),
