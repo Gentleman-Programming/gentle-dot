@@ -82,11 +82,12 @@ async function main(): Promise<void> {
 	process.stdout.write(`${startupMessage(daemon.url, config.dataDir, process.stdout.isTTY === true)}\n`);
 
 	if (windows) {
-		const shutdown = () => {
+		const shutdown = (signal: string) => {
+			log(`received ${signal}, shutting down`);
 			void windows.close();
 		};
-		process.on("SIGINT", shutdown);
-		process.on("SIGTERM", shutdown);
+		process.on("SIGINT", () => shutdown("SIGINT"));
+		process.on("SIGTERM", () => shutdown("SIGTERM"));
 		// Only successful daemon.close AND native drain may report success. Never use
 		// daemon.closed directly here: it also settles when daemon.close rejects.
 		// On failure, retain the owner and set exitCode without abandoning native
