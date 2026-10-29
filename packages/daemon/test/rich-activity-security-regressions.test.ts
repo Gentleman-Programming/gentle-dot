@@ -151,6 +151,7 @@ describe("S13.5 security regressions", () => {
 			type: "message_done",
 			messageId: "m1",
 			text: "hello",
+			at: expect.any(Number),
 		});
 	});
 

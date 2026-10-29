@@ -342,6 +342,7 @@ describe("rich history and live events", () => {
 			messageId: "m1",
 			text: `memory uses Gentle Dot.\n${code}`,
 			reasoning: "memory follows workflow",
+			at: expect.any(Number),
 		});
 		const activities = received.flatMap((p) => (p.type === "activity" ? [p.activity] : []));
 		expect(activities).toHaveLength(2);

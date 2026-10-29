@@ -99,18 +99,28 @@ function readHead(path: string): string {
 
 /** The messages a session file records, in order; context-only entries (summaries, handoffs) are not messages. */
 export function readSessionMessages(file: string): unknown[] {
+	return readSessionEntries(file).map((entry) => entry.message);
+}
+
+/**
+ * Each message with the time its entry was written (epoch ms), when the entry has a valid one.
+ * The engine writes an entry when the message ends: an answer's entry is when it finished.
+ */
+function readSessionEntries(file: string): { message: unknown; at?: number }[] {
 	if (!existsSync(file)) return [];
-	const messages: unknown[] = [];
+	const entries: { message: unknown; at?: number }[] = [];
 	for (const line of readFileSync(file, "utf8").split("\n")) {
 		if (!line.includes('"message"')) continue;
 		try {
-			const entry = JSON.parse(line) as { type?: unknown; message?: unknown };
-			if (entry.type === "message" && entry.message) messages.push(entry.message);
+			const entry = JSON.parse(line) as { type?: unknown; message?: unknown; timestamp?: unknown };
+			if (entry.type !== "message" || !entry.message) continue;
+			const at = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
+			entries.push(Number.isFinite(at) ? { message: entry.message, at } : { message: entry.message });
 		} catch {
 			// A torn last line while the engine writes; it is read again next time.
 		}
 	}
-	return messages;
+	return entries;
 }
 
 const turnCache = new Map<string, { size: number; mtimeMs: number; turns: HistoryMessage[] }>();
@@ -121,14 +131,25 @@ function sessionTurns(file: string, secrets: readonly string[]): HistoryMessage[
 	const { size, mtimeMs } = statSync(file);
 	// Instance secrets can change without the session changing. Never reuse previews made
 	// with an older secret set, nor keep the secrets themselves in the file cache.
-	if (secrets.length > 0) return historyFromMessages(readSessionMessages(file), secrets);
+	if (secrets.length > 0) return turnsOf(readSessionEntries(file), secrets);
 	const cached = turnCache.get(file);
 	if (cached?.size === size && cached.mtimeMs === mtimeMs) return cached.turns;
-	const turns = historyFromMessages(readSessionMessages(file));
+	const turns = turnsOf(readSessionEntries(file));
 	turnCache.delete(file);
 	turnCache.set(file, { size, mtimeMs, turns });
 	if (turnCache.size > CACHED_FILES) turnCache.delete(turnCache.keys().next().value as string);
 	return turns;
+}
+
+function turnsOf(
+	entries: { message: unknown; at?: number }[],
+	secrets: readonly string[] = [],
+): HistoryMessage[] {
+	return historyFromMessages(
+		entries.map((entry) => entry.message),
+		secrets,
+		entries.map((entry) => entry.at),
+	);
 }
 
 export interface HistoryPage {
@@ -172,10 +193,37 @@ export function pageHistory(
 	return { messages: page, hasEarlier: false };
 }
 
-type AgentMessage = { role?: string; content?: unknown; toolCallId?: string; isError?: boolean };
+type AgentMessage = {
+	role?: string;
+	content?: unknown;
+	toolCallId?: string;
+	isError?: boolean;
+	timestamp?: unknown;
+	durationMs?: unknown;
+};
 
-/** Converts Pi `get_messages` output into display messages; consecutive assistant messages form one turn. */
-export function historyFromMessages(messages: unknown[], secrets: readonly string[] = []): HistoryMessage[] {
+/**
+ * When a message was written, from the engine's own fields: a user message's `timestamp`; an answer's
+ * `timestamp` is when its request started, so only with `durationMs` does it say when it ended.
+ */
+function messageTime(m: AgentMessage): number | undefined {
+	if (typeof m.timestamp !== "number" || !Number.isFinite(m.timestamp)) return undefined;
+	if (m.role === "user") return m.timestamp;
+	return typeof m.durationMs === "number" && Number.isFinite(m.durationMs)
+		? m.timestamp + m.durationMs
+		: undefined;
+}
+
+/**
+ * Converts Pi messages into display messages; consecutive assistant messages form one turn. `times`
+ * are the session entries' times, by index; a message without one falls back to its own fields.
+ * A turn's `at` is its last part's time.
+ */
+export function historyFromMessages(
+	messages: unknown[],
+	secrets: readonly string[] = [],
+	times: readonly (number | undefined)[] = [],
+): HistoryMessage[] {
 	const results = new Map<string, AgentMessage>();
 	for (const raw of messages) {
 		const m = raw as AgentMessage;
@@ -183,8 +231,9 @@ export function historyFromMessages(messages: unknown[], secrets: readonly strin
 	}
 	const history: HistoryMessage[] = [];
 	let index = 0;
-	for (const raw of messages) {
+	for (const [i, raw] of messages.entries()) {
 		const m = raw as AgentMessage;
+		const at = times[i] ?? messageTime(m);
 		if (m.role === "user") {
 			const { text, attachments } = splitAttachments(textOf(m));
 			history.push({
@@ -193,6 +242,7 @@ export function historyFromMessages(messages: unknown[], secrets: readonly strin
 				text,
 				activities: [],
 				...(attachments.length > 0 ? { attachments } : {}),
+				...(at !== undefined ? { at } : {}),
 			});
 			continue;
 		}
@@ -207,6 +257,8 @@ export function historyFromMessages(messages: unknown[], secrets: readonly strin
 		const reasoning = presentText(redactPreview(reasoningOf(m), Number.POSITIVE_INFINITY, secrets));
 		if (reasoning) turn.reasoning = turn.reasoning ? `${turn.reasoning}\n\n${reasoning}` : reasoning;
 		turn.activities.push(...activitiesOf(m, results, secrets));
+		if (at !== undefined) turn.at = at;
+		else delete turn.at;
 	}
 	return history;
 }

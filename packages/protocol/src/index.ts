@@ -62,6 +62,11 @@ export interface AttachmentInfo {
 	name: string;
 	size: number;
 	mime: string;
+	/**
+	 * The message folder the file is stored in, when the daemon knows it; with `name` it makes the
+	 * address the file is fetched from, `GET /upload/<uploadId>/<name>` (S14.7).
+	 */
+	uploadId?: string;
 }
 
 /** A file uploaded with `POST /upload`, waiting to be sent with a message. */
@@ -74,6 +79,7 @@ export interface AttachmentRef {
 
 /** The daemon's answer to `POST /upload`. */
 export interface UploadedFile extends AttachmentRef, AttachmentInfo {
+	uploadId: string;
 	/** Where the file is, relative to the assistant's workspace: `uploads/<uploadId>/<name>`. */
 	path: string;
 }
@@ -96,6 +102,8 @@ export interface HistoryMessage {
 	reasoning?: string;
 	/** Files the user sent with the message. */
 	attachments?: AttachmentInfo[];
+	/** When the message was written (epoch ms); for an answer, when its last part ended. Omitted when unknown. */
+	at?: number;
 	/** From an earlier session of the same chat, before the daemon last rotated it. */
 	earlier?: true;
 }
@@ -433,7 +441,14 @@ export type ServerPayload =
 	  }
 	| { type: "pin_status"; pin: PinStatus }
 	| { type: "agent_state"; state: AgentState }
-	| { type: "user_message"; messageId: string; text: string; attachments?: AttachmentInfo[] }
+	| {
+			type: "user_message";
+			messageId: string;
+			text: string;
+			attachments?: AttachmentInfo[];
+			/** When the daemon took the message (epoch ms). */
+			at?: number;
+	  }
 	| { type: "message_delta"; messageId: string; delta: string }
 	| { type: "reasoning_delta"; messageId: string; delta: string }
 	| {
@@ -445,6 +460,8 @@ export type ServerPayload =
 			stopped?: true;
 			/** The answer failed; a plain-language explanation for the chat. */
 			error?: string;
+			/** When the answer ended (epoch ms). */
+			at?: number;
 	  }
 	| { type: "activity"; messageId: string; activity: Activity }
 	| { type: "ask"; ask: Ask }

@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { extname, join, resolve, sep } from "node:path";
@@ -40,7 +40,7 @@ import { type RotationLimits, rotationLimits } from "./rotation.ts";
 import { FileSecretSource, SECRETS_FILE, SECRETS_KEY_VAR } from "./secret-file.ts";
 import { AppSecretSource } from "./secret-source.ts";
 import { AgentSupervisor } from "./supervisor.ts";
-import { UploadStore } from "./uploads.ts";
+import { IMAGE_TYPES, type OpenedFile, UploadStore } from "./uploads.ts";
 import { VoiceService } from "./voice.ts";
 import { CONNECTOR_HOME, chownHandOver, prepareVpsLayout, type VpsOptions } from "./vps.ts";
 import { PIN_FILE, PinGate } from "./web-pin.ts";
@@ -115,6 +115,8 @@ export interface DotDaemon {
 }
 
 const HELLO_TIMEOUT_MS = 5000;
+/** How much of a downloaded file is read at a time. */
+const DOWNLOAD_CHUNK = 64 * 1024;
 const CONTENT_TYPES: Record<string, string> = {
 	".html": "text/html; charset=utf-8",
 	".js": "text/javascript; charset=utf-8",
@@ -380,6 +382,11 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 			void handleUpload(req, res, token, allowedOrigins(port, options), uploads);
 			return;
 		}
+		// The raw target too: `/upload/../x` must not reach the interface's files as `/x`.
+		if (pathname.startsWith("/upload/") || (req.url ?? "").startsWith("/upload/")) {
+			handleDownload(req, res, token, allowedOrigins(port, options), uploads);
+			return;
+		}
 		if (pathname.startsWith(MCP_PREFIX)) {
 			proxy.handle(req, res);
 			return;
@@ -636,6 +643,144 @@ async function handleUpload(
 	});
 	if (!outcome.ok) return refuse(outcome.status, outcome.code, outcome.message);
 	reply(res, 200, outcome.file);
+}
+
+/**
+ * `GET /upload/<uploadId>/<name>` (S14.7): a file the user uploaded, so a chat can show it again
+ * (images from history). The same access key and Origin rules as `POST /upload`, checked before
+ * anything about the file is said. The request target is parsed as it arrived, never normalized:
+ * exactly two segments, the name URI-encoded once; anything else, and anything the store does not
+ * vouch for ({@link UploadStore.open}), is 404. The type is the stored one, never the name's.
+ */
+function handleDownload(
+	req: IncomingMessage,
+	res: ServerResponse,
+	token: string,
+	origins: Set<string>,
+	uploads: UploadStore,
+): void {
+	res.setHeader("X-Content-Type-Options", "nosniff");
+	res.setHeader("Cache-Control", "private, no-store");
+	res.setHeader("Referrer-Policy", "no-referrer");
+	const refuse = (status: number, code: string, message: string, headers: Record<string, string> = {}) => {
+		for (const [name, value] of Object.entries(headers)) res.setHeader(name, value);
+		reply(res, status, { code, message });
+		req.resume();
+	};
+	const origin = req.headers.origin;
+	if (origin !== undefined && !origins.has(origin)) {
+		refuse(403, "forbidden", "This page may not read uploads.");
+		return;
+	}
+	if (origin !== undefined) {
+		res.setHeader("Access-Control-Allow-Origin", origin);
+		res.setHeader("Vary", "Origin");
+		res.setHeader("Access-Control-Expose-Headers", "Content-Disposition");
+	}
+	if (req.method === "OPTIONS") {
+		res.writeHead(204, {
+			"Access-Control-Allow-Methods": "GET",
+			"Access-Control-Allow-Headers": "Authorization",
+			"Access-Control-Max-Age": "600",
+		});
+		res.end();
+		return;
+	}
+	if (req.method !== "GET") {
+		refuse(405, "method_not_allowed", "Download files with GET.", { Allow: "GET" });
+		return;
+	}
+	const bearer = /^Bearer (\S+)$/.exec(req.headers.authorization ?? "")?.[1];
+	if (!bearer || !sameToken(bearer, token)) {
+		refuse(401, "unauthorized", "The access key is not valid.");
+		return;
+	}
+	const target = downloadTarget(req.url ?? "");
+	const file = target && uploads.open(target.uploadId, target.name);
+	if (!file) {
+		refuse(404, "not_found", "That file is not available.");
+		return;
+	}
+	const inline = IMAGE_TYPES.has(file.mime);
+	res.writeHead(200, {
+		"Content-Type": file.mime,
+		"Content-Length": String(file.size),
+		"Content-Disposition": contentDisposition(inline ? "inline" : "attachment", file.name),
+		"Content-Security-Policy": "default-src 'none'; sandbox",
+	});
+	sendFile(res, file);
+}
+
+/** The upload id and the decoded name from `/upload/<uploadId>/<name>`, exactly as requested. */
+function downloadTarget(raw: string): { uploadId: string; name: string } | undefined {
+	const path = raw.split(/[?#]/, 1)[0] ?? "";
+	const parts = path.split("/");
+	if (parts.length !== 4 || parts[0] !== "" || parts[1] !== "upload") return undefined;
+	const [, , uploadId = "", encoded = ""] = parts;
+	try {
+		return { uploadId, name: decodeURIComponent(encoded) };
+	} catch {
+		return undefined;
+	}
+}
+
+/** `inline` or `attachment`, with an ASCII fallback name and the exact one (RFC 6266, RFC 8187). */
+function contentDisposition(kind: "inline" | "attachment", name: string): string {
+	const ascii = name.replace(/[^A-Za-z0-9._ -]/g, "_");
+	const exact = encodeURIComponent(name).replace(
+		/['()*]/g,
+		(c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+	);
+	return `${kind}; filename="${ascii}"; filename*=UTF-8''${exact}`;
+}
+
+/**
+ * Streams the opened file, never more than the size it had when opened, in chunks read from the open
+ * descriptor (no file work on the thread pool, see engine-access.ts), waiting while the client is slow.
+ */
+function sendFile(res: ServerResponse, file: OpenedFile): void {
+	let sent = 0;
+	let closed = false;
+	const close = () => {
+		if (closed) return;
+		closed = true;
+		closeSync(file.fd);
+	};
+	res.once("close", close);
+	const pump = () => {
+		while (!closed) {
+			if (res.destroyed) {
+				close();
+				return;
+			}
+			const chunk = Buffer.alloc(Math.min(DOWNLOAD_CHUNK, file.size - sent));
+			let read = 0;
+			if (chunk.length > 0) {
+				try {
+					read = readSync(file.fd, chunk, 0, chunk.length, sent);
+				} catch {
+					read = -1;
+				}
+			}
+			if (sent === file.size) {
+				close();
+				res.end();
+				return;
+			}
+			if (read <= 0) {
+				// The file shrank or broke while it was sent: the client must not take it as complete.
+				close();
+				res.destroy();
+				return;
+			}
+			sent += read;
+			if (!res.write(chunk.subarray(0, read))) {
+				res.once("drain", pump);
+				return;
+			}
+		}
+	};
+	pump();
 }
 
 function reply(res: ServerResponse, status: number, body: object): void {

@@ -1271,6 +1271,8 @@ export class DotBridge {
 				messageId: `u${++this.nextMessage}`,
 				text,
 				...(attachments.length > 0 ? { attachments } : {}),
+				// The engine writes the message to its session now too; history reads that entry's time.
+				at: Date.now(),
 			});
 		}
 		if (message?.role === "assistant") {
@@ -1312,7 +1314,7 @@ export class DotBridge {
 			redactPreview(rawReasoning, Number.POSITIVE_INFINITY, this.previewSecrets()),
 		);
 		if (reasoning) this.broadcast({ type: "reasoning_delta", messageId, delta: reasoning });
-		const extra = reasoning ? { reasoning } : {};
+		const extra = { ...(reasoning ? { reasoning } : {}), at: Date.now() };
 		// The engine ends a stopped answer as "aborted", or as an error when a session switch tore it down.
 		if (message.stopReason === "aborted" || (message.stopReason === "error" && this.stopRequested)) {
 			this.broadcast({ type: "message_done", messageId, text, ...extra, stopped: true });
