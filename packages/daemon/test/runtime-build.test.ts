@@ -13,8 +13,9 @@ import {
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
-import { lockedEnginePackages } from "../src/runtime-build.ts";
+import { lockedEnginePackages, piWrapper } from "../src/runtime-build.ts";
 import { tempDir } from "./helpers.ts";
+import { WINDOWS_STOP_ADDON } from "./support/windows.ts";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
 const BUILD = join(PACKAGE, "scripts", "build-runtime.ts");
@@ -22,7 +23,17 @@ const ENGINE_CLI = join("@earendil-works", "pi-coding-agent", "dist", "bundle", 
 
 let out: string;
 
+// The real build stages the Windows stop addon, built with MSVC (build:windows-stop), and rightly
+// refuses without it. A local Windows checkout that never ran build:windows-stop has none, so the
+// build tests skip there; CI builds the addon first, so a missing one fails the build instead.
+const skipBuild =
+	process.platform === "win32" &&
+	!process.env.CI &&
+	!existsSync(join(PACKAGE, "native", "windows-stop.node"));
+if (skipBuild) console.info(`Windows-only test skip: ${WINDOWS_STOP_ADDON}`);
+
 beforeAll(() => {
+	if (skipBuild) return;
 	out = tempDir();
 	const build = spawnSync(process.execPath, [BUILD, "--out", out], { encoding: "utf8" });
 	expect(build.stderr).toBe("");
@@ -37,16 +48,37 @@ function listFiles(dir: string, prefix = ""): string[] {
 	);
 }
 
-describe("build:runtime", () => {
+describe("piWrapper", () => {
+	it("emits a relocatable Windows cmd wrapper without relying on sh or ambient Node", () => {
+		expect(piWrapper("@earendil-works/pi-coding-agent/dist/bundle/cli.js", "win32")).toBe(
+			'@echo off\r\nsetlocal DisableDelayedExpansion\r\n"%~dp0..\\node\\bin\\node.exe" "%~dp0..\\daemon\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js" %*\r\nexit /b %errorlevel%\r\n',
+		);
+	});
+
+	it("preserves the Unix shell wrapper for Linux and macOS", () => {
+		for (const platform of ["linux", "darwin"] as const) {
+			const wrapper = piWrapper("@earendil-works/pi-coding-agent/dist/bundle/cli.js", platform);
+			expect(wrapper).toContain("#!/bin/sh\n");
+			expect(wrapper).toContain('exec "$runtime/node/bin/node"');
+			expect(wrapper).toContain('"$@"');
+		}
+	});
+});
+
+describe.skipIf(skipBuild)("build:runtime", () => {
 	it("emits the daemon part of the runtime layout, without node_modules", () => {
-		expect(listFiles(out).sort()).toEqual([
-			"bin/pi",
-			"daemon/cli.mjs",
-			"daemon/extensions/approval-guard.ts",
-			"daemon/extensions/screenshot-context.ts",
-			"daemon/identity.md",
-			"daemon/package.json",
-		]);
+		const windows = process.platform === "win32";
+		expect(listFiles(out).sort()).toEqual(
+			[
+				windows ? "bin/pi.cmd" : "bin/pi",
+				"daemon/cli.mjs",
+				"daemon/extensions/approval-guard.ts",
+				"daemon/extensions/screenshot-context.ts",
+				"daemon/identity.md",
+				...(windows ? ["daemon/native/windows-stop.node"] : []),
+				"daemon/package.json",
+			].sort(),
+		);
 		expect(readFileSync(join(out, "daemon", "identity.md"), "utf8")).toBe(
 			readFileSync(join(PACKAGE, "src", "identity.md"), "utf8"),
 		);
@@ -61,6 +93,10 @@ describe("build:runtime", () => {
 		expect(bundle).not.toContain("@gentle-dot/protocol");
 		expect(bundle).toMatch(/from "ws"/);
 		expect(bundle).toContain('import("@earendil-works/pi-coding-agent")');
+		// The production addon stays external and resolves beside the staged entry,
+		// not relative to the source checkout; Unix's file layout remains unchanged.
+		expect(bundle).toContain("./native/windows-stop.node");
+		expect(bundle).not.toContain("NAPI_MODULE");
 	});
 
 	it("lists the external dependencies with the lockfile's exact versions", () => {
@@ -153,29 +189,61 @@ describe("build:runtime", () => {
 		expect(realpathSync(report.identity)).toBe(join(real, "daemon", "identity.md"));
 	});
 
-	it("emits a `pi` wrapper that runs the runtime's node and engine wherever the runtime is", () => {
-		expect(statSync(join(out, "bin", "pi")).mode & 0o111).toBe(0o111);
-		const moved = tempDir();
-		mkdirSync(join(moved, "bin"));
-		mkdirSync(join(moved, "node", "bin"), { recursive: true });
-		copyFileSync(join(out, "bin", "pi"), join(moved, "bin", "pi"));
-		writeFileSync(join(moved, "node", "bin", "node"), '#!/bin/sh\nprintf "%s\\n" "$0" "$@"\n', {
-			mode: 0o755,
-		});
-		const linked = join(tempDir(), "pi");
-		symlinkSync(join(moved, "bin", "pi"), linked);
-		const real = realpathSync(moved);
-		for (const entry of [join(moved, "bin", "pi"), linked]) {
-			const run = spawnSync(entry, ["--version", "a b"], { encoding: "utf8" });
+	it.runIf(process.platform === "win32")(
+		"emits a `pi.cmd` that runs the runtime's node.exe and engine wherever the runtime is, arguments intact",
+		() => {
+			const moved = join(tempDir(), "moved runtime");
+			mkdirSync(join(moved, "bin"), { recursive: true });
+			mkdirSync(join(moved, "node", "bin"), { recursive: true });
+			copyFileSync(join(out, "bin", "pi.cmd"), join(moved, "bin", "pi.cmd"));
+			copyFileSync(process.execPath, join(moved, "node", "bin", "node.exe"));
+			const engine = join(moved, "daemon", "node_modules", ENGINE_CLI);
+			mkdirSync(join(engine, ".."), { recursive: true });
+			writeFileSync(engine, "console.log(JSON.stringify([process.execPath, ...process.argv.slice(1)]));\n");
+			// .cmd files run through cmd.exe; /s strips only the outer quotes, so the quoted path and arguments stay as written.
+			const run = spawnSync(
+				"cmd.exe",
+				["/d", "/s", "/c", `""${join(moved, "bin", "pi.cmd")}" --version "a b" "wow!""`],
+				{ encoding: "utf8", windowsVerbatimArguments: true },
+			);
+			expect(run.stderr).toBe("");
 			expect(run.status).toBe(0);
-			expect(run.stdout.split("\n")).toEqual([
-				join(real, "node", "bin", "node"),
-				join(real, "daemon", "node_modules", ENGINE_CLI),
+			expect(JSON.parse(run.stdout)).toEqual([
+				join(moved, "node", "bin", "node.exe"),
+				engine,
 				"--version",
 				"a b",
-				"",
+				"wow!",
 			]);
-		}
-		expect(existsSync(join(PACKAGE, "node_modules", ENGINE_CLI))).toBe(true);
-	});
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"emits a `pi` wrapper that runs the runtime's node and engine wherever the runtime is",
+		() => {
+			expect(statSync(join(out, "bin", "pi")).mode & 0o111).toBe(0o111);
+			const moved = tempDir();
+			mkdirSync(join(moved, "bin"));
+			mkdirSync(join(moved, "node", "bin"), { recursive: true });
+			copyFileSync(join(out, "bin", "pi"), join(moved, "bin", "pi"));
+			writeFileSync(join(moved, "node", "bin", "node"), '#!/bin/sh\nprintf "%s\\n" "$0" "$@"\n', {
+				mode: 0o755,
+			});
+			const linked = join(tempDir(), "pi");
+			symlinkSync(join(moved, "bin", "pi"), linked);
+			const real = realpathSync(moved);
+			for (const entry of [join(moved, "bin", "pi"), linked]) {
+				const run = spawnSync(entry, ["--version", "a b"], { encoding: "utf8" });
+				expect(run.status).toBe(0);
+				expect(run.stdout.split("\n")).toEqual([
+					join(real, "node", "bin", "node"),
+					join(real, "daemon", "node_modules", ENGINE_CLI),
+					"--version",
+					"a b",
+					"",
+				]);
+			}
+			expect(existsSync(join(PACKAGE, "node_modules", ENGINE_CLI))).toBe(true);
+		},
+	);
 });
