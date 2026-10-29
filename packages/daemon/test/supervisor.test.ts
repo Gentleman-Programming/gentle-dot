@@ -368,6 +368,40 @@ describe("AgentSupervisor", () => {
 		},
 	);
 
+	it("forces a Windows tree at once when the soft taskkill fails, without waiting the hard window", async () => {
+		// taskkill /T without /F cannot end a windowless console process: it exits 255 at once.
+		const escalations: boolean[] = [];
+		const { supervisor } = track(
+			fakeSupervisor({
+				platform: "win32",
+				command: process.execPath,
+				args: ["-e", STUBBORN_AGENT, "--"],
+				stopTimeoutMs: 1,
+				terminateProcessTree: async (child, force) => {
+					escalations.push(force);
+					if (!force) throw new Error("taskkill failed for process tree with exit code 255");
+					child.kill("SIGKILL");
+					return true;
+				},
+			}),
+		);
+		await supervisor.start();
+		vi.useFakeTimers();
+		const stopped = supervisor.stop();
+		void stopped.catch(() => {});
+		try {
+			await vi.advanceTimersByTimeAsync(1);
+			expect(escalations).toEqual([false, true]);
+			vi.useRealTimers();
+			await stopped;
+			expect(supervisor.state).toBe("stopped");
+			// The hard window's own escalation finds the child gone: nothing is forced twice.
+			expect(escalations).toEqual([false, true]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("keeps both Windows default stages bounded without rejecting before taskkill can finish", async () => {
 		const escalations: boolean[] = [];
 		const { supervisor } = track(
