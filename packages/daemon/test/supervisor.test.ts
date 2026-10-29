@@ -212,6 +212,72 @@ describe("AgentSupervisor", () => {
 		expect(events.some((e) => e.type === "interrupted")).toBe(false);
 	});
 
+	it("a restart asked while the engine starts waits for it, then replaces it once (S1)", async () => {
+		let spawns = 0;
+		const logs: string[] = [];
+		const { supervisor, events } = track(
+			fakeSupervisor({
+				env: { ...process.env, FAKE_AGENT_START_DELAY_MS: "300" },
+				prepareSpawn: () => {
+					spawns += 1;
+					return {};
+				},
+				log: (line) => logs.push(line),
+			}),
+		);
+		const starting = supervisor.start();
+		const firstPid = supervisor.pid;
+		// Two requests while starting (computer control, then connector files put back) make one restart.
+		const restarts = [supervisor.restart(), supervisor.restart()];
+		await expect(starting).resolves.toBeUndefined();
+		await Promise.all(restarts);
+		expect(supervisor.state).toBe("ready");
+		expect(spawns).toBe(2);
+		expect(supervisor.pid).not.toBe(firstPid);
+		const states = events.flatMap((e) => (e.type === "supervisor_state" && "state" in e ? [e.state] : []));
+		expect(states).toEqual(["starting", "ready", "restarting", "ready"]);
+		expect(events.some((e) => e.type === "interrupted")).toBe(false);
+		expect(logs.filter((line) => /exited unexpectedly|restart failed/.test(line))).toEqual([]);
+	});
+
+	it("a stop while a restart waits for the start starts nothing again", async () => {
+		let spawns = 0;
+		const { supervisor } = track(
+			fakeSupervisor({
+				env: { ...process.env, FAKE_AGENT_START_DELAY_MS: "300" },
+				prepareSpawn: () => {
+					spawns += 1;
+					return {};
+				},
+			}),
+		);
+		const starting = supervisor.start().catch(() => {});
+		const restarting = supervisor.restart();
+		await supervisor.stop();
+		await Promise.all([starting, restarting]);
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		expect(spawns).toBe(1);
+		expect(supervisor.state).toBe("stopped");
+		expect(supervisor.pid).toBeUndefined();
+	});
+
+	it("a restart while ready replaces the engine right away, once", async () => {
+		let spawns = 0;
+		const { supervisor, events } = track(
+			fakeSupervisor({
+				prepareSpawn: () => {
+					spawns += 1;
+					return {};
+				},
+			}),
+		);
+		await supervisor.start();
+		await supervisor.restart();
+		expect(spawns).toBe(2);
+		const states = events.flatMap((e) => (e.type === "supervisor_state" && "state" in e ? [e.state] : []));
+		expect(states).toEqual(["starting", "ready", "restarting", "ready"]);
+	});
+
 	it("a stop during a restart starts nothing again (S35.2: the app quitting does both)", async () => {
 		const { supervisor } = track(fakeSupervisor());
 		await supervisor.start();

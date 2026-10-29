@@ -119,15 +119,18 @@ Adoption AdoptInheritedFd3(ExclusiveFd3Reservation) noexcept {
   }
   HANDLE original = HostFd3();  // borrowed: never pass this to CloseHandle
   if (!Valid(original)) { fail(Failure::missing_fd3); return result; }
-  if (GetFileType(original) != FILE_TYPE_PIPE) {
-    fail(Failure::not_pipe, GetLastError()); return result;
+  const DWORD type = GetFileType(original);
+  if (type != FILE_TYPE_PIPE) {
+    // GetLastError is meaningful only when GetFileType itself failed (FILE_TYPE_UNKNOWN);
+    // a disk or character handle is a successful answer with no error to record.
+    fail(Failure::not_pipe, type == FILE_TYPE_UNKNOWN ? GetLastError() : ERROR_SUCCESS); return result;
   }
   DWORD flags = 0, state = 0;
   if (!GetNamedPipeInfo(original, &flags, nullptr, nullptr, nullptr) ||
       !GetNamedPipeHandleStateW(original, &state, nullptr, nullptr, nullptr, nullptr, 0)) {
     fail(Failure::pipe_metadata, GetLastError()); return result;
   }
-  if ((flags & (PIPE_SERVER_END | PIPE_TYPE_MESSAGE)) || (state & PIPE_READMODE_MESSAGE)) {
+  if ((flags & (PIPE_SERVER_END | PIPE_TYPE_MESSAGE)) || (state & (PIPE_READMODE_MESSAGE | PIPE_NOWAIT))) {
     fail(Failure::not_byte_client); return result;
   }
   ULONG server_pid = 0, client_pid = 0;
@@ -194,6 +197,9 @@ Adoption AdoptInheritedFd3(ExclusiveFd3Reservation) noexcept {
   if (!Noninheritable(duplicate)) {
     fail(Failure::duplicate_inheritance, GetLastError()); return result;
   }
+  // A null callback makes libuv close synchronously; that path stores but never
+  // dereferences the loop (verified in src/win/fs.c of libuv 1.50.0-1.52.1, the
+  // range Node 24.0.0-24.22.1 ships). Recheck when the host Node line changes.
   uv_fs_t request = {};
   result.uv_error = uv_fs_close(nullptr, &request, 3, nullptr);
   uv_fs_req_cleanup(&request);

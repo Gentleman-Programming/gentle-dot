@@ -21,3 +21,10 @@ packages/*/src/**/*.d.ts
 # Engram memory exports: memory content must never be committed
 /engram-export.json
 /engram-*.json
+
+# Explicit Windows addon build outputs
+/packages/daemon/native/*.node
+/packages/daemon/native/*.obj
+/packages/daemon/native/*.lib
+/packages/daemon/native/*.exp
+/packages/daemon/native/*.pdb
