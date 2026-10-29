@@ -209,8 +209,10 @@ export class AgentSupervisor {
 		try {
 			await this.closeChild(child);
 		} catch (error) {
-			// The old process is still running: never spawn a second engine over it.
+			// The old process is still running: never spawn a second engine over it. Its stdin is
+			// closed, so it is not ready any more; its close schedules the replacement.
 			this.restarting = false;
+			if (this.child === child) this.setState("restarting");
 			throw error;
 		}
 		// Stopped while the old process was closing: nothing is started again.

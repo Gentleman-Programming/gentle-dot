@@ -432,6 +432,34 @@ describe("AgentSupervisor", () => {
 		await waitFor(() => supervisor.state === "stopped");
 	});
 
+	it("a failed restart does not report ready, and the engine comes back once the old process closes", async () => {
+		const { supervisor, events } = fakeSupervisor({
+			command: process.execPath,
+			args: ["-e", STUBBORN_AGENT, "--"],
+			stopTimeoutMs: 10,
+			hardStopTimeoutMs: 10,
+			terminationFailureTimeoutMs: 10,
+			terminateProcessTree: async () => false,
+		});
+		await supervisor.start();
+		const pid = supervisor.pid;
+		if (!pid || pid <= 0) throw new Error("Missing owned test child PID");
+		await expect(supervisor.restart()).rejects.toThrow(/failed to stop agent process/i);
+		// The old engine is still current but no longer reachable: not shown as ready.
+		expect(supervisor.state).toBe("restarting");
+		expect(events.at(-1)).toEqual({ type: "supervisor_state", state: "restarting" });
+		await expect(supervisor.request({ type: "get_state" })).rejects.toThrow(/not ready/i);
+		process.kill(pid, "SIGKILL");
+		await waitFor(() => supervisor.state === "ready" && supervisor.pid !== pid);
+		// The replacement ignores escalation too: end it here, as the test owns both processes.
+		const next = supervisor.pid;
+		if (!next || next <= 0) throw new Error("Missing replacement test child PID");
+		const stopped = supervisor.stop();
+		process.kill(next, "SIGKILL");
+		await stopped;
+		expect(supervisor.state).toBe("stopped");
+	});
+
 	it("rejects restart actionably instead of spawning over a child that did not terminate", async () => {
 		const { supervisor } = fakeSupervisor({
 			command: process.execPath,
