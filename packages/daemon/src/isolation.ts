@@ -220,26 +220,55 @@ export function isolatedAgentEnv(
 	return env;
 }
 
+type Listener = { kind: "empty" | "failed" | "ambiguous" } | { kind: "one"; pid: number };
+
+interface PrivateMemoryOptions {
+	platform?: NodeJS.Platform;
+	/** Bounded command execution seam; errors must not be reported as empty output. */
+	runListenerCommand?: (
+		command: string,
+		args: readonly string[],
+	) => Promise<{ code: number; stdout: string; stderr: string }>;
+	kill?: (pid: number, signal: "SIGTERM") => void;
+	health?: (port: string) => Promise<{ instance_id?: unknown } | undefined>;
+}
+
 /**
- * In private memory mode (`GENTLE_DOT_ENGRAM=private`) the engine's memory plugin starts a memory
- * server on the private port, and it outlives the engine. When nothing listened on that port as the
- * daemon started, the daemon caused it, so `stop()` ends it when the daemon closes: the PID that
- * listens on the port, and only after its `/health` instance id matches the private data folder's
- * (`<dataDir>/home/.engram/.instance-id`). Undefined outside private mode or when it already ran.
+ * Owns cleanup only after confirming an empty private port before startup.
+ * A failed or ambiguous lookup refuses ownership. Before termination, both the
+ * private data identity and a repeated stable listener PID must match.
+ * PID reuse after the final check remains possible; nothing is killed by name.
  */
 export async function privateMemory(
 	base: NodeJS.ProcessEnv,
 	dataDir: string,
 	log: (line: string) => void,
 	access: EngineAccess = directAccess,
+	options: PrivateMemoryOptions = {},
 ): Promise<{ stop(): Promise<void> } | undefined> {
 	if (base.GENTLE_DOT_ENGRAM !== "private") return undefined;
 	const port = base.GENTLE_DOT_ENGRAM_PORT || PRIVATE_ENGRAM_PORT;
-	if ((await listeningPid(port)) !== undefined) return undefined;
+	if (
+		!/^\d+$/.test(port) ||
+		!Number.isSafeInteger(Number(port)) ||
+		Number(port) < 1 ||
+		Number(port) > 65535
+	) {
+		throw new Error("Cannot start private memory: port must be an integer from 1 to 65535");
+	}
+	const before = await listeningPid(port, options);
+	if (before.kind === "one") return undefined;
+	if (before.kind !== "empty") {
+		throw new Error(`Cannot start private memory: ${before.kind} listener lookup on port ${port}`);
+	}
 	return {
 		async stop() {
-			const pid = await listeningPid(port);
-			if (pid === undefined) return;
+			const listener = await listeningPid(port, options);
+			if (listener.kind !== "one") {
+				if (listener.kind !== "empty")
+					log(`cannot verify private memory listener on port ${port}; left running`);
+				return;
+			}
 			let expected: string;
 			try {
 				const file = join(dataDir, "home", ".engram", ".instance-id");
@@ -247,27 +276,91 @@ export async function privateMemory(
 			} catch {
 				return;
 			}
-			const health = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) })
-				.then((response) => response.json() as Promise<{ instance_id?: unknown }>)
-				.catch(() => undefined);
+			const health = await (options.health ?? memoryHealth)(port).catch(() => undefined);
 			if (!expected || health?.instance_id !== expected) {
 				log(`the memory server on port ${port} serves other data; left running`);
 				return;
 			}
+			const again = await listeningPid(port, options);
+			if (again.kind !== "one" || again.pid !== listener.pid) {
+				log(`the private memory listener changed on port ${port}; left running`);
+				return;
+			}
 			try {
-				process.kill(pid, "SIGTERM");
-				log(`stopped the private memory server (pid ${pid})`);
-			} catch {}
+				(options.kill ?? process.kill)(listener.pid, "SIGTERM");
+				log(`stopped the private memory server (pid ${listener.pid})`);
+			} catch (error) {
+				log(`could not stop private memory server (pid ${listener.pid}): ${String(error)}`);
+			}
 		},
 	};
 }
 
-/** The one PID listening on `port` on this computer (`lsof`), if any. */
-function listeningPid(port: string): Promise<number | undefined> {
+function memoryHealth(port: string): Promise<{ instance_id?: unknown } | undefined> {
+	return fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) })
+		.then((response) => response.json() as Promise<{ instance_id?: unknown }>)
+		.catch(() => undefined);
+}
+
+/**
+ * How long the listener lookup may take. Windows starts PowerShell and queries CIM, which can take
+ * several seconds on a busy machine (startup, many processes); a lookup that runs out is a failed
+ * lookup, and private memory then refuses to start.
+ */
+export function listenerLookupTimeoutMs(platform: NodeJS.Platform): number {
+	return platform === "win32" ? 15_000 : 5000;
+}
+
+function runListenerCommand(
+	command: string,
+	args: readonly string[],
+): Promise<{ code: number; stdout: string; stderr: string }> {
 	return new Promise((resolve) => {
-		execFile("lsof", ["-t", "-n", "-P", `-iTCP:${port}`, "-sTCP:LISTEN"], (error, stdout) => {
-			const pids = [...new Set(String(stdout).trim().split("\n").filter(Boolean))];
-			resolve(!error && pids.length === 1 && /^\d+$/.test(pids[0] ?? "") ? Number(pids[0]) : undefined);
-		});
+		execFile(
+			command,
+			[...args],
+			{
+				encoding: "utf8",
+				timeout: listenerLookupTimeoutMs(command === "powershell.exe" ? "win32" : process.platform),
+				windowsHide: true,
+			},
+			(error, stdout, stderr) => {
+				resolve({
+					code: error ? (typeof error.code === "number" ? error.code : -1) : 0,
+					stdout: String(stdout),
+					stderr: String(stderr),
+				});
+			},
+		);
 	});
+}
+
+/** Enumerate Windows listeners before filtering, so an unused port is not a query error. */
+async function listeningPid(port: string, options: PrivateMemoryOptions): Promise<Listener> {
+	const windows = (options.platform ?? process.platform) === "win32";
+	const command = windows ? "powershell.exe" : "lsof";
+	const args = windows
+		? [
+				"-NoLogo",
+				"-NoProfile",
+				"-NonInteractive",
+				"-Command",
+				`$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; try { Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { $_.LocalPort -eq ${Number(port)} } | Select-Object -ExpandProperty OwningProcess } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }`,
+			]
+		: ["-t", "-n", "-P", `-iTCP:${port}`, "-sTCP:LISTEN"];
+	try {
+		const result = await (options.runListenerCommand ?? runListenerCommand)(command, args);
+		const text = result.stdout.trim();
+		// lsof exits 1 for no matches. Missing commands, diagnostics and timeouts are failures.
+		if (!windows && result.code === 1 && !text && !result.stderr.trim()) return { kind: "empty" };
+		if (result.code !== 0 || result.stderr.trim()) return { kind: "failed" };
+		if (!text) return { kind: "empty" };
+		const values = text.split(/\r?\n/).map((value) => value.trim());
+		if (values.some((value) => !/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))))
+			return { kind: "failed" };
+		const pids = [...new Set(values.map(Number))];
+		return pids.length === 1 ? { kind: "one", pid: pids[0] as number } : { kind: "ambiguous" };
+	} catch {
+		return { kind: "failed" };
+	}
 }
