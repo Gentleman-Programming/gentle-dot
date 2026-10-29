@@ -23,14 +23,17 @@ const ENGINE_CLI = join("@earendil-works", "pi-coding-agent", "dist", "bundle", 
 
 let out: string;
 
-// The real build stages the Windows stop addon, which is built with MSVC (build:windows-stop) and
-// is absent on CI runners; staging rightly refuses without it.
-const addonMissing =
-	process.platform === "win32" && !existsSync(join(PACKAGE, "native", "windows-stop.node"));
-if (addonMissing) console.info(`Windows-only test skip: ${WINDOWS_STOP_ADDON}`);
+// The real build stages the Windows stop addon, built with MSVC (build:windows-stop), and rightly
+// refuses without it. A local Windows checkout that never ran build:windows-stop has none, so the
+// build tests skip there; CI builds the addon first, so a missing one fails the build instead.
+const skipBuild =
+	process.platform === "win32" &&
+	!process.env.CI &&
+	!existsSync(join(PACKAGE, "native", "windows-stop.node"));
+if (skipBuild) console.info(`Windows-only test skip: ${WINDOWS_STOP_ADDON}`);
 
 beforeAll(() => {
-	if (addonMissing) return;
+	if (skipBuild) return;
 	out = tempDir();
 	const build = spawnSync(process.execPath, [BUILD, "--out", out], { encoding: "utf8" });
 	expect(build.stderr).toBe("");
@@ -45,7 +48,7 @@ function listFiles(dir: string, prefix = ""): string[] {
 	);
 }
 
-describe.skipIf(addonMissing)("build:runtime", () => {
+describe("piWrapper", () => {
 	it("emits a relocatable Windows cmd wrapper without relying on sh or ambient Node", () => {
 		expect(piWrapper("@earendil-works/pi-coding-agent/dist/bundle/cli.js", "win32")).toBe(
 			'@echo off\r\nsetlocal DisableDelayedExpansion\r\n"%~dp0..\\node\\bin\\node.exe" "%~dp0..\\daemon\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js" %*\r\nexit /b %errorlevel%\r\n',
@@ -60,7 +63,9 @@ describe.skipIf(addonMissing)("build:runtime", () => {
 			expect(wrapper).toContain('"$@"');
 		}
 	});
+});
 
+describe.skipIf(skipBuild)("build:runtime", () => {
 	it("emits the daemon part of the runtime layout, without node_modules", () => {
 		const windows = process.platform === "win32";
 		expect(listFiles(out).sort()).toEqual(

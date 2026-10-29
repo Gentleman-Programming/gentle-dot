@@ -68,7 +68,6 @@ export function lockedEnginePackages(
 	return versions;
 }
 
-/** A `pi` command that runs the runtime's own Node on the engine, from wherever the runtime folder is. */
 /** Windows staging is explicit and refuses an absent build; Unix never needs the addon. */
 export function runtimeWindowsStopArtifact(
 	platform: NodeJS.Platform,
@@ -83,6 +82,7 @@ export function runtimeWindowsStopArtifact(
 	return artifact;
 }
 
+/** A `pi` command that runs the runtime's own Node on the engine, from wherever the runtime folder is. */
 export function piWrapper(engineEntry: string, platform: NodeJS.Platform = process.platform): string {
 	if (platform === "win32") {
 		return [
