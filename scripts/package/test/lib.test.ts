@@ -214,10 +214,14 @@ describe("Windows staging install", () => {
 			SECRET: "omit",
 		};
 		expect(windowsBuildGo(source, () => true)).toBe(source.GENTLE_DOT_BUILD_GO);
-		expect(() => windowsBuildGo({}, () => true)).toThrow(/GENTLE_DOT_BUILD_GO/);
-		expect(() => windowsBuildGo(source, () => false)).toThrow(/existing/);
+		const usage =
+			"GENTLE_DOT_BUILD_GO must be the full path of the real go.exe in GOROOT\\bin (not a Scoop or Chocolatey shim), such as C:\\Program Files\\Go\\bin\\go.exe.";
+		expect(() => windowsBuildGo({}, () => true)).toThrow(usage);
+		expect(() => windowsBuildGo(source, () => false)).toThrow(
+			"GENTLE_DOT_BUILD_GO names C:\\Program Files\\Go\\bin\\go.exe, which is not an existing file.",
+		);
 		for (const value of ["go.exe", "C:\\tools;other\\go.exe", "C:\\tools\\other.exe"]) {
-			expect(() => windowsBuildGo({ GENTLE_DOT_BUILD_GO: value }, () => true)).toThrow(/GENTLE_DOT_BUILD_GO/);
+			expect(() => windowsBuildGo({ GENTLE_DOT_BUILD_GO: value }, () => true)).toThrow(usage);
 		}
 		const env = installerEnv("C:\\stage", "C:\\cache", "windows-x64", source, source.GENTLE_DOT_BUILD_GO);
 		expect(env.PATH).toBe(
@@ -290,14 +294,21 @@ describe("Windows staging install", () => {
 		const noGit = () => {
 			throw new Error("must not invoke git for a snapshot");
 		};
-		expect(daemonSourceRevision("C:\\snapshot", "win32", () => false, noGit)).toBe("snapshot-unversioned");
+		// A local copy without .git is labeled; CI (any value of CI) refuses to lose the commit.
+		expect(daemonSourceRevision("C:\\snapshot", "win32", () => false, noGit, "")).toBe(
+			"snapshot-unversioned",
+		);
+		for (const ci of ["true", "1"])
+			expect(() => daemonSourceRevision("C:\\snapshot", "win32", () => false, noGit, ci)).toThrow(
+				"CI must stage from a Git checkout: C:\\snapshot has no .git, so the runtime would have no daemon commit.",
+			);
 		for (const platform of ["linux", "darwin", "win32"]) {
 			const calls: unknown[] = [];
 			const git = (command, args, options) => {
 				calls.push([command, args, options]);
 				return args[0] === "rev-parse" ? "abc123\n" : " M packages/daemon/src/cli.ts\n";
 			};
-			expect(daemonSourceRevision("/repo", platform, () => true, git)).toBe("abc123-dirty");
+			expect(daemonSourceRevision("/repo", platform, () => true, git, "true")).toBe("abc123-dirty");
 			expect(calls).toEqual([
 				["git", ["rev-parse", "HEAD"], { cwd: "/repo", encoding: "utf8" }],
 				["git", ["status", "--porcelain", "--", "packages"], { cwd: "/repo", encoding: "utf8" }],

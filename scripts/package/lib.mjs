@@ -150,8 +150,10 @@ export function windowsBuildGo(source, isFile) {
 		win32.basename(exe).toLowerCase() !== "go.exe" ||
 		/[;\r\n"]/.test(exe)
 	)
-		throw new Error("GENTLE_DOT_BUILD_GO must name an absolute, already provisioned go.exe.");
-	if (!isFile(exe)) throw new Error("GENTLE_DOT_BUILD_GO must name an existing regular file.");
+		throw new Error(
+			"GENTLE_DOT_BUILD_GO must be the full path of the real go.exe in GOROOT\\bin (not a Scoop or Chocolatey shim), such as C:\\Program Files\\Go\\bin\\go.exe.",
+		);
+	if (!isFile(exe)) throw new Error(`GENTLE_DOT_BUILD_GO names ${exe}, which is not an existing file.`);
 	return exe;
 }
 
@@ -280,14 +282,24 @@ export function formatSize(bytes) {
 	return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-/** A copied Windows source tree has no Git revision; never manufacture one. */
+/**
+ * A copied Windows source tree has no Git revision; never manufacture one. That label is for a
+ * local copy only: CI stages release candidates, which must name their daemon commit.
+ */
 export function daemonSourceRevision(
 	repo,
 	platform = process.platform,
 	present = existsSync,
 	git = execFileSync,
+	ci = process.env.CI,
 ) {
-	if (platform === "win32" && !present(join(repo, ".git"))) return "snapshot-unversioned";
+	if (platform === "win32" && !present(join(repo, ".git"))) {
+		if (ci)
+			throw new Error(
+				`CI must stage from a Git checkout: ${repo} has no .git, so the runtime would have no daemon commit.`,
+			);
+		return "snapshot-unversioned";
+	}
 	const commit = git("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
 	const dirty = git("git", ["status", "--porcelain", "--", "packages"], { cwd: repo, encoding: "utf8" });
 	return dirty.trim() ? `${commit}-dirty` : commit;
