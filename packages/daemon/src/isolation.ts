@@ -12,13 +12,22 @@ import { resolveEngramBin, runtimeDir } from "./runtime.ts";
  * first-run setup needs `pi` on PATH, and a clean machine has none. An installed
  * app carries a relocatable `pi` in `<runtime>/bin`; pnpm's shim is not relocatable.
  */
-function bundledBinDir(base: NodeJS.ProcessEnv): string | undefined {
+interface IsolationOptions {
+	platform?: NodeJS.Platform;
+	/** Source shim directories, injectable for platform-independent tests. */
+	sourceBinDirs?: string[];
+}
+
+function bundledBinDir(base: NodeJS.ProcessEnv, options: IsolationOptions): string | undefined {
 	const runtime = runtimeDir(base);
 	if (runtime) return join(runtime, "bin");
 	const require = createRequire(import.meta.url);
-	for (const dir of require.resolve.paths("@earendil-works/pi-coding-agent") ?? []) {
-		const bin = join(dir, ".bin");
-		if (existsSync(join(bin, "pi"))) return bin;
+	const bins =
+		options.sourceBinDirs ??
+		(require.resolve.paths("@earendil-works/pi-coding-agent") ?? []).map((dir) => join(dir, ".bin"));
+	const names = (options.platform ?? process.platform) === "win32" ? ["pi", "pi.cmd", "pi.exe"] : ["pi"];
+	for (const bin of bins) {
+		if (names.some((name) => existsSync(join(bin, name)))) return bin;
 	}
 	return undefined;
 }
@@ -116,7 +125,7 @@ export function ensureMemoryProject(workspace: string, access: EngineAccess = di
 /**
  * The engine's environment: its own HOME (`<dataDir>/home`, mode 0700) with
  * the XDG folders under it, because parts of the engine write to fixed places
- * under the home folder. PATH is kept, with the bundled `pi` folder first, and so is the user's git identity,
+ * under the home folder. PATH is kept (on Windows as one `PATH` key, whatever its spelling), with the bundled `pi` folder first, and so is the user's git identity,
  * through `GIT_CONFIG_GLOBAL` pointing at their real `~/.gitconfig`.
  *
  * Memory is the user's global Engram: Engram ties a server to its data folder
@@ -140,10 +149,12 @@ export function isolatedAgentEnv(
 	base: NodeJS.ProcessEnv,
 	dataDir: string,
 	access: EngineAccess = directAccess,
+	options: IsolationOptions = {},
 ): NodeJS.ProcessEnv {
+	const platform = options.platform ?? process.platform;
 	const home = join(dataDir, "home");
 	access(() => ensurePrivateDir(home));
-	const realHome = base.HOME || homedir();
+	const realHome = base.HOME || (platform === "win32" && base.USERPROFILE) || homedir();
 	const env: NodeJS.ProcessEnv = {
 		...base,
 		HOME: home,
@@ -153,15 +164,31 @@ export function isolatedAgentEnv(
 		XDG_STATE_HOME: join(home, ".local", "state"),
 	};
 	for (const key of [...INHERITED_HOMES, ...SUBAGENT_VARIABLES, ...DAEMON_ONLY]) delete env[key];
-	if (!base.TMPDIR) {
+	if (platform === "win32") {
+		const tmp = join(home, ".cache", "tmp");
+		env.USERPROFILE = home;
+		env.TEMP = env.TMP = env.TMPDIR = tmp;
+		access(() => ensurePrivateDir(tmp));
+	} else if (!base.TMPDIR) {
 		const tmp = join(home, ".cache", "tmp");
 		env.TMPDIR = tmp;
 		access(() => ensurePrivateDir(tmp));
 	}
-	const bin = bundledBinDir(base);
+	// Windows spells the variable `Path`, and a copy of its environment keeps that key: reading
+	// `PATH` found nothing, and a second `PATH` key beside it won, leaving the engine only the bundled
+	// folder (found by Row0902). On Windows it is read whatever its spelling and kept as one `PATH`.
+	let path = base.PATH;
+	if (platform === "win32") {
+		const keys = Object.keys(env).filter((key) => key.toUpperCase() === "PATH");
+		path = keys.map((key) => env[key]).find((value) => value !== undefined);
+		for (const key of keys) delete env[key];
+		if (path !== undefined) env.PATH = path;
+	}
+	const bin = bundledBinDir(base, options);
 	if (bin) {
-		const rest = (base.PATH ?? "").split(delimiter).filter((part) => part && part !== bin);
-		env.PATH = [bin, ...rest].join(delimiter);
+		const separator = platform === "win32" ? ";" : delimiter;
+		const rest = (path ?? "").split(separator).filter((part) => part && part !== bin);
+		env.PATH = [bin, ...rest].join(separator);
 	}
 	// The user's own Gentle Shell setting is not the assistant's.
 	env.GENTLE_PI_AGENTS = subagentsEnabled(base) ? "1" : "0";
@@ -174,7 +201,7 @@ export function isolatedAgentEnv(
 			base.GENTLE_DOT_ENGRAM_DATA_DIR || base.ENGRAM_DATA_DIR || join(realHome, ".engram");
 	}
 	const runtime = runtimeDir(base);
-	if (runtime) env.ENGRAM_BIN = resolveEngramBin(base, runtime, { home: realHome });
+	if (runtime) env.ENGRAM_BIN = resolveEngramBin(base, runtime, { home: realHome, platform });
 	const gitConfig = join(realHome, ".gitconfig");
 	if (!base.GIT_CONFIG_GLOBAL && existsSync(gitConfig)) env.GIT_CONFIG_GLOBAL = gitConfig;
 	return env;

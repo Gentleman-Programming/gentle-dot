@@ -42,6 +42,37 @@ export function bundledGentleShell(env: NodeJS.ProcessEnv = process.env): string
 	throw new Error("The bundled assistant engine is missing. Run `pnpm install`.");
 }
 
+/**
+ * Disable launch-time provisioning only for the installed Windows default engine.
+ * GENTLE_DOT_RUNTIME is supplied by the desktop runtime launcher; matching the
+ * executable and bundled script also leaves programmatic custom agents alone.
+ */
+export function agentSpawnEnv(
+	command: string,
+	args: string[],
+	env: NodeJS.ProcessEnv,
+	platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+	const runtime = runtimeDir(env);
+	if (
+		platform !== "win32" ||
+		!runtime ||
+		command !== process.execPath ||
+		env.GENTLE_DOT_AGENT_BIN ||
+		env.GENTLE_DOT_AGENT_SCRIPT ||
+		env.GENTLE_DOT_AGENT_ARGS ||
+		args[0] !== join(runtimeModules(runtime), "gentle-pi", "bin", "gentle-shell.mjs")
+	)
+		return env;
+	return {
+		...env,
+		// gentle-shell's first-run companion provisioning gate.
+		GENTLE_SHELL_NO_AUTO_SETUP: "1",
+		// Its missing package-local gentle-ai self-heal and installer gate.
+		GENTLE_PI_SKIP_GENTLE_AI_INSTALL: "1",
+	};
+}
+
 /** The web UI: the runtime's `ui/` in an installed app, the UI package's build otherwise. */
 function uiDirOf(env: NodeJS.ProcessEnv): string {
 	const runtime = runtimeDir(env);
@@ -81,7 +112,9 @@ function parseList(value: string | undefined, name: string): string[] {
 /**
  * The agent is the bundled Gentle Shell by default, run with the assistant's own
  * home so nothing is shared with a Gentle Shell the user may have installed.
- * GENTLE_DOT_AGENT_ARGS marks a custom agent script (tests), which gets no home.
+ * GENTLE_DOT_AGENT_SCRIPT selects an existing Gentle Shell script while keeping
+ * that separate home. GENTLE_DOT_AGENT_ARGS takes precedence for custom agent
+ * scripts (tests), which get no home.
  */
 function agentConfig(env: NodeJS.ProcessEnv, dataDir: string) {
 	const custom = parseList(env.GENTLE_DOT_AGENT_ARGS, "GENTLE_DOT_AGENT_ARGS");
@@ -91,6 +124,12 @@ function agentConfig(env: NodeJS.ProcessEnv, dataDir: string) {
 			agentCommand: env.GENTLE_DOT_AGENT_BIN ?? process.execPath,
 			agentArgs: custom,
 			agentHome: undefined,
+		};
+	if (env.GENTLE_DOT_AGENT_SCRIPT)
+		return {
+			agentCommand: env.GENTLE_DOT_AGENT_BIN ?? process.execPath,
+			agentArgs: [env.GENTLE_DOT_AGENT_SCRIPT],
+			agentHome,
 		};
 	if (env.GENTLE_DOT_AGENT_BIN) return { agentCommand: env.GENTLE_DOT_AGENT_BIN, agentArgs: [], agentHome };
 	return { agentCommand: process.execPath, agentArgs: [bundledGentleShell(env)], agentHome };

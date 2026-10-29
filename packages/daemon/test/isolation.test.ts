@@ -7,7 +7,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import {
@@ -17,19 +17,81 @@ import {
 	PRIVATE_ENGRAM_PORT,
 } from "../src/isolation.ts";
 import { FAKE_AGENT, tempDir } from "./helpers.ts";
+import { expectPosixMode } from "./support/windows.ts";
 
 const daemons: DotDaemon[] = [];
 afterEach(async () => {
 	await Promise.all(daemons.splice(0).map((d) => d.close()));
 });
 
+describe("Windows isolation", () => {
+	it("isolates the OS home and Windows temp while preserving the real memory folder", () => {
+		const realHome = tempDir();
+		const data = tempDir();
+		const env = isolatedAgentEnv(
+			{ USERPROFILE: realHome, TEMP: "/user/temp", TMP: "/user/tmp" },
+			data,
+			undefined,
+			{
+				platform: "win32",
+			},
+		);
+		expect(env.HOME).toBe(join(data, "home"));
+		expect(env.USERPROFILE).toBe(env.HOME);
+		expect(env.TEMP).toBe(join(data, "home", ".cache", "tmp"));
+		expect(env.TMP).toBe(env.TEMP);
+		expect(env.ENGRAM_DATA_DIR).toBe(join(realHome, ".engram"));
+	});
+
+	it("recognizes a source pi.cmd without a POSIX shim", () => {
+		const bin = tempDir();
+		writeFileSync(join(bin, "pi.cmd"), "@echo off\r\n");
+		const env = isolatedAgentEnv({ HOME: tempDir(), PATH: "/tools" }, tempDir(), undefined, {
+			platform: "win32",
+			sourceBinDirs: [bin],
+		});
+		expect(env.PATH).toBe(`${bin};/tools`);
+	});
+
+	it("keeps Unix USERPROFILE and TEMP overrides unchanged", () => {
+		const env = isolatedAgentEnv(
+			{ HOME: tempDir(), USERPROFILE: "/user", TEMP: "/tmp/user", TMP: "/tmp/other" },
+			tempDir(),
+			undefined,
+			{ platform: "linux" },
+		);
+		expect(env.USERPROFILE).toBe("/user");
+		expect(env.TEMP).toBe("/tmp/user");
+		expect(env.TMP).toBe("/tmp/other");
+	});
+});
+
 describe("isolatedAgentEnv PATH", () => {
 	it("puts the bundled `pi` first so the engine's first-run setup works on a clean machine", () => {
-		const env = isolatedAgentEnv({ PATH: "/usr/bin:/bin", HOME: tempDir() }, tempDir());
-		const [first, ...rest] = (env.PATH ?? "").split(":");
-		expect(first).toMatch(/node_modules\/\.bin$/);
-		expect(existsSync(join(first ?? "", "pi"))).toBe(true);
+		const env = isolatedAgentEnv({ PATH: ["/usr/bin", "/bin"].join(delimiter), HOME: tempDir() }, tempDir());
+		const [first, ...rest] = (env.PATH ?? "").split(delimiter);
+		expect(first?.endsWith(join("node_modules", ".bin"))).toBe(true);
+		const shims = process.platform === "win32" ? ["pi", "pi.cmd", "pi.exe"] : ["pi"];
+		expect(shims.some((name) => existsSync(join(first ?? "", name)))).toBe(true);
 		expect(rest).toEqual(["/usr/bin", "/bin"]);
+	});
+
+	it("keeps the user's Windows Path, under one spelling, after the bundled folder (Row0902's finding)", () => {
+		// A copy of Windows' environment keeps the key as Windows spells it, `Path`. Reading `PATH`
+		// found nothing, and a second `PATH` key beside it won: the engine had only the bundled folder.
+		const bin = tempDir();
+		writeFileSync(join(bin, "pi.cmd"), "");
+		const env = isolatedAgentEnv(
+			{ Path: "C:\\Windows\\System32;C:\\Git\\cmd", HOME: tempDir() },
+			tempDir(),
+			undefined,
+			{
+				platform: "win32",
+				sourceBinDirs: [bin],
+			},
+		);
+		expect(Object.keys(env).filter((key) => key.toUpperCase() === "PATH")).toEqual(["PATH"]);
+		expect(env.PATH).toBe([bin, "C:\\Windows\\System32", "C:\\Git\\cmd"].join(";"));
 	});
 
 	it("does not add the bundled folder twice", () => {
@@ -142,13 +204,15 @@ describe("isolatedAgentEnv temporary folder", () => {
 		const dataDir = tempDir();
 		const env = isolatedAgentEnv({ HOME: tempDir() }, dataDir);
 		expect(env.TMPDIR).toBe(join(dataDir, "home", ".cache", "tmp"));
-		expect(statSync(env.TMPDIR ?? "").mode & 0o777).toBe(0o700);
+		expectPosixMode(statSync(env.TMPDIR ?? "").mode, 0o700);
 	});
 
-	it("keeps the user's own TMPDIR", () => {
-		expect(isolatedAgentEnv({ HOME: tempDir(), TMPDIR: "/var/tmp/me" }, tempDir()).TMPDIR).toBe(
-			"/var/tmp/me",
-		);
+	it("keeps the Unix user's own TMPDIR (Windows always isolates TEMP/TMP)", () => {
+		expect(
+			isolatedAgentEnv({ HOME: tempDir(), TMPDIR: "/var/tmp/me" }, tempDir(), undefined, {
+				platform: "linux",
+			}).TMPDIR,
+		).toBe("/var/tmp/me");
 	});
 });
 

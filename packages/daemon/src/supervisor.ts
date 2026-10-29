@@ -1,6 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { agentSpawnEnv } from "./config.ts";
 import { encodeRecord, JsonlDecoder } from "./jsonl.ts";
 import { writePrivateFile } from "./private-file.ts";
 import { terminateProcessTree, WINDOWS_TASKKILL_TIMEOUT_MS } from "./process-tree.ts";
@@ -326,7 +327,12 @@ export class AgentSupervisor {
 		const { command, args = [], extraArgs = [], cwd, env, prepareSpawn, user } = this.options;
 		const child = spawn(command, [...args, "--mode", "rpc", "--session-dir", this.sessionDir, ...extraArgs], {
 			cwd,
-			env: { ...(env ?? process.env), ...prepareSpawn?.() },
+			env: agentSpawnEnv(
+				command,
+				args,
+				{ ...(env ?? process.env), ...prepareSpawn?.() },
+				this.options.platform,
+			),
 			stdio: ["pipe", "pipe", "pipe"],
 			...(user ? { uid: user.uid, gid: user.gid } : {}),
 		});
