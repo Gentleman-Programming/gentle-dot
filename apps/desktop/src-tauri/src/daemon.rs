@@ -846,12 +846,15 @@ impl Daemon {
     /// Stops the daemon only if this app spawned it, and closes its channel.
     #[cfg(unix)]
     pub fn stop(&self) {
-        let child = self.child.lock().unwrap().take();
-        if let Some(mut child) = child {
+        let mut child_slot = self.child.lock().unwrap();
+        if let Some(mut child) = child_slot.take() {
             stop_child(child.as_mut(), STOP_GRACE);
             forget_launch(&self.data_dir, child.id());
         }
+        // Keep child -> channel ordering through the take, so a concurrent spawn
+        // cannot install a new generation's channel before this stop takes its own.
         let channel = self.channel.lock().unwrap().take();
+        drop(child_slot);
         if let Some(channel) = channel {
             channel.close();
         }
@@ -1554,6 +1557,90 @@ done"#;
         daemon.stop();
         assert!(daemon.channel().is_none());
         assert!(!channel.is_open());
+    }
+
+    #[test]
+    fn concurrent_stop_keeps_the_replacement_channel_open() {
+        use std::sync::{mpsc, Barrier, TryLockError};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        fn wait_for(mut condition: impl FnMut() -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !condition() {
+                assert!(Instant::now() < deadline, "interleaving condition timed out");
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        let dir = scratch_dir("stop-replacement");
+        let handler = Arc::new(Opened::default());
+        let probes = AtomicUsize::new(0);
+        // Each start sees an unoccupied port, then a healthy newly spawned child.
+        let health = Arc::new(move || probes.fetch_add(1, Ordering::SeqCst) % 2 == 1);
+        let script = format!(r#"
+trap 'echo stopping > "{0}/stopping"; i=0; while [ ! -f "{0}/release" ] && [ "$i" -lt 300 ]; do sleep 0.01; i=$((i+1)); done; exit 0' TERM
+echo ready > "{0}/ready"
+while :; do sleep 0.01; done
+"#, dir.display());
+        let daemon = Arc::new(Daemon::new(1, dir.clone(), None)
+            .with_channel(handler.clone()).with_launch(sh_spec(&script)).with_health(health));
+        daemon.ensure_running(Duration::from_secs(3)).unwrap();
+        let old_channel = daemon.channel().unwrap();
+        wait_for(|| dir.join("ready").exists());
+        let stopping = {
+            let daemon = daemon.clone();
+            thread::spawn(move || daemon.stop())
+        };
+        // The trap is an observable handshake: stop_child has sent SIGTERM, but
+        // the old child cannot exit until we release it (with a bounded fallback).
+        wait_for(|| dir.join("stopping").exists());
+        // PID recording is best-effort. Model an unavailable record so public
+        // start exercises spawn admission, not the unrelated orphan-stop path.
+        fs::write(dir.join(PID_FILE), "").unwrap();
+        let serialized = match daemon.child.try_lock() {
+            Ok(guard) => { drop(guard); false }
+            Err(TryLockError::WouldBlock) => true,
+            Err(error) => panic!("child mutex: {error}"),
+        };
+        let attempting = Arc::new(Barrier::new(2));
+        let (done, completed) = mpsc::channel();
+        let starting = {
+            let daemon = daemon.clone();
+            let attempting = attempting.clone();
+            thread::spawn(move || {
+                attempting.wait();
+                let result = daemon.ensure_running(Duration::from_secs(3));
+                done.send(result).unwrap();
+            })
+        };
+        attempting.wait();
+        // With the buggy unlocked stop, force replacement installation before
+        // allowing stop to take its channel. With serialization, start must wait.
+        if !serialized {
+            completed.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();
+        }
+        fs::write(dir.join("release"), "").unwrap();
+        stopping.join().unwrap();
+        if serialized {
+            completed.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();
+        }
+        starting.join().unwrap();
+        let running = daemon.owns_running();
+        let replacement = daemon.channel();
+        let replacement_open = replacement.as_ref().is_some_and(|channel| channel.is_open());
+        let old_closed = !old_channel.is_open();
+        let opened = *handler.0.lock().unwrap();
+        let recorded = recorded_launch(&dir);
+        let owned_pid = daemon.child.lock().unwrap().as_ref().map(|child| child.id());
+        // Clean up even on the expected RED failure; no surviving test daemon/pid file.
+        daemon.stop();
+        assert!(running, "the replacement child must remain running");
+        assert!(replacement_open,
+            "stop closed the replacement channel instead of the old channel");
+        assert!(old_closed, "stop must close the old generation's channel");
+        assert_eq!(opened, 2);
+        assert_eq!(recorded.map(|launch| launch.pid), owned_pid);
+        assert!(!dir.join(PID_FILE).exists(), "no stray pid file after cleanup");
     }
 
     /// A stand-in for a daemon this app did not launch (`pnpm dev`, or one an older app left): it
