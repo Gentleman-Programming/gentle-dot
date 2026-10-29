@@ -80,6 +80,26 @@ To keep permissions across updates, sign every release with the same identity. `
 
 The command stages the runtime (`build/runtime/darwin-arm64`), signs the runtime's binaries, builds the release app, and writes the DMG to `apps/desktop/src-tauri/target/release/bundle/dmg/`. `--skip-stage` reuses a runtime staged earlier; `--check-dmg <dmg>` checks an existing DMG without building.
 
+## Windows
+
+### Build the installer from source
+
+On Windows 10 or 11 (x64) with Node 24, pnpm, Rust, Visual Studio's C++ build tools (for the native addon), and Go 1.25.10 or newer:
+
+```powershell
+pnpm install
+pnpm --filter @gentle-dot/daemon build:windows-stop -- --compiler <cl.exe> --headers <node-headers>/include/node --node-lib <node.lib>
+$env:GENTLE_DOT_BUILD_GO = "C:\Program Files\Go\bin\go.exe"
+pnpm package:runtime --target windows-x64
+pnpm package:windows
+```
+
+- `build:windows-stop` builds `packages/daemon/native/windows-stop.node`, the native stop and app channel addon. The runtime build refuses to stage without it. `.github/workflows/windows.yml` shows the exact compiler, headers and `node.lib` it uses.
+- `GENTLE_DOT_BUILD_GO` must be the full path of the real `go.exe` in `GOROOT\bin`, not a package manager shim. gentle-pi's postinstall builds gentle-ai from source with it. Only that directory joins the installer's `PATH`, which otherwise holds the staged Node and the Windows system folders.
+- Run both commands through pnpm: on Windows, staging calls pnpm through Node instead of spawning `pnpm.cmd`.
+- `package:runtime` writes `build/runtime/windows-x64` (about 320 MB): Node from its official ZIP, Engram's `engram.exe`, the daemon with its dependencies, and the web UI, each download checked against its published checksums.
+- `package:windows` only packages a runtime staged earlier (`--runtime <dir>` names another one, on the same drive as the checkout). It builds an NSIS installer into `apps/desktop/src-tauri/target/release/bundle/nsis/`. Where WebView2 is missing, the installer runs Microsoft's bootstrapper, which needs the internet at that moment. WebView2 ships with Windows 11 and most Windows 10 installs.
+
 ## Linux
 
 Gentle Dot ships as a self-contained package: it carries its own Node.js, assistant engine, and Engram, so nothing else needs to be installed first. Pick the file for your system (`dpkg --print-architecture` or `uname -m` tells which):
