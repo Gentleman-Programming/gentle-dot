@@ -5,11 +5,12 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { itWithInheritedAppChannel, itWithUnmanagedCli } from "./support/windows.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 
 describe("gentle-dot command", () => {
-	it("keeps the access key out of redirected output, such as a log file", async () => {
+	itWithUnmanagedCli("keeps the access key out of redirected output, such as a log file", async () => {
 		const dataDir = join(tempDir(), "data");
 		const child = spawn(process.execPath, [CLI], {
 			env: {
@@ -69,38 +70,41 @@ describe("gentle-dot command", () => {
 		},
 	);
 
-	it("a daemon launched with the app's channel exits when the app goes (S35.2, #22)", async () => {
-		const dataDir = join(tempDir(), "data");
-		const { app, daemon } = await socketPair();
-		const child = spawn(process.execPath, [CLI], {
-			env: {
-				...process.env,
-				GENTLE_DOT_DATA_DIR: dataDir,
-				GENTLE_DOT_PORT: "0",
-				GENTLE_DOT_AGENT_BIN: process.execPath,
-				GENTLE_DOT_AGENT_ARGS: JSON.stringify([FAKE_AGENT]),
-			},
-			stdio: ["ignore", "pipe", "pipe", daemon],
-		});
-		daemon.destroy();
-		let output = "";
-		const collect = (chunk: Buffer) => {
-			output += chunk.toString();
-		};
-		child.stdout?.on("data", collect);
-		child.stderr?.on("data", collect);
-		const exited = new Promise<number | null>((resolve) => child.on("close", (code) => resolve(code)));
-		try {
-			// The daemon is up once it asks the app for something (the connectors' integrity key).
-			await new Promise((resolve) => app.once("data", resolve));
-			// The app quits, crashes, or is killed: the kernel closes its end of the pair.
-			app.destroy();
-			expect(await exited).toBe(0);
-		} finally {
-			child.kill("SIGKILL");
-		}
-		expect(output).toContain("the desktop app's channel closed; stopping the assistant");
-	});
+	itWithInheritedAppChannel(
+		"a daemon launched with the app's channel exits when the app goes (S35.2, #22)",
+		async () => {
+			const dataDir = join(tempDir(), "data");
+			const { app, daemon } = await socketPair();
+			const child = spawn(process.execPath, [CLI], {
+				env: {
+					...process.env,
+					GENTLE_DOT_DATA_DIR: dataDir,
+					GENTLE_DOT_PORT: "0",
+					GENTLE_DOT_AGENT_BIN: process.execPath,
+					GENTLE_DOT_AGENT_ARGS: JSON.stringify([FAKE_AGENT]),
+				},
+				stdio: ["ignore", "pipe", "pipe", daemon],
+			});
+			daemon.destroy();
+			let output = "";
+			const collect = (chunk: Buffer) => {
+				output += chunk.toString();
+			};
+			child.stdout?.on("data", collect);
+			child.stderr?.on("data", collect);
+			const exited = new Promise<number | null>((resolve) => child.on("close", (code) => resolve(code)));
+			try {
+				// The daemon is up once it asks the app for something (the connectors' integrity key).
+				await new Promise((resolve) => app.once("data", resolve));
+				// The app quits, crashes, or is killed: the kernel closes its end of the pair.
+				app.destroy();
+				expect(await exited).toBe(0);
+			} finally {
+				child.kill("SIGKILL");
+			}
+			expect(output).toContain("the desktop app's channel closed; stopping the assistant");
+		},
+	);
 });
 
 /** A connected pair of Unix sockets (Node has no socketpair): the app's end and the daemon's. */
