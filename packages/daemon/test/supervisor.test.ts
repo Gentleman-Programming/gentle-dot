@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSupervisor } from "../src/supervisor.ts";
 import { fakeSupervisor, tempDir, waitFor } from "./helpers.ts";
+import { itServerMode } from "./support/windows.ts";
 
 const running: AgentSupervisor[] = [];
 afterEach(async () => {
@@ -51,20 +52,23 @@ describe("AgentSupervisor", () => {
 		expect(supervisor.state).toBe("ready");
 	});
 
-	it("starts the agent as the configured user, and as the daemon's own user without one (S25.8)", async () => {
-		const own = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
-		const processFile = join(tempDir(), "process.json");
-		const env = { ...process.env, FAKE_AGENT_PROCESS_FILE: processFile };
-		// Without a user, the agent runs as the daemon does today.
-		const plain = track(fakeSupervisor({ env }));
-		await plain.supervisor.start();
-		expect(JSON.parse(readFileSync(processFile, "utf8"))).toMatchObject(own);
-		await plain.supervisor.stop();
-		const as = track(fakeSupervisor({ env, user: own }));
-		await as.supervisor.start();
-		expect(JSON.parse(readFileSync(processFile, "utf8"))).toMatchObject(own);
-		expect(as.supervisor.state).toBe("ready");
-	});
+	itServerMode(
+		"starts the agent as the configured user, and as the daemon's own user without one (S25.8)",
+		async () => {
+			const own = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
+			const processFile = join(tempDir(), "process.json");
+			const env = { ...process.env, FAKE_AGENT_PROCESS_FILE: processFile };
+			// Without a user, the agent runs as the daemon does today.
+			const plain = track(fakeSupervisor({ env }));
+			await plain.supervisor.start();
+			expect(JSON.parse(readFileSync(processFile, "utf8"))).toMatchObject(own);
+			await plain.supervisor.stop();
+			const as = track(fakeSupervisor({ env, user: own }));
+			await as.supervisor.start();
+			expect(JSON.parse(readFileSync(processFile, "utf8"))).toMatchObject(own);
+			expect(as.supervisor.state).toBe("ready");
+		},
+	);
 
 	it.skipIf((process.getuid?.() ?? 0) === 0)(
 		"applies the user to the spawn: one it cannot take is refused",
