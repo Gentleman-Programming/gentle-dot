@@ -1,9 +1,12 @@
+import * as childProcess from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSupervisor } from "../src/supervisor.ts";
 import { fakeSupervisor, tempDir, waitFor } from "./helpers.ts";
 import { itServerMode } from "./support/windows.ts";
+
+vi.mock("node:child_process", { spy: true });
 
 const running: AgentSupervisor[] = [];
 afterEach(async () => {
@@ -41,6 +44,33 @@ setInterval(() => {}, 1000);
 `;
 
 describe("AgentSupervisor", () => {
+	it("enforces packaged Windows setup opt-outs after prepareSpawn on every spawn without launching the engine", async () => {
+		const runtime = join(process.cwd(), "packaged-runtime");
+		const script = join(runtime, "daemon", "node_modules", "gentle-pi", "bin", "gentle-shell.mjs");
+		const spawn = vi.spyOn(childProcess, "spawn").mockImplementation(() => {
+			throw new Error("spawn intercepted");
+		});
+		try {
+			const { supervisor } = fakeSupervisor({
+				platform: "win32",
+				args: [script, "--home", "/agent"],
+				env: { GENTLE_DOT_RUNTIME: runtime, GENTLE_SHELL_NO_AUTO_SETUP: "0" },
+				prepareSpawn: () => ({ GENTLE_PI_SKIP_GENTLE_AI_INSTALL: "0", PREPARED: "yes" }),
+			});
+			for (let attempt = 0; attempt < 2; attempt++) {
+				await expect(supervisor.start()).rejects.toThrow("spawn intercepted");
+				const options = spawn.mock.calls[attempt]?.[2] as childProcess.SpawnOptions;
+				expect(options.env).toMatchObject({
+					GENTLE_SHELL_NO_AUTO_SETUP: "1",
+					GENTLE_PI_SKIP_GENTLE_AI_INSTALL: "1",
+					PREPARED: "yes",
+				});
+			}
+		} finally {
+			spawn.mockRestore();
+		}
+	});
+
 	it("spawns the agent in RPC mode with the session dir and extra args", async () => {
 		const argsFile = join(tempDir(), "argv.json");
 		const { supervisor, dataDir } = track(
