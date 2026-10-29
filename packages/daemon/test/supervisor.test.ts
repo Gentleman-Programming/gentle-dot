@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSupervisor } from "../src/supervisor.ts";
 import { fakeSupervisor, tempDir, waitFor } from "./helpers.ts";
 
@@ -13,6 +13,31 @@ function track<T extends { supervisor: AgentSupervisor }>(value: T): T {
 	running.push(value.supervisor);
 	return value;
 }
+
+const STUBBORN_AGENT = `
+process.on("SIGTERM", () => {});
+process.stdin.setEncoding("utf8");
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+	buffer += chunk;
+	for (;;) {
+		const newline = buffer.indexOf("\\n");
+		if (newline < 0) break;
+		const line = buffer.slice(0, newline);
+		buffer = buffer.slice(newline + 1);
+		if (!line) continue;
+		const record = JSON.parse(line);
+		if (record.type === "get_state") {
+			process.stdout.write(JSON.stringify({
+				type: "response", id: record.id, command: "get_state", success: true,
+				data: { sessionId: "stubborn" }
+			}) + "\\n");
+		}
+	}
+});
+process.stdin.on("end", () => process.stdin.resume());
+setInterval(() => {}, 1000);
+`;
 
 describe("AgentSupervisor", () => {
 	it("spawns the agent in RPC mode with the session dir and extra args", async () => {
@@ -242,5 +267,154 @@ describe("AgentSupervisor", () => {
 		await supervisor.stop();
 		expect(supervisor.state).toBe("stopped");
 		await expect(supervisor.request({ type: "get_state" })).rejects.toThrow(/not ready/i);
+	});
+
+	it("closes a cooperative agent within the production grace without escalation", async () => {
+		const escalations: boolean[] = [];
+		const { supervisor } = track(
+			fakeSupervisor({
+				// Keep the production grace: OS scheduling under suite load is not a 10ms contract.
+				terminateProcessTree: async (_child, force) => {
+					escalations.push(force);
+					return false;
+				},
+			}),
+		);
+		await supervisor.start();
+		await supervisor.stop();
+		expect(escalations).toEqual([]);
+		expect(supervisor.state).toBe("stopped");
+		expect(supervisor.pid).toBeUndefined();
+	});
+
+	it.each([
+		["win32", 12000],
+		["linux", 2000],
+		["darwin", 2000],
+	] as const)(
+		"coordinates default %s escalation windows without changing Unix timing",
+		async (platform, windowMs) => {
+			const escalations: boolean[] = [];
+			const { supervisor } = track(
+				fakeSupervisor({
+					platform,
+					command: process.execPath,
+					args: ["-e", STUBBORN_AGENT, "--"],
+					stopTimeoutMs: 1,
+					terminateProcessTree: async (child, force) => {
+						escalations.push(force);
+						if (force) child.kill("SIGKILL");
+						return true;
+					},
+				}),
+			);
+			await supervisor.start();
+			vi.useFakeTimers();
+			const stopped = supervisor.stop();
+			void stopped.catch(() => {});
+			try {
+				await vi.advanceTimersByTimeAsync(1);
+				expect(escalations).toEqual([false]);
+				await vi.advanceTimersByTimeAsync(windowMs - 1);
+				expect(escalations).toEqual([false]);
+				await vi.advanceTimersByTimeAsync(1);
+				expect(escalations).toEqual([false, true]);
+				await stopped;
+				expect(supervisor.state).toBe("stopped");
+				expect(supervisor.pid).toBeUndefined();
+			} finally {
+				vi.useRealTimers();
+				const pid = supervisor.pid;
+				// Only a positive PID is the owned fixture; a throw here would hide the test's own failure.
+				if (pid !== undefined && pid > 0) {
+					process.kill(pid, "SIGKILL");
+					await waitFor(() => supervisor.state === "stopped");
+				}
+			}
+		},
+	);
+
+	it("keeps both Windows default stages bounded without rejecting before taskkill can finish", async () => {
+		const escalations: boolean[] = [];
+		const { supervisor } = track(
+			fakeSupervisor({
+				platform: "win32",
+				command: process.execPath,
+				args: ["-e", STUBBORN_AGENT, "--"],
+				stopTimeoutMs: 1,
+				terminateProcessTree: async (_child, force) => {
+					escalations.push(force);
+					return false;
+				},
+			}),
+		);
+		await supervisor.start();
+		const pid = supervisor.pid;
+		const sessionId = supervisor.sessionId;
+		vi.useFakeTimers();
+		let failure: Error | undefined;
+		const stopped = supervisor.stop().catch((error) => {
+			failure = error;
+		});
+		try {
+			await vi.advanceTimersByTimeAsync(24000);
+			expect(failure).toBeUndefined();
+			expect(escalations).toEqual([false, true]);
+			await vi.advanceTimersByTimeAsync(1);
+			await stopped;
+			expect(failure?.message).toBe(`Failed to stop agent process ${pid} after bounded termination`);
+			expect(supervisor.pid).toBe(pid);
+			expect(supervisor.sessionId).toBe(sessionId);
+		} finally {
+			vi.useRealTimers();
+			// Only the current positive PID is the owned fixture; a throw here would hide the test's own failure.
+			if (pid && pid > 0 && supervisor.pid === pid) {
+				process.kill(pid, "SIGKILL");
+				await waitFor(() => supervisor.state === "stopped");
+			}
+		}
+	});
+
+	it("rejects stop actionably when bounded soft and hard termination do not close the child", async () => {
+		const escalations: boolean[] = [];
+		const { supervisor } = fakeSupervisor({
+			command: process.execPath,
+			args: ["-e", STUBBORN_AGENT, "--"],
+			stopTimeoutMs: 10,
+			hardStopTimeoutMs: 10,
+			terminationFailureTimeoutMs: 10,
+			terminateProcessTree: async (_child, force) => {
+				escalations.push(force);
+				return false;
+			},
+		});
+		await supervisor.start();
+		const pid = supervisor.pid;
+		await expect(supervisor.stop()).rejects.toThrow(/failed to stop agent process/i);
+		expect(escalations).toEqual([false, true]);
+		expect(supervisor.pid).toBe(pid);
+		if (!pid || pid <= 0) throw new Error("Missing owned test child PID");
+		process.kill(pid, "SIGKILL");
+		await waitFor(() => supervisor.state === "stopped");
+	});
+
+	it("rejects restart actionably instead of spawning over a child that did not terminate", async () => {
+		const { supervisor } = fakeSupervisor({
+			command: process.execPath,
+			args: ["-e", STUBBORN_AGENT, "--"],
+			stopTimeoutMs: 10,
+			hardStopTimeoutMs: 10,
+			terminationFailureTimeoutMs: 10,
+			terminateProcessTree: async () => false,
+		});
+		await supervisor.start();
+		const pid = supervisor.pid;
+		await expect(supervisor.restart()).rejects.toThrow(/failed to stop agent process/i);
+		expect(supervisor.pid).toBe(pid);
+		if (!pid || pid <= 0) throw new Error("Missing owned test child PID");
+		const stopped = supervisor.stop();
+		process.kill(pid, "SIGKILL");
+		await stopped;
+		expect(supervisor.state).toBe("stopped");
 	});
 });

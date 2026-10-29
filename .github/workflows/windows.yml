@@ -96,5 +96,5 @@ jobs:
 
       # These portable adapter tests and real-addon refusal tests stay together.
       - name: App-channel tests
-        run: pnpm exec vitest run packages/daemon/test/windows-stop.test.ts packages/daemon/test/windows-app-channel.test.ts packages/daemon/test/app-channel-platform.test.ts packages/daemon/test/app-channel.test.ts packages/daemon/test/app-channel-fd.test.ts packages/daemon/test/windows-app-channel-addon.test.ts
+        run: pnpm exec vitest run packages/daemon/test/windows-stop.test.ts packages/daemon/test/windows-app-channel.test.ts packages/daemon/test/app-channel-platform.test.ts packages/daemon/test/app-channel.test.ts packages/daemon/test/app-channel-fd.test.ts packages/daemon/test/windows-app-channel-addon.test.ts packages/daemon/test/process-tree.test.ts packages/daemon/test/supervisor.test.ts
 
