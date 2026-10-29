@@ -1,7 +1,8 @@
 // Pure helpers for staging the installed app's runtime (`stage-runtime.mjs`).
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, lstatSync, readdirSync, renameSync } from "node:fs";
-import { join } from "node:path";
+import { createReadStream, existsSync, lstatSync, readdirSync, renameSync } from "node:fs";
+import { join, posix, win32 } from "node:path";
 
 /**
  * The targets a runtime can be staged for, with the names Node's and Engram's
@@ -140,6 +141,79 @@ export function renameWhenReleased(
 	}
 }
 
+/** Explicit build prerequisite only; never search or inherit the user's entire PATH. */
+export function windowsBuildGo(source, isFile) {
+	const exe = source.GENTLE_DOT_BUILD_GO;
+	if (
+		!exe ||
+		!win32.isAbsolute(exe) ||
+		win32.basename(exe).toLowerCase() !== "go.exe" ||
+		/[;\r\n"]/.test(exe)
+	)
+		throw new Error("GENTLE_DOT_BUILD_GO must name an absolute, already provisioned go.exe.");
+	if (!isFile(exe)) throw new Error("GENTLE_DOT_BUILD_GO must name an existing regular file.");
+	return exe;
+}
+
+/** Windows builds have module/binary provenance, not a downloaded archive checksum. */
+export function gentleAiIntegritySummary(info) {
+	if (info.method === "go-sumdb-source-build")
+		return `gentle-ai ${info.version} via ${info.method} ${info.package}@${info.tag} (module checksum ${info.moduleChecksum}; binary sha256 ${info.binarySha256}; Go ${info.goVersion})`;
+	return `gentle-ai ${info.version} from ${info.asset} (sha256 ${info.assetSha256})`;
+}
+
+/** Child-only environment: installers do not inherit the user's home or credentials. */
+export function installerEnv(out, cache, target, source = process.env, goExecutable) {
+	const windows = target === "windows-x64";
+	const path = windows ? win32.join : posix.join;
+	const home = path(cache, "npm-home");
+	const env = {
+		HOME: home,
+		PATH: `${path(out, "node", "bin")}:/usr/bin:/bin:/usr/sbin:/sbin`,
+		TMPDIR: source.TMPDIR ?? "/tmp",
+		npm_config_userconfig: path(cache, "npmrc"),
+		npm_config_cache: path(cache, "npm-cache"),
+		npm_config_registry: "https://registry.npmjs.org/",
+		npm_config_update_notifier: "false",
+	};
+	if (windows) {
+		const get = (key) =>
+			Object.entries(source).find(([name]) => name.toLowerCase() === key.toLowerCase())?.[1];
+		const root = get("SystemRoot");
+		if (!root) throw new Error("Windows installers require SystemRoot.");
+		delete env.TMPDIR;
+		Object.assign(env, {
+			USERPROFILE: home,
+			LOCALAPPDATA: path(home, "AppData", "Local"),
+			APPDATA: path(home, "AppData", "Roaming"),
+			SystemRoot: root,
+			ComSpec: path(root, "System32", "cmd.exe"),
+			PATH: [
+				path(out, "node", "bin"),
+				path(root, "System32"),
+				root,
+				...(goExecutable ? [win32.dirname(goExecutable)] : []),
+			].join(";"),
+			TEMP: get("TEMP") ?? get("TMP") ?? path(home, "Temp"),
+			TMP: get("TMP") ?? get("TEMP") ?? path(home, "Temp"),
+		});
+	}
+	return env;
+}
+
+/** No shell quoting or direct .cmd spawn: pnpm supplies its JS entry via npm_execpath. */
+export function pnpmInvocation(
+	args,
+	platform = process.platform,
+	env = process.env,
+	node = process.execPath,
+) {
+	if (platform !== "win32") return { command: "pnpm", args };
+	if (!/pnpm\.(?:c?js|mjs)$/i.test(env.npm_execpath ?? ""))
+		throw new Error("Run Windows staging through pnpm so npm_execpath names pnpm's JavaScript entry.");
+	return { command: node, args: [env.npm_execpath, ...args] };
+}
+
 /** The SHA-256 a `SHASUMS256.txt` / `checksums.txt` listing gives `fileName`; throws when it is absent. */
 export function checksumFor(listing, fileName) {
 	for (const line of listing.split("\n")) {
@@ -204,6 +278,19 @@ export function symlinksIn(dir, prefix = "") {
 
 export function formatSize(bytes) {
 	return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** A copied Windows source tree has no Git revision; never manufacture one. */
+export function daemonSourceRevision(
+	repo,
+	platform = process.platform,
+	present = existsSync,
+	git = execFileSync,
+) {
+	if (platform === "win32" && !present(join(repo, ".git"))) return "snapshot-unversioned";
+	const commit = git("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+	const dirty = git("git", ["status", "--porcelain", "--", "packages"], { cwd: repo, encoding: "utf8" });
+	return dirty.trim() ? `${commit}-dirty` : commit;
 }
 
 /** The runtime's `MANIFEST.json` content. */
