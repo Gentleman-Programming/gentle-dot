@@ -330,6 +330,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	const historyPage = options.historyPage ?? Number(process.env.GENTLE_DOT_HISTORY_PAGE);
 	const bridge = new DotBridge(supervisor, {
 		dataDir: options.dataDir,
+		previewSecrets: () => [token, ...connectorStore.previewSecrets()],
 		log,
 		auth,
 		profiles,
@@ -550,7 +551,7 @@ function acceptClient(ws: WebSocket, token: string, bridge: DotBridge): void {
 				ws.close(CloseCode.badProtocol, "unsupported protocol");
 				return;
 			}
-			detach = bridge.attach(client);
+			detach = bridge.attach(client, message.capabilities);
 			return;
 		}
 		if (!message) {

@@ -81,6 +81,7 @@ Client to daemon:
 
 | type | fields | maps to Pi RPC |
 |---|---|---|
+| `hello` | `token`, `protocol: 1`, optional `capabilities: string[]`; `"reasoning"` opts into reasoning messages/fields for this connection | authenticates the connection (no RPC) |
 | `send` | `text`, `requestId` | `prompt` (with `streamingBehavior: "steer"` while busy); a repeated `requestId` is ignored |
 | `steer` | `text` | `steer` |
 | `abort` | — | `abort` |
@@ -109,15 +110,16 @@ Daemon to client:
 | `user_message` | a user message entered from any client |
 | `agent_state` | `starting` \| `idle` \| `thinking` \| `working` \| `needs_you` \| `restarting` \| `error` |
 | `message_delta` | assistant text delta for message `messageId` |
-| `message_done` | final assistant message; `stopped: true` when the user stopped it (Stop, or a switch), `error` with a plain-language explanation when it failed (shown inline in the chat, not as a toast) |
+| `reasoning_delta` | Opt-in only: `messageId`, `delta`; engine `thinking_delta` text is buffered through message end, then redacted and white-label presented as one delta |
+| `message_done` | final assistant message with optional `reasoning` (presented thinking content); `stopped: true` when the user stopped it (Stop, or a switch), `error` with a plain-language explanation when it failed (shown inline in the chat, not as a toast) |
 | `queue` | `steering` and `followUp`: the complete lists of messages sent while the assistant works and not taken yet (from Pi's `queue_update`); empty lists clear it, and it is cleared when the run settles or the agent restarts |
 | `ask_resolved` | an ask was answered or timed out |
 | `conversations` | `conversations` (`id`, `title`, `updatedAt`) and `activeId` |
 | `interrupted` | the agent restarted while a run was active |
-| `activity` | `messageId` plus sanitized tool activity: `id`, `kind` (`read`, `edit`, `run`, `search`, `memory`, `delegate`, `other`), `title`, `status` |
+| `activity` | `messageId` plus sanitized tool activity: `id`, `kind` (`read`, `edit`, `run`, `search`, `memory`, `delegate`, `other`), `title`, `status`; optional `tool`, `source`, `detail`, `output` (below) |
 | `ask` | sanitized `extension_ui_request` dialog: `requestId`, `method` (`select`, `confirm`, `input`, `editor`), `title`, `message`, `options`, `timeoutMs` |
 | `toast` | sanitized `notify` |
-| `history` | the most recent messages (100 by default, `GENTLE_DOT_HISTORY_PAGE`), `hasEarlier`; messages from earlier sessions of the chat carry `earlier: true`, and the UI draws an "Earlier messages" divider after the last one |
+| `history` | the most recent messages (100 by default, `GENTLE_DOT_HISTORY_PAGE`), `hasEarlier`; each assistant message may include `reasoning` and rich `activities`; messages from earlier sessions of the chat carry `earlier: true`, and the UI draws an "Earlier messages" divider after the last one |
 | `earlier` | `before`, one page of `messages` before it, `hasEarlier`; message ids are `s<file index>-<turn>` in the chain |
 | `error` | `code`, `message` safe for the user |
 | `auth_providers` | providers with `methods`, `oauthName`, `configured`, `source`; `open: true` when the user typed `/login` |
@@ -125,6 +127,27 @@ Daemon to client:
 | `auth_event` | `auth_url`, `device_code`, `progress`, or `info` |
 | `auth_done` | `ok`, plain-language `message` on failure or cancellation |
 | `connectors` | `connectors` (`id`, `name`, `reads`, `sends`, `added`, `enabled`, `mode`, `status`: `off` \| `needs_signin` \| `connected` \| `error`); `open: true` when the user typed `/connectors` |
+
+### Rich activities and reasoning
+
+Protocol stays **v1**. Activity fields are optional. Reasoning is **capability-gated**, not broadcast to old clients: only a connection whose authenticated `hello.capabilities` includes `"reasoning"` receives `reasoning_delta` or `reasoning` on `message_done`, `history`, and `earlier`. A missing capability list means no reasoning; unknown string capabilities are ignored. Malformed capability fields (anything other than an array of strings) are ignored as a whole: authentication proceeds normally with no capabilities. A wrong token still closes with 4401. A later `hello` cannot change the negotiated capabilities. The existing web UI does not opt in and remains unchanged.
+
+| Optional activity field | Meaning |
+|---|---|
+| `tool` | Raw engine tool name, for example `mem_save` or `mcp__slack__slack_search_public`; never the arguments object |
+| `source` | `engram`, `slack`, `linear`, `gmail`, `notion`, `atlassian`, `discord`, `rdd`, `web`, `files`, `shell`, `subagent`, `mcp`, or `other` |
+| `detail` | Redacted argument preview, at most 200 characters |
+| `output` | Redacted text-only result preview, at most 2000 characters, on `done`/`failed` only; images, provider metadata, and tool result `details` are omitted |
+
+Live start/end events and history use the same activity builder. End events supply `result`; their arguments come from the matching start. History correlates `toolResult` messages by `toolCallId`. Connector classification uses the catalog server ids in the engine's `mcp__<server>__<tool>` namespace; other MCP tools fall back to `mcp`.
+
+**Redaction:** one pure policy covers live/history argument and result previews **and reasoning**. It masks credential-like JSON keys, `key=value`/`Key: value`, URL userinfo and credential query parameters (including `key`, `sig`, `signature`, `auth`, `code`), shell credential flags (including MySQL `-p` and curl `-u`/`--user`), complete Cookie/Set-Cookie values, Bearer/Basic credentials, common API/GitHub/Slack/AWS/Google tokens, JWTs, PEM private keys, and instance/connector credentials already cached in daemon memory. Authentication-email cues (including a login/sign-in/verification subject paired with a code-bearing body) identify code/link values to mask without discarding benign sibling fields. Property names are sanitized too, and a final literal-secret pass covers the serialized preview. The policy runs **before display truncation**, and never fetches additional secrets.
+
+Redaction has a separate **64 KiB scan budget** (65,536 JavaScript string code units) across string values and property names. An unscanned suffix is replaced by a single `[TRUNCATED]` marker, never copied to the wire, even when the display cap is unlimited. Structured inputs additionally have a 4096-node/32-level traversal limit. Credential labels, flags, and URLs are scanned as maximal tokens rather than repeatedly matching overlapping suffixes. These limits apply to reasoning as well as activity previews. It is pattern-based defense in depth, not a safe export of private data: arbitrary unlabelled or encoded/obfuscated secrets, unsupported shell syntax/flags, and authentication emails without recognizable cues (including other languages) may escape detection. Ordinary assistant/user text is not covered by this policy.
+
+**Reasoning buffering:** no raw thinking delta reaches a client. The daemon retains the complete reasoning tail until `message_end`, then applies the same redaction with current instance secrets and presents the complete text. This deliberately delays reasoning until message completion: a fixed-size tail cannot safely bound arbitrary credential lengths, multiline PEM blocks, or email context. Restarted/abandoned buffers are discarded; final redacted/encrypted thinking blocks are never reconstructed from earlier deltas.
+
+`message_done.reasoning` and `HistoryMessage.reasoning` come only from readable `thinking` blocks, never encrypted signatures or redacted thinking. Final/history text and reasoning preserve fenced (backticks or tildes) and inline code byte-for-byte while rewriting internal names in prose.
 
 ### Sign-in (S10) and own instance (S12)
 
@@ -218,7 +241,7 @@ The user changes the main assistant's model from the chat, in the panel and the 
 ## 5. White-label layer
 
 - **Identity**: `--append-system-prompt` with `identity.md`: the assistant is "Gentle Dot", a personal assistant; it must not mention Gentle Shell, Pi, el Gentleman, ODD, or Engram by name, and describes them as "my workflow" and "my memory" when needed. It keeps every behavior.
-- **Event sanitizer** (`packages/daemon/src/white-label.ts`, unit-tested): rewrites internal names in toasts, ask titles, messages, and options (answers are mapped back to the agent's original option strings), final assistant text, and history. Informational `notify` records are harness chatter and are hidden; warnings and errors are shown. `setStatus`, `setWidget`, `setTitle`, and terminal-only requests are dropped. Tool names map to activity kinds and neutral titles (for example `mem_search` -> `memory` "Checking my notes"). Streamed deltas are not rewritten; the UI replaces them with the final text.
+- **Event sanitizer** (`packages/daemon/src/white-label.ts`, unit-tested): rewrites internal names in toasts, ask titles, messages, and options (answers are mapped back to the agent's original option strings), final assistant text, and history. Informational `notify` records are harness chatter and are hidden; warnings and errors are shown. `setStatus`, `setWidget`, `setTitle`, and terminal-only requests are dropped. Tool names map to activity kinds and neutral titles (for example `mem_search` -> `memory` "Checking my notes"). Streamed text deltas are not rewritten; the UI replaces them with the final text. Opt-in reasoning deltas are buffered and redacted before white-label presentation; final/history reasoning is redacted and presented from the complete thinking blocks. Fenced and inline code are preserved in final/history presentation.
 - **Commands**: `gentle:*` slash commands are never exposed, and a message starting with `/gentle:` is refused with `unsupported`; the UI has no command palette in this version.
 - **Errors**: provider or process errors become neutral messages; raw details go to the daemon log only.
 

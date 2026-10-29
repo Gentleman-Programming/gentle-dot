@@ -22,6 +22,7 @@ import {
 	type ServerPayload,
 	type VoiceCapability,
 } from "@gentle-dot/protocol";
+import { redactPreview } from "./activity-preview.ts";
 import { APPROVAL_WAIT_MS, type AppApproval, type AppLink } from "./app-channel.ts";
 import type { AuthManager } from "./auth.ts";
 import type { ConnectorManager, ConnectorRefusal } from "./connectors.ts";
@@ -34,7 +35,7 @@ import {
 } from "./conversations.ts";
 import { directAccess, type EngineAccess } from "./engine-access.ts";
 import { DRAFT_STATUS_KEY } from "./extensions/approval-guard.ts";
-import { describeTool, textOf } from "./presentation.ts";
+import { activityOf, reasoningOf, textOf } from "./presentation.ts";
 import {
 	LiveModelSwitch,
 	ProfileError,
@@ -90,6 +91,8 @@ export interface BridgeOptions {
 	rotation?: RotationLimits;
 	/** How many messages `history` and each `get_earlier` page carry. Default 100. */
 	historyPage?: number;
+	/** In-memory instance credentials to mask in activity previews; never read from files here. */
+	previewSecrets?: () => readonly string[];
 }
 
 type ProfileCommand = Extract<
@@ -131,6 +134,9 @@ const HISTORY_PAGE = 100;
  */
 export class DotBridge {
 	private readonly clients = new Set<BridgeClient>();
+	private readonly reasoningClients = new WeakSet<BridgeClient>();
+	/** Keep the complete reasoning tail until message end: patterns/known secrets may span any delta. */
+	private reasoningBuffer = "";
 	/** Each window's id, for the app's commands on its behalf. */
 	private readonly clientIds = new Map<string, BridgeClient>();
 	private readonly asks = new Map<string, PendingAsk>();
@@ -141,6 +147,8 @@ export class DotBridge {
 	/** Told to every window that connects during this run (a connectors file set aside at start). */
 	private readonly notices: ServerPayload[] = [];
 	private readonly runningTools = new Set<string>();
+	/** End events carry the result, not arguments; retain each start until its matching end. */
+	private readonly toolStarts = new Map<string, { tool: string; args: unknown }>();
 	private readonly seenRequestIds: string[] = [];
 	private readonly sessionDir: string;
 	private readonly supervisor: AgentSupervisor;
@@ -293,8 +301,9 @@ export class DotBridge {
 		await this.run(client, message.command);
 	}
 
-	attach(client: BridgeClient): () => void {
+	attach(client: BridgeClient, capabilities: readonly string[] = []): () => void {
 		this.clients.add(client);
+		if (capabilities.includes("reasoning")) this.reasoningClients.add(client);
 		const clientId = randomBytes(18).toString("base64url");
 		this.clientIds.set(clientId, client);
 		this.deliver(client, {
@@ -315,6 +324,7 @@ export class DotBridge {
 		for (const notice of this.notices) this.deliver(client, notice);
 		return () => {
 			this.clients.delete(client);
+			this.reasoningClients.delete(client);
 			this.clientIds.delete(clientId);
 			this.options.auth?.cancelOwnedBy(client);
 			this.options.connectors?.cancelOwnedBy(client);
@@ -632,7 +642,9 @@ export class DotBridge {
 				this.deliver(client, {
 					type: "earlier",
 					before: message.before,
-					...this.engine(() => pageHistory(this.chain(), this.pageSize(), message.before)),
+					...this.engine(() =>
+						pageHistory(this.chain(), this.pageSize(), message.before, this.previewSecrets()),
+					),
 				});
 				return;
 		}
@@ -1138,7 +1150,9 @@ export class DotBridge {
 			// The engine writes a message to its session file right after announcing it;
 			// one round trip makes sure everything announced so far is on disk.
 			await this.supervisor.request({ type: "get_state" });
-			const page = this.engine(() => pageHistory(this.chain(), this.pageSize()));
+			const page = this.engine(() =>
+				pageHistory(this.chain(), this.pageSize(), undefined, this.previewSecrets()),
+			);
 			if (this.nextMessage === seen || attempt >= 2) return page;
 		}
 	}
@@ -1209,6 +1223,8 @@ export class DotBridge {
 				// The run may have changed the connector files.
 				this.options.connectors?.enforce();
 				this.runningTools.clear();
+				this.toolStarts.clear();
+				this.reasoningBuffer = "";
 				this.assistantId = undefined;
 				this.stopRequested = false;
 				// Anything still queued will not be taken by this run.
@@ -1257,13 +1273,26 @@ export class DotBridge {
 				...(attachments.length > 0 ? { attachments } : {}),
 			});
 		}
-		if (message?.role === "assistant") this.assistantId = `m${++this.nextMessage}`;
+		if (message?.role === "assistant") {
+			this.assistantId = `m${++this.nextMessage}`;
+			this.reasoningBuffer = "";
+		}
 	}
 
 	private onMessageUpdate(event: AgentRecord): void {
 		const update = event.assistantMessageEvent as { type?: string; delta?: unknown } | undefined;
-		if (update?.type !== "text_delta" || typeof update.delta !== "string") return;
+		if (
+			(update?.type !== "text_delta" && update?.type !== "thinking_delta") ||
+			typeof update.delta !== "string"
+		)
+			return;
 		this.assistantId ??= `m${++this.nextMessage}`;
+		if (update.type === "thinking_delta") {
+			// No fixed-size window can safely split an arbitrary credential/PEM/email.
+			// Retain the entire tail and redact once on message_end, never emit raw pieces.
+			this.reasoningBuffer += update.delta;
+			return;
+		}
 		this.broadcast({ type: "message_delta", messageId: this.assistantId, delta: update.delta });
 	}
 
@@ -1274,29 +1303,46 @@ export class DotBridge {
 		if (message?.role !== "assistant") return;
 		const messageId = this.assistantId ?? `m${++this.nextMessage}`;
 		const text = presentText(textOf(message));
+		const content = (message as { content?: unknown }).content;
+		const hasThinking = Array.isArray(content) && content.some((b) => b?.type === "thinking");
+		// A final redacted block must not fall back to earlier readable deltas.
+		const rawReasoning = hasThinking ? reasoningOf(message) : this.reasoningBuffer;
+		this.reasoningBuffer = "";
+		const reasoning = presentText(
+			redactPreview(rawReasoning, Number.POSITIVE_INFINITY, this.previewSecrets()),
+		);
+		if (reasoning) this.broadcast({ type: "reasoning_delta", messageId, delta: reasoning });
+		const extra = reasoning ? { reasoning } : {};
 		// The engine ends a stopped answer as "aborted", or as an error when a session switch tore it down.
 		if (message.stopReason === "aborted" || (message.stopReason === "error" && this.stopRequested)) {
-			this.broadcast({ type: "message_done", messageId, text, stopped: true });
+			this.broadcast({ type: "message_done", messageId, text, ...extra, stopped: true });
 		} else if (message.stopReason === "error") {
 			this.log(`assistant error: ${message.errorMessage ?? "unknown"}`);
-			this.broadcast({ type: "message_done", messageId, text, error: ANSWER_FAILED });
+			this.broadcast({ type: "message_done", messageId, text, ...extra, error: ANSWER_FAILED });
 		} else {
-			this.broadcast({ type: "message_done", messageId, text });
+			this.broadcast({ type: "message_done", messageId, text, ...extra });
 		}
 	}
 
 	private onTool(event: AgentRecord): void {
 		const id = String(event.toolCallId ?? "");
 		const started = event.type === "tool_execution_start";
-		if (started) this.runningTools.add(id);
-		else this.runningTools.delete(id);
+		const tool = String(event.toolName ?? this.toolStarts.get(id)?.tool ?? "");
+		const args = started ? event.args : this.toolStarts.get(id)?.args;
+		if (started) {
+			this.runningTools.add(id);
+			this.toolStarts.set(id, { tool, args });
+		} else {
+			this.runningTools.delete(id);
+			this.toolStarts.delete(id);
+		}
 		const status = started ? "running" : event.isError ? "failed" : "done";
 		// Start and end of one tool call must land on the same message.
 		this.assistantId ??= `m${++this.nextMessage}`;
 		this.broadcast({
 			type: "activity",
 			messageId: this.assistantId,
-			activity: { id, ...describeTool(String(event.toolName ?? ""), event.args, status), status },
+			activity: activityOf(id, tool, args, status, event.result, this.previewSecrets()),
 		});
 	}
 
@@ -1352,6 +1398,8 @@ export class DotBridge {
 	private clearRun(): void {
 		for (const requestId of [...this.asks.keys()]) this.resolveAsk(requestId);
 		this.runningTools.clear();
+		this.toolStarts.clear();
+		this.reasoningBuffer = "";
 		this.assistantId = undefined;
 	}
 
@@ -1389,6 +1437,12 @@ export class DotBridge {
 	}
 
 	private deliver(client: BridgeClient, payload: ServerPayload): void {
+		if (!this.reasoningClients.has(client)) {
+			if (payload.type === "reasoning_delta") return;
+			if (payload.type === "message_done") payload = withoutReasoning(payload);
+			if (payload.type === "history" || payload.type === "earlier")
+				payload = { ...payload, messages: payload.messages.map(withoutReasoning) };
+		}
 		client.send(payload);
 	}
 
@@ -1397,9 +1451,19 @@ export class DotBridge {
 		return (this.options.engineAccess ?? directAccess)(fn);
 	}
 
+	private previewSecrets(): readonly string[] {
+		return this.options.previewSecrets?.() ?? [];
+	}
+
 	private log(line: string): void {
 		this.options.log?.(line);
 	}
+}
+
+/** Do not mutate shared broadcast/history objects when tailoring an old client's payload. */
+function withoutReasoning<T extends { reasoning?: string }>(message: T): Omit<T, "reasoning"> {
+	const { reasoning: _reasoning, ...rest } = message;
+	return rest;
 }
 
 /** A queued message as the user wrote it; files show by name. */
