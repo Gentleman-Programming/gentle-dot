@@ -94,6 +94,18 @@ describe("isolatedAgentEnv PATH", () => {
 		expect(env.PATH).toBe([bin, "C:\\Windows\\System32", "C:\\Git\\cmd"].join(";"));
 	});
 
+	it("does not add the bundled folder twice on Windows, whatever its case or trailing separator", () => {
+		const bin = tempDir();
+		writeFileSync(join(bin, "pi.cmd"), "");
+		const env = isolatedAgentEnv(
+			{ Path: `C:\\Windows\\System32;${bin.toUpperCase()}\\;${bin}/`, HOME: tempDir() },
+			tempDir(),
+			undefined,
+			{ platform: "win32", sourceBinDirs: [bin] },
+		);
+		expect(env.PATH).toBe([bin, "C:\\Windows\\System32"].join(";"));
+	});
+
 	it("does not add the bundled folder twice", () => {
 		const once = isolatedAgentEnv({ PATH: "/bin", HOME: tempDir() }, tempDir());
 		const twice = isolatedAgentEnv({ PATH: once.PATH, HOME: tempDir() }, tempDir());

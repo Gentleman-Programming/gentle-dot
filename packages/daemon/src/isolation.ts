@@ -186,8 +186,14 @@ export function isolatedAgentEnv(
 	}
 	const bin = bundledBinDir(base, options);
 	if (bin) {
-		const separator = platform === "win32" ? ";" : delimiter;
-		const rest = (path ?? "").split(separator).filter((part) => part && part !== bin);
+		const windows = platform === "win32";
+		const separator = windows ? ";" : delimiter;
+		// Windows paths ignore case and a trailing separator, so the bundled folder is not kept twice.
+		const same = (part: string) =>
+			windows
+				? part.replace(/[\\/]+$/, "").toLowerCase() === bin.replace(/[\\/]+$/, "").toLowerCase()
+				: part === bin;
+		const rest = (path ?? "").split(separator).filter((part) => part && !same(part));
 		env.PATH = [bin, ...rest].join(separator);
 	}
 	// The user's own Gentle Shell setting is not the assistant's.
