@@ -1,9 +1,10 @@
 import * as childProcess from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSupervisor } from "../src/supervisor.ts";
-import { fakeSupervisor, tempDir, waitFor } from "./helpers.ts";
+import { FAKE_AGENT, fakeSupervisor, tempDir, waitFor } from "./helpers.ts";
 import { itServerMode } from "./support/windows.ts";
 
 vi.mock("node:child_process", { spy: true });
@@ -179,6 +180,45 @@ describe("AgentSupervisor", () => {
 				2,
 		);
 		expect(events.some((e) => e.type === "interrupted")).toBe(false);
+	});
+
+	it("schedules one respawn per backoff step while the agent keeps dying at startup (no restart storm)", {
+		timeout: 9000,
+	}, async () => {
+		// Measured on Windows (daemon.log, 2026-10-27): one crash of a healthy agent whose
+		// respawns all died at startup became ~416k respawn attempts in five hours, because a
+		// death during startup schedules the restart twice and the backoff never escalates.
+		const dataDir = tempDir();
+		const dieFlag = join(dataDir, "die");
+		const spawnLog = join(dataDir, "spawns.txt");
+		const launcher = join(dataDir, "launcher.mjs");
+		writeFileSync(
+			launcher,
+			[
+				"import { appendFileSync, existsSync } from 'node:fs';",
+				"if (existsSync(process.env.DIE_FLAG)) {",
+				`  appendFileSync(process.env.SPAWN_LOG, \`\${Date.now()}\\n\`);`,
+				"  process.exit(3221225794);", // 0xC0000142, the incident's exit code
+				"}",
+				`await import(${JSON.stringify(pathToFileURL(FAKE_AGENT).href)});`,
+			].join("\n"),
+		);
+		const { supervisor } = track(
+			fakeSupervisor({
+				command: process.execPath,
+				args: [launcher],
+				env: { ...process.env, DIE_FLAG: dieFlag, SPAWN_LOG: spawnLog },
+			}),
+		);
+		await supervisor.start();
+		writeFileSync(dieFlag, "");
+		process.kill(supervisor.pid ?? 0, "SIGKILL");
+		await new Promise((resolve) => setTimeout(resolve, 4000));
+		const spawns = readFileSync(spawnLog, "utf8").trim().split("\n").filter(Boolean);
+		// The [50, 100, 200] backoff itself allows ~13 attempts in 4 s; a restart storm or a
+		// backoff that never escalates produces multiples of that.
+		expect(spawns.length).toBeLessThanOrEqual(20);
+		expect(supervisor.state).toBe("restarting");
 	});
 
 	it("rejects pending commands when the agent exits", async () => {

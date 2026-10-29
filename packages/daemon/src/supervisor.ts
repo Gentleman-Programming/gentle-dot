@@ -227,6 +227,7 @@ export class AgentSupervisor {
 		this.stopping = true;
 		this.wasLaunched = true;
 		clearTimeout(this.restartTimer);
+		this.restartTimer = undefined;
 		const child = this.child;
 		if (!child) {
 			this.setState("stopped");
@@ -406,16 +407,26 @@ export class AgentSupervisor {
 		}
 		this.log(`agent exited unexpectedly (${signal ?? `code ${code}`})`);
 		if (wasBusy) this.interrupted = true;
+		// The dead run's length, measured now, decides whether the next failures start the backoff
+		// over; the old check ran inside scheduleRestart against a spawnedAt the failed runs never
+		// updated, so a persistent startup crash reset the attempts on every call and retried at
+		// the first delay forever.
+		if (this.spawnedAt && Date.now() - this.spawnedAt > (this.options.stableMs ?? 30_000)) this.attempts = 0;
+		this.spawnedAt = 0;
 		this.scheduleRestart();
 	}
 
 	private scheduleRestart(): void {
+		// One pending respawn at most. A death during startup reaches this from handleClose and
+		// again from the spawn's catch; stacking the timers doubled the attempts every generation
+		// (measured on Windows: one crash became ~416k respawn attempts in five hours).
+		if (this.restartTimer) return;
 		const backoff = this.options.backoffMs ?? DEFAULT_BACKOFF_MS;
-		if (this.spawnedAt && Date.now() - this.spawnedAt > (this.options.stableMs ?? 30_000)) this.attempts = 0;
 		const delay = backoff[Math.min(this.attempts, backoff.length - 1)] ?? 1000;
 		this.attempts += 1;
 		this.setState("restarting");
 		this.restartTimer = setTimeout(() => {
+			this.restartTimer = undefined;
 			if (this.stopping) return;
 			this.initialize().catch((error: Error) => {
 				this.log(`agent restart failed: ${error.message}`);
