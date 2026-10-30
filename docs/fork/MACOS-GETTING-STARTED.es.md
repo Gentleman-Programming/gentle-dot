@@ -52,8 +52,8 @@ rama por defecto; mientras se mantiene aislado, usa push o vuelve a ejecutar un 
 ## Actualización desde la app
 
 El requisito de comprobación automática y actualización validada está en
-[AUTO-UPDATE.es.md](AUTO-UPDATE.es.md). Aún no está implementado; el DMG de esta
-rama no debe anunciarse como autoactualizable.
+[AUTO-UPDATE.es.md](AUTO-UPDATE.es.md). El código ya está integrado; requiere configurar las claves de firma y
+validar A → B en un Mac real antes de distribuirlo como autoactualizable.
 
 ## CI y publicación
 
@@ -65,7 +65,8 @@ rama no debe anunciarse como autoactualizable.
   No prueba permisos TCC, dictado físico, GUI ni credenciales de usuario.
 - Se conservan DMG, licencia, manifiesto de build y SHA256SUMS.
 - PR y builds normales tienen contents:read; solo el job de release tiene
-  contents:write. No hay pull_request_target, certificados ni secretos de usuario.
+  contents:write. No hay pull_request_target. Los secretos de firma se entregan solo al paso
+  de empaquetado de tags; no a builds de PR.
 - Node 24 resuelve un parche y Engram se resuelve según upstream al compilar;
   BUILD-INFO registra el runtime efectivo. No se promete reproducción byte a byte.
 
@@ -79,7 +80,7 @@ git tag -a macos-qa-v0.1.0-1 -m "macOS QA 0.1.0 build 1"
 git push origin macos-qa-v0.1.0-1
 ```
 
-Solo el fork `Maicololiveras/gentle-dot` crea el borrador, y solo después de todas
+El fork y el repositorio oficial pueden crear el borrador, y solo después de todas
 las comprobaciones. No sobreescribe una release existente ni publica en latest.
 Revisa el instalador en un Mac real antes de publicar el borrador como prerelease.
 Si falla antes de crear la release, vuelve a ejecutar los jobs fallidos; si ya

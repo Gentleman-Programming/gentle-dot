@@ -1,3 +1,7 @@
+#[cfg(target_os = "macos")]
+pub mod updates;
+#[cfg(target_os = "macos")]
+mod update_policy;
 pub mod alert;
 pub mod app_channel;
 pub mod approvals;

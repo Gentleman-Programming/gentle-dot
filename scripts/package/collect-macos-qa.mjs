@@ -25,6 +25,37 @@ const info = {
 	runtime: manifest,
 };
 await writeFile(join(output, "BUILD-INFO.json"), `${JSON.stringify(info, null, 2)}\n`);
+if (process.env.GITHUB_REF_TYPE === "tag") {
+	const repo = process.env.GITHUB_REPOSITORY;
+	const tag = process.env.GITHUB_REF_NAME;
+	const config = JSON.parse(await readFile("apps/desktop/src-tauri/tauri.conf.json", "utf8"));
+	if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo ?? "")) throw new Error("Invalid release repository");
+	const match = /^macos-qa-v(\d+\.\d+\.\d+)-(\d+)$/.exec(tag ?? "");
+	if (!match || match[1] !== config.version) throw new Error("Tag and app version must match");
+	const archive = `${config.productName}.app.tar.gz`;
+	const folder = "apps/desktop/src-tauri/target/release/bundle/macos";
+	const signature = (await readFile(join(folder, `${archive}.sig`), "utf8")).trim();
+	if (!signature) throw new Error("Missing updater signature");
+	await cp(join(folder, archive), join(output, archive));
+	await cp(join(folder, `${archive}.sig`), join(output, `${archive}.sig`));
+	await writeFile(
+		join(output, "latest.json"),
+		`${JSON.stringify(
+			{
+				version: config.version,
+				notes: "Actualización QA. Consulta las notas de esta release en GitHub.",
+				platforms: {
+					"darwin-aarch64": {
+						signature,
+						url: `https://github.com/${repo}/releases/download/${tag}/${encodeURIComponent(archive)}`,
+					},
+				},
+			},
+			null,
+			2,
+		)}\n`,
+	);
+}
 const sums = [];
 for (const name of (await readdir(output)).sort()) {
 	const hash = createHash("sha256");

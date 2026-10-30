@@ -201,6 +201,12 @@ async function main() {
 	// Tauri copies the signed runtime into the app, signs the app, and builds the DMG from it.
 	// Unless asked, the DMG's Finder window is not scripted (CI): that needs Finder automation.
 	const config = tauriReleaseConfig({ runtime, identity: options.identity });
+	// The updater signature is independent from Apple's codesign identity.
+	if (process.env.TAURI_SIGNING_PRIVATE_KEY) {
+		if (!process.env.GENTLE_DOT_UPDATE_PUBLIC_KEY?.trim())
+			throw new Error("Updater signing requires GENTLE_DOT_UPDATE_PUBLIC_KEY");
+		config.bundle.createUpdaterArtifacts = true;
+	}
 	say(`tauri build --bundles app,dmg (release, signing ${identityName(options.identity)})`);
 	const env = { ...process.env, APPLE_SIGNING_IDENTITY: options.identity };
 	if (options.finderLayout) delete env.CI;

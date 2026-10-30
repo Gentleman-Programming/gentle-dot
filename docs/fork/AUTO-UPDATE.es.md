@@ -1,52 +1,84 @@
-# Actualización autónoma — requisito de esta entrega
+# Actualización de Gentle Dot QA
 
-Estado: pendiente de implementación y prueba end-to-end. El workflow macOS
-actual genera el DMG verificado; todavía NO instala actualizaciones desde la app.
-No anunciar autoactualización disponible hasta cerrar los criterios siguientes.
+Implementada en `updates.rs` usando tauri-plugin-updater v2. El código necesita
+validación nativa y una prueba A → B en macOS antes de considerarse listo para
+producción. No hay aún una release firmada de este fork.
 
-## Comportamiento requerido
+## Funcionamiento
 
-- Consultar al iniciar y cada 24 horas sin bloquear el chat; botón Buscar
-  actualizaciones para reintentar manualmente.
-- Comparar SemVer de la app instalada con la publicación del canal seleccionado.
-  Una compilación QA solo consulta QA; estable solo consulta estable.
-- Mostrar versión, notas y acción Instalar y reiniciar / Más tarde.
-- Descargar en segundo plano, validar firma criptográfica antes de instalar,
-  rechazar versiones anteriores, firmas inválidas, truncados y arquitectura errónea.
-- Detener captura y control del equipo; esperar o pedir confirmar el cierre de
-  tareas activas; cerrar el daemon de forma ordenada antes de reiniciar.
-- Conservar conversaciones, preferencias, autenticación y memoria. Fallos de red,
-  proxy o verificación no deben inutilizar la instalación actual.
+Busca al iniciar, cada 24 horas y desde Buscar actualizaciones en el menú.
+Consulta las últimas 100 releases del repositorio compilado en la app, descarta
+borradores y estables, y considera únicamente tags `macos-qa-vX.Y.Z-N` marcados
+como prerelease. Escoge una versión SemVer estrictamente posterior. Para esta
+primera entrega el canal es QA; no se implementa actualización estable.
 
-## Implementación indicada para el agente que continúe en el PC
+Lee `latest.json` de la release elegida, comprueba versión y origen del archivo,
+y descarga mediante Tauri. Se exige firma válida y versión firmada
+(`requireSignedVersion: true`), además de TLS. Una firma antigua sin versión
+firmada se rechaza: usa una versión de Tauri CLI que incluya la versión en el
+trusted comment. Nunca rebajes ese requisito para aceptar un paquete viejo.
 
-Usar tauri-plugin-updater v2, mecanismo nativo de Tauri ya usado por el escritorio.
-No ejecutar un instalador arbitrario sugerido por el agente ni desactivar TLS.
+Primero ofrece Descargar / Más tarde. Una vez verificado, ofrece Instalar y
+reiniciar / Más tarde, avisando que cerrará tareas activas. Tras instalar, cancela
+voz y control, detiene el daemon y reinicia. No escribe en conversaciones,
+preferencias, llaveros ni memoria. No detecta automáticamente si una tarea tiene
+trabajo sin guardar: el diálogo pide guardarlo antes de confirmar.
+
+Solo el shell nativo tiene acceso a este flujo; no se otorgan permisos updater
+al webview. Un proceso del agente no puede cambiar el repositorio ni la clave
+mediante variables de entorno: se incorporan durante la compilación.
+
+Errores de red automáticos se registran sin bloquear el chat. La búsqueda manual
+muestra un error. Si no hay clave pública, no busca ni descarga actualizaciones
+y el menú explica que esa compilación no está configurada.
+
+## Configuración inicial del maintainer (en tu PC)
+
+En un checkout con las dependencias instaladas:
+
+```bash
+pnpm --filter @gentle-dot/desktop exec tauri signer generate -w ~/.tauri/gentle-dot.key
+```
+
+Elige y conserva una contraseña. Guarda la clave privada fuera del repo y una
+copia segura: perderla impide actualizar las instalaciones que confían en ella.
+
+En Settings → Secrets and variables → Actions del repositorio correspondiente:
+
+| Tipo | Nombre | Valor |
+|---|---|---|
+| Variable | GENTLE_DOT_UPDATE_PUBLIC_KEY | Contenido de gentle-dot.key.pub |
+| Secret | TAURI_SIGNING_PRIVATE_KEY | Contenido de gentle-dot.key |
+| Secret | TAURI_SIGNING_PRIVATE_KEY_PASSWORD | Contraseña de la clave |
+
+No pegues valores privados en chats, issues, commits o logs. El conector no puede
+configurar Secrets; esta preparación se hace desde el PC del propietario.
+La firma updater no sustituye codesign ni notarización Apple.
+
+CI fija GENTLE_DOT_UPDATE_REPOSITORY al repositorio de ejecución. El código usa
+Gentleman-Programming/gentle-dot si se compila sin ese valor; el fork usa su propio
+repositorio. Cada repositorio configura su clave por separado. Main no se cambia.
+
+## Publicación
+
+Incrementa `version` en tauri.conf.json, Cargo.toml, Cargo.lock y el package.json
+del escritorio. Cada actualización necesita una versión X.Y.Z mayor; cambiar
+solo N en el tag no provoca reinstalación de la misma versión.
+
+Un tag `macos-qa-vX.Y.Z-N` construye los artefactos firmados. Sin clave privada o
+pública falla. La rama y los PR no reciben claves privadas y generan solo el DMG.
+La release queda en borrador con `.app.tar.gz`, `.sig`, `latest.json`, DMG,
+BUILD-INFO, licencia y SHA256SUMS. Publica ese borrador como prerelease solo después
+de revisar los checks y probar el DMG; desde entonces lo descubrirán las apps.
+No requiere una rama/feed mutable ni usa releases/latest para QA.
+
+## Validación pendiente en Mac real
+
+Instalar A con la clave pública; publicar B firmada y comprobar A → B, datos
+conservados y un solo daemon al reiniciar. Probar firma incorrecta, versión
+firmada diferente, archivo truncado, downgrade, ausencia de red, Más tarde,
+canal equivocado y tarea activa. El checksum no sustituye esta verificación.
+No se promete rollback tras cualquier fallo del sistema de archivos: el manejo
+de sustitución de la app depende del instalador nativo de Tauri.
+
 Referencia: https://v2.tauri.app/plugin/updater/ .
-
-1. Añadir dependencia Rust y actualizar Cargo.lock. Registrar el plugin nativo;
-   preferir comandos internos del shell y diálogos nativos, sin exponer a mensajes
-   del modelo capacidades para cambiar endpoint, clave o aprobar instalación.
-2. Generar una clave de firma del actualizador desde el PC del propietario.
-   La clave privada y su contraseña van a Secrets de GitHub; solo la pública se
-   integra en la app. No crear ni publicar claves privadas en el repositorio.
-3. Separar canales con manifiestos de actualización QA/estable y URL HTTPS fija.
-   QA requiere endpoint propio porque releases/latest no selecciona prereleases.
-4. Activar createUpdaterArtifacts en el build Tauri. CI debe generar el archivo
-   de actualización .app.tar.gz y su .sig, además del DMG. Una release actualizable
-   debe fallar si falta la firma; no degradar a checksum como autenticación.
-5. Publicar el manifiesto del canal solo después de comprobar los artefactos
-   firmados y publicar su release. Enlazar versión, URL y firma exactas.
-6. Añadir máquina de estados: checking, available, downloading, verifying,
-   ready, installing, error; límites de tiempo y protección contra concurrencia.
-7. Revisar la limpieza en shell.rs: el daemon se detiene en RunEvent::Exit.
-   Confirmar que el camino de reinicio también realiza esa limpieza y cancela voz
-   y control; no dar por hecho que restart ejecuta los mismos callbacks.
-
-## Criterios de aceptación
-
-Instalar versión A en un Mac real; publicar B con firma correcta y comprobar
-A → B, conservación de datos y un solo daemon tras reiniciar. Repetir con
-firma incorrecta, archivo incompleto, versión anterior, sin red, canal equivocado,
-Más tarde y tarea activa. Ningún caso inválido debe reemplazar la aplicación.
-La firma de actualización es independiente de codesign/notarización Apple.

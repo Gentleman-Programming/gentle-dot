@@ -18,6 +18,9 @@ jobs:
   build:
     runs-on: macos-15
     timeout-minutes: 90
+    env:
+      GENTLE_DOT_UPDATE_REPOSITORY: ${{ github.repository }}
+      GENTLE_DOT_UPDATE_PUBLIC_KEY: ${{ vars.GENTLE_DOT_UPDATE_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -40,7 +43,7 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - name: Packaging tests
-        run: pnpm exec vitest run scripts/package/test/lib.test.ts scripts/package/test/package-mac.test.ts
+        run: pnpm exec vitest run scripts/package/test/lib.test.ts scripts/package/test/package-mac.test.ts scripts/package/test/update-distribution.test.ts
       - name: Build UI
         run: pnpm build
       - name: Check Rust and run library tests
@@ -48,8 +51,18 @@ jobs:
         run: |
           cargo check --locked --all-targets
           cargo test --locked --lib
-      - name: Build and smoke-test the actual DMG
+      - name: Build and smoke-test the actual DMG (no release secrets)
+        if: github.ref_type != 'tag'
         run: pnpm package:mac --check
+      - name: Build signed QA update and smoke-test DMG
+        if: github.ref_type == 'tag'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          test -n "$TAURI_SIGNING_PRIVATE_KEY"
+          test -n "$GENTLE_DOT_UPDATE_PUBLIC_KEY"
+          pnpm package:mac --check
       - name: Collect verified installer and provenance
         run: node scripts/package/collect-macos-qa.mjs
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
@@ -61,7 +74,7 @@ jobs:
 
   draft-release:
     needs: build
-    if: github.repository == 'Maicololiveras/gentle-dot' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/macos-qa-v')
+    if: (github.repository == 'Maicololiveras/gentle-dot' || github.repository == 'Gentleman-Programming/gentle-dot') && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/macos-qa-v')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
