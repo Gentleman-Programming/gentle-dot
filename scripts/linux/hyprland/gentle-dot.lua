@@ -10,6 +10,11 @@ local toggle = "/usr/bin/gentle-dot --toggle"
 -- Built from source with scripts/linux/setup-*.sh: use this line instead of the one above.
 -- local toggle = (os.getenv("HOME") or "") .. "/.local/bin/gentle-dot --toggle"
 
+-- WebKitGTK's DMA-BUF renderer commits without an acquire timeline and Hyprland closes the
+-- connection: `Error 71` at startup (WebKitGTK bug 280210; common with NVIDIA). Session-wide,
+-- so every WebKitGTK app is covered; the app also sets this for itself before GTK starts.
+hl.env("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
+
 -- The rose: a 72 px transparent window with no border, shadow, or blur.
 hl.window_rule({
   match = { title = "^(Gentle Dot)$" },

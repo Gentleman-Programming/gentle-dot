@@ -94,7 +94,7 @@ What differs from macOS (decided in `src/platform.rs`, unit-tested on both syste
 
 | Topic | macOS | GNOME on Wayland (Debian, Ubuntu) | Hyprland (Omarchy) |
 |---|---|---|---|
-| Display backend | — | XWayland: the app sets `GDK_BACKEND=x11` before GTK starts, when the session is Wayland, the desktop is not Hyprland, `DISPLAY` is set, and the user did not choose a `GDK_BACKEND` | Native Wayland |
+| Display backend | — | XWayland: the app sets `GDK_BACKEND=x11` before GTK starts, when the session is Wayland, the desktop is not Hyprland, `DISPLAY` is set, and the user did not choose a `GDK_BACKEND` | Native Wayland; on native Wayland the app also sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` before GTK starts (WebKitGTK bug 280210: its DMA-BUF renderer commits without an acquire timeline and strict compositor Hyprland closes the connection with `Error 71`, common with NVIDIA) |
 | Dot placement, snapping, panel next to the Dot | The app | The app | Hyprland window rules, matched by title (`Gentle Dot`, `Gentle Dot Panel`): [`scripts/linux/hyprland/`](../../scripts/linux/hyprland/) has a `hyprland.lua` form (Omarchy 4) and a `hyprland.conf` form |
 | Global shortcut | `Alt+Space` from the app | A desktop custom shortcut running `gentle-dot --toggle` (XWayland only sees keys while an X11 window has focus, and `Alt+Space` is GNOME's window menu) | A Hyprland `bind` running `gentle-dot --toggle` (the app does not register one) |
 | Panel background | `HudWindow` vibrancy | Opaque: the panel URL carries `effects=none` | Same as GNOME |
