@@ -38,7 +38,14 @@ export function engramBinaryName(platform: NodeJS.Platform = process.platform): 
 }
 
 /** Where a user's own Engram usually lives, after the login PATH. */
-export function engramKnownDirs(home: string): string[] {
+export function engramKnownDirs(home: string, platform: NodeJS.Platform = process.platform): string[] {
+	if (platform === "win32") {
+		return [
+			join(home, "go", "bin"),
+			join(home, "AppData", "Local", "engram", "bin"),
+			join(home, ".local", "bin"),
+		];
+	}
 	return [join(home, "go", "bin"), "/opt/homebrew/bin", "/usr/local/bin", join(home, ".local", "bin")];
 }
 
@@ -102,9 +109,9 @@ export function refusalGuard(
 
 const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 
-function isExecutableFile(path: string): boolean {
+function isExecutableFile(path: string, platform: NodeJS.Platform = process.platform): boolean {
 	try {
-		accessSync(path, constants.X_OK);
+		accessSync(path, platform === "win32" ? constants.R_OK : constants.X_OK);
 		return statSync(path).isFile();
 	} catch {
 		return false;
@@ -155,12 +162,12 @@ export function resolveEngramBin(
 	if (env.ENGRAM_BIN) return env.ENGRAM_BIN;
 	const platform = options.platform ?? process.platform;
 	const binary = engramBinaryName(platform);
-	const home = options.home ?? (env.HOME || homedir());
+	const home = options.home ?? (env.HOME || (platform === "win32" && env.USERPROFILE) || homedir());
 	const fromLogin = loginShellEngram(env, home, platform);
 	if (fromLogin) return fromLogin;
-	for (const dir of options.knownDirs ?? engramKnownDirs(home)) {
+	for (const dir of options.knownDirs ?? engramKnownDirs(home, platform)) {
 		const bin = join(dir, binary);
-		if (isExecutableFile(bin)) return bin;
+		if (isExecutableFile(bin, platform)) return bin;
 	}
 	return join(runtime, "bin", binary);
 }

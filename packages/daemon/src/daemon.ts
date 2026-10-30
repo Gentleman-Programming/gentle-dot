@@ -376,6 +376,7 @@ async function startClaimedDaemon(
 		// Nothing the app asks changes connectors before connectors.json was checked (S25.6).
 		app.handler = async (method, params) => {
 			await integrity;
+			if (!app.connected) throw new Error("The Gentle Dot app closed its channel.");
 			return appRequest(method, params, bridge, connectors, app);
 		};
 		// The computer helper belongs to the app that registered it (S24.7).
@@ -431,16 +432,33 @@ async function startClaimedDaemon(
 	const shutdown = async () => {
 		// Not listening any more first, so an app relaunched meanwhile starts a daemon of its own.
 		const serverClosed = new Promise<void>((done) => server.close(() => done()));
-		app?.close();
-		for (const client of wss.clients) client.terminate();
-		wss.close();
-		// Stops waiting approvals and the connectors' servers (stdio ones are processes of the daemon).
-		await proxy.close();
-		await serverClosed;
-		await supervisor.stop();
-		connectorStore.close();
-		authHelper?.close();
-		await memory?.stop();
+		let failed = false;
+		let firstError: unknown;
+		const attempt = async (cleanup: () => unknown) => {
+			try {
+				await cleanup();
+			} catch (error) {
+				if (!failed) {
+					failed = true;
+					firstError = error;
+				}
+			}
+		};
+		// Logical refusal and secret invalidation happen NOW, not after native drain.
+		// Start drain independently so a pending/failed channel cannot skip cleanup.
+		const channelClosed = attempt(() => app?.close());
+		await attempt(() => {
+			for (const client of wss.clients) client.terminate();
+			wss.close();
+		});
+		await attempt(() => proxy.close());
+		await attempt(() => serverClosed);
+		await attempt(() => supervisor.stop());
+		await attempt(() => connectorStore.close());
+		await attempt(() => authHelper?.close());
+		await attempt(() => memory?.stop());
+		await channelClosed;
+		if (failed) throw firstError;
 		// The folders are free for the next start; a claim left by a kill is taken over by liveness
 		// instead, so this only keeps a clean stop from leaving the file behind.
 		releaseDaemonClaims(claims);
@@ -448,7 +466,15 @@ async function startClaimedDaemon(
 	let stopping: Promise<void> | undefined;
 	const close = (): Promise<void> => {
 		if (!stopping) {
-			stopping = shutdown();
+			// Publish before synchronous logical close notifies app.onClose; do not
+			// defer refusal, and do not recursively start another shutdown.
+			let resolveClose!: () => void;
+			let rejectClose!: (error: unknown) => void;
+			stopping = new Promise<void>((resolve, reject) => {
+				resolveClose = resolve;
+				rejectClose = reject;
+			});
+			void shutdown().then(resolveClose, rejectClose);
 			stopping.then(stopped, (error: Error) => {
 				log(`the assistant did not stop cleanly: ${error.message}`);
 				stopped();

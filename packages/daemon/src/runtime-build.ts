@@ -68,6 +68,20 @@ export function lockedEnginePackages(
 	return versions;
 }
 
+/** Windows staging is explicit and refuses an absent build; Unix never needs the addon. */
+export function runtimeWindowsStopArtifact(
+	platform: NodeJS.Platform,
+	artifact = join(PACKAGE, "native", "windows-stop.node"),
+	present: (path: string) => boolean = existsSync,
+): string | undefined {
+	if (platform !== "win32") return undefined;
+	if (!present(artifact))
+		throw new Error(
+			"Windows stop addon is missing. Run build:windows-stop with existing Node headers and node.lib first.",
+		);
+	return artifact;
+}
+
 /** A `pi` command that runs the runtime's own Node on the engine, from wherever the runtime folder is. */
 export function piWrapper(engineEntry: string): string {
 	return `#!/bin/sh
@@ -119,12 +133,14 @@ function engineEntry(): string {
  * Builds the daemon part of the installed runtime into `outDir`: `daemon/cli.mjs`
  * (the daemon and the protocol bundled; the engine and `ws` external), the files it
  * finds next to itself, a `package.json` for a flat install of the external
- * dependencies, and `bin/pi` (`bin/pi.cmd` on Windows). Nothing is installed.
+ * dependencies, and `bin/pi` (`bin/pi.cmd` on Windows, where the stop addon also goes to
+ * `daemon/native`). Nothing is installed.
  */
 export async function buildRuntime(
 	outDir: string,
 	platform: NodeJS.Platform = process.platform,
 ): Promise<void> {
+	const nativeArtifact = runtimeWindowsStopArtifact(platform);
 	const daemon = join(outDir, "daemon");
 	mkdirSync(join(daemon, "extensions"), { recursive: true });
 	mkdirSync(join(outDir, "bin"), { recursive: true });
@@ -145,6 +161,10 @@ export async function buildRuntime(
 	// The engine loads the guard with -e, and the guard imports its siblings.
 	for (const name of ["approval-guard.ts", "screenshot-context.ts"]) {
 		copyFileSync(join(PACKAGE, "src", "extensions", name), join(daemon, "extensions", name));
+	}
+	if (nativeArtifact) {
+		mkdirSync(join(daemon, "native"), { recursive: true });
+		copyFileSync(nativeArtifact, join(daemon, "native", "windows-stop.node"));
 	}
 	const manifest = {
 		name: "gentle-dot-runtime",

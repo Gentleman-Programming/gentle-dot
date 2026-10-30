@@ -7,11 +7,12 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 import { expectPosixMode } from "./support/posix-modes.ts";
+import { itWithUnmanagedCli } from "./support/windows.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 
 describe("gentle-dot command", () => {
-	it("keeps the access key out of redirected output, such as a log file", async () => {
+	itWithUnmanagedCli("keeps the access key out of redirected output, such as a log file", async () => {
 		const dataDir = join(tempDir(), "data");
 		const child = spawn(process.execPath, [CLI], {
 			env: {

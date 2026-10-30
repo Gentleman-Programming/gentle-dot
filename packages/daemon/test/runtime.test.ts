@@ -7,6 +7,7 @@ import { bundledMcpCli } from "../src/connectors.ts";
 import { isolatedAgentEnv } from "../src/isolation.ts";
 import { engramBinaryName, refusalGuard, resolveEngramBin, runtimeDir } from "../src/runtime.ts";
 import { tempDir } from "./helpers.ts";
+import { itWithPosixShell } from "./support/windows.ts";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
 const ENGINE_CLI = join("@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js");
@@ -91,7 +92,7 @@ describe("installed runtime (GENTLE_DOT_RUNTIME)", () => {
 		expect(env).toMatchObject({ ENGRAM_BIN: "/x/engram", ENGRAM_DATA_DIR: join(realHome, ".engram") });
 	});
 
-	it("finds the user's Engram through the login shell before the bundled one", () => {
+	itWithPosixShell("finds the user's Engram through the login shell before the bundled one", () => {
 		const runtime = fakeRuntime();
 		const userEngram = touch(join(tempDir(), "engram"), "", 0o755);
 		const env = isolatedAgentEnv(
@@ -183,6 +184,38 @@ describe("resolveEngramBin", () => {
 		const home = tempDir();
 		const userEngram = touch(join(home, "go", "bin", hostBinary), "", 0o755);
 		expect(resolveEngramBin({ SHELL: fakeShell(undefined) }, fakeRuntime(), { home })).toBe(userEngram);
+	});
+
+	it("finds the Windows executable without requiring POSIX executable permissions or a login shell", () => {
+		const home = tempDir();
+		const loginEngram = touch(join(tempDir(), "engram"), "", 0o755);
+		const windowsEngram = touch(join(home, "go", "bin", "engram.exe"));
+		expect(
+			resolveEngramBin({ USERPROFILE: home, SHELL: fakeShell(loginEngram) }, fakeRuntime(), {
+				platform: "win32",
+			}),
+		).toBe(windowsEngram);
+	});
+
+	it("finds the Windows user installation and keeps ENGRAM_BIN precedence", () => {
+		const home = tempDir();
+		const windowsEngram = touch(join(home, "AppData", "Local", "engram", "bin", "engram.exe"));
+		const runtime = fakeRuntime();
+		const options = { home, platform: "win32" as const };
+		expect(resolveEngramBin({}, runtime, options)).toBe(windowsEngram);
+		expect(resolveEngramBin({ ENGRAM_BIN: "/explicit/engram.exe" }, runtime, options)).toBe(
+			"/explicit/engram.exe",
+		);
+	});
+
+	it("falls back to bundled engram.exe on Windows, ignoring a login shell and non-file candidates", () => {
+		const home = tempDir();
+		mkdirSync(join(home, "go", "bin", "engram.exe"), { recursive: true });
+		const loginEngram = touch(join(tempDir(), "engram"), "", 0o755);
+		const runtime = fakeRuntime();
+		expect(resolveEngramBin({ SHELL: fakeShell(loginEngram) }, runtime, { home, platform: "win32" })).toBe(
+			join(runtime, "bin", "engram.exe"),
+		);
 	});
 });
 

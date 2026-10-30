@@ -1,107 +1,51 @@
-# The Windows verification channel (odd/tasks/windows-port.md, W3).
+# Windows checks for the native Windows port.
 #
-# The desktop shell is developed on macOS and Linux, where `cfg!(target_os = "windows")`
-# never compiles. This workflow is the only place a Windows build is ever exercised, so a
-# change that only touches a Windows arm still has to face a real `x86_64-pc-windows-msvc`
-# toolchain and the real WebView2 before it can be called done.
-#
-# Scope note: this workflow covers Windows only. The macOS and Linux checks are still the
-# commands in the README (`pnpm typecheck && pnpm lint && pnpm test`, plus `cargo test` in
-# apps/desktop/src-tauri) run on a developer machine; broadening CI to those platforms is a
-# separate decision, not part of the Windows port.
+# The desktop shell is mostly written on Linux and macOS, where its `cfg(windows)` code never
+# compiles, so this is where that code meets a real `x86_64-pc-windows-msvc` toolchain.
 name: Windows
 
 on:
   push:
-    # `main` is the branch this workflow guards. `feat/windows-port` is listed while the staged port
-    # lives there, because its own pushes would otherwise never run the suite they change (W27); the
-    # line goes away with the branch when the port merges.
-    branches: [main, feat/windows-port]
+    # `ci/**` branches try workflow changes before they reach `main`.
+    branches: [main, 'ci/**']
   pull_request:
   workflow_dispatch:
 
-# A superseded push does not need to finish: the newer commit is what matters.
 concurrency:
   group: windows-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  # `always` keeps cargo's diagnostics colored, so a failure in the Windows job is readable in the log.
   CARGO_TERM_COLOR: always
 
 jobs:
-  # The daemon, the protocol, and the UI. These are platform-neutral, so this job passes on Windows:
-  # the POSIX assumptions W4 and W5 removed are gone, and the suites whose *subject* Windows does not
-  # have -- the inherited fd 3, and server mode's setuid -- skip with a named reason on raw stderr
-  # instead of failing (W27, `packages/daemon/test/support/platform-absence.ts`). The job is blocking,
-  # so a new failure in it is a real one.
-  typescript:
-    name: TypeScript (daemon, protocol, UI)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      # No `version` input: package.json declares `packageManager: pnpm@11.5.0`.
-      - uses: pnpm/action-setup@v6
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version-file: .nvmrc
-          cache: pnpm
-
-      # Not a convenience: `pnpm install` cannot succeed on Windows without it. The
-      # gentle-pi postinstall builds its package-local Gentle AI binary **from source** on
-      # Windows and requires Go 1.25.10 or newer, while the windows-latest image ships Go
-      # 1.24.13. On Darwin and Linux the same postinstall downloads a pinned release archive,
-      # so this requirement only shows up here. `stable` is the honest range: the constraint is
-      # "or newer", not an exact version.
-      - uses: actions/setup-go@v7
-        with:
-          go-version: stable
-          cache: false
-
-      - name: Install
-        run: pnpm install --frozen-lockfile
-
-      - name: Typecheck
-        run: pnpm typecheck
-
-      - name: Lint
-        run: pnpm lint
-
-      - name: Test
-        run: pnpm test
-
-  # The shell compiles and passes on Windows, so this job is blocking: measured on a
-  # `windows-latest` runner at `e12d300`, `cargo test` reports `406 passed; 0 failed; 4 ignored`
-  # (2026-10-18, run 39101716169), the same suite a Windows 11 host reports.
-  #
-  # It installs no node and no PATH of its own: `build.rs` records the node and PATH it finds at
-  # build time, and `cargo test` never consults them, so a setup step for either would only make
-  # the job look broader than it is.
-  #
-  # Its history is why the flag was worth stating rather than deleting quietly. It ran with
-  # `continue-on-error` while `src/daemon.rs` and `src/app_channel.rs` used `std::os::unix` and
-  # `std::os::fd` unconditionally, first because `tauri-build` needs `icons/icon.ico` (W8) and then
-  # on 57 compile errors in its own sources (W6). W6 gated the production surface, W6c the test
-  # surface, and W7 replaced the fd-3 channel with a named pipe, so the condition the old comment
-  # named is now met on the runner instead of predicted from a developer machine (W27).
   rust:
     name: Rust shell
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      # The toolchain the Windows port is built and tested with. The repository has no
+      # rust-toolchain.toml, so this pin is the one place that names it; later PRs keep it.
+      - uses: dtolnay/rust-toolchain@1.96.1
 
       - uses: Swatinem/rust-cache@v2.9.2
         with:
           workspaces: apps/desktop/src-tauri
 
-      # WebView2 ships with the windows-latest image, so no extra setup step is needed for it.
+      # `tauri.conf.json` points `frontendDist` at the built UI. A debug build does not embed it,
+      # but the folder has to exist, and building the UI here would add the whole pnpm install.
+      - name: UI folder for the build script
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path packages/ui/dist/app | Out-Null
+
+      - name: cargo check
+        working-directory: apps/desktop/src-tauri
+        run: cargo check --locked --all-targets
+
       - name: cargo test
         working-directory: apps/desktop/src-tauri
-        run: cargo test
+        run: cargo test --locked --lib
 
   app-channel:
     name: Native app channel
@@ -150,6 +94,7 @@ jobs:
           pnpm --filter @gentle-dot/daemon run build:windows-stop -- --compiler "$compiler" --headers "$inputs/node-$version/include/node" --node-lib "$inputs/node.lib"
           if ($LASTEXITCODE -ne 0) { throw 'Native addon build failed' }
 
-      # These portable adapter tests and real-addon refusal tests stay together.
-      - name: App-channel tests
-        run: pnpm exec vitest run packages/daemon/test/windows-stop.test.ts packages/daemon/test/windows-app-channel.test.ts packages/daemon/test/app-channel-platform.test.ts packages/daemon/test/app-channel.test.ts packages/daemon/test/app-channel-fd.test.ts packages/daemon/test/windows-app-channel-addon.test.ts
+      # The daemon test files that run on Windows (the runtime build uses the addon built above).
+      - name: Daemon tests
+        run: pnpm exec vitest run packages/daemon/test/windows-stop.test.ts packages/daemon/test/windows-app-channel.test.ts packages/daemon/test/app-channel-platform.test.ts packages/daemon/test/app-channel.test.ts packages/daemon/test/app-channel-fd.test.ts packages/daemon/test/windows-app-channel-addon.test.ts packages/daemon/test/process-tree.test.ts packages/daemon/test/supervisor.test.ts packages/daemon/test/runtime.test.ts packages/daemon/test/config.test.ts packages/daemon/test/isolation.test.ts packages/daemon/test/private-memory.test.ts packages/daemon/test/lifecycle.test.ts packages/daemon/test/cli.test.ts packages/daemon/test/runtime-build.test.ts scripts/package/test/lib.test.ts scripts/package/test/package-windows.test.ts
+

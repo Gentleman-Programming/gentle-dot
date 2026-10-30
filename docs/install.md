@@ -80,6 +80,45 @@ To keep permissions across updates, sign every release with the same identity. `
 
 The command stages the runtime (`build/runtime/darwin-arm64`), signs the runtime's binaries, builds the release app, and writes the DMG to `apps/desktop/src-tauri/target/release/bundle/dmg/`. `--skip-stage` reuses a runtime staged earlier; `--check-dmg <dmg>` checks an existing DMG without building.
 
+## Windows
+
+Requirements: Windows 10 or 11, 64-bit (x64).
+
+### Install
+
+1. Run `Gentle Dot_<version>_x64-setup.exe`.
+2. The installer is not signed yet, so Windows SmartScreen may say **Windows protected your PC**. Click **More info**, then **Run anyway**. Only do this for an installer you built yourself or got from someone you trust.
+3. Follow the installer. It installs for your user only, in `%LOCALAPPDATA%\Gentle Dot` (an update keeps the folder of the earlier install), with no administrator prompt. Where WebView2 is missing, it first runs Microsoft's WebView2 installer, which needs the internet. WebView2 ships with Windows 11 and most Windows 10 installs.
+
+If Gentle Dot is running, the installer says **Gentle Dot is running! Click OK to kill it**. **OK** closes it at once, without the usual orderly quit, so quit it from the tray first.
+
+### First open
+
+Open **Gentle Dot** from the Start menu. The first open needs the network once: the engine installs its companion packages. Computer control and voice input are not available on Windows yet.
+
+### Where data lives
+
+| What | Where |
+|---|---|
+| The app and its bundled runtime | the install folder, with the runtime in `runtime\` |
+| Settings, conversations, logs (`daemon.log`), the engine's own files | `%USERPROFILE%\.gentle-dot\` |
+| Connector secrets, encrypted for your Windows user (DPAPI) | `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\` |
+| The window's own data (WebView2) | `%LOCALAPPDATA%\dev.gentleman.gentle-dot\` and `%APPDATA%\dev.gentleman.gentle-dot\` |
+| Memory (Engram, project `gentle-dot`) | `%USERPROFILE%\.engram\`, shared with any other Engram user on this PC |
+| Launch at login (when turned on) | a `Gentle Dot` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` |
+
+The app's install folder never changes after install; everything it writes goes to the folders above.
+
+### Uninstall
+
+1. Quit Gentle Dot from its tray icon (**Quit**), so the assistant and its processes stop in order.
+2. Open **Settings → Apps → Installed apps**, find **Gentle Dot**, and choose **Uninstall**, or run `uninstall.exe` in the install folder. It removes the app, its Start menu and desktop shortcuts, its launch at login, and its registry entries. Like the installer, it asks to close Gentle Dot if it is still running.
+3. Optional: tick **Delete the application data** in the uninstaller to remove the window's data (`%APPDATA%\dev.gentleman.gentle-dot\` and `%LOCALAPPDATA%\dev.gentleman.gentle-dot\`).
+4. Optional: remove `%USERPROFILE%\.gentle-dot\` to delete settings and conversations, and `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\` to delete connector secrets. The uninstaller never touches these.
+
+`%USERPROFILE%\.gentle-dot\daemon.owner` stays behind after a normal quit. It records the last launch without any authority over it, and the next launch replaces it.
+
+
 ## Linux
 
 Gentle Dot ships as a self-contained package: it carries its own Node.js, assistant engine, and Engram, so nothing else needs to be installed first. Pick the file for your system (`dpkg --print-architecture` or `uname -m` tells which):

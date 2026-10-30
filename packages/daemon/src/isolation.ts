@@ -12,13 +12,22 @@ import { refusalGuard, resolveEngramBin, runtimeDir } from "./runtime.ts";
  * first-run setup needs `pi` on PATH, and a clean machine has none. An installed
  * app carries a relocatable `pi` in `<runtime>/bin`; pnpm's shim is not relocatable.
  */
-function bundledBinDir(base: NodeJS.ProcessEnv): string | undefined {
+interface IsolationOptions {
+	platform?: NodeJS.Platform;
+	/** Source shim directories, injectable for platform-independent tests. */
+	sourceBinDirs?: string[];
+}
+
+function bundledBinDir(base: NodeJS.ProcessEnv, options: IsolationOptions): string | undefined {
 	const runtime = runtimeDir(base);
 	if (runtime) return join(runtime, "bin");
 	const require = createRequire(import.meta.url);
-	for (const dir of require.resolve.paths("@earendil-works/pi-coding-agent") ?? []) {
-		const bin = join(dir, ".bin");
-		if (existsSync(join(bin, "pi"))) return bin;
+	const bins =
+		options.sourceBinDirs ??
+		(require.resolve.paths("@earendil-works/pi-coding-agent") ?? []).map((dir) => join(dir, ".bin"));
+	const names = (options.platform ?? process.platform) === "win32" ? ["pi", "pi.cmd", "pi.exe"] : ["pi"];
+	for (const bin of bins) {
+		if (names.some((name) => existsSync(join(bin, name)))) return bin;
 	}
 	return undefined;
 }
@@ -115,8 +124,8 @@ export function ensureMemoryProject(workspace: string, access: EngineAccess = di
 
 /**
  * The engine's environment: its own HOME (`<dataDir>/home`, mode 0700) with
- * the XDG folders under it, because parts of the engine write to fixed places
- * under the home folder. PATH is kept, with the bundled `pi` folder first, and so is the user's git identity,
+ * the XDG folders under it (on Windows `USERPROFILE`, `APPDATA` and `LOCALAPPDATA`), because
+ * parts of the engine write to fixed places under the home folder. PATH is kept (on Windows as one `PATH` key, whatever its spelling), with the bundled `pi` folder first, and so is the user's git identity,
  * through `GIT_CONFIG_GLOBAL` pointing at their real `~/.gitconfig`.
  *
  * Memory is the user's global Engram: Engram ties a server to its data folder
@@ -142,10 +151,12 @@ export function isolatedAgentEnv(
 	dataDir: string,
 	access: EngineAccess = directAccess,
 	log?: (line: string) => void,
+	options: IsolationOptions = {},
 ): NodeJS.ProcessEnv {
+	const platform = options.platform ?? process.platform;
 	const home = join(dataDir, "home");
 	access(() => ensurePrivateDir(home));
-	const realHome = base.HOME || homedir();
+	const realHome = base.HOME || (platform === "win32" && base.USERPROFILE) || homedir();
 	const env: NodeJS.ProcessEnv = {
 		...base,
 		HOME: home,
@@ -155,12 +166,24 @@ export function isolatedAgentEnv(
 		XDG_STATE_HOME: join(home, ".local", "state"),
 	};
 	for (const key of [...INHERITED_HOMES, ...SUBAGENT_VARIABLES, ...DAEMON_ONLY]) delete env[key];
-	if (!base.TMPDIR) {
+	if (platform === "win32") {
+		const tmp = join(home, ".cache", "tmp");
+		env.USERPROFILE = home;
+		env.TEMP = env.TMP = env.TMPDIR = tmp;
+		// Windows' counterparts of the XDG folders, so the engine's tools keep no state in the user's.
+		env.APPDATA = join(home, "AppData", "Roaming");
+		env.LOCALAPPDATA = join(home, "AppData", "Local");
+		access(() => {
+			ensurePrivateDir(tmp);
+			ensurePrivateDir(env.APPDATA as string);
+			ensurePrivateDir(env.LOCALAPPDATA as string);
+		});
+	} else if (!base.TMPDIR) {
 		const tmp = join(home, ".cache", "tmp");
 		env.TMPDIR = tmp;
 		access(() => ensurePrivateDir(tmp));
 	}
-	const bin = bundledBinDir(base);
+	const bin = bundledBinDir(base, options);
 	if (bin) {
 		// Windows hands a process `Path` while the engine resolves the uppercase name, so setting
 		// `PATH` beside an inherited `Path` kept both and the engine's own lookup found the bundled
@@ -171,9 +194,14 @@ export function isolatedAgentEnv(
 		for (const key of Object.keys(env)) {
 			if (key.toLowerCase() === "path") delete env[key];
 		}
+		// Windows paths ignore case and a trailing separator, so the bundled folder is not kept twice.
+		const same = (part: string) =>
+			platform === "win32"
+				? part.replace(/[\\/]+$/, "").toLowerCase() === bin.replace(/[\\/]+$/, "").toLowerCase()
+				: part === bin;
 		const rest = (inherited ? (base[inherited] ?? "") : "")
 			.split(delimiter)
-			.filter((part) => part && part !== bin);
+			.filter((part) => part && !same(part));
 		env.PATH = [bin, ...rest].join(delimiter);
 	}
 	// The user's own Gentle Shell setting is not the assistant's.
@@ -202,7 +230,7 @@ export function isolatedAgentEnv(
 			);
 			env.ENGRAM_BIN = guard;
 		} else {
-			env.ENGRAM_BIN = resolveEngramBin(base, runtime, { home: realHome });
+			env.ENGRAM_BIN = resolveEngramBin(base, runtime, { home: realHome, platform });
 		}
 	}
 	const gitConfig = join(realHome, ".gitconfig");
@@ -210,26 +238,59 @@ export function isolatedAgentEnv(
 	return env;
 }
 
+type Listener = { kind: "empty" | "failed" | "ambiguous" } | { kind: "one"; pid: number };
+
+interface PrivateMemoryOptions {
+	platform?: NodeJS.Platform;
+	/** Bounded command execution seam; errors must not be reported as empty output. */
+	runListenerCommand?: (
+		command: string,
+		args: readonly string[],
+	) => Promise<{ code: number; stdout: string; stderr: string }>;
+	kill?: (pid: number, signal: "SIGTERM") => void;
+	health?: (port: string) => Promise<{ instance_id?: unknown } | undefined>;
+}
+
 /**
- * In private memory mode (`GENTLE_DOT_ENGRAM=private`) the engine's memory plugin starts a memory
- * server on the private port, and it outlives the engine. When nothing listened on that port as the
- * daemon started, the daemon caused it, so `stop()` ends it when the daemon closes: the PID that
- * listens on the port, and only after its `/health` instance id matches the private data folder's
- * (`<dataDir>/home/.engram/.instance-id`). Undefined outside private mode or when it already ran.
+ * Owns cleanup only after confirming an empty private port before startup.
+ * A failed or ambiguous lookup refuses ownership, not startup: the daemon starts,
+ * logs it, and leaves that memory server running when it closes. An invalid port
+ * is a configuration error and does stop startup. Before termination, both the
+ * private data identity and a repeated stable listener PID must match.
+ * PID reuse after the final check remains possible; nothing is killed by name.
  */
 export async function privateMemory(
 	base: NodeJS.ProcessEnv,
 	dataDir: string,
 	log: (line: string) => void,
 	access: EngineAccess = directAccess,
+	options: PrivateMemoryOptions = {},
 ): Promise<{ stop(): Promise<void> } | undefined> {
 	if (base.GENTLE_DOT_ENGRAM !== "private") return undefined;
 	const port = base.GENTLE_DOT_ENGRAM_PORT || PRIVATE_ENGRAM_PORT;
-	if ((await listeningPid(port)) !== undefined) return undefined;
+	if (
+		!/^\d+$/.test(port) ||
+		!Number.isSafeInteger(Number(port)) ||
+		Number(port) < 1 ||
+		Number(port) > 65535
+	) {
+		throw new Error("Cannot start private memory: port must be an integer from 1 to 65535");
+	}
+	const before = await listeningPid(port, options);
+	if (before.kind === "one") return undefined;
+	if (before.kind !== "empty") {
+		// Not knowing is no reason to keep the assistant from starting, nor to claim the server.
+		log(`cannot verify private memory listener on port ${port} (${before.kind} lookup); will not stop it`);
+		return undefined;
+	}
 	return {
 		async stop() {
-			const pid = await listeningPid(port);
-			if (pid === undefined) return;
+			const listener = await listeningPid(port, options);
+			if (listener.kind !== "one") {
+				if (listener.kind !== "empty")
+					log(`cannot verify private memory listener on port ${port}; left running`);
+				return;
+			}
 			let expected: string;
 			try {
 				const file = join(dataDir, "home", ".engram", ".instance-id");
@@ -237,73 +298,91 @@ export async function privateMemory(
 			} catch {
 				return;
 			}
-			const health = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) })
-				.then((response) => response.json() as Promise<{ instance_id?: unknown }>)
-				.catch(() => undefined);
+			const health = await (options.health ?? memoryHealth)(port).catch(() => undefined);
 			if (!expected || health?.instance_id !== expected) {
 				log(`the memory server on port ${port} serves other data; left running`);
 				return;
 			}
+			const again = await listeningPid(port, options);
+			if (again.kind !== "one" || again.pid !== listener.pid) {
+				log(`the private memory listener changed on port ${port}; left running`);
+				return;
+			}
 			try {
-				process.kill(pid, "SIGTERM");
-				log(`stopped the private memory server (pid ${pid})`);
-			} catch {}
+				(options.kill ?? process.kill)(listener.pid, "SIGTERM");
+				log(`stopped the private memory server (pid ${listener.pid})`);
+			} catch (error) {
+				log(`could not stop private memory server (pid ${listener.pid}): ${String(error)}`);
+			}
 		},
 	};
 }
 
-/**
- * The command that lists the local PIDs listening on a TCP `port`. POSIX answers with `lsof`, which
- * filters by the port itself. Windows has no `lsof` and answers with `netstat -ano`, whose rows
- * carry the state and PID that `netstatListeningPids` reads. The platform only decides the command.
- */
-export function listenerCommand(
-	port: string,
-	platform: NodeJS.Platform = process.platform,
-): { command: string; args: string[] } {
-	if (platform === "win32") return { command: "netstat", args: ["-ano"] };
-	return { command: "lsof", args: ["-t", "-n", "-P", `-iTCP:${port}`, "-sTCP:LISTEN"] };
+function memoryHealth(port: string): Promise<{ instance_id?: unknown } | undefined> {
+	return fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) })
+		.then((response) => response.json() as Promise<{ instance_id?: unknown }>)
+		.catch(() => undefined);
 }
 
 /**
- * The PIDs `netstat -ano` reports as listening on `port`, deduplicated. Each row is
- * `Proto  Local Address  Foreign Address  State  PID`: only a `LISTENING` row whose local address
- * ends in `:<port>` counts, and the PID is the last field. One listener commonly appears once per
- * address family (`0.0.0.0:<port>` and `[::]:<port>`), so the set collapses them to one PID. Empty
- * output, no matching row, and a matching port in another state all answer with no PID.
+ * How long the listener lookup may take. Windows starts PowerShell and queries CIM, which can take
+ * several seconds on a busy machine (startup, many processes); a lookup that runs out is a failed
+ * lookup, and private memory then refuses to start.
  */
-export function netstatListeningPids(stdout: string, port: string): number[] {
-	const pids = new Set<number>();
-	for (const line of stdout.split(/\r?\n/)) {
-		const fields = line.trim().split(/\s+/);
-		if (fields.length < 5) continue;
-		const [, localAddress, , state] = fields;
-		const pid = fields[fields.length - 1];
-		if (state !== "LISTENING") continue;
-		if (!localAddress?.endsWith(`:${port}`)) continue;
-		if (!/^\d+$/.test(pid ?? "")) continue;
-		pids.add(Number(pid));
-	}
-	return [...pids];
+export function listenerLookupTimeoutMs(platform: NodeJS.Platform): number {
+	return platform === "win32" ? 15_000 : 5000;
 }
 
-/** The one PID listening on `port` on this computer (`lsof` on POSIX, `netstat -ano` on Windows). */
-function listeningPid(
-	port: string,
-	platform: NodeJS.Platform = process.platform,
-): Promise<number | undefined> {
+function runListenerCommand(
+	command: string,
+	args: readonly string[],
+): Promise<{ code: number; stdout: string; stderr: string }> {
 	return new Promise((resolve) => {
-		const { command, args } = listenerCommand(port, platform);
-		execFile(command, args, (error, stdout) => {
-			if (error) {
-				resolve(undefined);
-				return;
-			}
-			const pids: (number | string)[] =
-				platform === "win32"
-					? netstatListeningPids(String(stdout), port)
-					: [...new Set(String(stdout).trim().split("\n").filter(Boolean))];
-			resolve(pids.length === 1 && /^\d+$/.test(String(pids[0])) ? Number(pids[0]) : undefined);
-		});
+		execFile(
+			command,
+			[...args],
+			{
+				encoding: "utf8",
+				timeout: listenerLookupTimeoutMs(command === "powershell.exe" ? "win32" : process.platform),
+				windowsHide: true,
+			},
+			(error, stdout, stderr) => {
+				resolve({
+					code: error ? (typeof error.code === "number" ? error.code : -1) : 0,
+					stdout: String(stdout),
+					stderr: String(stderr),
+				});
+			},
+		);
 	});
+}
+
+/** Enumerate Windows listeners before filtering, so an unused port is not a query error. */
+async function listeningPid(port: string, options: PrivateMemoryOptions): Promise<Listener> {
+	const windows = (options.platform ?? process.platform) === "win32";
+	const command = windows ? "powershell.exe" : "lsof";
+	const args = windows
+		? [
+				"-NoLogo",
+				"-NoProfile",
+				"-NonInteractive",
+				"-Command",
+				`$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; try { Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { $_.LocalPort -eq ${Number(port)} } | Select-Object -ExpandProperty OwningProcess } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }`,
+			]
+		: ["-w", "-t", "-n", "-P", `-iTCP:${port}`, "-sTCP:LISTEN"];
+	try {
+		const result = await (options.runListenerCommand ?? runListenerCommand)(command, args);
+		const text = result.stdout.trim();
+		// lsof exits 1 for no matches. Missing commands, diagnostics and timeouts are failures.
+		if (!windows && result.code === 1 && !text && !result.stderr.trim()) return { kind: "empty" };
+		if (result.code !== 0 || result.stderr.trim()) return { kind: "failed" };
+		if (!text) return { kind: "empty" };
+		const values = text.split(/\r?\n/).map((value) => value.trim());
+		if (values.some((value) => !/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))))
+			return { kind: "failed" };
+		const pids = [...new Set(values.map(Number))];
+		return pids.length === 1 ? { kind: "one", pid: pids[0] as number } : { kind: "ambiguous" };
+	} catch {
+		return { kind: "failed" };
+	}
 }

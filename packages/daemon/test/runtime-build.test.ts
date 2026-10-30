@@ -13,10 +13,11 @@ import {
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
-import { lockedEnginePackages } from "../src/runtime-build.ts";
+import { lockedEnginePackages, piCmdWrapper, piWrapper } from "../src/runtime-build.ts";
 import { tempDir } from "./helpers.ts";
 import { directoryLinkType, symlinkDirectory } from "./support/fixture-capabilities.ts";
 import { expectPosixExecutable } from "./support/posix-modes.ts";
+import { WINDOWS_STOP_ADDON } from "./support/windows.ts";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
 const BUILD = join(PACKAGE, "scripts", "build-runtime.ts");
@@ -24,7 +25,17 @@ const ENGINE_CLI = join("@earendil-works", "pi-coding-agent", "dist", "bundle", 
 
 let out: string;
 
+// The real build stages the Windows stop addon, built with MSVC (build:windows-stop), and rightly
+// refuses without it. A local Windows checkout that never ran build:windows-stop has none, so the
+// build tests skip there; CI builds the addon first, so a missing one fails the build instead.
+const skipBuild =
+	process.platform === "win32" &&
+	!process.env.CI &&
+	!existsSync(join(PACKAGE, "native", "windows-stop.node"));
+if (skipBuild) console.info(`Windows-only test skip: ${WINDOWS_STOP_ADDON}`);
+
 beforeAll(() => {
+	if (skipBuild) return;
 	out = tempDir();
 	const build = spawnSync(process.execPath, [BUILD, "--out", out], { encoding: "utf8" });
 	expect(build.stderr).toBe("");
@@ -71,16 +82,37 @@ function listFiles(dir: string, prefix = ""): string[] {
 	);
 }
 
-describe("build:runtime", () => {
+describe("piWrapper", () => {
+	it("emits a relocatable Windows cmd wrapper without relying on sh or ambient Node", () => {
+		const wrapper = piCmdWrapper("@earendil-works/pi-coding-agent/dist/bundle/cli.js");
+		expect(wrapper).toContain('"%_runtime%\\node\\node.exe"');
+		expect(wrapper).toContain(
+			'"%_runtime%\\daemon\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js" %*',
+		);
+	});
+
+	it("preserves the Unix shell wrapper for Linux and macOS", () => {
+		const wrapper = piWrapper("@earendil-works/pi-coding-agent/dist/bundle/cli.js");
+		expect(wrapper).toContain("#!/bin/sh\n");
+		expect(wrapper).toContain('exec "$runtime/node/bin/node"');
+		expect(wrapper).toContain('"$@"');
+	});
+});
+
+describe.skipIf(skipBuild)("build:runtime", () => {
 	it("emits the daemon part of the runtime layout, without node_modules", () => {
-		expect(listFiles(out).sort()).toEqual([
-			process.platform === "win32" ? "bin/pi.cmd" : "bin/pi",
-			"daemon/cli.mjs",
-			"daemon/extensions/approval-guard.ts",
-			"daemon/extensions/screenshot-context.ts",
-			"daemon/identity.md",
-			"daemon/package.json",
-		]);
+		const windows = process.platform === "win32";
+		expect(listFiles(out).sort()).toEqual(
+			[
+				windows ? "bin/pi.cmd" : "bin/pi",
+				"daemon/cli.mjs",
+				"daemon/extensions/approval-guard.ts",
+				"daemon/extensions/screenshot-context.ts",
+				"daemon/identity.md",
+				...(windows ? ["daemon/native/windows-stop.node"] : []),
+				"daemon/package.json",
+			].sort(),
+		);
 		expect(readFileSync(join(out, "daemon", "identity.md"), "utf8")).toBe(
 			readFileSync(join(PACKAGE, "src", "identity.md"), "utf8"),
 		);
@@ -95,6 +127,10 @@ describe("build:runtime", () => {
 		expect(bundle).not.toContain("@gentle-dot/protocol");
 		expect(bundle).toMatch(/from "ws"/);
 		expect(bundle).toContain('import("@earendil-works/pi-coding-agent")');
+		// The production addon stays external and resolves beside the staged entry,
+		// not relative to the source checkout; Unix's file layout remains unchanged.
+		expect(bundle).toContain("./native/windows-stop.node");
+		expect(bundle).not.toContain("NAPI_MODULE");
 	});
 
 	it("lists the external dependencies with the lockfile's exact versions", () => {
