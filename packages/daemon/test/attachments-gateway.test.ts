@@ -98,8 +98,10 @@ describe("sending files to the assistant", () => {
 			type: "user_message",
 			messageId: shown.messageId,
 			text: "hello",
+			at: shown.at,
 			seq: shown.seq,
 		});
+		expect(typeof shown.at).toBe("number");
 		await find("message_done");
 		expect(prompts()).toEqual([{ type: "prompt", message: "hello" }]);
 	});
@@ -120,8 +122,8 @@ describe("sending files to the assistant", () => {
 		const shown = await find("user_message");
 		expect(shown.text).toBe("what do you see?");
 		expect(shown.attachments).toEqual([
-			{ name: "report.txt", size: 17, mime: "application/octet-stream" },
-			{ name: "shot.png", size: PNG.length, mime: "image/png" },
+			{ name: "report.txt", size: 17, mime: "application/octet-stream", uploadId: doc.uploadId },
+			{ name: "shot.png", size: PNG.length, mime: "image/png", uploadId: doc.uploadId },
 		]);
 		await find("message_done");
 		const [prompt] = prompts();
