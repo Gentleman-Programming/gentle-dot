@@ -96,12 +96,24 @@ pub enum PermissionKind {
     ScreenRecording,
 }
 
+/// The approved front app and any distinct process receiving its keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyboardRecipient {
+    pub front_pid: i32,
+    pub focused_pid: Option<i32>,
+}
+
 /// The Mac, as the helper sees it.
 pub trait Desktop: Send + Sync {
     fn permissions(&self) -> Permissions;
     /// A screenshot of the display under the pointer, downscaled to `coords::MAX_LONG_EDGE`.
     fn capture(&self) -> Result<Capture, String>;
     fn post(&self, event: &InputEvent) -> Result<(), String>;
+    /// Posts a type chunk or Return bound to the recipient approved by the shared guard.
+    /// Platforms with targeted input checks can validate it immediately before sending.
+    fn post_typed(&self, event: &InputEvent, _recipient: &KeyboardRecipient) -> Result<(), String> {
+        self.post(event)
+    }
     fn list_apps(&self) -> Result<Vec<AppInfo>, String>;
     /// Opens (or activates) an app by name or bundle id.
     fn open_app(&self, name: &str) -> Result<(), String>;
