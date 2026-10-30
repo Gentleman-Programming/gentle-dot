@@ -20,6 +20,15 @@ pub struct KeyCombo {
 }
 
 impl KeyCombo {
+    /// The combo as one canonical name, modifiers first (`ctrl+a`, `shift+cmd+t`), for messages.
+    pub fn label(&self) -> String {
+        let m = self.modifiers;
+        let held = [(m.fn_key, "fn"), (m.ctrl, "ctrl"), (m.alt, "alt"), (m.shift, "shift"), (m.cmd, "cmd")];
+        let mut parts: Vec<&str> = held.iter().filter(|(on, _)| *on).map(|(_, name)| *name).collect();
+        parts.push(self.key);
+        parts.join("+")
+    }
+
     /// Return (or Enter) with any modifiers: the key that submits forms and sends messages.
     pub fn is_return(&self) -> bool {
         self.key == "return"
@@ -129,6 +138,14 @@ mod tests {
         assert_eq!(parse_combo("cmd+,").unwrap().code, 43);
         assert_eq!(parse_combo("f12").unwrap().code, 111);
         assert_eq!(parse_combo("space").unwrap().code, 49);
+    }
+
+    #[test]
+    fn a_combo_is_labelled_with_its_modifiers() {
+        assert_eq!(parse_combo("ctrl+a").unwrap().label(), "ctrl+a");
+        assert_eq!(parse_combo("shift+command+t").unwrap().label(), "shift+cmd+t");
+        assert_eq!(parse_combo("fn+option+control+cmd+shift+f1").unwrap().label(), "fn+ctrl+alt+shift+cmd+f1");
+        assert_eq!(parse_combo("enter").unwrap().label(), "return");
     }
 
     #[test]
