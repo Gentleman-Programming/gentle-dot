@@ -118,7 +118,8 @@ pnpm package:mac
 pnpm package:linux --arch arm64
 pnpm package:linux --arch amd64
 
-# Windows (x64): an NSIS installer, after building the native addon
+# Windows (x64): an NSIS installer. First build the native addon and set
+# GENTLE_DOT_BUILD_GO: see docs/install.md#build-the-installer-from-source
 pnpm package:runtime --target windows-x64
 pnpm package:windows
 ```

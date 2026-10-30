@@ -134,9 +134,10 @@ describe("Windows package admission and plan (no commands executed)", () => {
 });
 
 it("wires package-only marker to fallible admission before launch without changing launch_spec", () => {
-	const build = readFileSync("apps/desktop/src-tauri/build.rs", "utf8");
-	const daemon = readFileSync("apps/desktop/src-tauri/src/daemon.rs", "utf8");
-	const launch = readFileSync("apps/desktop/src-tauri/src/daemon/launch.rs", "utf8");
+	const tauri = new URL("../../../apps/desktop/src-tauri/", import.meta.url);
+	const build = readFileSync(new URL("build.rs", tauri), "utf8");
+	const daemon = readFileSync(new URL("src/daemon.rs", tauri), "utf8");
+	const launch = readFileSync(new URL("src/daemon/launch.rs", tauri), "utf8");
 	expect(build).toContain("cargo:rerun-if-env-changed=GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED");
 	expect(build).toContain("cargo:rustc-env=GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED=");
 	expect(build).toContain('env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")');
