@@ -128,7 +128,7 @@ pnpm dev   # builds the UI and starts the daemon on http://127.0.0.1:4317
 PATH=/opt/homebrew/opt/rustup/bin:$PATH pnpm --filter @gentle-dot/desktop dev   # the macOS app
 ```
 
-On a terminal, the daemon prints a URL that already carries its access key. Linux users can also build from source with `scripts/linux/setup-debian.sh` or `scripts/linux/setup-arch.sh`.
+On a terminal, the daemon prints a URL that already carries its access key. Linux users can also build from source with `scripts/linux/setup-debian.sh`, `scripts/linux/setup-fedora.sh`, or `scripts/linux/setup-arch.sh`.
 
 <div align="right"><a href="#top">Back to top</a></div>
 
