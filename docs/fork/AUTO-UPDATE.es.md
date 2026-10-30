@@ -19,8 +19,9 @@ firmada se rechaza: usa una versión de Tauri CLI que incluya la versión en el
 trusted comment. Nunca rebajes ese requisito para aceptar un paquete viejo.
 
 Primero ofrece Descargar / Más tarde. Una vez verificado, ofrece Instalar y
-reiniciar / Más tarde, avisando que cerrará tareas activas. Tras instalar, cancela
-voz y control, detiene el daemon y reinicia. No escribe en conversaciones,
+reiniciar / Más tarde, avisando que cerrará tareas activas. Antes de instalar, cancela
+voz y control y detiene el daemon; tras instalar reinicia. Si la instalación
+falla, solicita el reinicio del daemon y muestra el error en la búsqueda manual. No escribe en conversaciones,
 preferencias, llaveros ni memoria. No detecta automáticamente si una tarea tiene
 trabajo sin guardar: el diálogo pide guardarlo antes de confirmar.
 

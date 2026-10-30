@@ -25,7 +25,10 @@ const PUBLIC_KEY: &str = match option_env!("GENTLE_DOT_UPDATE_PUBLIC_KEY") {
 };
 static BUSY: AtomicBool = AtomicBool::new(false);
 type Cleanup = Arc<dyn Fn(&AppHandle) + Send + Sync>;
-struct UpdateState(Cleanup);
+struct UpdateState {
+    stop: Cleanup,
+    recover: Cleanup,
+}
 struct Flight;
 impl Drop for Flight {
     fn drop(&mut self) {
@@ -42,8 +45,8 @@ fn message(app: &AppHandle, text: &str) {
         .blocking_show();
 }
 
-pub fn start(app: AppHandle, cleanup: Cleanup) {
-    app.manage(UpdateState(cleanup));
+pub fn start(app: AppHandle, stop: Cleanup, recover: Cleanup) {
+    app.manage(UpdateState { stop, recover });
     check_now(app.clone(), false);
     thread::spawn(move || loop {
         thread::sleep(Duration::from_secs(24 * 60 * 60));
@@ -157,7 +160,10 @@ fn check(app: &AppHandle) -> Result<bool, Box<dyn std::error::Error + Send + Syn
     if !alert::ask(app, "Actualización verificada",
         "Instalar y reiniciar cerrará las tareas activas, el micrófono y el control del equipo. Guarda tu trabajo antes de continuar. Tus conversaciones y memoria se conservarán.",
         Choice { allow: "Instalar y reiniciar", refuse: "Más tarde" }) { return Ok(true); }
-    update.install(bytes)?;
-    (app.state::<UpdateState>().0)(app);
+    (app.state::<UpdateState>().stop)(app);
+    if let Err(error) = update.install(bytes) {
+        (app.state::<UpdateState>().recover)(app);
+        return Err(error.into());
+    }
     app.restart();
 }

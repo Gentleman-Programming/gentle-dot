@@ -901,7 +901,7 @@ pub fn run() {
                 computer::stop(app, Reason::Stopped);
                 app.state::<voice::VoiceInput>().cancel().ok();
                 app.state::<Shell>().daemon.stop();
-            }));
+            }), Arc::new(|app| restart_daemon(app.clone())));
             // Started by the shortcut while not running: open the panel right away.
             let args: Vec<String> = std::env::args().collect();
             if platform::launch_request(&args) == LaunchRequest::Toggle {
