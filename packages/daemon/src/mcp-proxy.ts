@@ -82,6 +82,10 @@ export interface McpProxyOptions {
 	approve(preview: ApprovalPreview, signal: AbortSignal): Promise<boolean>;
 	/** The transport to the real server; by default streamable HTTP or stdio, from the server. */
 	transport?: (connector: ProxiedConnector, credentials: UpstreamCredentials) => McpTransport;
+	/** Connector-connect retries with exponential backoff. Connection-layer only:
+	 *  a retried connect never replays tool calls. Defaults: 3 attempts, 1s base. */
+	connectMaxRetries?: number;
+	connectRetryBaseMs?: number;
 	/** The environment stdio servers start from (the engine's own), and their working folder. */
 	env?: NodeJS.ProcessEnv;
 	cwd?: string;
@@ -109,6 +113,9 @@ const MAX_BODY = 8 * 1024 * 1024;
 /** A tool call may wait for the user's approval and then the server: just under the engine's 300 s. */
 const CALL_TIMEOUT_MS = 290_000;
 const REQUEST_TIMEOUT_MS = 60_000;
+const CONNECT_TIMEOUT_MS = 15_000;
+const MAX_CONNECT_RETRIES = 3;
+const CONNECT_RETRY_BASE_MS = 1000;
 
 interface Upstream {
 	client: McpClient;
@@ -126,6 +133,8 @@ export class McpProxy {
 	/** Requests being answered, by connector and request id, so a `notifications/cancelled` stops them. */
 	private readonly running = new Map<string, AbortController>();
 	private readonly options: McpProxyOptions;
+	/** Set by close(): pending connect backoffs abort instead of retrying. */
+	private closing = false;
 
 	constructor(options: McpProxyOptions) {
 		this.options = options;
@@ -154,6 +163,7 @@ export class McpProxy {
 	}
 
 	async close(): Promise<void> {
+		this.closing = true;
 		for (const controller of this.running.values()) controller.abort();
 		const closing = [...this.upstreams.values()].map((upstream) => upstream.client.close().catch(() => {}));
 		this.upstreams.clear();
@@ -358,22 +368,16 @@ export class McpProxy {
 			upstream = undefined;
 		}
 		if (!upstream) {
-			const client = new McpClient({
-				name: "gentle-dot",
-				version: "1.0.0",
-				requestTimeoutMs: REQUEST_TIMEOUT_MS,
-			});
 			const created: Upstream = {
-				client,
+				client: new McpClient({
+					name: "gentle-dot",
+					version: "1.0.0",
+					requestTimeoutMs: REQUEST_TIMEOUT_MS,
+				}),
 				revision: connector.revision,
-				connecting: (async () => {
-					const credentials = await this.options.credentials(connector.id);
-					await client.connect(this.transport(connector, credentials));
-				})(),
+				connecting: Promise.resolve(),
 			};
-			client.onClose(() => {
-				if (this.upstreams.get(connector.id) === created) this.upstreams.delete(connector.id);
-			});
+			created.connecting = this.connectWithRetry(created, connector);
 			this.upstreams.set(connector.id, created);
 			upstream = created;
 		}
@@ -384,6 +388,49 @@ export class McpProxy {
 			throw error;
 		}
 		return upstream;
+	}
+
+	/**
+	 * Conecta con backoff exponencial acotado. Solo capa de conexión: un
+	 * connect reintentado jamás repite tool calls ni otros efectos colaterales.
+	 */
+	private async connectWithRetry(upstream: Upstream, connector: ProxiedConnector): Promise<void> {
+		const maxRetries = this.options.connectMaxRetries ?? MAX_CONNECT_RETRIES;
+		const baseMs = this.options.connectRetryBaseMs ?? CONNECT_RETRY_BASE_MS;
+		const credentials = await this.options.credentials(connector.id);
+		let lastError: unknown;
+		for (let attempt = 1; attempt <= maxRetries; attempt++) {
+			if (this.closing) throw new Error("McpProxy is closing");
+			// Un cliente nuevo por intento: el McpClient queda inservible tras un
+			// connect fallido, así que cada reintento arranca con transporte limpio.
+			const client = new McpClient({
+				name: "gentle-dot",
+				version: "1.0.0",
+				requestTimeoutMs: REQUEST_TIMEOUT_MS,
+			});
+			try {
+				await client.connect(this.transport(connector, credentials));
+				upstream.client = client;
+				client.onClose(() => {
+					if (this.upstreams.get(connector.id) === upstream) this.upstreams.delete(connector.id);
+				});
+				return;
+			} catch (error) {
+				lastError = error;
+				void client.close().catch(() => {});
+				if (attempt < maxRetries) await this.connectBackoff(baseMs * 2 ** (attempt - 1));
+			}
+		}
+		throw lastError;
+	}
+
+	/** Backoff que aborta apenas cierra el proxy. */
+	private async connectBackoff(ms: number): Promise<void> {
+		const started = Date.now();
+		while (!this.closing && Date.now() - started < ms) {
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
+		if (this.closing) throw new Error("McpProxy is closing");
 	}
 
 	private transport(connector: ProxiedConnector, credentials: UpstreamCredentials): McpTransport {
