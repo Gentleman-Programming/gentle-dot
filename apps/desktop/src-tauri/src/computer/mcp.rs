@@ -812,7 +812,10 @@ impl Helper {
                     }).map_err(|error| {
                         format!("{error} Typing stopped after {posted} of {total} characters.")
                     })?;
-                    self.still_running(epoch).and_then(|()| self.desktop.post_typed(&event, &recipient)).map_err(|error| {
+                    // A stop before the post sent nothing more; only a failed post leaves a range uncertain.
+                    self.still_running(epoch)
+                        .map_err(|error| format!("{error} Typing stopped after {posted} of {total} characters."))?;
+                    self.desktop.post_typed(&event, &recipient).map_err(|error| {
                         format!("{error} Typing stopped within characters {}-{} of {total}.", posted + 1, posted + characters)
                     })?;
                     posted += characters;
@@ -834,7 +837,7 @@ impl Helper {
                 Ok((format!("{action} in {target}: done."), SETTLE_MS))
             }
             Tool::Key { combo } => {
-                let (target, _) = self.keyboard_target()?;
+                let (target, recipient) = self.keyboard_target()?;
                 let focus = self.desktop.focused_element();
                 let act = if combo.is_return() {
                     Act::Return(focus.as_ref())
@@ -845,7 +848,14 @@ impl Helper {
                 };
                 let action = format!("Press {}", combo.label());
                 self.confirm_if_risky(assess(act, intent), &action, &target)?;
-                self.post(epoch, InputEvent::Key(combo))?;
+                // Reading the focus or a confirmation can change the app in front: the key goes only
+                // to the recipient approved above, as each typed chunk does.
+                let (_, current) = self.keyboard_target()?;
+                if current != recipient {
+                    return Err("The app receiving the keys changed before the key was sent, so it was not sent.".into());
+                }
+                self.still_running(epoch)?;
+                self.desktop.post_typed(&InputEvent::Key(combo), &recipient)?;
                 (self.glow)(Mark::Key);
                 Ok((format!("{action} in {target}: done."), SETTLE_MS))
             }
@@ -1472,6 +1482,55 @@ mod tests {
     }
 
     #[test]
+    fn a_key_rechecks_front_and_recipient_before_it_is_posted() {
+        for combo in ["tab", "return"] {
+            for change_front in [true, false] {
+                let rig = rig();
+                rig.ready();
+                let desktop = rig.desktop.clone();
+                *rig.desktop.during_focused_element.lock().unwrap() = Some(Box::new(move || {
+                    let changed = Some(app(402, "panel.exe", "Panel"));
+                    if change_front {
+                        *desktop.frontmost.lock().unwrap() = changed;
+                    } else {
+                        *desktop.focused_app.lock().unwrap() = changed;
+                    }
+                }));
+                let result = rig.call("key", json!({"combo": combo}));
+                assert!(is_error(&result), "{combo} {change_front}: {result}");
+                assert!(rig.desktop.events().is_empty(), "{combo} {change_front}");
+                assert!(rig.desktop.typed_posts.lock().unwrap().is_empty(), "{combo} {change_front}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_key_is_posted_bound_to_its_approved_recipient() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.focused_app.lock().unwrap() = Some(app(401, "editor.exe", "Editor"));
+        assert!(!is_error(&rig.call("key", json!({"combo": "tab"}))));
+        let recipient = KeyboardRecipient { front_pid: 200, focused_pid: Some(401) };
+        assert_eq!(
+            *rig.desktop.typed_posts.lock().unwrap(),
+            vec![(InputEvent::Key(parse_combo("tab").unwrap()), recipient)]
+        );
+    }
+
+    #[test]
+    fn a_stop_before_the_first_post_reports_nothing_sent_not_an_uncertain_range() {
+        let rig = rig();
+        rig.ready();
+        let clock = rig.clock.clone();
+        // The session runs out while the focus is read, before anything is posted.
+        *rig.desktop.during_focused_element.lock().unwrap() = Some(Box::new(move || clock.advance(SESSION_MS + 1)));
+        let result = rig.call("type", json!({"text": "hello"}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), format!("{STOPPED} Typing stopped after 0 of 5 characters."));
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
     fn typing_post_failures_keep_the_error_and_report_the_uncertain_character_range() {
         for (text, failed_post, expected, sent) in [
             ("a".repeat(45), 2, "Typing stopped within characters 21-40 of 45.", vec![InputEvent::Text("a".repeat(20))]),
@@ -1501,9 +1560,12 @@ mod tests {
             assert_eq!(events.len(), 5);
             assert_eq!(*rig.desktop.typed_posts.lock().unwrap(),
                 events.into_iter().map(|event| (event, recipient)).collect::<Vec<_>>());
+            // A key is bound the same way.
             let before = rig.desktop.typed_posts.lock().unwrap().len();
             assert!(!is_error(&rig.call("key", json!({"combo": "tab"}))));
-            assert_eq!(rig.desktop.typed_posts.lock().unwrap().len(), before);
+            let typed = rig.desktop.typed_posts.lock().unwrap();
+            assert_eq!(typed.len(), before + 1);
+            assert_eq!(typed[before], (InputEvent::Key(parse_combo("tab").unwrap()), recipient));
         }
     }
 
