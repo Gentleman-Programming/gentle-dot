@@ -323,6 +323,8 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 			};
 		case "interrupted":
 			return { ...state, interrupted: true };
+		case "turn_timeout":
+			return { ...state, messages: state.messages.map(stopStreaming) };
 		case "queue":
 			return { ...state, queue: { steering: message.steering, followUp: message.followUp } };
 		case "auth_providers":

@@ -12,10 +12,12 @@
 	},
 	"dependencies": {
 		"@earendil-works/pi-ai": "1.4.0",
+		"@earendil-works/pi-codemode": "1.4.0",
 		"@earendil-works/pi-coding-agent": "1.4.0",
 		"@earendil-works/pi-mcp": "1.4.0",
 		"@earendil-works/pi-tui": "1.4.0",
 		"@gentle-dot/protocol": "workspace:*",
+		"@gentleman/shared-core": "workspace:*",
 		"gentle-pi": "4.3.0",
 		"jiti": "2.7.0",
 		"ws": "^8.22.0"

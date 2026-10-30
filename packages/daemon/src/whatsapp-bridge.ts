@@ -31,16 +31,25 @@
  * SOFTWARE.
  */
 
-import { mkdirSync, existsSync, readFileSync, statSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { join, extname } from "node:path";
-import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import type { UploadedFile, AttachmentRef } from "@gentle-dot/protocol";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	statSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { extname, join } from "node:path";
+import type { AttachmentRef, UploadedFile } from "@gentle-dot/protocol";
 import type { WebSocket } from "ws";
 
 // MIME type mapping for file extensions
 const MIME_MAP: Record<string, string> = {
-	".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+	".jpg": "image/jpeg",
+	".jpeg": "image/jpeg",
 	".png": "image/png",
 	".gif": "image/gif",
 	".webp": "image/webp",
@@ -403,7 +412,9 @@ export class WhatsAppBridge {
 		});
 
 		if (!response.ok) {
-			const error = (await response.json().catch(() => ({ code: "unknown", message: response.statusText }))) as {
+			const error = (await response
+				.json()
+				.catch(() => ({ code: "unknown", message: response.statusText }))) as {
 				code: string;
 				message: string;
 			};

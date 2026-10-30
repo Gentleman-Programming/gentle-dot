@@ -158,3 +158,16 @@ describe("reduce", () => {
 		expect(s.messages.every((m) => !m.streaming)).toBe(true);
 	});
 });
+
+it("stops streaming when turn_timeout is received", () => {
+	const s = apply(
+		initialState,
+		{ type: "user_message", messageId: "u1", text: "hi" },
+		{ type: "message_delta", messageId: "m2", delta: "Hel" },
+		{ type: "message_delta", messageId: "m2", delta: "lo" },
+	);
+	expect(s.messages[1]?.streaming).toBe(true);
+	const stopped = apply(s, { type: "turn_timeout", timeoutMs: 600000 });
+	expect(stopped.messages[1]?.streaming).toBe(false);
+	expect(stopped.messages[0]?.streaming).toBe(false);
+});

@@ -26,6 +26,7 @@ import {
 } from "./connectors.ts";
 import { directAccess, type EngineAccess, engineAccess } from "./engine-access.ts";
 import { approvalRequest } from "./extensions/approval-guard.ts";
+import { ensureGitBoundary } from "@gentleman/shared-core";
 import {
 	claimEngineHome,
 	ensureMemoryProject,
@@ -94,6 +95,8 @@ export interface DaemonOptions {
 	conversations?: boolean;
 	/** When the chat's session is rotated; default from `GENTLE_DOT_ROTATE_BYTES` and `GENTLE_DOT_ROTATE_COMPACTIONS`. */
 	rotation?: RotationLimits;
+	/** Turn timeout in milliseconds; default from `GENTLE_DOT_TURN_TIMEOUT_MS` or 10 minutes. */
+	turnTimeoutMs?: number;
 	/** Messages per history page; default `GENTLE_DOT_HISTORY_PAGE` or 100. */
 	historyPage?: number;
 	/** Upload limits; default 25 MB per file, 10 files and 50 MB per message (S31.3). */
@@ -164,6 +167,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	if (options.agentHome && resolve(options.agentHome) === resolve(options.dataDir, "agent"))
 		claimEngineHome(options.agentHome, log, access);
 	access(() => mkdirSync(options.workspace, { recursive: true, mode: 0o700 }));
+	ensureGitBoundary(options.workspace, access);
 	ensureMemoryProject(options.workspace, access);
 	const folderArgs = options.preferredFolder
 		? [
@@ -263,6 +267,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		},
 		// The first start in a new home installs the engine's companion packages.
 		...(options.agentHome ? { startTimeoutMs: 180_000 } : {}),
+		...(options.turnTimeoutMs ? { turnTimeoutMs: options.turnTimeoutMs } : {}),
 		...(options.backoffMs ? { backoffMs: options.backoffMs } : {}),
 		log: (line) => log(`[agent] ${line}`),
 	});

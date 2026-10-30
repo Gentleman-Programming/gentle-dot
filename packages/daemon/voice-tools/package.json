@@ -1,12 +1,12 @@
 {
-  "name": "gentle-dot-voice-tools",
-  "version": "1.0.0",
-  "private": true,
-  "description": "Local voice-note transcription server for the Gentle Dot daemon (NVIDIA Parakeet via sherpa-onnx-node).",
-  "license": "MIT",
-  "type": "commonjs",
-  "main": "transcriber.js",
-  "dependencies": {
-    "sherpa-onnx-node": "1.13.8"
-  }
+	"name": "gentle-dot-voice-tools",
+	"version": "1.0.0",
+	"private": true,
+	"description": "Local voice-note transcription server for the Gentle Dot daemon (NVIDIA Parakeet via sherpa-onnx-node).",
+	"license": "MIT",
+	"type": "commonjs",
+	"main": "transcriber.js",
+	"dependencies": {
+		"sherpa-onnx-node": "1.13.8"
+	}
 }

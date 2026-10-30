@@ -1,7 +1,7 @@
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { loadConfig } from "../src/config.ts";
+import { loadConfig, parseDurationMs } from "../src/config.ts";
 import { tempDir } from "./helpers.ts";
 
 describe("loadConfig", () => {
@@ -74,5 +74,24 @@ describe("loadConfig", () => {
 		expect(() => loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_AGENT_ARGS: '{"a":1}' })).toThrow(
 			"GENTLE_DOT_AGENT_ARGS must be a JSON array of strings",
 		);
+	});
+});
+
+describe("parseDurationMs", () => {
+	it("accepts valid positive integers", () => {
+		expect(parseDurationMs("600000", "test")).toBe(600000);
+		expect(parseDurationMs("0", "test")).toBe(0);
+		expect(parseDurationMs("1", "test")).toBe(1);
+		expect(parseDurationMs("1000", "test")).toBe(1000);
+	});
+
+	it("rejects negative numbers", () => {
+		expect(() => parseDurationMs("-1", "test")).toThrow("Invalid test: -1 (must be non-negative integer ms)");
+		expect(() => parseDurationMs("-100", "test")).toThrow("Invalid test: -100 (must be non-negative integer ms)");
+	});
+
+	it("rejects non-numeric and empty strings", () => {
+		expect(() => parseDurationMs("abc", "test")).toThrow("Invalid test: abc (must be non-negative integer ms)");
+		expect(() => parseDurationMs("", "test")).toThrow("Invalid test:  (must be non-negative integer ms)");
 	});
 });

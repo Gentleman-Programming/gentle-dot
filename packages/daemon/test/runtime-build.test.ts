@@ -68,6 +68,7 @@ describe("build:runtime", () => {
 		expect(manifest).toMatchObject({ private: true, type: "module" });
 		expect(manifest.dependencies).toEqual({
 			"@earendil-works/pi-ai": "1.4.0",
+			"@earendil-works/pi-codemode": "1.4.0",
 			"@earendil-works/pi-coding-agent": "1.4.0",
 			"@earendil-works/pi-mcp": "1.4.0",
 			"@earendil-works/pi-tui": "1.4.0",
@@ -86,7 +87,6 @@ describe("build:runtime", () => {
 		const manifest = JSON.parse(readFileSync(join(out, "daemon", "package.json"), "utf8"));
 		expect(manifest.overrides).toEqual({
 			"@earendil-works/pi-agent-core": "1.4.0",
-			"@earendil-works/pi-codemode": "1.4.0",
 			"@earendil-works/pi-telemetry": "1.4.0",
 		});
 	});

@@ -19,6 +19,8 @@ export interface DotConfig {
 	/** The assistant's own Gentle Shell home; undefined for a custom agent script. */
 	agentHome: string | undefined;
 	allowedOrigins: string[];
+	/** Turn timeout in milliseconds. */
+	turnTimeoutMs?: number;
 }
 
 const DEFAULT_UI_DIR = fileURLToPath(new URL("../../ui/dist/app", import.meta.url));
@@ -69,6 +71,14 @@ function parsePort(value: unknown, source: string): number {
 	return port;
 }
 
+export function parseDurationMs(value: string, name: string): number {
+	const n = parseInt(value, 10);
+	if (!Number.isInteger(n) || n < 0) {
+		throw new Error(`Invalid ${name}: ${value} (must be non-negative integer ms)`);
+	}
+	return n;
+}
+
 function parseList(value: string | undefined, name: string): string[] {
 	if (!value) return [];
 	const parsed = JSON.parse(value) as unknown;
@@ -117,5 +127,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DotConfig {
 		uiDir: resolve(env.GENTLE_DOT_UI_DIR ?? uiDirOf(env)),
 		...agentConfig(env, dataDir),
 		allowedOrigins: parseList(env.GENTLE_DOT_ALLOWED_ORIGINS, "GENTLE_DOT_ALLOWED_ORIGINS"),
+		turnTimeoutMs: (() => {
+			const v = env.GENTLE_DOT_TURN_TIMEOUT_MS;
+			if (!v) return undefined;
+			try { return parseDurationMs(v, "GENTLE_DOT_TURN_TIMEOUT_MS"); } catch { return undefined; }
+		})(),
 	};
 }

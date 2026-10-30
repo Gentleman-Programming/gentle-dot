@@ -22,7 +22,8 @@ export type SupervisorState = "stopped" | "starting" | "ready" | "restarting";
 export type SupervisorEvent =
 	| AgentRecord
 	| { type: "supervisor_state"; state: SupervisorState }
-	| { type: "interrupted" };
+	| { type: "interrupted" }
+	| { type: "turn_timeout"; timeoutMs: number };
 
 export interface SupervisorOptions {
 	/** Executable to run, for example `gentle-shell`. */
@@ -47,6 +48,8 @@ export interface SupervisorOptions {
 	requestTimeoutMs?: number;
 	/** Deadline for the agent to answer its first `get_state`. Default 60s. */
 	startTimeoutMs?: number;
+	/** Deadline for a turn to complete. Default 10 minutes. */
+	turnTimeoutMs?: number;
 	/** Grace period after closing stdin before SIGTERM. Default 5s. */
 	stopTimeoutMs?: number;
 	log?: (line: string) => void;
@@ -86,6 +89,8 @@ export class AgentSupervisor {
 	private restarting = false;
 	private interrupted = false;
 	private restartTimer: NodeJS.Timeout | undefined;
+	/** Timer for turn timeout. */
+	private turnTimeoutTimer: NodeJS.Timeout | undefined;
 	/** The spawn whose engine has not answered yet, while there is one. */
 	private initializing: Promise<void> | undefined;
 	/** A restart asked while an engine starts, run once that start settles. */
@@ -306,18 +311,43 @@ export class AgentSupervisor {
 			else pending.reject(new Error(response.error ?? `${response.command} failed`));
 			return;
 		}
-		if (record.type === "agent_start") this.busy = true;
+		if (record.type === "agent_start") {
+			this.busy = true;
+			this.startTurnTimeout();
+		}
 		if (record.type === "agent_settled") {
 			this.settledRuns += 1;
+			this.clearTurnTimeout();
 			this.busy = false;
 			void this.refreshSession().catch(() => {});
 		}
 		this.emit(record);
 	}
 
+	private startTurnTimeout(): void {
+		if (!this.options.turnTimeoutMs) return;
+		this.clearTurnTimeout();
+		this.turnTimeoutTimer = setTimeout(() => {
+			this.clearTurnTimeout();
+			if (this.busy && this.child?.stdin?.writable) {
+				this.emit({ type: "turn_timeout", timeoutMs: this.options.turnTimeoutMs! });
+				this.busy = false;
+				this.child.kill("SIGTERM");
+			}
+		}, this.options.turnTimeoutMs);
+	}
+
+	private clearTurnTimeout(): void {
+		if (this.turnTimeoutTimer) {
+			clearTimeout(this.turnTimeoutTimer);
+			this.turnTimeoutTimer = undefined;
+		}
+	}
+
 	private handleClose(child: ChildProcess, code: number | null, signal: NodeJS.Signals | null): void {
 		if (child !== this.child) return;
 		this.child = undefined;
+		this.clearTurnTimeout();
 		const reason = new Error(`Agent exited (${signal ?? `code ${code}`})`);
 		for (const [id, pending] of this.pending) {
 			clearTimeout(pending.timer);

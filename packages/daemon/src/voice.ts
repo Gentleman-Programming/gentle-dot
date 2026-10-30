@@ -71,7 +71,6 @@ function voiceToolsSource(): string | undefined {
 	return undefined;
 }
 
-
 export type VoiceResult<T> = ({ ok: true } & T) | { ok: false; reason: string };
 
 export interface VoiceServiceOptions {

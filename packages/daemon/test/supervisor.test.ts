@@ -243,4 +243,22 @@ describe("AgentSupervisor", () => {
 		expect(supervisor.state).toBe("stopped");
 		await expect(supervisor.request({ type: "get_state" })).rejects.toThrow(/not ready/i);
 	});
+
+it("turn timeout aborts run, clears busy, and emits turn_timeout event", async () => {
+	const { supervisor, events } = track(
+		fakeSupervisor({
+			turnTimeoutMs: 100,
+			env: { ...process.env, FAKE_AGENT_START_DELAY_MS: "0" },
+		}),
+	);
+	await supervisor.start();
+	// Start a prompt that will take longer than the timeout
+	await supervisor.request({ type: "prompt", message: "slow" });
+	// Wait for the turn_timeout event
+	await waitFor(() => events.some((e) => e.type === "turn_timeout" && e.timeoutMs === 100));
+	expect(supervisor.busy).toBe(false);
+	// The agent should be killed and respawn
+	await waitFor(() => supervisor.state === "ready");
+});
+
 });

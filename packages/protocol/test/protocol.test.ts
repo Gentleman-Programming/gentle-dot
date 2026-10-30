@@ -321,6 +321,14 @@ describe("computer control messages", () => {
 	});
 });
 
+describe("server messages", () => {
+	it("accepts turn_timeout payload", () => {
+		const msg = { type: "turn_timeout", timeoutMs: 600000, seq: 1 };
+		expect(msg.type).toBe("turn_timeout");
+		expect(msg.timeoutMs).toBe(600000);
+	});
+});
+
 describe("app-only commands (S25.2)", () => {
 	const parse = (value: object) => parseClientMessage(JSON.stringify(value));
 

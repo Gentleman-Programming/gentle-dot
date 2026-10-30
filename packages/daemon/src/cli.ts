@@ -10,6 +10,7 @@ import { resolveEngramBin, runtimeDir } from "./runtime.ts";
 import { SECRETS_KEY_VAR } from "./secret-file.ts";
 import { loadVpsOptions } from "./vps.ts";
 import { IDENTITY_SOURCE } from "./white-label.ts";
+import { createDiscordWebhookFromEnv } from "./discord-webhook.ts";
 
 /** This file (or the bundled `cli.mjs`), which the sign-in helper runs again. */
 const ENTRY = fileURLToPath(import.meta.url);
@@ -57,6 +58,7 @@ async function main(): Promise<void> {
 		agentArgs: config.agentArgs,
 		...(config.agentHome ? { agentHome: config.agentHome } : {}),
 		allowedOrigins: config.allowedOrigins,
+		...(config.turnTimeoutMs ? { turnTimeoutMs: config.turnTimeoutMs } : {}),
 		...(appChannel ? { appChannel } : {}),
 		// Sign-in runs in this same entry point as the engine's user (`--auth-helper`, B1).
 		...(vps
@@ -82,8 +84,31 @@ async function main(): Promise<void> {
 	void daemon.closed.then(() => process.exit(0));
 }
 
+async function testDiscordWebhook(): Promise<void> {
+	const webhook = createDiscordWebhookFromEnv();
+	if (!webhook) {
+		console.error('❌ DISCORD_WEBHOOK_URL not set');
+		console.log('Set DISCORD_WEBHOOK_URL environment variable');
+		process.exit(1);
+	}
+
+	console.log('🔧 Testing Discord webhook...');
+	const result = await webhook.test();
+	if (result.success) {
+		console.log('✅ Webhook test successful!');
+	} else {
+		console.error('❌ Webhook test failed:', result.error);
+		process.exit(1);
+	}
+}
+
 if (process.argv.includes("--auth-helper")) serveAuthHelper();
-else {
+else if (process.argv.includes("--test-discord-webhook")) {
+	testDiscordWebhook().catch((error) => {
+		console.error('❌ Webhook test failed:', error.message);
+		process.exit(1);
+	});
+} else {
 	if (process.argv.includes("--self-check")) selfCheck();
 	main().catch((error: Error) => {
 		log(`failed to start: ${error.message}`);
