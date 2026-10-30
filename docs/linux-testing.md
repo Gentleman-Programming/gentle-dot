@@ -238,6 +238,7 @@ For a quick comparison on GNOME, you can start the app as a native Wayland clien
 | A connector that needs a sign-in or token never runs, and `daemon.log` says `no Secret Service in this desktop session` | Your session has no keyring. Install `gnome-keyring` (or KWallet) and make sure it runs and is unlocked in your session, then quit Gentle Dot from the tray, open it again, and try the connector again. |
 | The rose stays dimmed | Look at `~/.gentle-dot/daemon.log` and attach it (see below). |
 | No tray icon on GNOME | Check that the AppIndicator extension is on: `gnome-extensions list --enabled` |
+| The app prints `(gentle-dot): libayatana-appindicator-WARNING **: ... is deprecated` when it starts | Cosmetic: the tray icon still works and nothing is affected. To quiet the GTK noise, start the app with `G_DEBUG=gdk:quiet` before the app command, for example `G_DEBUG=gdk:quiet gentle-dot`. Note in the report whether you saw the warning at all. |
 | `gentle-dot: command not found` | Use the full path: `/usr/bin/gentle-dot` with the package, `~/.local/bin/gentle-dot` from source |
 
 ## Report template
