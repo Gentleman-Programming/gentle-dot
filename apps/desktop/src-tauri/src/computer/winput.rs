@@ -31,7 +31,8 @@ pub struct VirtualScreen {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
-    /// An absolute move, normalized to 0..=65535 over the virtual screen.
+    /// An absolute move, normalized to 0..=65535 over the virtual screen: the centre of the
+    /// pixel's bin, since Windows splits that range into one equal bin per pixel.
     Move { x: i32, y: i32 },
     Button { button: MouseButton, down: bool },
     /// Positive vertical deltas scroll up, positive horizontal ones scroll right.
@@ -43,11 +44,15 @@ pub enum Step {
 }
 
 impl VirtualScreen {
-    /// The absolute move to `at`, clamped to the virtual screen.
+    /// The absolute move to `at`, clamped to the virtual screen. Windows maps a normalized
+    /// coordinate `n` to pixel `n * length / 65536` (one equal bin per pixel), so each pixel is
+    /// aimed at the centre of its own bin: interpolating between the end pixels instead can land
+    /// an interior point on its neighbour.
     pub fn move_to(&self, at: Point) -> Step {
         let axis = |value: f64, start: i32, length: i32| {
-            let span = f64::from((length - 1).max(1));
-            ((value - f64::from(start)) * 65535.0 / span).round().clamp(0.0, 65535.0) as i32
+            let length = i64::from(length.max(1));
+            let offset = ((value - f64::from(start)).round() as i64).clamp(0, length - 1);
+            ((2 * offset + 1) * 65536 / (2 * length)) as i32
         };
         Step::Move { x: axis(at.x, self.x, self.width), y: axis(at.y, self.y, self.height) }
     }
@@ -283,16 +288,47 @@ mod tests {
 
     #[test]
     fn moves_are_absolute_over_the_whole_virtual_screen() {
-        assert_eq!(SCREEN.move_to(at(-1920.0, 0.0)), Step::Move { x: 0, y: 0 });
-        assert_eq!(SCREEN.move_to(at(1919.0, 1079.0)), Step::Move { x: 65535, y: 65535 });
+        // Each pixel is the centre of its bin: the first and last ones are just inside 0 and 65535.
+        assert_eq!(SCREEN.move_to(at(-1920.0, 0.0)), Step::Move { x: 8, y: 30 });
+        assert_eq!(SCREEN.move_to(at(1919.0, 1079.0)), Step::Move { x: 65527, y: 65505 });
         // The primary display's top-left corner sits in the middle of the virtual screen.
-        assert_eq!(SCREEN.move_to(at(0.0, 0.0)), Step::Move { x: 32776, y: 0 });
+        assert_eq!(SCREEN.move_to(at(0.0, 0.0)), Step::Move { x: 32776, y: 30 });
+    }
+
+    /// The pixel Windows moves to for a normalized coordinate: absolute input splits 0..=65535
+    /// into one equal bin per pixel of the virtual screen.
+    fn landing(normalized: i32, start: i32, length: i32) -> i32 {
+        start + (i64::from(normalized) * i64::from(length) / 65536) as i32
+    }
+
+    #[test]
+    fn every_pixel_round_trips_through_windows_absolute_coordinates() {
+        let screens = [
+            SCREEN,
+            VirtualScreen { x: 0, y: -1080, width: 1920, height: 2160 },
+            VirtualScreen { x: -7680, y: -2160, width: 15360, height: 4320 },
+            VirtualScreen { x: 0, y: 0, width: 1, height: 1 },
+            VirtualScreen { x: 5, y: -3, width: 2, height: 3 },
+        ];
+        for screen in screens {
+            for x in screen.x..screen.x + screen.width {
+                let Step::Move { x: nx, .. } = screen.move_to(at(f64::from(x), f64::from(screen.y))) else { unreachable!() };
+                assert_eq!(landing(nx, screen.x, screen.width), x, "x {x} on {screen:?}");
+            }
+            for y in screen.y..screen.y + screen.height {
+                let Step::Move { y: ny, .. } = screen.move_to(at(f64::from(screen.x), f64::from(y))) else { unreachable!() };
+                assert_eq!(landing(ny, screen.y, screen.height), y, "y {y} on {screen:?}");
+            }
+        }
+        // The case that landed one pixel early: the second column of a screen starting at -1920.
+        let Step::Move { x, .. } = SCREEN.move_to(at(-1919.0, 0.0)) else { unreachable!() };
+        assert_eq!(landing(x, SCREEN.x, SCREEN.width), -1919);
     }
 
     #[test]
     fn moves_outside_the_virtual_screen_are_clamped() {
-        assert_eq!(SCREEN.move_to(at(-5000.0, -10.0)), Step::Move { x: 0, y: 0 });
-        assert_eq!(SCREEN.move_to(at(9000.0, 2000.0)), Step::Move { x: 65535, y: 65535 });
+        assert_eq!(SCREEN.move_to(at(-5000.0, -10.0)), SCREEN.move_to(at(-1920.0, 0.0)));
+        assert_eq!(SCREEN.move_to(at(9000.0, 2000.0)), SCREEN.move_to(at(1919.0, 1079.0)));
     }
 
     #[test]
@@ -461,11 +497,14 @@ mod tests {
     #[test]
     fn negative_origins_on_both_axes_and_tiny_screens_are_normalized() {
         let above = VirtualScreen { x: 0, y: -1080, width: 1920, height: 2160 };
-        assert_eq!(above.move_to(at(0.0, -1080.0)), Step::Move { x: 0, y: 0 });
-        assert_eq!(above.move_to(at(1919.0, 1079.0)), Step::Move { x: 65535, y: 65535 });
+        let Step::Move { x, y } = above.move_to(at(0.0, -1080.0)) else { unreachable!() };
+        assert_eq!((landing(x, 0, 1920), landing(y, -1080, 2160)), (0, -1080));
+        let Step::Move { x, y } = above.move_to(at(1919.0, 1079.0)) else { unreachable!() };
+        assert_eq!((landing(x, 0, 1920), landing(y, -1080, 2160)), (1919, 1079));
+        // One pixel is one bin: the whole range, aimed at its centre, wherever the point is.
         let tiny = VirtualScreen { x: 0, y: 0, width: 1, height: 1 };
-        assert_eq!(tiny.move_to(at(0.0, 0.0)), Step::Move { x: 0, y: 0 });
-        assert_eq!(tiny.move_to(at(3.0, 3.0)), Step::Move { x: 65535, y: 65535 });
+        assert_eq!(tiny.move_to(at(0.0, 0.0)), Step::Move { x: 32768, y: 32768 });
+        assert_eq!(tiny.move_to(at(3.0, 3.0)), Step::Move { x: 32768, y: 32768 });
     }
 
     #[test]
