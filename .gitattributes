@@ -1,0 +1,10 @@
+# Every text file is stored with LF and checked out with LF, on every platform.
+#
+# This is not cosmetic here. Windows checkouts default to `core.autocrlf=true`, which rewrites
+# line endings to CRLF in the working tree, and `biome check` reads the bytes it is given: on the
+# Windows CI runner it reported 201 formatting errors, one per line, for files that are correct in
+# the repository. A Windows developer hits the same wall locally, before ever pushing.
+#
+# `text=auto` normalizes on commit and leaves files git detects as binary alone, so the PNG, ICNS,
+# and other binary assets under apps/desktop/src-tauri/icons and docs/assets are untouched.
+* text=auto eol=lf

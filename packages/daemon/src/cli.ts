@@ -1,9 +1,7 @@
 #!/usr/bin/env node
 import { existsSync } from "node:fs";
-import { join } from "node:path";
-import type { Duplex } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { inheritedAppSocket } from "./app-channel.ts";
+import { inheritedAppSocket, namedPipeSocket } from "./app-channel.ts";
 import { serveAuthHelper } from "./auth-helper.ts";
 import { loadConfig } from "./config.ts";
 import { APPROVAL_GUARD, bundledMcpCli } from "./connectors.ts";
@@ -12,8 +10,6 @@ import { resolveEngramBin, runtimeDir } from "./runtime.ts";
 import { SECRETS_KEY_VAR } from "./secret-file.ts";
 import { loadVpsOptions } from "./vps.ts";
 import { IDENTITY_SOURCE } from "./white-label.ts";
-import type { WindowsAppChannel } from "./windows-app-channel.ts";
-import { finishWindowsShutdown, startWithWindowsAppChannel } from "./windows-stop.ts";
 
 /** This file (or the bundled `cli.mjs`), which the sign-in helper runs again. */
 const ENTRY = fileURLToPath(import.meta.url);
@@ -43,58 +39,37 @@ function selfCheck(): void {
 
 async function main(): Promise<void> {
 	const config = loadConfig();
-	// The desktop app that launched the daemon hands over its private channel on fd 3 (S25.1); it is
-	// opened before anything is spawned, and refused if children would inherit it.
-	const appChannel = process.platform === "win32" ? undefined : inheritedAppSocket({ log });
+	// The desktop app that launched the daemon hands over its private channel on fd 3 (S25.1). On
+	// Windows there is no fd 3: the app creates a named pipe and passes its name here instead. The
+	// name is removed from the environment so the daemon's own children do not inherit a name they
+	// do not need; the app authenticates this process by the accepted connection's PID (W7b).
+	const pipeName = process.env.GENTLE_DOT_CHANNEL_PIPE;
+	if (pipeName) delete process.env.GENTLE_DOT_CHANNEL_PIPE;
+	// The fd-3 socket is opened before anything is spawned and refused if children would inherit it.
+	const appChannel = pipeName ? namedPipeSocket(pipeName) : inheritedAppSocket({ log });
 	// Server mode only when GENTLE_DOT_VPS says so (S25.8). The secrets key is read once and removed
 	// from the process environment, so no child the daemon starts can inherit it.
 	const vps = loadVpsOptions(process.env, { uid: process.getuid?.() ?? -1 });
 	delete process.env[SECRETS_KEY_VAR];
-	const start = (channel: Duplex | undefined = appChannel) =>
-		startDaemon({
-			port: config.port,
-			host: config.host,
-			dataDir: config.dataDir,
-			workspace: config.workspace,
-			...(config.preferredFolder ? { preferredFolder: config.preferredFolder } : {}),
-			uiDir: config.uiDir,
-			agentCommand: config.agentCommand,
-			agentArgs: config.agentArgs,
-			...(config.agentHome ? { agentHome: config.agentHome } : {}),
-			allowedOrigins: config.allowedOrigins,
-			...(channel ? { appChannel: channel } : {}),
-			// Sign-in runs in this same entry point as the engine's user (`--auth-helper`, B1).
-			...(vps
-				? { vps: { ...vps, authHelper: { command: process.execPath, args: [ENTRY, "--auth-helper"] } } }
-				: {}),
-			log,
-		});
-	// Windows requires the L98 private exact-launch record. No implicit unmanaged bypass.
-	// Construction precedes startDaemon and therefore all descendant startup.
-	const windows =
-		process.platform === "win32"
-			? await startWithWindowsAppChannel<Awaited<ReturnType<typeof start>>, WindowsAppChannel>(
-					join(config.dataDir, "daemon.pid"),
-					start,
-				)
-			: undefined;
-	const daemon = windows?.daemon ?? (await start());
+	const daemon = await startDaemon({
+		port: config.port,
+		host: config.host,
+		dataDir: config.dataDir,
+		workspace: config.workspace,
+		...(config.preferredFolder ? { preferredFolder: config.preferredFolder } : {}),
+		uiDir: config.uiDir,
+		agentCommand: config.agentCommand,
+		agentArgs: config.agentArgs,
+		...(config.agentHome ? { agentHome: config.agentHome } : {}),
+		allowedOrigins: config.allowedOrigins,
+		...(appChannel ? { appChannel } : {}),
+		// Sign-in runs in this same entry point as the engine's user (`--auth-helper`, B1).
+		...(vps
+			? { vps: { ...vps, authHelper: { command: process.execPath, args: [ENTRY, "--auth-helper"] } } }
+			: {}),
+		log,
+	});
 	process.stdout.write(`${startupMessage(daemon.url, config.dataDir, process.stdout.isTTY === true)}\n`);
-
-	if (windows) {
-		const shutdown = (signal: string) => {
-			log(`received ${signal}, shutting down`);
-			void windows.close();
-		};
-		process.on("SIGINT", () => shutdown("SIGINT"));
-		process.on("SIGTERM", () => shutdown("SIGTERM"));
-		// Only successful daemon.close AND native drain may report success. Never use
-		// daemon.closed directly here: it also settles when daemon.close rejects.
-		// On failure, retain the owner and set exitCode without abandoning native
-		// ownership through process.exit. No descendant completion is claimed.
-		void finishWindowsShutdown(windows, process, log);
-		return;
-	}
 
 	let closing = false;
 	const shutdown = (signal: string) => {
@@ -117,8 +92,6 @@ else {
 	if (process.argv.includes("--self-check")) selfCheck();
 	main().catch((error: Error) => {
 		log(`failed to start: ${error.message}`);
-		// Windows lets native ownership drain instead of exiting at once (`finishWindowsShutdown`).
-		if (process.platform === "win32") process.exitCode = 1;
-		else process.exit(1);
+		process.exit(1);
 	});
 }

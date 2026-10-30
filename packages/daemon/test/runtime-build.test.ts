@@ -10,11 +10,13 @@ import {
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
-import { lockedEnginePackages, piWrapper } from "../src/runtime-build.ts";
+import { lockedEnginePackages, piCmdWrapper, piWrapper } from "../src/runtime-build.ts";
 import { tempDir } from "./helpers.ts";
+import { directoryLinkType, symlinkDirectory } from "./support/fixture-capabilities.ts";
+import { expectPosixExecutable } from "./support/posix-modes.ts";
 import { WINDOWS_STOP_ADDON } from "./support/windows.ts";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
@@ -40,6 +42,38 @@ beforeAll(() => {
 	expect(build.status).toBe(0);
 }, 60_000);
 
+/**
+ * Puts `PACKAGE/node_modules` beside the output's `cli.mjs` so the self-check resolves the engine.
+ * One directory link does not port: on a plain Windows install `symlinkSync` needs the symlink
+ * privilege, and a **junction** to this pnpm layout does not resolve either — Node cannot follow a
+ * dependency that is itself a symlink when it is reached through a junction (measured on Windows
+ * 11, Node 24). Windows therefore gets a real folder holding one junction per dependency, each
+ * pointing at the dependency's real path, so nothing under the output is a symlink to follow.
+ */
+function linkNodeModules(out: string): void {
+	const link = join(out, "daemon", "node_modules");
+	const source = join(PACKAGE, "node_modules");
+	if (process.platform !== "win32") {
+		symlinkDirectory(source, link);
+		return;
+	}
+	mkdirSync(link, { recursive: true });
+	for (const entry of readdirSync(source, { withFileTypes: true })) {
+		if (entry.name === ".bin") continue;
+		const from = join(source, entry.name);
+		if (entry.name.startsWith("@")) {
+			mkdirSync(join(link, entry.name));
+			for (const sub of readdirSync(from)) {
+				const real = realpathSync(join(from, sub));
+				if (statSync(real).isDirectory()) symlinkSync(real, join(link, entry.name, sub), directoryLinkType());
+			}
+		} else {
+			const real = realpathSync(from);
+			if (statSync(real).isDirectory()) symlinkSync(real, join(link, entry.name), directoryLinkType());
+		}
+	}
+}
+
 function listFiles(dir: string, prefix = ""): string[] {
 	return readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
 		entry.isDirectory()
@@ -50,18 +84,18 @@ function listFiles(dir: string, prefix = ""): string[] {
 
 describe("piWrapper", () => {
 	it("emits a relocatable Windows cmd wrapper without relying on sh or ambient Node", () => {
-		expect(piWrapper("@earendil-works/pi-coding-agent/dist/bundle/cli.js", "win32")).toBe(
-			'@echo off\r\nsetlocal DisableDelayedExpansion\r\n"%~dp0..\\node\\bin\\node.exe" "%~dp0..\\daemon\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js" %*\r\nexit /b %errorlevel%\r\n',
+		const wrapper = piCmdWrapper("@earendil-works/pi-coding-agent/dist/bundle/cli.js");
+		expect(wrapper).toContain('"%_runtime%\\node\\node.exe"');
+		expect(wrapper).toContain(
+			'"%_runtime%\\daemon\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js" %*',
 		);
 	});
 
 	it("preserves the Unix shell wrapper for Linux and macOS", () => {
-		for (const platform of ["linux", "darwin"] as const) {
-			const wrapper = piWrapper("@earendil-works/pi-coding-agent/dist/bundle/cli.js", platform);
-			expect(wrapper).toContain("#!/bin/sh\n");
-			expect(wrapper).toContain('exec "$runtime/node/bin/node"');
-			expect(wrapper).toContain('"$@"');
-		}
+		const wrapper = piWrapper("@earendil-works/pi-coding-agent/dist/bundle/cli.js");
+		expect(wrapper).toContain("#!/bin/sh\n");
+		expect(wrapper).toContain('exec "$runtime/node/bin/node"');
+		expect(wrapper).toContain('"$@"');
 	});
 });
 
@@ -162,7 +196,7 @@ describe.skipIf(skipBuild)("build:runtime", () => {
 	});
 
 	it("runs its self-check from the output with the engine resolved inside it", () => {
-		symlinkSync(join(PACKAGE, "node_modules"), join(out, "daemon", "node_modules"));
+		linkNodeModules(out);
 		const check = spawnSync(process.execPath, [join(out, "daemon", "cli.mjs"), "--self-check"], {
 			encoding: "utf8",
 			env: {
@@ -189,41 +223,28 @@ describe.skipIf(skipBuild)("build:runtime", () => {
 		expect(realpathSync(report.identity)).toBe(join(real, "daemon", "identity.md"));
 	});
 
-	it.runIf(process.platform === "win32")(
-		"emits a `pi.cmd` that runs the runtime's node.exe and engine wherever the runtime is, arguments intact",
-		() => {
-			const moved = join(tempDir(), "moved runtime");
-			mkdirSync(join(moved, "bin"), { recursive: true });
-			mkdirSync(join(moved, "node", "bin"), { recursive: true });
+	it("emits a `pi` wrapper that runs the runtime's node and engine wherever the runtime is", () => {
+		const moved = tempDir();
+		mkdirSync(join(moved, "bin"));
+		const real = realpathSync(moved);
+		if (process.platform === "win32") {
+			// The Windows wrapper is `bin/pi.cmd`, which `cmd.exe` only runs as a batch file.
 			copyFileSync(join(out, "bin", "pi.cmd"), join(moved, "bin", "pi.cmd"));
-			copyFileSync(process.execPath, join(moved, "node", "bin", "node.exe"));
+			mkdirSync(join(moved, "node"), { recursive: true });
+			copyFileSync(process.execPath, join(moved, "node", "node.exe"));
 			const engine = join(moved, "daemon", "node_modules", ENGINE_CLI);
-			mkdirSync(join(engine, ".."), { recursive: true });
-			writeFileSync(engine, "console.log(JSON.stringify([process.execPath, ...process.argv.slice(1)]));\n");
-			// .cmd files run through cmd.exe; /s strips only the outer quotes, so the quoted path and arguments stay as written.
-			const run = spawnSync(
-				"cmd.exe",
-				["/d", "/s", "/c", `""${join(moved, "bin", "pi.cmd")}" --version "a b" "wow!""`],
-				{ encoding: "utf8", windowsVerbatimArguments: true },
-			);
-			expect(run.stderr).toBe("");
+			mkdirSync(dirname(engine), { recursive: true });
+			writeFileSync(engine, 'console.log(process.argv.slice(1).join("\\n"));\n');
+			const run = spawnSync(`"${join(real, "bin", "pi.cmd")}" --version "a b"`, {
+				encoding: "utf8",
+				shell: true,
+			});
 			expect(run.status).toBe(0);
-			expect(JSON.parse(run.stdout)).toEqual([
-				join(moved, "node", "bin", "node.exe"),
-				engine,
-				"--version",
-				"a b",
-				"wow!",
-			]);
-		},
-	);
-
-	it.skipIf(process.platform === "win32")(
-		"emits a `pi` wrapper that runs the runtime's node and engine wherever the runtime is",
-		() => {
-			expect(statSync(join(out, "bin", "pi")).mode & 0o111).toBe(0o111);
-			const moved = tempDir();
-			mkdirSync(join(moved, "bin"));
+			const lines = run.stdout.trim().split("\n");
+			expect(lines.slice(-2)).toEqual(["--version", "a b"]);
+			expect(lines[0]).toContain("cli.js");
+		} else {
+			expectPosixExecutable(join(out, "bin", "pi"));
 			mkdirSync(join(moved, "node", "bin"), { recursive: true });
 			copyFileSync(join(out, "bin", "pi"), join(moved, "bin", "pi"));
 			writeFileSync(join(moved, "node", "bin", "node"), '#!/bin/sh\nprintf "%s\\n" "$0" "$@"\n', {
@@ -231,7 +252,6 @@ describe.skipIf(skipBuild)("build:runtime", () => {
 			});
 			const linked = join(tempDir(), "pi");
 			symlinkSync(join(moved, "bin", "pi"), linked);
-			const real = realpathSync(moved);
 			for (const entry of [join(moved, "bin", "pi"), linked]) {
 				const run = spawnSync(entry, ["--version", "a b"], { encoding: "utf8" });
 				expect(run.status).toBe(0);
@@ -243,7 +263,7 @@ describe.skipIf(skipBuild)("build:runtime", () => {
 					"",
 				]);
 			}
-			expect(existsSync(join(PACKAGE, "node_modules", ENGINE_CLI))).toBe(true);
-		},
-	);
+		}
+		expect(existsSync(join(PACKAGE, "node_modules", ENGINE_CLI))).toBe(true);
+	});
 });

@@ -3,7 +3,7 @@
 // proxy addresses, the real servers stay in the daemon's memory and their secrets in the app's
 // secure store (S25.5), and the approval guard lets proxied tools through (the proxy asks) while it
 // keeps protecting the files, the old sign-in files included.
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -12,6 +12,7 @@ import { ConnectorStore, type CustomConnector, renderMcpJson } from "../src/conn
 import { decide, parsePolicy } from "../src/extensions/approval-guard.ts";
 import { MemorySecretSource } from "../src/secret-source.ts";
 import { tempDir } from "./helpers.ts";
+import { expectPosixMode } from "./support/posix-modes.ts";
 
 const NOTION_KEY = "mcp__notion|https://mcp.notion.com/mcp";
 const KEY = "proxy-key-for-this-launch-0123456789abcdef";
@@ -152,7 +153,7 @@ describe("the engine's mcp.json with the proxy", () => {
 		const record = readFileSync(join(dataDir, "connectors.json"), "utf8");
 		for (const secret of Object.values(SECRETS)) expect(record).not.toContain(secret);
 		expect(JSON.parse(record).connectors.slack.values.client_id).toBe("slack-client-id");
-		expect(statSync(join(dataDir, "connectors.json")).mode & 0o777).toBe(0o600);
+		expectPosixMode(join(dataDir, "connectors.json"), 0o600);
 	});
 
 	it("leaves the connectors out until the proxy listens, keeps the computer helper as it is, and changes the key per launch", () => {

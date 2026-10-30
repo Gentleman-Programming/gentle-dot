@@ -124,6 +124,29 @@ describe("MessageList", () => {
 		expect(screen.getByText("Read b.md")).toBeInTheDocument();
 		expect(screen.getByText("A command failed")).toBeInTheDocument();
 	});
+
+	it("opens a Markdown link through openUrl instead of navigating the panel", () => {
+		const openUrl = vi.fn();
+		render(
+			<MessageList
+				openUrl={openUrl}
+				messages={[
+					{
+						id: "m1",
+						role: "assistant",
+						text: "Manage it at [the settings page](https://example.com/settings).",
+						streaming: false,
+						activities: [],
+					},
+				]}
+			/>,
+		);
+		const link = screen.getByRole("link", { name: "the settings page" });
+		expect(link).toHaveAttribute("href", "https://example.com/settings");
+		// fireEvent returns false when the click was cancelled: the panel's webview must not navigate.
+		expect(fireEvent.click(link)).toBe(false);
+		expect(openUrl).toHaveBeenCalledWith("https://example.com/settings");
+	});
 });
 
 describe("MessageList user text", () => {

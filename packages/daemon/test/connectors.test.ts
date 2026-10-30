@@ -1,13 +1,4 @@
-import {
-	existsSync,
-	mkdirSync,
-	readdirSync,
-	readFileSync,
-	rmSync,
-	statSync,
-	symlinkSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -24,6 +15,8 @@ import { isReadOnlyCall } from "../src/extensions/approval-guard.ts";
 import { MemorySecretSource } from "../src/secret-source.ts";
 import { fakeOAuth } from "./fake-oauth.ts";
 import { tempDir, waitFor } from "./helpers.ts";
+import { symlinkDirectory } from "./support/fixture-capabilities.ts";
+import { expectPosixMode } from "./support/posix-modes.ts";
 
 describe("connectors catalog", () => {
 	it("lists Notion, Linear, and Atlassian with their official remote servers", () => {
@@ -111,8 +104,8 @@ describe("connector store", () => {
 			version: 2,
 			connectors: { notion: { enabled: true, mode: "read_only" } },
 		});
-		expect(statSync(join(dataDir, "connectors.json")).mode & 0o777).toBe(0o600);
-		expect(statSync(join(agentHome, "mcp.json")).mode & 0o777).toBe(0o600);
+		expectPosixMode(join(dataDir, "connectors.json"), 0o600);
+		expectPosixMode(join(agentHome, "mcp.json"), 0o600);
 		// The old sign-in home is never made again.
 		expect(existsSync(s.signinHome)).toBe(false);
 		expect(readdirSync(agentHome).filter((f) => f.includes(".tmp"))).toEqual([]);
@@ -224,7 +217,7 @@ describe("connector store", () => {
 		rmSync(join(workspace, ".pi"), { recursive: true });
 		const elsewhere = tempDir();
 		writeFileSync(join(elsewhere, "mcp.json"), "{}");
-		symlinkSync(elsewhere, join(workspace, ".pi"));
+		symlinkDirectory(elsewhere, join(workspace, ".pi"));
 		expect(s.enforce()).toBe(true);
 		expect(existsSync(join(workspace, ".pi"))).toBe(false);
 		expect(readFileSync(join(elsewhere, "mcp.json"), "utf8")).toBe("{}");

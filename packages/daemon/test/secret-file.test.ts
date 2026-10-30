@@ -1,12 +1,13 @@
 // Connector secrets on a server (S25.8): no desktop app, so the daemon keeps them in a file of its
 // own, each one encrypted with AES-256-GCM under a key that only the daemon's environment holds.
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { FileSecretSource, NO_SECRETS_KEY, parseSecretsKey } from "../src/secret-file.ts";
 import { SecretsUnavailableError } from "../src/secret-source.ts";
 import { tempDir } from "./helpers.ts";
+import { expectPosixMode } from "./support/posix-modes.ts";
 
 const SECRET = "xoxb-plain-bot-token-0123456789";
 
@@ -25,7 +26,7 @@ describe("encrypted secrets file", () => {
 		expect(text).not.toContain(SECRET);
 		expect(text).not.toContain(Buffer.from(SECRET).toString("base64"));
 		expect(text).not.toContain("a".repeat(64));
-		expect(statSync(file).mode & 0o777).toBe(0o600);
+		expectPosixMode(file, 0o600);
 		// Every record has its own nonce: the same secret twice is two different ciphertexts.
 		await source.put("connector/discord/bot", SECRET);
 		const records = JSON.parse(readFileSync(file, "utf8")).records as Record<

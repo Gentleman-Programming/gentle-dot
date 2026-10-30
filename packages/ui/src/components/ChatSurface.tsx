@@ -341,6 +341,7 @@ export function ChatSurface({
 						const first = state.messages[0];
 						if (first) send({ type: "get_earlier", before: first.id });
 					}}
+					openUrl={openUrl}
 				/>
 				{state.interrupted ? (
 					<div className="interrupted">

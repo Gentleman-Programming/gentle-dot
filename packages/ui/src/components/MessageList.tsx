@@ -2,6 +2,7 @@ import type { Activity, ActivityKind } from "@gentle-dot/protocol";
 import { Fragment, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { openUrl as openExternal } from "../desktop.ts";
 import type { ChatMessage } from "../store.ts";
 import { formatSize } from "../uploads.ts";
 
@@ -61,9 +62,17 @@ interface MessageListProps {
 	/** Offers "Show earlier" at the top, which calls `onShowEarlier`. */
 	hasEarlier?: boolean;
 	onShowEarlier?: () => void;
+	/** Opens a Markdown link outside the panel; the panel's webview itself must never navigate away. */
+	openUrl?: (url: string) => void;
 }
 
-export function MessageList({ messages, queued = [], hasEarlier = false, onShowEarlier }: MessageListProps) {
+export function MessageList({
+	messages,
+	queued = [],
+	hasEarlier = false,
+	onShowEarlier,
+	openUrl = openExternal,
+}: MessageListProps) {
 	const end = useRef<HTMLDivElement>(null);
 	const last = messages.at(-1);
 	const lastEarlier = messages.findLastIndex((m) => m.earlier);
@@ -109,7 +118,25 @@ export function MessageList({ messages, queued = [], hasEarlier = false, onShowE
 						) : null}
 						{message.text && message.role === "assistant" ? (
 							<div className="message-body">
-								<Markdown remarkPlugins={[remarkGfm]}>{message.text}</Markdown>
+								<Markdown
+									remarkPlugins={[remarkGfm]}
+									components={{
+										// The panel's webview must not navigate to an external page: that unloads the app.
+										a: ({ href, children }) => (
+											<a
+												href={href}
+												onClick={(event) => {
+													event.preventDefault();
+													if (typeof href === "string") openUrl(href);
+												}}
+											>
+												{children}
+											</a>
+										),
+									}}
+								>
+									{message.text}
+								</Markdown>
 							</div>
 						) : null}
 						{message.streaming ? <span className="caret" aria-hidden="true" /> : null}
