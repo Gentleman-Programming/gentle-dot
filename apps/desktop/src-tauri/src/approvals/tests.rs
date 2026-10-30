@@ -106,6 +106,18 @@ fn the_approval_buttons_default_to_decline() {
 }
 
 #[test]
+fn the_dialog_carries_the_approvals_deadline_so_a_late_one_refuses_itself() {
+    let prompt = Arc::new(FakePrompt::new([Answer::After(Duration::ZERO, true)]));
+    let before = Instant::now();
+    approvals(&prompt, LONG).confirm(&request(vec![]));
+    let after = Instant::now();
+    let deadline = prompt.shown.lock().unwrap()[0].deadline.expect("a deadline");
+    assert!(deadline >= before + LONG && deadline <= after + LONG, "the confirmation's own deadline");
+    // A dialog built for a preview carries none.
+    assert_eq!(ApprovalDialog::new(&request(vec![]), LONG).deadline, None);
+}
+
+#[test]
 fn allow_approves_and_decline_declines() {
     let prompt = Arc::new(FakePrompt::new([Answer::After(Duration::ZERO, true), Answer::After(Duration::ZERO, false)]));
     let approvals = approvals(&prompt, LONG);
