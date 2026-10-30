@@ -49,4 +49,22 @@ describe("channel protocol (WhatsApp, phase 1)", () => {
 		expect(isAppCommand({ type: "channel_allowlist" })).toBe(false);
 		expect(isPinCommand({ type: "channel_unpair" })).toBe(true);
 	});
+
+	describe("channel_notify (proactive outreach, T11/S9)", () => {
+		it("is a valid ServerPayload type with required fields", () => {
+			const notify = { type: "channel_notify", to: "5491112345678", text: "🔔 Backup completed" };
+			expect(notify.type).toBe("channel_notify");
+			expect(notify.to).toBe("5491112345678");
+			expect(notify.text).toBe("🔔 Backup completed");
+		});
+
+		it("accepts optional requestId for idempotency", () => {
+			const notify = { type: "channel_notify", to: "5491112345678", text: "🔔 Backup completed", requestId: "req-123" };
+			expect(notify.requestId).toBe("req-123");
+		});
+
+		it("is not an app command (daemon→bridge only)", () => {
+			expect(isAppCommand({ type: "channel_notify", to: "5491112345678", text: "test" } as any)).toBe(false);
+		});
+	});
 });

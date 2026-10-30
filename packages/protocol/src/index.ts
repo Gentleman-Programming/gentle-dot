@@ -514,6 +514,8 @@ export type ServerPayload =
 	| { type: "channel_allowlist"; numbers: string[] }
 	| { type: "channel_pair"; status: ChannelPairStatus | null }
 	| { type: "channel_verify_result"; results: { masked: string; ok: boolean }[] }
+	/** Proactive outreach (T11/S9): the daemon notifies an allowlisted number without a user prompt. */
+	| { type: "channel_notify"; to: string; text: string; requestId?: string }
 	| { type: "voice_transcript"; requestId: string; text: string }
 	/** Speech for a `voice_speak` request, in base64. */
 	| { type: "voice_speech"; requestId: string; mime: string; data: string }

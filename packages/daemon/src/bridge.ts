@@ -1423,6 +1423,19 @@ export class DotBridge {
 				this.broadcast({ type: "toast", level, message: presentText(String(event.message ?? "")) });
 			return;
 		}
+
+		if (method === "channel_notify") {
+			const to = String(event.to ?? "");
+			const text = String(event.message ?? "");
+			if (!to || !text) {
+				this.log("channel_notify ignored: missing to or text");
+				return;
+			}
+			const notify: ServerPayload = { type: "channel_notify", to, text };
+			if (requestId) (notify as { type: "channel_notify"; to: string; text: string; requestId?: string }).requestId = requestId;
+			this.broadcast(notify);
+			return;
+		}
 		if (method === "setStatus" && event.statusKey === DRAFT_STATUS_KEY) {
 			this.onConnectorDraft(event.statusText);
 			return;
