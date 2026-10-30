@@ -133,6 +133,18 @@ export const CATALOG: readonly CatalogEntry[] = [
 			"notion-get-users",
 			"notion-query-data-sources",
 			"notion-query-meeting-notes",
+			"notion-query-multiple-data-sources",
+			"notion-list-private-pages",
+			"notion-list-shared-pages",
+			"notion-list-favorite-pages",
+			"notion-list-recent-pages",
+			"notion-list-page-backlinks",
+			"notion-memory-search",
+			"notion-get-self",
+			"notion-get-groups",
+			"notion-get-async-task",
+			// Only makes more tools visible; each of those is still classified on its own.
+			"notion-get-tool-access",
 		],
 	},
 	{
