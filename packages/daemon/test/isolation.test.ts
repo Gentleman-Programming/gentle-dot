@@ -257,7 +257,10 @@ describe("ensureGitBoundary", () => {
 		ensureGitBoundary(workspace);
 		// git rev-parse from the workspace now stops at the workspace, not at the parent repo.
 		const top = gitOut(["rev-parse", "--show-toplevel"], workspace);
-		expect(realpathSync(top)).toBe(realpathSync(workspace));
+		/** realpathSync.native expands NTFS 8.3 names, which is how git answers. */
+const canonical = (path: string) => realpathSync.native(path);
+
+expect(canonical(top)).toBe(canonical(workspace));
 	});
 
 	it("leaves an existing workspace repo as it is", () => {
@@ -278,7 +281,10 @@ describe("ensureGitBoundary", () => {
 		});
 		expect(readFileSync(join(workspace, ".git", "HEAD"), "utf8")).toContain("refs/heads/");
 		const top = gitOut(["rev-parse", "--show-toplevel"], workspace);
-		expect(realpathSync(top)).toBe(realpathSync(workspace));
+		/** realpathSync.native expands NTFS 8.3 names, which is how git answers. */
+const canonical = (path: string) => realpathSync.native(path);
+
+expect(canonical(top)).toBe(canonical(workspace));
 	});
 });
 
