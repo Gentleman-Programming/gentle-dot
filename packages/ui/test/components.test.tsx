@@ -126,6 +126,44 @@ describe("MessageList", () => {
 	});
 });
 
+describe("MessageList links", () => {
+	it("opens links with openUrl instead of navigating", async () => {
+		const openUrl = vi.fn();
+		render(
+			<MessageList
+				messages={[
+					{
+						id: "m1",
+						role: "assistant",
+						text: "See the [Discord portal](https://discord.com/developers)",
+						streaming: false,
+						activities: [],
+					},
+				]}
+				openUrl={openUrl}
+			/>,
+		);
+		await userEvent.click(screen.getByRole("link", { name: "Discord portal" }));
+		expect(openUrl).toHaveBeenCalledWith("https://discord.com/developers");
+	});
+
+	it("leaves relative hrefs to the webview", async () => {
+		const openUrl = vi.fn();
+		render(
+			<MessageList
+				messages={[
+					{ id: "m1", role: "assistant", text: "[anchor](#section)", streaming: false, activities: [] },
+				]}
+				openUrl={openUrl}
+			/>,
+		);
+		const link = screen.getByRole("link", { name: "anchor" });
+		expect(link).toHaveAttribute("href", "#section");
+		await userEvent.click(link);
+		expect(openUrl).not.toHaveBeenCalled();
+	});
+});
+
 describe("MessageList user text", () => {
 	it("keeps the user's line breaks as typed", () => {
 		const { container } = render(
