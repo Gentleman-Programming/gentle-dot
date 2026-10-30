@@ -22,6 +22,10 @@ pub mod risk;
 pub mod server;
 pub mod session;
 pub mod windows;
+// What Windows posts for each input event; tested everywhere. The Windows desktop backend that
+// posts it widens this to `any(windows, test)`.
+#[cfg(test)]
+pub mod winput;
 pub mod working;
 
 use blocklist::AppIdentity;

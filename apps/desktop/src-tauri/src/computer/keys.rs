@@ -44,6 +44,12 @@ const KEYS: &[(&str, u16)] = &[
     ("f1", 122), ("left", 123), ("right", 124), ("down", 125), ("up", 126),
 ];
 
+/// Every key name `parse_combo` accepts, aliases aside.
+#[cfg(test)]
+pub(crate) fn names() -> impl Iterator<Item = &'static str> {
+    KEYS.iter().map(|(name, _)| *name)
+}
+
 /// Other spellings of the named keys.
 const ALIASES: &[(&str, &str)] = &[
     ("enter", "return"), ("esc", "escape"), ("backspace", "delete"), ("del", "forwarddelete"),
