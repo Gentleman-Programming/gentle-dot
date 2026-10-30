@@ -463,7 +463,7 @@ mod tests {
         assert_eq!(parakeet.availability(), Err(VoiceError::NoModel));
         let (voice, _) = voice(parakeet);
         assert_eq!(voice.status(), VoiceStatus::unavailable(VoiceError::NoModel.to_string()));
-        assert_eq!(voice.start(None, Recorder::default().events()), Err(VoiceError::NoModel));
+        assert_eq!(voice.start(None, None, Recorder::default().events()), Err(VoiceError::NoModel));
     }
 
     #[test]
@@ -472,7 +472,7 @@ mod tests {
         let setup = Setup::new(Some(gate.clone()));
         let (voice, mic) = voice(Arc::new(setup.parakeet()));
         let recorder = Recorder::default();
-        voice.start(None, recorder.events()).unwrap();
+        voice.start(None, None, recorder.events()).unwrap();
         mic.sink().audio(&[0.1; 1_600]);
         mic.sink().audio(&[0.2; 800]);
 
@@ -508,7 +508,7 @@ mod tests {
         let parakeet = Arc::new(setup.parakeet());
         let (voice, mic) = voice(parakeet.clone());
         let recorder = Recorder::default();
-        voice.start(None, recorder.events()).unwrap();
+        voice.start(None, None, recorder.events()).unwrap();
         wait_until("the model to load", || parakeet.loaded());
         mic.sink().audio(&vec![0.0; PARTIAL_EVERY]);
         wait_until("a partial", || !partials(&recorder).is_empty());
@@ -524,7 +524,7 @@ mod tests {
         let parakeet = Arc::new(setup.parakeet());
         let (warm, mic) = voice(parakeet.clone());
         let recorder = Recorder::default();
-        warm.start(None, recorder.events()).unwrap();
+        warm.start(None, None, recorder.events()).unwrap();
         wait_until("the model to load", || parakeet.loaded());
         mic.sink().audio(&vec![0.0; PARTIAL_EVERY]);
         wait_until("the partial decode", || !setup.threads.lock().unwrap().is_empty());
@@ -538,7 +538,7 @@ mod tests {
         let cold_parakeet = Arc::new(cold.parakeet());
         let (cold_voice, cold_mic) = voice(cold_parakeet);
         let cold_recorder = Recorder::default();
-        cold_voice.start(None, cold_recorder.events()).unwrap();
+        cold_voice.start(None, None, cold_recorder.events()).unwrap();
         cold_mic.sink().audio(&vec![0.0; PARTIAL_EVERY * 2]);
         std::thread::sleep(Duration::from_millis(50));
         assert!(partials(&cold_recorder).is_empty());
@@ -550,7 +550,7 @@ mod tests {
         let parakeet = Arc::new(setup.parakeet());
         let (voice, mic) = voice(parakeet.clone());
         for _ in 0..2 {
-            voice.start(None, Recorder::default().events()).unwrap();
+            voice.start(None, None, Recorder::default().events()).unwrap();
             mic.sink().audio(&[0.0; 160]);
             assert_eq!(voice.stop(), Ok(Transcript { text: "160 samples".into() }));
         }
@@ -560,7 +560,7 @@ mod tests {
 
         parakeet.release();
         assert!(!parakeet.loaded());
-        voice.start(None, Recorder::default().events()).unwrap();
+        voice.start(None, None, Recorder::default().events()).unwrap();
         voice.stop().unwrap();
         assert_eq!(setup.loads.load(Ordering::SeqCst), 2, "released models load again");
     }
@@ -570,7 +570,7 @@ mod tests {
         let setup = Setup::new(None);
         let parakeet = Arc::new(setup.parakeet().with_idle(Duration::from_millis(30)));
         let (voice, _) = voice(parakeet.clone());
-        voice.start(None, Recorder::default().events()).unwrap();
+        voice.start(None, None, Recorder::default().events()).unwrap();
         voice.stop().unwrap();
         assert!(parakeet.loaded());
         wait_until("the idle unload", || !parakeet.loaded());
@@ -581,7 +581,7 @@ mod tests {
         let setup = Setup::new(None);
         setup.fail_load.store(true, Ordering::SeqCst);
         let (voice, mic) = voice(Arc::new(setup.parakeet()));
-        voice.start(None, Recorder::default().events()).unwrap();
+        voice.start(None, None, Recorder::default().events()).unwrap();
         mic.sink().audio(&[0.0; 160]);
         assert_eq!(voice.stop(), Ok(Transcript { text: String::new() }));
     }
@@ -590,7 +590,7 @@ mod tests {
     fn cancel_discards_the_recording_without_decoding_it() {
         let setup = Setup::new(None);
         let (voice, mic) = voice(Arc::new(setup.parakeet()));
-        voice.start(None, Recorder::default().events()).unwrap();
+        voice.start(None, None, Recorder::default().events()).unwrap();
         mic.sink().audio(&[0.0; 160]);
         voice.cancel().unwrap();
         std::thread::sleep(Duration::from_millis(20));

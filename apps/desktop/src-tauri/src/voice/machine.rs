@@ -158,9 +158,10 @@ impl Voice {
         }
     }
 
-    /// Starts recording, prompting for permissions first when they were never asked. Blocks
-    /// while a prompt is open, so it runs off the main thread. `events` reach the caller.
-    pub fn start(&self, requested: Option<&str>, events: Events) -> Result<(), VoiceError> {
+    /// Starts recording from `device` (a CoreAudio UID; `None` is the system default input),
+    /// prompting for permissions first when they were never asked. Blocks while a prompt is
+    /// open, so it runs off the main thread. `events` reach the caller.
+    pub fn start(&self, requested: Option<&str>, device: Option<&str>, events: Events) -> Result<(), VoiceError> {
         let recording = {
             let mut state = lock(&self.inner.state);
             let State::Idle { next } = *state else { return Err(VoiceError::Busy) };
@@ -170,7 +171,7 @@ impl Voice {
         let sink = Sink { inner: Arc::downgrade(&self.inner), recording };
         let begun = self.prepare(requested, recording).and_then(|locale| {
             let mut recognition = self.inner.recognizer.begin(&locale, sink.clone())?;
-            match self.inner.microphone.open(sink) {
+            match self.inner.microphone.open(device, sink) {
                 Ok(stream) => Ok((stream, recognition)),
                 Err(error) => {
                     recognition.cancel();
@@ -441,7 +442,7 @@ mod tests {
 
     impl Rig {
         fn start(&self) -> Result<(), VoiceError> {
-            self.voice.start(None, self.recorder.events())
+            self.voice.start(None, None, self.recorder.events())
         }
     }
 
@@ -502,8 +503,21 @@ mod tests {
     #[test]
     fn the_requested_locale_reaches_the_recognizer() {
         let rig = granted();
-        rig.voice.start(Some("es_AR"), rig.recorder.events()).unwrap();
+        rig.voice.start(Some("es_AR"), None, rig.recorder.events()).unwrap();
         assert_eq!(rig.recognizer.log.lock().unwrap().locales, vec!["es-ES".to_string()]);
+    }
+
+    #[test]
+    fn the_chosen_device_reaches_the_microphone() {
+        let rig = granted();
+        rig.voice.start(None, Some("BuiltInMic:1"), rig.recorder.events()).unwrap();
+        rig.voice.stop().unwrap();
+        // No choice opens the system default input.
+        rig.voice.start(None, None, rig.recorder.events()).unwrap();
+        assert_eq!(
+            rig.mic.log.lock().unwrap().devices,
+            vec![Some("BuiltInMic:1".to_string()), None]
+        );
     }
 
     #[test]
@@ -717,7 +731,7 @@ mod tests {
         let mic = rig.mic.clone();
         *mic.open_error.lock().unwrap() = None;
         let voice = Voice::new(Arc::new(FailingOnOpen(mic, recognizer.clone())), recognizer.clone(), rig.clock.clone());
-        assert_eq!(voice.start(None, rig.recorder.events()), Err(VoiceError::Failed("Siri and Dictation are disabled.".into())));
+        assert_eq!(voice.start(None, None, rig.recorder.events()), Err(VoiceError::Failed("Siri and Dictation are disabled.".into())));
         assert_eq!(recognizer.log.lock().unwrap().cancelled, 1);
         assert_eq!(voice.stop(), Err(VoiceError::NotRecording));
     }
@@ -734,9 +748,9 @@ mod tests {
             self.0.request_authorization()
         }
 
-        fn open(&self, sink: Sink) -> Result<Box<dyn crate::voice::Stream>, VoiceError> {
+        fn open(&self, device: Option<&str>, sink: Sink) -> Result<Box<dyn crate::voice::Stream>, VoiceError> {
             self.1.sink().failed("Siri and Dictation are disabled.");
-            self.0.open(sink)
+            self.0.open(device, sink)
         }
     }
 }
