@@ -98,4 +98,4 @@ jobs:
           gh release create "$RELEASE_TAG" dist/* \
             --repo "$RELEASE_REPO" --verify-tag --draft --prerelease \
             --title "Gentle Dot macOS QA — $RELEASE_TAG" \
-            --notes 'Community fork build for Apple Silicon. Ad-hoc signed, not notarized by Apple. Includes SHA256SUMS, upstream license and BUILD-INFO.json. Review the DMG on a real Mac before publishing. See docs/fork/MACOS-GETTING-STARTED.es.md at the release commit.'
+            --notes 'Community fork build for Apple Silicon. Ad-hoc signed, not notarized by Apple. Includes SHA256SUMS, upstream license and BUILD-INFO.json. Review the DMG on a real Mac before publishing. See docs/fork/MACOS-GETTING-STARTED.md at the release commit.'

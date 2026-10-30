@@ -43,7 +43,7 @@ if (process.env.GITHUB_REF_TYPE === "tag") {
 		`${JSON.stringify(
 			{
 				version: config.version,
-				notes: "Actualización QA. Consulta las notas de esta release en GitHub.",
+				notes: "QA update. See this release on GitHub for details.",
 				platforms: {
 					"darwin-aarch64": {
 						signature,

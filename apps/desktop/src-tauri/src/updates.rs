@@ -41,7 +41,7 @@ use crate::update_policy::{latest, Release};
 fn message(app: &AppHandle, text: &str) {
     app.dialog()
         .message(text)
-        .title("Actualizaciones de Gentle Dot QA")
+        .title("Gentle Dot QA updates")
         .blocking_show();
 }
 
@@ -62,17 +62,17 @@ pub fn check_now(app: AppHandle, manual: bool) {
         let _flight = Flight;
         if PUBLIC_KEY.trim().is_empty() {
             if manual {
-                message(&app, "Esta compilación no tiene clave pública de actualización. Instala una compilación firmada del fork; no se descargarán actualizaciones sin validar.");
+                message(&app, "This build has no update public key. Install a signed build from your release repository. Unverified updates will not be downloaded.");
             }
             return;
         }
         let result = check(&app);
         match result {
-            Ok(false) if manual => message(&app, "No hay una versión QA posterior disponible."),
+            Ok(false) if manual => message(&app, "No newer QA version is available."),
             Err(error) => {
                 eprintln!("gentle-dot updater: {error}");
                 if manual {
-                    message(&app, "No se pudo comprobar o instalar la actualización. Revisa la red y los registros. No se omitió la validación de firma.");
+                    message(&app, "Could not check or install the update. Check your network and logs. Signature verification was not bypassed.");
                 }
             }
             _ => (),
@@ -144,22 +144,22 @@ fn check(app: &AppHandle) -> Result<bool, Box<dyn std::error::Error + Send + Syn
         .collect();
     if !alert::ask(
         app,
-        "Nueva versión de Gentle Dot QA",
+        "New Gentle Dot QA version",
         &format!(
-            "Versión {current} → {expected}\n\n{notes}\n\n¿Descargar y verificar la actualización?"
+            "Version {current} → {expected}\n\n{notes}\n\nDownload and verify the update?"
         ),
         Choice {
-            allow: "Descargar",
-            refuse: "Más tarde",
+            allow: "Download",
+            refuse: "Later",
         },
     ) {
         return Ok(true);
     }
     // Tauri verifies the updater signature before returning these bytes.
     let bytes = tauri::async_runtime::block_on(update.download(|_, _| {}, || {}))?;
-    if !alert::ask(app, "Actualización verificada",
-        "Instalar y reiniciar cerrará las tareas activas, el micrófono y el control del equipo. Guarda tu trabajo antes de continuar. Tus conversaciones y memoria se conservarán.",
-        Choice { allow: "Instalar y reiniciar", refuse: "Más tarde" }) { return Ok(true); }
+    if !alert::ask(app, "Update verified",
+        "Installing and restarting will stop active tasks, recording and computer control. Save your work before continuing. Your conversations and memory will be preserved.",
+        Choice { allow: "Install and restart", refuse: "Later" }) { return Ok(true); }
     (app.state::<UpdateState>().stop)(app);
     if let Err(error) = update.install(bytes) {
         (app.state::<UpdateState>().recover)(app);

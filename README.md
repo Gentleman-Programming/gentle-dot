@@ -1,4 +1,4 @@
-> **Fork macOS QA:** [Instalación, CI y continuación desde tu PC](docs/fork/MACOS-GETTING-STARTED.es.md). Builds comunitarios para Apple Silicon; disponibilidad sujeta a CI exitoso.
+> **macOS QA:** [Installation and CI guide](docs/fork/MACOS-GETTING-STARTED.md). Apple Silicon builds are available after CI succeeds.
 
 <!-- markdownlint-disable-next-line MD041 -->
 <a id="top"></a>

@@ -652,7 +652,7 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tau
         }
     }
     #[cfg(target_os = "macos")]
-    menu.append(&MenuItem::with_id(app, "updates", "Buscar actualizaciones…", true, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(app, "updates", "Check for updates…", true, None::<&str>)?)?;
     TrayIconBuilder::with_id(TRAY)
         .icon(Image::from_bytes(TrayGlyph::Unavailable.image(Os::CURRENT))?)
         .icon_as_template(is_template(Os::CURRENT))
