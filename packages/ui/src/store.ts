@@ -6,6 +6,8 @@ import type {
 	AuthEvent,
 	AuthPrompt,
 	AuthProvider,
+	ChannelInfo,
+	ChannelPairStatus,
 	ConnectorDraft,
 	ConnectorInfo,
 	ConversationSummary,
@@ -64,6 +66,19 @@ export interface ConnectorsState {
 	drafts?: ConnectorDraft[];
 	/** The servers the last scan found in other apps, while the list is shown. */
 	imports?: ImportCandidate[];
+}
+
+/** A channel bridge (WhatsApp, phase 1) and its pairing step, as the daemon proxies it. */
+export interface ChannelsState {
+	open: boolean;
+	/** Undefined until the first list arrives; an unreachable bridge still lists, with `reachable: false`. */
+	list?: ChannelInfo[];
+	/** The masked allowlist, undefined until it arrives. */
+	allowlist?: string[];
+	/** The live pairing step; `null` while the bridge is not pairing. */
+	pair?: ChannelPairStatus | null;
+	/** The last live verification, per allowlisted number (masked). */
+	verify?: { masked: string; ok: boolean }[];
 }
 
 /** The chat's model picker (S32). */
@@ -132,6 +147,7 @@ export interface DotState {
 	auth: AuthState;
 	profiles: ProfilesState;
 	connectors: ConnectorsState;
+	channels: ChannelsState;
 	models: ModelsState;
 	/** What the daemon can do with voice (an OpenAI API key). */
 	voice: VoiceCapability;
@@ -148,6 +164,7 @@ export type DotAction =
 	| { type: "accounts"; open: boolean }
 	| { type: "profiles"; open: boolean }
 	| { type: "connectors"; open: boolean }
+	| { type: "channels"; open: boolean }
 	| { type: "connector_started"; connectorId: string }
 	| { type: "connector_imports_closed" }
 	| { type: "models_opened" }
@@ -168,6 +185,7 @@ export const initialState: DotState = {
 	auth: { open: false },
 	profiles: { open: false, roles: [], models: [], importable: false },
 	connectors: { open: false },
+	channels: { open: false },
 	models: { profiles: [] },
 	voice: { transcribe: false, speak: false },
 	voiceReplies: [],
@@ -191,14 +209,16 @@ export function reduce(state: DotState, action: DotAction): DotState {
 			// Closing drops the flow; reopening keeps a running one and leaves a finished one.
 			const keep = action.open && state.auth.flow !== undefined && state.auth.flow.done === undefined;
 			return {
-				...closeConnectors(closeProfiles(state, action.open), action.open),
+				...closeChannels(closeConnectors(closeProfiles(state, action.open), action.open), action.open),
 				auth: { ...state.auth, open: action.open, flow: keep ? state.auth.flow : undefined },
 			};
 		}
 		case "profiles":
-			return closeConnectors(openProfiles(state, action.open), action.open);
+			return closeChannels(closeConnectors(openProfiles(state, action.open), action.open), action.open);
 		case "connectors":
 			return openConnectors(state, action.open);
+		case "channels":
+			return openChannels(state, action.open);
 		case "connector_started":
 			return {
 				...openConnectors(state, true),
@@ -416,6 +436,21 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 					: state;
 			return addNotice(next, "error", message.message);
 		}
+		case "channels":
+			return {
+				...state,
+				channels: {
+					...state.channels,
+					list: message.channels,
+					...(message.open === undefined ? {} : { open: message.open }),
+				},
+			};
+		case "channel_allowlist":
+			return { ...state, channels: { ...state.channels, allowlist: message.numbers } };
+		case "channel_pair":
+			return { ...state, channels: { ...state.channels, pair: message.status } };
+		case "channel_verify_result":
+			return { ...state, channels: { ...state.channels, verify: message.results } };
 	}
 }
 
@@ -440,7 +475,9 @@ function closeProfiles(state: DotState, when: boolean): DotState {
 function openConnectors(state: DotState, open: boolean): DotState {
 	const flow = state.connectors.flow;
 	const keep = open && flow !== undefined && flow.done === undefined;
-	const others = open ? openProfiles({ ...state, auth: { ...state.auth, open: false } }, false) : state;
+	const others = open
+		? closeChannels(openProfiles({ ...state, auth: { ...state.auth, open: false } }, false), true)
+		: state;
 	const { imports, ...connectors } = state.connectors;
 	return {
 		...others,
@@ -457,6 +494,22 @@ function closeConnectors(state: DotState, when: boolean): DotState {
 	return when && state.connectors.open
 		? { ...state, connectors: { ...state.connectors, open: false } }
 		: state;
+}
+
+function closeChannels(state: DotState, when: boolean): DotState {
+	return when && state.channels.open ? { ...state, channels: { ...state.channels, open: false } } : state;
+}
+
+/** Channels share the screen with connectors, accounts, and profiles: opening one closes the others. */
+function openChannels(state: DotState, open: boolean): DotState {
+	const others = open
+		? closeChannels(
+				closeConnectors(openProfiles({ ...state, auth: { ...state.auth, open: false } }, false), true),
+				true,
+			)
+		: state;
+	const { verify: _verify, ...channels } = state.channels;
+	return { ...others, channels: { ...channels, open } };
 }
 
 /** Connector sign-ins reuse the sign-in messages, with flow ids of their own. */
