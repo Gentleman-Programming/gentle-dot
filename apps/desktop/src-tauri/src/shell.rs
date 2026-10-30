@@ -651,6 +651,8 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tau
             _ => menu.append(&PredefinedMenuItem::separator(app)?)?,
         }
     }
+    #[cfg(target_os = "macos")]
+    menu.append(&MenuItem::with_id(app, "updates", "Check for updates…", true, None::<&str>)?)?;
     TrayIconBuilder::with_id(TRAY)
         .icon(Image::from_bytes(TrayGlyph::Unavailable.image(Os::CURRENT))?)
         .icon_as_template(is_template(Os::CURRENT))
@@ -659,6 +661,11 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tau
         .show_menu_on_left_click(true)
         .on_menu_event(move |app, event| {
             let result = match event.id().as_ref() {
+                #[cfg(target_os = "macos")]
+                "updates" => {
+                    crate::updates::check_now(app.clone(), true);
+                    Ok(())
+                }
                 "open" => show_panel(app),
                 "new" => show_panel(app).and_then(|()| app.emit("dot://new-conversation", ()).map_err(err)),
                 "browser" => open_in_browser(app),
@@ -820,6 +827,8 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let handle = app.handle().clone();
+            #[cfg(target_os = "macos")]
+            app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
 
             // Computer control first: a daemon this app spawns gets the helper over its channel.
             let computer = computer::start(&handle, Arc::new(ShellWindows(handle.clone())));
@@ -887,6 +896,12 @@ pub fn run() {
                     "gentle-dot: native Wayland: the desktop places the windows and owns shortcuts; bind `gentle-dot --toggle` (docs/linux-testing.md)"
                 );
             }
+            #[cfg(target_os = "macos")]
+            crate::updates::start(handle.clone(), Arc::new(|app| {
+                computer::stop(app, Reason::Stopped);
+                app.state::<voice::VoiceInput>().cancel().ok();
+                app.state::<Shell>().daemon.stop();
+            }), Arc::new(|app| restart_daemon(app.clone())));
             // Started by the shortcut while not running: open the panel right away.
             let args: Vec<String> = std::env::args().collect();
             if platform::launch_request(&args) == LaunchRequest::Toggle {

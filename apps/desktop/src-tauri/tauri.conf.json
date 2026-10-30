@@ -30,5 +30,12 @@
 		"macOS": {
 			"minimumSystemVersion": "12.3"
 		}
+	},
+	"plugins": {
+		"updater": {
+			"pubkey": "",
+			"endpoints": [],
+			"requireSignedVersion": true
+		}
 	}
 }
