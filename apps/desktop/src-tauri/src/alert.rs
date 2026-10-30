@@ -1,6 +1,8 @@
 //! Native yes/no alerts owned by the app, never the webview, whose default button is the safe one
-//! (L75 A2). Only a click on the allowing button allows: the refusing button, Return, Escape,
-//! closing, aborting, an alert that cannot be shown, and any answer not recognized here refuse.
+//! (L75 A2). Refusing is the default: the refusing button, Return, Escape, closing, aborting, an
+//! alert that cannot be shown, and any answer not recognized here refuse. Allowing takes choosing
+//! the allowing button on purpose: a click, or where the platform lets the keyboard reach a button
+//! (Windows, below), moving the focus to it first.
 //!
 //! macOS: an `NSAlert` run modally on the main thread, asked from a worker thread that waits for
 //! the answer. The refusing button is added first (`NSAlertFirstButtonReturn`) with Return as its
@@ -10,8 +12,11 @@
 //! rfd shows a `CFUserNotification` and reports cancels and failures as `Cancel`, which the plugin
 //! turns into the second label of `OkCancelCustom` (T23c B1).
 //!
-//! Windows: a task dialog whose default button is the refusing one, so Return refuses; Escape and
-//! closing answer `IDCANCEL`, and only the allowing button's own id allows. The dialog plugin is
+//! Windows: a task dialog whose default button is the refusing one, so Return right after it opens
+//! refuses; Escape and closing answer `IDCANCEL`, and only the allowing button's own id allows. The
+//! keyboard can still choose the allowing button on purpose: moving the focus to it (Tab or the
+//! arrow keys) and pressing Return or Space allows, as a click does, so the dialog works without a
+//! mouse. The dialog plugin is
 //! not used there: rfd's task dialog makes its first button (the OK slot, the allowing label) the
 //! default, so Return would allow. It asks to be raised above the app being controlled when it
 //! opens. Another thread can ask an `OpenDialog` to refuse its dialog (an approval that timed out,
