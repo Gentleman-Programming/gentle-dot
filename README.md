@@ -106,7 +106,7 @@ Attach files with the paperclip, drag and drop, or paste. Images go straight to 
 
 ## Get started
 
-There are no published releases yet: build the installer for your system. You need Node.js 24 and pnpm; the macOS app also needs Rust and the Xcode command line tools, and the Linux packages need Docker.
+There are no published releases yet: build the installer for your system. You need Node.js 24 and pnpm; the macOS app also needs Rust and the Xcode command line tools, the Linux packages need Docker, and the Windows installer needs Rust, Visual Studio's C++ build tools and Go (see [docs/install.md](docs/install.md#windows)).
 
 ```sh
 pnpm install
@@ -117,6 +117,11 @@ pnpm package:mac
 # Linux: a .deb (amd64 also builds the Arch package)
 pnpm package:linux --arch arm64
 pnpm package:linux --arch amd64
+
+# Windows (x64): an NSIS installer. First build the native addon and set
+# GENTLE_DOT_BUILD_GO: see docs/install.md#build-the-installer-from-source
+pnpm package:runtime --target windows-x64
+pnpm package:windows
 ```
 
 Then follow **[docs/install.md](docs/install.md)**: opening an unsigned app on macOS 15 and later goes through **System Settings → Privacy & Security → Open Anyway**, and the guide covers permissions, where your data lives, and uninstalling.
