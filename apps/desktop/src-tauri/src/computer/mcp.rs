@@ -806,8 +806,10 @@ impl Helper {
                 let mut posted = 0;
                 let mut post_typed = |event, characters| -> Result<(), String> {
                     self.keyboard_target(posted > 0).and_then(|(_, current)| {
-                        if current != recipient {
+                        if current != recipient && posted > 0 {
                             Err("The app receiving the keys changed while typing, so the rest was not sent.".into())
+                        } else if current != recipient {
+                            Err("The app receiving the keys changed before typing, so nothing was sent.".into())
                         } else {
                             Ok(())
                         }
@@ -1481,6 +1483,8 @@ mod tests {
             if change_front {
                 // Nothing landed yet, so the screenshot guard can still say so.
                 assert_eq!(first_text(&result), "Panel is in front now, not the app of the latest screenshot, so nothing was sent. Take a screenshot first. Typing stopped after 0 of 5 characters.");
+            } else {
+                assert_eq!(first_text(&result), "The app receiving the keys changed before typing, so nothing was sent. Typing stopped after 0 of 5 characters.");
             }
             assert!(rig.desktop.events().is_empty());
         }
