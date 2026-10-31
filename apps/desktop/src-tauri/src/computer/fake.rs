@@ -21,6 +21,10 @@ pub struct FakeDesktop {
     pub focused_app: Mutex<Option<AppIdentity>>,
     /// Changes the foreground app after this many recorded posts; disabled by default.
     pub front_after_posts: Mutex<Option<(usize, AppIdentity)>>,
+    /// Apps that run as administrator, refused for keyboard input.
+    pub elevated: Mutex<Vec<i32>>,
+    /// Marks an app as elevated after this many recorded posts; disabled by default.
+    pub elevated_after_posts: Mutex<Option<(usize, i32)>>,
     /// What comes to the front while the next capture is taken (once).
     pub front_during_capture: Mutex<Option<AppIdentity>>,
     pub focused_after_posts: Mutex<Option<(usize, AppIdentity)>>,
@@ -54,6 +58,8 @@ impl Default for FakeDesktop {
             frontmost: Mutex::new(Some(safari)),
             focused_app: Mutex::new(None),
             front_after_posts: Mutex::new(None),
+            elevated: Mutex::new(Vec::new()),
+            elevated_after_posts: Mutex::new(None),
             front_during_capture: Mutex::new(None),
             focused_after_posts: Mutex::new(None),
             during_focused_element: Mutex::new(None),
@@ -78,6 +84,11 @@ impl FakeDesktop {
 }
 
 impl Desktop for FakeDesktop {
+    fn keyboard_refusal(&self, app: &AppIdentity) -> Option<String> {
+        self.elevated.lock().unwrap().contains(&app.pid)
+            .then(|| format!("{} runs as administrator, so Gentle Dot cannot send it keys.", app.name))
+    }
+
     fn permissions(&self) -> Permissions {
         *self.permissions.lock().unwrap()
     }
@@ -101,6 +112,11 @@ impl Desktop for FakeDesktop {
             events.push(event.clone());
             events.len()
         };
+        if let Some((posts, pid)) = *self.elevated_after_posts.lock().unwrap() {
+            if count == posts {
+                self.elevated.lock().unwrap().push(pid);
+            }
+        }
         if let Some((posts, app)) = self.front_after_posts.lock().unwrap().as_ref() {
             if count == *posts {
                 *self.frontmost.lock().unwrap() = Some(app.clone());
