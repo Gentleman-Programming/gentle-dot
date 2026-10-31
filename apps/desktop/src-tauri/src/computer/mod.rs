@@ -22,14 +22,20 @@ pub mod risk;
 pub mod server;
 pub mod session;
 pub mod windows;
+// The Windows desktop backend, built in parts: input and capture now, then apps, then UI
+// Automation and the `Desktop` implementation. Nothing calls it until that last part, which
+// removes this allow.
+#[cfg(windows)]
+#[allow(dead_code)]
+mod win;
 // The Windows desktop's pure parts, tested everywhere: UI Automation element mapping, which
 // processes are apps, and what Windows posts for each input event. The Windows desktop backend
-// that uses them widens these to `any(windows, test)`.
+// widens each to `any(windows, test)` once it uses it.
 #[cfg(test)]
 pub mod winaccess;
 #[cfg(test)]
 pub mod winapps;
-#[cfg(test)]
+#[cfg(any(windows, test))]
 pub mod winput;
 pub mod working;
 
