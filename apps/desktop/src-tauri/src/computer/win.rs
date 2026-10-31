@@ -909,24 +909,13 @@ fn app_path(name: &str) -> Option<String> {
     None
 }
 
-/// The program `name` in an absolute folder of PATH (never the current folder).
-fn search_exe(name: &str) -> Option<String> {
-    let file = with_exe(name);
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(&file))
-        .find(|candidate| candidate.is_file())
-        .map(|found| found.to_string_lossy().into_owned())
-}
-
 fn off_limits(label: &str) -> String {
     format!("{label} is off limits, so it was not opened.")
 }
 
 /// Opens an app, or brings it forward when it already runs, the way `open -a` does on macOS: by a
 /// running app's name or executable, else a Start menu shortcut with that name, else the program
-/// App Paths or PATH names. Whatever the route, only a program on a local drive is started, with
+/// App Paths names. Whatever the route, only a program on a local drive is started, with
 /// no arguments, and never one the blocklist names.
 pub fn open_app(name: &str) -> Result<(), String> {
     let request = request(name)?;
@@ -964,12 +953,13 @@ pub fn open_app(name: &str) -> Result<(), String> {
 }
 
 /// The program a bare app name opens: a Start menu shortcut with that name, else the program App
-/// Paths registers for it, else the program of that name in PATH.
+/// Paths registers for it. PATH is never searched, so a shell tool is not opened by its file name
+/// (`cmd`, `curl`); an app that registers itself in App Paths still is, as on macOS.
 fn resolve_name(wanted: &str, shortcuts: &[String]) -> Result<String, String> {
     match shortcut_named(wanted, shortcuts) {
         Some(shortcut) => shortcut_target(shortcut),
         None => {
-            let found = app_path(wanted).or_else(|| search_exe(wanted));
+            let found = app_path(wanted);
             executable_target(&found.ok_or_else(|| format!("cannot find an app named `{wanted}`"))?, "")
         }
     }
