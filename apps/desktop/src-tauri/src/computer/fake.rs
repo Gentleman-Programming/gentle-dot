@@ -115,8 +115,10 @@ impl Desktop for FakeDesktop {
     }
 
     fn post_typed(&self, event: &InputEvent, recipient: &KeyboardRecipient) -> Result<(), String> {
+        // Only posts that went through, so this stays in step with `events`.
+        self.post(event)?;
         self.typed_posts.lock().unwrap().push((event.clone(), *recipient));
-        self.post(event)
+        Ok(())
     }
 
     fn list_apps(&self) -> Result<Vec<AppInfo>, String> {

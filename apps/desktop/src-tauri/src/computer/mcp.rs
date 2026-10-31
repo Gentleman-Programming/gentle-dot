@@ -71,7 +71,7 @@ risky actions ask the user to confirm, and some apps (Settings, Windows Security
 
 /// The `key` and `open_app` tool descriptions, and the system an `open_app` confirmation names.
 #[cfg(not(windows))]
-const KEY_DESCRIPTION: &str = "Press a key combo in the frontmost app, for example `cmd+shift+t`, `return`, or `esc`.";
+const KEY_DESCRIPTION: &str = "Press a key combo in the frontmost app, for example `shift+cmd+t`, `return`, or `esc`.";
 #[cfg(windows)]
 const KEY_DESCRIPTION: &str =
     "Press a key combo in the frontmost app, for example `ctrl+shift+t`, `return`, or `esc` (`cmd` presses Ctrl).";
@@ -573,14 +573,16 @@ impl Helper {
 
     /// The frontmost app and the app owning the focused element (they differ for a
     /// non-activating panel), each refused when blocked. The one receiving the keys, for messages.
-    fn keyboard_target(&self) -> Result<(String, KeyboardRecipient), String> {
+    /// `sent` says whether part of the input already landed, so a refusal never claims nothing was sent.
+    fn keyboard_target(&self, sent: bool) -> Result<(String, KeyboardRecipient), String> {
         let front = self.desktop.frontmost_app().ok_or("Cannot tell which app is in front.")?;
         self.refuse_blocked(&front)?;
         // The user may have switched apps since the agent last looked: it looks again first.
         if *lock(&self.seen_front) != Some(front.pid) {
             return Err(format!(
-                "{} is in front now, not the app of the latest screenshot, so nothing was sent. Take a screenshot first.",
-                front.name
+                "{} is in front now, not the app of the latest screenshot, so {}. Take a screenshot first.",
+                front.name,
+                if sent { "the rest was not sent" } else { "nothing was sent" }
             ));
         }
         let focused = self.desktop.focused_app().filter(|focused| focused.pid != front.pid);
@@ -794,7 +796,7 @@ impl Helper {
                 Ok((format!("{action}: done."), SETTLE_MS))
             }
             Tool::Type { text: typed } => {
-                let (target, recipient) = self.keyboard_target()?;
+                let (target, recipient) = self.keyboard_target(false)?;
                 let typed = typed.replace("\r\n", "\n").replace('\r', "\n");
                 let focus = self.desktop.focused_element();
                 let action = format!("Type {} characters", typed.chars().count());
@@ -803,7 +805,7 @@ impl Helper {
                 let total = typed.chars().count();
                 let mut posted = 0;
                 let mut post_typed = |event, characters| -> Result<(), String> {
-                    self.keyboard_target().and_then(|(_, current)| {
+                    self.keyboard_target(posted > 0).and_then(|(_, current)| {
                         if current != recipient {
                             Err("The app receiving the keys changed while typing, so the rest was not sent.".into())
                         } else {
@@ -837,7 +839,7 @@ impl Helper {
                 Ok((format!("{action} in {target}: done."), SETTLE_MS))
             }
             Tool::Key { combo } => {
-                let (target, recipient) = self.keyboard_target()?;
+                let (target, recipient) = self.keyboard_target(false)?;
                 let focus = self.desktop.focused_element();
                 let act = if combo.is_return() {
                     Act::Return(focus.as_ref())
@@ -850,7 +852,7 @@ impl Helper {
                 self.confirm_if_risky(assess(act, intent), &action, &target)?;
                 // Reading the focus or a confirmation can change the app in front: the key goes only
                 // to the recipient approved above, as each typed chunk does.
-                let (_, current) = self.keyboard_target()?;
+                let (_, current) = self.keyboard_target(false)?;
                 if current != recipient {
                     return Err("The app receiving the keys changed before the key was sent, so it was not sent.".into());
                 }
@@ -1418,8 +1420,7 @@ mod tests {
         *rig.desktop.front_after_posts.lock().unwrap() = Some((1, app(400, "com.apple.mail", "Mail")));
         let result = rig.call("type", json!({"text": "a".repeat(45)}));
         assert!(is_error(&result), "{result}");
-        assert!(first_text(&result).contains("Mail is in front now, not the app of the latest screenshot, so nothing was sent. Take a screenshot first."), "{result}");
-        assert!(first_text(&result).contains("Typing stopped after 20 of 45 characters."), "{result}");
+        assert_eq!(first_text(&result), "Mail is in front now, not the app of the latest screenshot, so the rest was not sent. Take a screenshot first. Typing stopped after 20 of 45 characters.");
         assert_eq!(rig.desktop.events(), vec![InputEvent::Text("a".repeat(20))]);
     }
 
@@ -1430,7 +1431,7 @@ mod tests {
         *rig.desktop.front_after_posts.lock().unwrap() = Some((1, app(400, "com.apple.mail", "Mail")));
         let result = rig.call("type", json!({"text": "🦀é\nsecond"}));
         assert!(is_error(&result), "{result}");
-        assert_eq!(first_text(&result), "Mail is in front now, not the app of the latest screenshot, so nothing was sent. Take a screenshot first. Typing stopped after 2 of 9 characters.");
+        assert_eq!(first_text(&result), "Mail is in front now, not the app of the latest screenshot, so the rest was not sent. Take a screenshot first. Typing stopped after 2 of 9 characters.");
         assert_eq!(rig.desktop.events(), vec![InputEvent::Text("🦀é".into())]);
     }
 
@@ -1477,6 +1478,10 @@ mod tests {
             let result = rig.call("type", json!({"text": "hello"}));
             assert!(is_error(&result), "{result}");
             assert!(first_text(&result).ends_with("Typing stopped after 0 of 5 characters."), "{result}");
+            if change_front {
+                // Nothing landed yet, so the screenshot guard can still say so.
+                assert_eq!(first_text(&result), "Panel is in front now, not the app of the latest screenshot, so nothing was sent. Take a screenshot first. Typing stopped after 0 of 5 characters.");
+            }
             assert!(rig.desktop.events().is_empty());
         }
     }
@@ -1544,6 +1549,8 @@ mod tests {
             assert!(is_error(&result), "{result}");
             assert_eq!(first_text(&result), format!("Native input failed. {expected}"));
             assert_eq!(rig.desktop.events(), sent);
+            let typed: Vec<InputEvent> = rig.desktop.typed_posts.lock().unwrap().iter().map(|(event, _)| event.clone()).collect();
+            assert_eq!(typed, sent);
         }
     }
 
