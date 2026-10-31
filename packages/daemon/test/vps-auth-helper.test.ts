@@ -142,7 +142,16 @@ describe("server mode: sign-in runs as the engine's user (S25.8, B1)", () => {
 		it("signs in, lists, uses the key for voice, and signs out through the helper", async () => {
 			const s = await setup(vpsAs(own));
 			expect((await s.signIn("openai", "sk-helper-test-not-real")).ok).toBe(true);
-			const auth = JSON.parse(readFileSync(join(s.agentHome, "auth.json"), "utf8"));
+			// The helper delegates the write to Pi's ModelRuntime, whose auth.json write is not atomic:
+			// a read between creation and flush sees an empty file. The sign-in contract is eventual
+			// visibility of the key, so a transient empty or partial read is retried, not failed.
+			const auth = await waitFor(() => {
+				try {
+					return JSON.parse(readFileSync(join(s.agentHome, "auth.json"), "utf8"));
+				} catch {
+					return undefined;
+				}
+			});
 			expect(auth.openai).toMatchObject({ type: "api_key", key: "sk-helper-test-not-real" });
 			const listed = await s.accounts();
 			expect(listed.providers.find((p) => p.id === "openai")).toMatchObject({
