@@ -47,6 +47,7 @@ import { VoiceService } from "./voice.ts";
 import { CONNECTOR_HOME, chownHandOver, prepareVpsLayout, type VpsOptions } from "./vps.ts";
 import { PIN_FILE, PinGate } from "./web-pin.ts";
 import { identityArgs } from "./white-label.ts";
+import { isProductionWindowsAppChannel } from "./windows-app-channel.ts";
 
 export interface DaemonOptions {
 	port: number;
@@ -165,6 +166,15 @@ export function applyMemoryMode(base: NodeJS.ProcessEnv, memory: MemoryMode): No
 }
 
 export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
+	// A generic Duplex or fd number is not Windows descendant-exclusion admission.
+	// Only actual main-thread/native ownership transfer on the production startup
+	// path admits a requested channel, before privateMemory can spawn PowerShell.
+	if (
+		process.platform === "win32" &&
+		options.appChannel &&
+		!isProductionWindowsAppChannel(options.appChannel)
+	)
+		throw new Error("Windows app channel requires validated production ownership before startup");
 	const log = options.log ?? (() => {});
 	// One daemon per data folder (W24): the port bind only stops a second daemon on the same port, so
 	// the folders the daemon owns are claimed here, before anything is written into them.
@@ -184,6 +194,16 @@ async function startClaimedDaemon(
 	log: (line: string) => void,
 	claims: string[],
 ): Promise<DotDaemon> {
+	const openApp = () =>
+		options.appChannel
+			? new AppChannel(options.appChannel, {
+					log,
+					...(options.approvalWaitMs ? { approvalWaitMs: options.approvalWaitMs } : {}),
+				})
+			: undefined;
+	// Observe Windows transport errors during asynchronous memory bootstrap.
+	// Unix retains its original channel-construction timing below.
+	const earlyWindowsApp = process.platform === "win32" ? openApp() : undefined;
 	const token = ensureToken(options.dataDir);
 	const vps = options.vps;
 	// Server mode (S25.8): the daemon's files stay its own, the engine's folders become the engine's,
@@ -220,12 +240,7 @@ async function startClaimedDaemon(
 		agentEnv.GENTLE_PI_CONFIG_HOME = join(options.dataDir, "gentle-ai");
 	}
 	const agentHome = options.agentHome ?? resolveAgentHome(process.env, options.dataDir);
-	const app = options.appChannel
-		? new AppChannel(options.appChannel, {
-				log,
-				...(options.approvalWaitMs ? { approvalWaitMs: options.approvalWaitMs } : {}),
-			})
-		: undefined;
+	const app = earlyWindowsApp ?? openApp();
 	// The approved connectors are read once, here; the engine cannot change them (docs/design.md).
 	// Their secrets come from the app's secure store over its channel, and only into memory (S25.5).
 	const connectorStore = new ConnectorStore({
