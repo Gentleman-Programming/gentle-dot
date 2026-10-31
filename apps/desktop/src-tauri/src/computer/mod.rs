@@ -22,6 +22,15 @@ pub mod risk;
 pub mod server;
 pub mod session;
 pub mod windows;
+// The Windows desktop's pure parts, tested everywhere: UI Automation element mapping, which
+// processes are apps, and what Windows posts for each input event. The Windows desktop backend
+// that uses them widens these to `any(windows, test)`.
+#[cfg(test)]
+pub mod winaccess;
+#[cfg(test)]
+pub mod winapps;
+#[cfg(test)]
+pub mod winput;
 pub mod working;
 
 use blocklist::AppIdentity;

@@ -71,6 +71,8 @@ pub struct ApprovalDialog {
     pub title: String,
     /// The sentence, every field with its (possibly cut) value, and the timeout note.
     pub message: String,
+    /// When the approval is declined: a dialog still up then refuses itself (Windows).
+    pub deadline: Option<Instant>,
 }
 
 impl ApprovalDialog {
@@ -103,6 +105,7 @@ impl ApprovalDialog {
 If you do not answer within {}, it is declined.",
                 spell(timeout)
             ),
+            deadline: None,
         }
     }
 }
@@ -197,7 +200,7 @@ impl Approvals {
     /// Asks the user. Blocks until the answer or the timeout, so call it off the main thread.
     pub fn confirm(&self, request: &ApprovalRequest) -> Decision {
         let deadline = Instant::now() + self.timeout;
-        let dialog = ApprovalDialog::new(request, self.timeout);
+        let dialog = ApprovalDialog { deadline: Some(deadline), ..ApprovalDialog::new(request, self.timeout) };
         let Some(ticket) = self.gate.acquire(deadline) else {
             return Decision::Declined;
         };
