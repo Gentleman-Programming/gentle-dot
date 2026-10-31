@@ -35,12 +35,12 @@ describe("a subject Windows does not have", () => {
 		expect(fd3).toBe(
 			absenceLine(
 				"the app channel on fd 3 (S25.1)",
-				"Windows inherits no fd 3, and the app's channel there is the named pipe it names in " +
-					"GENTLE_DOT_CHANNEL_PIPE (W7); app-channel-pipe.test.ts covers it on every platform",
+				"Windows does not take the inherited POSIX fd 3 path; its channel is adopted natively " +
+					"(covered by the windows-app-channel suites)",
 			),
 		);
 		expect(fd3).toContain("platform-absence: skipping the app channel on fd 3 (S25.1)");
-		expect(fd3).toContain("app-channel-pipe.test.ts");
+		expect(fd3).toContain("windows-app-channel");
 
 		stderr.mockClear();
 		expect(hasServerMode("server mode: the engine as another user (S25.8)", "win32")).toBe(false);

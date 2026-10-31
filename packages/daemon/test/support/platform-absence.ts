@@ -5,9 +5,10 @@
 // a probe for a privilege the host may or may not have). This file is for a *subject that does not
 // exist* on the host: there is nothing to substitute, so the suite skips and says so by name.
 //
-// - The app's channel as an inherited **fd 3** (S25.1). Windows inherits no such descriptor: the app
-//   creates a named pipe before it spawns the daemon and hands the name over in
-//   `GENTLE_DOT_CHANNEL_PIPE` (W7), which `app-channel-pipe.test.ts` covers on every platform.
+// - The app's channel as an inherited **fd 3** (S25.1). Windows hands fd 3 through its native
+//   owned launch, not the inherited POSIX socket: `cli.ts` does not take the `inheritedAppSocket`
+//   path there, and the native adoption is covered by the windows-app-channel suites and
+//   `windows-app-channel-addon.test.ts`.
 // - **Server mode** (S25.8). The daemon runs as root and takes the engine's user for a synchronous
 //   call with `setuid`/`setegid`; Windows has no such call, so `engineAccess` refuses there and the
 //   daemon never enters server mode. The desktop path (`directAccess`) is what Windows uses.
@@ -20,8 +21,8 @@
 // on any machine rather than only the one this host happens to be (W23's pattern).
 
 const ABSENT_FD3 =
-	"Windows inherits no fd 3, and the app's channel there is the named pipe it names in " +
-	"GENTLE_DOT_CHANNEL_PIPE (W7); app-channel-pipe.test.ts covers it on every platform";
+	"Windows does not take the inherited POSIX fd 3 path; its channel is adopted natively " +
+	"(covered by the windows-app-channel suites)";
 const ABSENT_SERVER_MODE =
 	"Windows has no setuid/setegid, so the daemon never takes the engine's user; it runs the " +
 	"desktop path (directAccess) instead";
@@ -37,7 +38,8 @@ function announce(where: string, reason: string): void {
 
 /**
  * Whether the app's channel arrives as an inherited fd 3 (S25.1).
- * On Windows it does not: the channel is a named pipe, so the suite skips and says what covers it.
+ * On Windows it does not: the channel arrives through the native owned launch and is adopted by
+ * the addon, so the suite skips and says what covers it.
  */
 export function hasInheritedAppChannel(where: string, host: NodeJS.Platform = process.platform): boolean {
 	if (host !== "win32") return true;
