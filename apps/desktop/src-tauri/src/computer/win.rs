@@ -1059,9 +1059,6 @@ mod tests {
         assert_eq!(identity(-5).name, "process -5", "an unknown process keeps its number");
     }
 
-    #[test]
-    #[ignore = "interactive Windows desktop: run in the user's own session"]
-
     /// T48: a bare name never resolves through PATH, so shell tools in System32 are not opened by
     /// name (`cmd.exe` and `curl.exe` are in System32, which is in PATH, and neither is in App
     /// Paths). No shortcut is passed, so only App Paths and PATH are asked.
