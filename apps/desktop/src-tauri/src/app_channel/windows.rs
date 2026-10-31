@@ -1,371 +1,380 @@
-//! The Windows transport for the app's private channel: a named pipe whose credential is the
-//! connecting process's PID matched against the daemon this app spawned (S25.1, W7b).
-//!
-//! The primitives are adapted from the credited draft `Row0902/gentle-dot#2`
-//! (`isolated_bootstrap_windows.rs`, `app_channel_windows.rs`): a single-instance endpoint that is
-//! non-inheritable from creation, per-direction `OVERLAPPED` events with a dedicated reader/writer
-//! pair, and `CancelIoEx` cancellation that serializes with submission under a mutex and never
-//! blocks the canceling thread. Unlike the draft, the pipe is created with default security
-//! attributes (the handle is non-inheritable), and the credential is the accepted connection's PID
-//! checked against the retained child. The pipe's name is not a secret; a same-user process may
-//! find it in `\\.\pipe\` and connect, only to be refused and disconnected.
+//! Connected, dedicated Windows channel. No name is returned to the launcher.
+//! Tests below require Windows; source presence is not native execution evidence.
 
 use std::io::{self, Read, Write};
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::ptr;
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
-use windows_sys::Win32::Foundation::{
-    GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT, ERROR_BROKEN_PIPE,
-    ERROR_IO_PENDING, ERROR_NOT_FOUND, ERROR_OPERATION_ABORTED, ERROR_PIPE_CONNECTED,
-};
-use windows_sys::Win32::Storage::FileSystem::{
-    ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX,
-};
-use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
-use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
-    PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
-};
-use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+use std::ptr::{null, null_mut};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use windows_sys::Win32::Foundation::*;
+use windows_sys::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
+use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER};
+use windows_sys::Win32::Storage::FileSystem::*;
+use windows_sys::Win32::System::IO::*;
+use windows_sys::Win32::System::Pipes::*;
+use windows_sys::Win32::System::Threading::{CreateEventW, GetCurrentProcess, GetCurrentProcessId, OpenProcessToken};
 
-/// The pipe lives in the `\\.\pipe\` namespace; the suffix is 16 random bytes as 32 lowercase hex.
-const PREFIX: &str = r"\\.\pipe\gentle-dot-";
+/// The process user's SID as owner and sole grantee. Not OWNER RIGHTS ("OW"): under an
+/// elevated token the default owner can be BUILTIN\Administrators, not the user.
+fn pipe_sddl(user: &str) -> String { format!("O:{user}D:P(A;;GA;;;{user})") }
 
-fn wide(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(Some(0)).collect()
-}
-
-fn random_name() -> io::Result<String> {
-    let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes).map_err(|error| io::Error::other(error.to_string()))?;
-    let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    Ok(format!("{PREFIX}{suffix}"))
-}
-
-fn checked(value: i32) -> io::Result<()> {
-    if value == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-fn timed_out() -> io::Error {
-    io::Error::new(io::ErrorKind::TimedOut, "the assistant did not connect to the channel in time")
-}
-
-/// The app's single-instance named pipe, created before the daemon is spawned so no other process
-/// can take the name. It is non-inheritable from creation (default security attributes).
-pub struct ServerEndpoint {
-    handle: OwnedHandle,
-    name: String,
-}
-
-impl ServerEndpoint {
-    /// Creates a fresh endpoint with a random name.
-    pub fn create() -> io::Result<Self> {
-        let name = random_name()?;
-        let name_wide = wide(&name);
-        // SAFETY: `name_wide` is a NUL-terminated UTF-16 buffer alive through the call. A null
-        // `lpSecurityAttributes` gives the handle the creator's default (non-inheritable) security.
-        let handle = unsafe {
-            CreateNamedPipeW(
-                name_wide.as_ptr(),
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                1,
-                4096,
-                4096,
-                0,
-                ptr::null(),
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `handle` is a fresh, non-null pipe handle this structure now owns.
-        Ok(Self { handle: unsafe { OwnedHandle::from_raw_handle(handle) }, name })
-    }
-
-    /// The full `\\.\pipe\…` name, handed to the daemon in `GENTLE_DOT_CHANNEL_PIPE`.
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// Accepts the one connection whose client PID is `pid`, while `alive()` reports the child still
-    /// runs and before `deadline`. Any other connection (for example a same-user process that
-    /// guessed the name) is disconnected and refused; the endpoint then waits again.
-    pub fn accept(
-        self,
-        pid: u32,
-        alive: impl Fn() -> bool + Send + 'static,
-        deadline: Instant,
-    ) -> io::Result<Connected> {
-        let mut handle = self.handle;
-        loop {
-            if !alive() {
-                return Err(io::Error::new(
-                    io::ErrorKind::ConnectionAborted,
-                    "the assistant exited before it connected to the channel",
-                ));
-            }
-            if Instant::now() >= deadline {
-                return Err(timed_out());
-            }
-            connect(&handle, deadline, &alive)?;
-            let mut client_pid = 0u32;
-            // SAFETY: `handle` is a connected server pipe handle and the out-pointer is valid.
-            if unsafe { GetNamedPipeClientProcessId(handle.as_raw_handle(), &mut client_pid) } == 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if client_pid == pid {
-                return Connected::new(handle);
-            }
-            // Retain a duplicate for the next accept, then disconnect the rejected instance. Both
-            // handles name the same instance, so the next `ConnectNamedPipe` reuses it.
-            let next = handle.try_clone()?;
-            // SAFETY: `handle` owns a connected server pipe instance; the clone stays open.
-            unsafe { DisconnectNamedPipe(handle.as_raw_handle()) };
-            handle = next;
-        }
-    }
-}
-
-/// Waits for one client to connect. The `OVERLAPPED` and its event stay alive until
-/// `GetOverlappedResult` reports settlement, even after a cancellation.
-fn connect(
-    handle: &OwnedHandle,
-    deadline: Instant,
-    alive: &(impl Fn() -> bool + Send + 'static),
-) -> io::Result<()> {
-    // SAFETY: an unnamed, manual-reset event.
-    let event = unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) };
-    if event.is_null() {
+/// String form of the process token's user SID (TokenUser).
+fn current_user_sid() -> io::Result<String> {
+    let mut token = null_mut();
+    // SAFETY: pseudo-handle for this process and a writable output; `owned` takes the token.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: `event` is a fresh event handle this scope now owns.
-    let event = unsafe { OwnedHandle::from_raw_handle(event) };
-    let mut operation: OVERLAPPED = unsafe { std::mem::zeroed() };
-    operation.hEvent = event.as_raw_handle();
-    let raw = handle.as_raw_handle();
-    // SAFETY: `raw` is a server pipe handle and `operation` is a valid OVERLAPPED alive here.
-    let started = unsafe { ConnectNamedPipe(raw, &mut operation) };
-    if started != 0 {
-        return Ok(());
+    let token = owned(token)?;
+    let mut size = 0;
+    // SAFETY: size query with no buffer; the expected failure reports the required size.
+    unsafe { GetTokenInformation(token.as_raw_handle(), TokenUser, null_mut(), 0, &mut size) };
+    if (size as usize) < std::mem::size_of::<TOKEN_USER>() { return Err(io::Error::last_os_error()); }
+    // usize words keep TOKEN_USER and its SID pointer suitably aligned.
+    let mut words = vec![0usize; (size as usize).div_ceil(std::mem::size_of::<usize>())];
+    // SAFETY: the buffer holds `size` bytes, aligned for TOKEN_USER.
+    if unsafe { GetTokenInformation(token.as_raw_handle(), TokenUser, words.as_mut_ptr().cast(), size, &mut size) } == 0 {
+        return Err(io::Error::last_os_error());
     }
-    // SAFETY: reads this thread's last-error code.
-    match unsafe { GetLastError() } {
-        ERROR_PIPE_CONNECTED => return Ok(()),
-        ERROR_IO_PENDING => {}
-        _ => return Err(io::Error::last_os_error()),
+    // SAFETY: GetTokenInformation filled a TOKEN_USER whose SID points into `words`.
+    let sid = unsafe { (*words.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+    let mut text = null_mut();
+    // SAFETY: valid SID from the token; LocalFree releases the converted string below.
+    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 { return Err(io::Error::last_os_error()); }
+    let mut length = 0;
+    // SAFETY: ConvertSidToStringSidW returns a NUL-terminated wide string.
+    while unsafe { *text.add(length) } != 0 { length += 1; }
+    let user = String::from_utf16(unsafe { std::slice::from_raw_parts(text, length) });
+    // SAFETY: allocation returned by ConvertSidToStringSidW, freed exactly once.
+    unsafe { LocalFree(text.cast()) };
+    user.map_err(|_| io::Error::other("invalid user SID"))
+}
+
+struct Descriptor(*mut std::ffi::c_void);
+impl Descriptor {
+    fn owner_only() -> io::Result<Self> {
+        let text: Vec<u16> = pipe_sddl(&current_user_sid()?).encode_utf16().chain(Some(0)).collect();
+        let mut descriptor = null_mut();
+        // SAFETY: terminated SDDL and writable output; LocalFree owns the resulting allocation.
+        if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(text.as_ptr(), SDDL_REVISION_1, &mut descriptor, null_mut()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self(descriptor))
     }
-    loop {
-        if !alive() {
-            cancel(raw, &operation);
-            return Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                "the assistant exited before it connected to the channel",
-            ));
+}
+impl Drop for Descriptor {
+    fn drop(&mut self) {
+        // SAFETY: allocation returned by the SDDL converter, freed exactly once.
+        unsafe { LocalFree(self.0) };
+    }
+}
+
+/// Kept non-inheritable until the next owned launcher explicitly transfers it.
+/// libuv's Windows pipe path uses FILE_FLAG_OVERLAPPED (v1.51.0 src/win/pipe.c,
+/// uv__create_stdio_pipe_pair); no synchronous std::fs::File adapter is valid here.
+/// Node adoption, CRT fd3 packing and descendant exclusion are NOT implemented by this type.
+pub struct ChildEndpoint(OwnedHandle);
+#[cfg(test)]
+impl ChildEndpoint {
+    pub(super) fn into_test_stream(self) -> ChannelStream { ChannelStream::new(self.0) }
+}
+impl AsRawHandle for ChildEndpoint {
+    fn as_raw_handle(&self) -> RawHandle { self.0.as_raw_handle() }
+}
+
+struct State {
+    handle: Option<OwnedHandle>,
+    closed: bool,
+    active: usize,
+    close_error: Option<i32>,
+}
+struct Shared {
+    state: Mutex<State>,
+    drained: Condvar,
+    #[cfg(test)]
+    cancel_error: std::sync::atomic::AtomicI32,
+    #[cfg(test)]
+    cancel_barriers: Mutex<Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>>,
+}
+#[derive(Clone)]
+pub struct ChannelStream(Arc<Shared>);
+impl ChannelStream {
+    fn new(handle: OwnedHandle) -> Self {
+        Self(Arc::new(Shared {
+            state: Mutex::new(State { handle: Some(handle), closed: false, active: 0, close_error: None }),
+            drained: Condvar::new(),
+            #[cfg(test)]
+            cancel_error: std::sync::atomic::AtomicI32::new(0),
+            #[cfg(test)]
+            cancel_barriers: Mutex::new(None),
+        }))
+    }
+    pub fn try_clone(&self) -> io::Result<Self> {
+        if self.0.state.lock().unwrap_or_else(PoisonError::into_inner).closed {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "channel closed"));
         }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            cancel(raw, &operation);
-            return Err(timed_out());
-        }
-        let millis = remaining.min(Duration::from_millis(10)).as_millis().max(1) as u32;
-        // SAFETY: waiting on an event handle this scope owns, bounded by `millis`.
-        match unsafe { WaitForSingleObject(event.as_raw_handle(), millis) } {
-            WAIT_OBJECT_0 => {
-                let mut transferred = 0u32;
-                // SAFETY: the operation settled; `operation` is still valid.
-                checked(unsafe { GetOverlappedResult(raw, &operation, &mut transferred, 1) })?;
-                return Ok(());
+        Ok(self.clone())
+    }
+    pub(super) fn close_error(&self) -> Option<i32> {
+        self.0.state.lock().unwrap_or_else(PoisonError::into_inner).close_error
+    }
+    #[cfg(test)]
+    pub(super) fn inject_cancel_error(&self, code: i32) {
+        self.0.cancel_error.store(code, std::sync::atomic::Ordering::SeqCst);
+    }
+    #[cfg(test)]
+    #[allow(dead_code)] // through AppChannel::test_close_barriers, for the lifecycle tests
+    pub(super) fn close_barriers(&self, entered: Arc<std::sync::Barrier>, release: Arc<std::sync::Barrier>) {
+        *self.0.cancel_barriers.lock().unwrap() = Some((entered, release));
+    }
+    #[cfg(test)]
+    pub(super) fn active_operations(&self) -> usize {
+        self.0.state.lock().unwrap().active
+    }
+    fn cancel(&self, handle: HANDLE) -> io::Result<()> {
+        #[cfg(test)]
+        {
+            let barriers = self.0.cancel_barriers.lock().unwrap().take();
+            if let Some((entered, release)) = barriers {
+                entered.wait();
+                release.wait();
             }
-            WAIT_TIMEOUT => {}
-            _ => {
-                let error = io::Error::last_os_error();
-                cancel(raw, &operation);
+            let code = self.0.cancel_error.load(std::sync::atomic::Ordering::SeqCst);
+            if code != 0 { return Err(io::Error::from_raw_os_error(code)); }
+        }
+        // SAFETY: caller retains a live owned handle under the initiation mutex.
+        if unsafe { CancelIoEx(handle, null()) } == 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_NOT_FOUND as i32) { return Err(error); }
+        }
+        Ok(())
+    }
+    /// Success means cancellation completions were drained and the sole handle released.
+    /// Failure means logically closed ONLY: handle, active buffers and OVERLAPPED operations
+    /// remain owned/live. The controller must retain the channel and retry checked shutdown;
+    /// failure is not EOF, native closure, or permission to forget the unfinished operations.
+    /// No writer mutex is needed to interrupt a blocked write.
+    pub fn shutdown(&self) -> io::Result<()> {
+        self.shutdown_until(std::time::Instant::now() + std::time::Duration::from_secs(2))
+    }
+    fn shutdown_until(&self, deadline: std::time::Instant) -> io::Result<()> {
+        let mut state = self.0.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.closed = true;
+        if let Some(handle) = &state.handle {
+            if let Err(error) = self.cancel(handle.as_raw_handle()) {
+                state.close_error = Some(error.raw_os_error().unwrap_or(ERROR_GEN_FAILURE as i32));
                 return Err(error);
             }
         }
-    }
-}
-
-/// Requests cancellation of an in-flight `ConnectNamedPipe` and waits for it to settle, so the
-/// stack `OVERLAPPED` and its event outlive the operation.
-fn cancel(handle: HANDLE, operation: &OVERLAPPED) {
-    // SAFETY: requesting cancellation of this thread's overlapped I/O on `handle`.
-    unsafe { CancelIoEx(handle, operation) };
-    let mut transferred = 0u32;
-    // SAFETY: `operation` is still a valid, live OVERLAPPED on this stack.
-    unsafe { GetOverlappedResult(handle, operation, &mut transferred, 1) };
-}
-
-/// An accepted, PID-verified pipe connection split into independently signaled I/O halves.
-pub struct Connected {
-    pub(crate) reader: PipeReader,
-    pub(crate) writer: PipeWriter,
-    pub(crate) read_cancel: PipeCancellation,
-    pub(crate) write_cancel: PipeCancellation,
-}
-
-impl Connected {
-    fn new(handle: OwnedHandle) -> io::Result<Self> {
-        let reader_event = direction_event()?;
-        let writer_event = direction_event()?;
-        let pipe = Arc::new(handle);
-        let reader = PipeReader(PipeDirection { pipe: pipe.clone(), event: reader_event, state: Default::default() });
-        let writer = PipeWriter(PipeDirection { pipe, event: writer_event, state: Default::default() });
-        let read_cancel = reader.cancellation();
-        let write_cancel = writer.cancellation();
-        Ok(Self { reader, writer, read_cancel, write_cancel })
-    }
-}
-
-fn direction_event() -> io::Result<OwnedHandle> {
-    // SAFETY: an unnamed, manual-reset event.
-    let event = unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) };
-    if event.is_null() {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: `event` is a fresh event handle this scope now owns.
-    Ok(unsafe { OwnedHandle::from_raw_handle(event) })
-}
-
-#[derive(Debug, Default)]
-struct TransferState {
-    revoked: bool,
-    // Address of the boxed OVERLAPPED, valid only while protected by this mutex.
-    active: Option<usize>,
-}
-
-/// Cancels a direction. The `pipe` and `state` are shared with the direction that registered the
-/// in-flight operation, so `cancel` reaches exactly that operation.
-#[derive(Debug, Clone)]
-pub(crate) struct PipeCancellation {
-    pipe: Arc<OwnedHandle>,
-    state: Arc<Mutex<TransferState>>,
-}
-
-impl PipeCancellation {
-    /// Permanently revokes this direction without waiting for I/O settlement.
-    pub(crate) fn cancel(&self) -> io::Result<()> {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.revoked = true;
-        if let Some(address) = state.active {
-            // The worker registers, submits and unregisters under this same mutex, so it retains
-            // the operation, buffer and event through actual completion.
-            // SAFETY: `address` is the OVERLAPPED the worker registered under this mutex.
-            let result =
-                unsafe { CancelIoEx(self.pipe.as_raw_handle(), address as *const OVERLAPPED) };
-            if result == 0 {
-                let error = io::Error::last_os_error();
-                // Completion may have won the cancellation race.
-                if error.raw_os_error() != Some(ERROR_NOT_FOUND as i32) {
-                    return Err(error);
-                }
+        while state.active != 0 {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                state.close_error = Some(ERROR_TIMEOUT as i32);
+                return Err(io::Error::new(io::ErrorKind::TimedOut,
+                    "Windows channel cancellation completion deadline elapsed"));
             }
+            let (next, _) = self.0.drained.wait_timeout(state, remaining)
+                .unwrap_or_else(PoisonError::into_inner);
+            state = next;
         }
+        state.handle.take();
+        state.close_error = None;
         Ok(())
     }
-}
-
-#[derive(Debug)]
-struct PipeDirection {
-    pipe: Arc<OwnedHandle>,
-    event: OwnedHandle,
-    state: Arc<Mutex<TransferState>>,
-}
-
-impl PipeDirection {
-    fn transfer(&mut self, buffer: *mut u8, length: usize, read: bool) -> io::Result<usize> {
-        if length == 0 {
-            return Ok(0);
-        }
-        let mut operation: Box<OVERLAPPED> = Box::new(unsafe { std::mem::zeroed() });
-        operation.hEvent = self.event.as_raw_handle();
-        let raw = self.pipe.as_raw_handle();
-        let length = length.min(u32::MAX as usize) as u32;
-        // Serialize revocation with registration AND submission. Cancellation cannot miss a
-        // just-submitted operation or permit I/O after revocation.
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.revoked {
-            return Err(io::Error::from_raw_os_error(ERROR_OPERATION_ABORTED as i32));
-        }
-        state.active = Some((&mut *operation as *mut OVERLAPPED) as usize);
-        // SAFETY: `raw` is a pipe handle and `operation`/`buffer` stay alive through settlement.
+    fn transfer(&self, buffer: *mut u8, length: usize, write: bool) -> io::Result<usize> {
+        if length == 0 { return Ok(0); }
+        // Each operation has its own manual-reset event and OVERLAPPED; neither is moved or
+        // freed until GetOverlappedResult observes completion (including cancellation).
+        let event = owned(unsafe { CreateEventW(null(), 1, 0, null()) })?;
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        overlapped.hEvent = event.as_raw_handle();
+        let mut state = self.0.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.closed { return Err(io::Error::new(io::ErrorKind::BrokenPipe, "channel closed")); }
+        let handle = state.handle.as_ref().expect("open channel handle").as_raw_handle();
+        let count = length.min(u32::MAX as usize) as u32;
+        // SAFETY: caller retains its buffer until completion; the shared state retains the
+        // handle and prevents cancellation from racing initiation.
         let started = unsafe {
-            if read {
-                ReadFile(raw, buffer, length, ptr::null_mut(), &mut *operation)
-            } else {
-                WriteFile(raw, buffer, length, ptr::null_mut(), &mut *operation)
-            }
+            if write { WriteFile(handle, buffer, count, null_mut(), &mut overlapped) }
+            else { ReadFile(handle, buffer, count, null_mut(), &mut overlapped) }
         };
         if started == 0 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
-                state.active = None;
-                if read && error.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
-                    return Ok(0);
-                }
-                return Err(error);
+                return if !write && error.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) { Ok(0) } else { Err(error) };
             }
         }
+        state.active += 1;
         drop(state);
-        // CancelIoEx merely requests cancellation. Keep all I/O storage alive until this wait
-        // settles, then unregister before destroying the box.
-        let mut transferred = 0u32;
-        // SAFETY: `operation` is a valid, live OVERLAPPED and `raw` owns the operation.
-        let completed = unsafe { GetOverlappedResult(raw, &*operation, &mut transferred, 1) };
-        let error = (completed == 0).then(io::Error::last_os_error);
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .active = None;
-        if let Some(error) = error {
-            if read && error.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
-                return Ok(0);
-            }
-            return Err(error);
+        let mut transferred = 0;
+        // SAFETY: event, OVERLAPPED, buffer and handle remain live through completion.
+        let result = if unsafe { GetOverlappedResult(handle, &overlapped, &mut transferred, 1) } != 0 {
+            Ok(transferred as usize)
+        } else {
+            let error = io::Error::last_os_error();
+            if !write && error.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) { Ok(0) } else { Err(error) }
+        };
+        let mut state = self.0.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.active -= 1;
+        self.0.drained.notify_all();
+        result
+    }
+}
+impl Read for ChannelStream {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> { self.transfer(bytes.as_mut_ptr(), bytes.len(), false) }
+}
+impl Write for ChannelStream {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> { self.transfer(bytes.as_ptr().cast_mut(), bytes.len(), true) }
+    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+}
+
+fn owned(handle: HANDLE) -> io::Result<OwnedHandle> {
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE { return Err(io::Error::last_os_error()); }
+    // SAFETY: fresh native handle; no other owner exists.
+    Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
+}
+
+pub fn channel_pair() -> io::Result<(ChannelStream, ChildEndpoint)> {
+    let mut random = [0u8; 32];
+    getrandom::fill(&mut random).map_err(|_| io::Error::other("channel randomness unavailable"))?;
+    let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    // Internal ephemeral name only: never returned, logged, persisted or passed to a child.
+    let name: Vec<u16> = format!(r"\\.\pipe\gentle-dot-{suffix}").encode_utf16().chain(Some(0)).collect();
+    pair_named(&name)
+}
+
+fn pair_named(name: &[u16]) -> io::Result<(ChannelStream, ChildEndpoint)> {
+    let descriptor = Descriptor::owner_only()?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    // SAFETY: terminated private name, valid security descriptor. One first-instance local
+    // duplex byte pipe; all partial failures release already acquired handles through RAII.
+    let server = owned(unsafe { CreateNamedPipeW(name.as_ptr(),
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+        1, 65536, 65536, 0, &attributes) })?;
+    let client = owned(unsafe { CreateFileW(name.as_ptr(), GENERIC_READ | GENERIC_WRITE,
+        0, &attributes, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, null_mut()) })?;
+    // CreateFileW has already connected the client. The ConnectNamedPipe API contract
+    // explicitly permits connection between CreateNamedPipeW and ConnectNamedPipe (the
+    // latter would report ERROR_PIPE_CONNECTED). No accept is necessary here: verify the
+    // connected endpoints directly below. Setup initiates no OVERLAPPED operation, so every
+    // setup failure has plain handle RAII, no cancellation/wait or stack lifetime escape.
+    let mut client_pid = 0;
+    let mut server_pid = 0;
+    // Query only our pipe endpoints, never open or inspect a process by PID.
+    if unsafe { GetNamedPipeClientProcessId(server.as_raw_handle(), &mut client_pid) } == 0
+        || unsafe { GetNamedPipeServerProcessId(client.as_raw_handle(), &mut server_pid) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let controller = unsafe { GetCurrentProcessId() };
+    if client_pid != controller || server_pid != controller {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "channel ownership mismatch"));
+    }
+    // Both endpoints are already connected; max instances = 1 leaves no accepting instance.
+    Ok((ChannelStream::new(server), ChildEndpoint(client)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE_FLAG_INHERIT};
+
+    #[test]
+    fn endpoints_are_owned_non_inheritable_and_child_is_overlapped() {
+        let (mut parent, child) = channel_pair().unwrap();
+        fn owned(_: &ChildEndpoint) {}
+        owned(&child);
+        let mut flags = 0;
+        assert_ne!(unsafe { GetHandleInformation(child.as_raw_handle(), &mut flags) }, 0);
+        assert_eq!(flags & HANDLE_FLAG_INHERIT, 0);
+        let state = parent.0.state.lock().unwrap();
+        assert_ne!(unsafe { GetHandleInformation(state.handle.as_ref().unwrap().as_raw_handle(), &mut flags) }, 0);
+        assert_eq!(flags & HANDLE_FLAG_INHERIT, 0);
+        drop(state);
+        // Exercise the native child with the same explicit OVERLAPPED semantics as the parent.
+        let mut child = ChannelStream::new(child.0);
+        parent.write_all(b"{\"kind\":\"response\",\"id\":1}\n").unwrap();
+        let mut bytes = [0; 27];
+        child.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"{\"kind\":\"response\",\"id\":1}\n");
+        parent.shutdown().unwrap();
+        assert_eq!(child.read(&mut bytes).unwrap(), 0);
+    }
+
+    #[test]
+    fn close_cancels_pending_read_and_releases_writer_clones() {
+        let (parent, child) = channel_pair().unwrap();
+        let mut reader = parent.try_clone().unwrap();
+        let retained_writer = parent.try_clone().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let mut byte = [0];
+            tx.send(reader.read(&mut byte)).unwrap();
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while parent.0.state.lock().unwrap().active == 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
         }
-        Ok(transferred as usize)
-    }
-}
-
-/// The read half of an accepted connection.
-#[derive(Debug)]
-pub(crate) struct PipeReader(PipeDirection);
-
-impl PipeReader {
-    fn cancellation(&self) -> PipeCancellation {
-        PipeCancellation { pipe: self.0.pipe.clone(), state: self.0.state.clone() }
-    }
-}
-
-impl Read for PipeReader {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        self.0.transfer(buffer.as_mut_ptr(), buffer.len(), true)
-    }
-}
-
-/// The write half of an accepted connection. `write` returns a short count and `write_all` iterates.
-#[derive(Debug)]
-pub(crate) struct PipeWriter(PipeDirection);
-
-impl PipeWriter {
-    fn cancellation(&self) -> PipeCancellation {
-        PipeCancellation { pipe: self.0.pipe.clone(), state: self.0.state.clone() }
-    }
-}
-
-impl Write for PipeWriter {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.0.transfer(buffer.as_ptr().cast_mut(), buffer.len(), false)
+        assert_eq!(parent.0.state.lock().unwrap().active, 1, "read must be pending before cancellation");
+        parent.shutdown().unwrap();
+        assert!(rx.recv_timeout(Duration::from_secs(2)).unwrap().is_err());
+        thread.join().unwrap();
+        let mut peer = ChannelStream::new(child.0);
+        assert_eq!(peer.read(&mut [0]).unwrap(), 0);
+        assert!(retained_writer.try_clone().is_err());
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        // Writes wait for completion; no userspace buffering remains to flush.
-        Ok(())
+    #[test]
+    fn close_deadline_retains_handle_until_checked_retry() {
+        let (parent, child) = channel_pair().unwrap();
+        let mut reader = parent.try_clone().unwrap();
+        let thread = std::thread::spawn(move || reader.read(&mut [0]));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while parent.active_operations() == 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(parent.active_operations(), 1);
+        // Holding the initiation lock makes a zero-budget drain deterministic even if
+        // the kernel has already completed cancellation: the reader has not retired yet.
+        let error = parent.shutdown_until(std::time::Instant::now()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(parent.close_error(), Some(ERROR_TIMEOUT as i32));
+        assert!(parent.0.state.lock().unwrap().handle.is_some());
+        assert!(parent.try_clone().is_err());
+        parent.shutdown().unwrap();
+        assert!(thread.join().unwrap().is_err());
+        assert_eq!(parent.active_operations(), 0);
+        assert!(parent.0.state.lock().unwrap().handle.is_none());
+        assert_eq!(parent.close_error(), None);
+        drop(child);
+    }
+
+    #[test]
+    fn creation_failure_returns_no_endpoints() {
+        assert!(pair_named(&[0]).is_err());
+    }
+
+    #[test]
+    fn first_instance_collision_fails_without_replacing_connected_pair() {
+        let mut random = [0; 32];
+        getrandom::fill(&mut random).unwrap();
+        let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        let name: Vec<u16> = format!(r"\\.\pipe\gentle-dot-test-{suffix}").encode_utf16().chain(Some(0)).collect();
+        let (parent, child) = pair_named(&name).unwrap();
+        assert!(pair_named(&name).is_err());
+        parent.shutdown().unwrap();
+        drop(child);
+    }
+
+    #[test]
+    fn acl_is_explicit_protected_owner_only() {
+        assert_eq!(pipe_sddl("S-1-5-21-1-2-3-1001"), "O:S-1-5-21-1-2-3-1001D:P(A;;GA;;;S-1-5-21-1-2-3-1001)");
+        assert!(current_user_sid().unwrap().starts_with("S-1-5-"));
+        let _descriptor = Descriptor::owner_only().unwrap();
     }
 }

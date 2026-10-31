@@ -6,9 +6,7 @@
 //! runs on a blocking thread: starting may wait on a permission prompt, stopping waits for the
 //! final transcript, and removing the model deletes files.
 
-use super::engine::fallback_engine;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-use super::engine::Preferred;
+use super::engine::{fallback_engine, Preferred};
 use super::model::{HttpFetcher, ModelError, ModelEvent, ModelEvents, ModelManager, ModelSpec, ModelStatus, MODEL_EVENT};
 use super::parakeet::{self, Loader, Locate, Parakeet};
 use super::{Events, Transcript, Voice, VoiceError, VoiceEvent, VoiceStatus, UNSUPPORTED};

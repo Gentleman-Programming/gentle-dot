@@ -14,7 +14,7 @@
  */
 import { type StdioOptions, spawnSync } from "node:child_process";
 import { closeSync, fstatSync } from "node:fs";
-import { connect, Socket } from "node:net";
+import { Socket } from "node:net";
 import type { Duplex } from "node:stream";
 import { isWindowsAppChannel } from "./windows-app-channel.ts";
 
@@ -23,12 +23,11 @@ export const APP_FD = 3;
 /** Longer than the app's own 120 s dialog timeout, which answers "declined" first. */
 export const APPROVAL_WAIT_MS = 130_000;
 /**
- * Frames longer than this many **bytes** close the channel; nothing legitimate comes close. The app
- * has the same rule, and a closed channel stops the daemon (S35.2), so neither side ever sends a
- * longer one: an oversized request fails (an approval is refused) and an oversized answer becomes an
- * error. Both sides must count the same unit, and bytes is the one the app's end uses.
+ * A frame longer than this closes the channel; nothing legitimate comes close. The app has the same
+ * rule, and a closed channel stops the daemon (S35.2), so neither side ever sends a longer one: an
+ * oversized request fails (an approval is refused) and an oversized answer becomes an error.
  */
-export const MAX_FRAME = 1024 * 1024;
+const MAX_FRAME = 1024 * 1024;
 
 /** One argument of the action, in the order shown. */
 export interface PreviewField {
@@ -172,17 +171,10 @@ export class AppChannel implements AppLink {
 		for (let end = this.buffer.indexOf("\n"); end >= 0; end = this.buffer.indexOf("\n")) {
 			const line = this.buffer.slice(0, end);
 			this.buffer = this.buffer.slice(end + 1);
-			// `MAX_FRAME` is a byte cap and the frame is a string: counting characters would let a frame
-			// of multi-byte characters through, while the app's own end refuses to send one.
-			if (Buffer.byteLength(line, "utf8") > MAX_FRAME) {
-				this.log("the app's channel sent a frame that is too long; closing it");
-				this.close();
-				return;
-			}
 			if (line.trim() !== "") this.onFrame(line);
 			if (!this.open) return;
 		}
-		if (Buffer.byteLength(this.buffer, "utf8") > MAX_FRAME) {
+		if (this.buffer.length > MAX_FRAME) {
 			this.log("the app's channel sent a frame that is too long; closing it");
 			this.close();
 		}
@@ -295,15 +287,4 @@ export function inheritedAppSocket(options: InheritedChannelOptions = {}): Socke
 export function openInheritedChannel(options: InheritedChannelOptions = {}): AppChannel | undefined {
 	const socket = inheritedAppSocket(options);
 	return socket ? new AppChannel(socket, options) : undefined;
-}
-
-/**
- * The daemon's end of the Windows channel: the app creates the named pipe before it spawns the
- * daemon and hands the name over in `GENTLE_DOT_CHANNEL_PIPE`, so the daemon connects to it. The
- * name is not a secret; the app authenticates the daemon by the accepted connection's PID. Node
- * buffers writes made before the connection completes, and a connection error closes the channel
- * (the consumer is an {@link AppChannel}), so privileged actions fail closed when the app is gone.
- */
-export function namedPipeSocket(path: string): Socket {
-	return connect({ path });
 }
