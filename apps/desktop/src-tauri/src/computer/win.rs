@@ -1051,7 +1051,7 @@ mod tests {
 
     /// T48: a bare name never resolves through PATH, so shell tools in System32 are not opened by
     /// name (`cmd.exe` and `curl.exe` are in System32, which is in PATH, and neither is in App
-    /// Paths). No shortcut is passed, so only App Paths and PATH are asked.
+    /// Paths). No shortcut is passed, so only App Paths could answer.
     #[test]
     fn a_bare_name_is_not_resolved_through_path() {
         for name in ["cmd", "curl", "certutil"] {
