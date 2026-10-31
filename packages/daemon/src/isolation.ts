@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, win32 } from "node:path";
 import { bundledGentleShell } from "./config.ts";
 import { directAccess, type EngineAccess } from "./engine-access.ts";
 import { refusalGuard, resolveEngramBin, runtimeDir } from "./runtime.ts";
@@ -199,10 +199,13 @@ export function isolatedAgentEnv(
 			platform === "win32"
 				? part.replace(/[\\/]+$/, "").toLowerCase() === bin.replace(/[\\/]+$/, "").toLowerCase()
 				: part === bin;
+		// The injected platform owns the PATH spelling too: a win32 isolation must not split and
+		// rejoin with the runtime's POSIX delimiter, which mangles the inherited Windows Path.
+		const separator = platform === "win32" ? win32.delimiter : delimiter;
 		const rest = (inherited ? (base[inherited] ?? "") : "")
-			.split(delimiter)
+			.split(separator)
 			.filter((part) => part && !same(part));
-		env.PATH = [bin, ...rest].join(delimiter);
+		env.PATH = [bin, ...rest].join(separator);
 	}
 	// The user's own Gentle Shell setting is not the assistant's.
 	env.GENTLE_PI_AGENTS = subagentsEnabled(base) ? "1" : "0";
