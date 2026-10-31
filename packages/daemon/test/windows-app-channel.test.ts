@@ -124,6 +124,46 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 describe("Windows app channel lifecycle integration", () => {
+	// The app's shutdown awaits daemon.close() before listener.close(), so the peer closing its
+	// end during the drain is the normal race, not an anomaly: with every admitted write completed
+	// it must certify drain instead of turning the clean stop into exit 1 (Row0902's #112 review).
+	it("a peer that consumed every write and closed during the drain still drains cleanly", async () => {
+		const f = fixture();
+		const s = f.stream();
+		const wrote = new Promise<void>((resolve) => s.write("x", () => resolve()));
+		await tick();
+		expect(f.writes).toEqual([Buffer.from("x")]);
+		f.status.completedWrite = 1n;
+		f.status.queuedBytes = 0;
+		f.status.queuedItems = 0;
+		await tick();
+		await wrote;
+		const closing = s.close("drain");
+		f.status.eof = true;
+		f.status.phase = "closed";
+		f.status.pendingIo = false;
+		await tick();
+		await expect(closing).resolves.toEqual({ mode: "drain", drained: true });
+	});
+
+	// An admitted write the peer never reads would hold the channel open forever: it is bounded
+	// like the close deadline and ends in an abort (the #112 native review's write half).
+	it("an admitted write that never completes aborts on a bounded deadline", async () => {
+		const f = fixture();
+		const s = f.stream();
+		const settled = new Promise<Error | null | undefined>((resolve) =>
+			s.write("x", (error) => resolve(error)),
+		);
+		await tick();
+		expect(f.writes).toEqual([Buffer.from("x")]);
+		const outcome = await Promise.race([
+			settled,
+			vi.advanceTimersByTimeAsync(100).then(() => null as Error | null),
+		]);
+		expect(outcome).toMatchObject({ message: "App channel write deadline exceeded" });
+		expect(f.calls).toContain("stop:abort");
+	});
+
 	it("decodes string writes into Buffer bytes before native admission", async () => {
 		const f = fixture();
 		const s = f.stream();
