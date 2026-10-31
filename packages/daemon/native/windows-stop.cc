@@ -206,9 +206,16 @@ struct State {
 };
 using Owner = std::shared_ptr<State>;
 void ReleaseParticipant(State& s, napi_threadsafe_function_release_mode mode) {
-  std::lock_guard<std::mutex> lock(s.gate);
-  if (!s.participant) return;
-  s.participant = false;
+  {
+    std::lock_guard<std::mutex> lock(s.gate);
+    if (!s.participant) return;
+    s.participant = false;
+  }
+  // Released outside the gate on purpose: napi_release_threadsafe_function can
+  // run the cleanup hook synchronously on this thread, and that hook re-enters
+  // ReleaseParticipant. The gate is not recursive, so holding it here would
+  // self-deadlock. The participant flag is already cleared under the lock, so a
+  // second release stays impossible.
   napi_release_threadsafe_function(s.tsfn, mode);
 }
 bool Queue(State& s, void* data) {
