@@ -2,7 +2,6 @@ import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -52,6 +51,54 @@ function protectRecord(path: string, sid: string): void {
 	);
 }
 
+// The listener's pipe DACL grants exactly the desktop app's minimal access mask, which a Node
+// socket cannot request (libuv opens GENERIC_READ|GENERIC_WRITE, which adds READ_CONTROL and
+// write-attribute rights the DACL does not grant). The client role therefore runs the same
+// CreateFileW mask the app uses, through P/Invoke: connect, write the 36-byte message, close.
+// Everything else, from impersonation to delivery, stays on the real native path.
+const pipeClientScript = String.raw`
+param([string]$PipeId, [string]$CapabilityHex)
+$ErrorActionPreference = 'Stop'
+Add-Type -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+public static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string name, uint access, uint share, System.IntPtr security, uint disposition, uint flags, System.IntPtr template);
+[DllImport("kernel32.dll", SetLastError=true)]
+public static extern bool WriteFile(Microsoft.Win32.SafeHandles.SafeFileHandle handle, byte[] buffer, uint count, out uint written, System.IntPtr overlapped);
+'@ -Name StopPipeClient -Namespace GentleDot
+# FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE: the pipe DACL's exact grant.
+$handle = [GentleDot.StopPipeClient]::CreateFileW("\\.\pipe\gentle-dot-stop-$PipeId", 0x100083, 0, [IntPtr]::Zero, 3, 0, [IntPtr]::Zero)
+if ($handle.IsInvalid) { throw "CreateFileW failed: $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
+try {
+	$frame = [System.Collections.Generic.List[byte]]::new()
+	$frame.AddRange([System.Text.Encoding]::ASCII.GetBytes('GDS1'))
+	for ($i = 0; $i -lt $CapabilityHex.Length; $i += 2) { $frame.Add([Convert]::ToByte($CapabilityHex.Substring($i, 2), 16)) }
+	$written = 0
+	if (-not [GentleDot.StopPipeClient]::WriteFile($handle, $frame.ToArray(), [uint32]$frame.Count, [ref]$written, [IntPtr]::Zero)) { throw "WriteFile failed: $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
+	if ($written -ne 36) { throw "wrote $written of 36 bytes" }
+} finally { $handle.Dispose() }
+`;
+
+function runPipeClient(dir: string, id: string, capability: Buffer): void {
+	const script = join(dir, "stop-client.ps1");
+	writeFileSync(script, pipeClientScript);
+	execFileSync(
+		"powershell.exe",
+		[
+			"-NoProfile",
+			"-NonInteractive",
+			"-ExecutionPolicy",
+			"Bypass",
+			"-File",
+			script,
+			"-PipeId",
+			id,
+			"-CapabilityHex",
+			capability.toString("hex"),
+		],
+		{ encoding: "utf8", windowsHide: true, timeout: 60_000 },
+	);
+}
+
 /** Five lines, trailing newline: format, PID, creation ticks, pipe id, 32-byte capability hex. */
 function writeRecord(
 	dir: string,
@@ -94,7 +141,7 @@ describe.skipIf(Boolean(skipReason))(`real Windows stop listener addon (${skipRe
 		expect(() => addon.createStopListener(record, () => {})).toThrow("Cannot exclusively own stop pipe");
 	});
 
-	it("delivers one authenticated frame end to end through the real pipe", async () => {
+	it("delivers one authenticated frame end to end through the real pipe", { timeout: 60_000 }, async () => {
 		mkdirSync(dir, { recursive: true });
 		const addon = require(fileURLToPath(artifact)) as {
 			createStopListener(path: string, callback: (frame: Buffer) => void): StopListener;
@@ -106,21 +153,12 @@ describe.skipIf(Boolean(skipReason))(`real Windows stop listener addon (${skipRe
 			const listener = addon.createStopListener(record, (frame) => resolve(Buffer.from(frame)));
 			listeners.push(listener);
 		});
-		const client = connect(`\\\\.\\pipe\\gentle-dot-stop-${id}`);
-		try {
-			await new Promise<void>((resolve, reject) => {
-				client.once("connect", resolve);
-				client.once("error", reject);
-			});
-			client.write(Buffer.concat([Buffer.from("GDS1"), capability]));
-			const frame = await Promise.race([
-				delivered,
-				new Promise<never>((_, reject) => setTimeout(() => reject(new Error("frame not delivered")), 10_000)),
-			]);
-			expect(frame.subarray(0, 4).toString()).toBe("GDS1");
-			expect(frame.subarray(4)).toEqual(capability);
-		} finally {
-			client.destroy();
-		}
+		runPipeClient(dir, id, capability);
+		const frame = await Promise.race([
+			delivered,
+			new Promise<never>((_, reject) => setTimeout(() => reject(new Error("frame not delivered")), 20_000)),
+		]);
+		expect(frame.subarray(0, 4).toString()).toBe("GDS1");
+		expect(frame.subarray(4)).toEqual(capability);
 	});
 });
