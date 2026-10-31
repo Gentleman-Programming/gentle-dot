@@ -493,3 +493,4 @@ mod tests {
         post(&InputEvent::Move(start)).unwrap();
         assert!((landed.x - target.x).abs() <= 1.0 && (landed.y - target.y).abs() <= 1.0, "{landed:?} != {target:?}");
     }
+}
