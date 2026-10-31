@@ -126,6 +126,16 @@ void Pop(Stream& s) noexcept {
 }
 void WriteResult(Stream& s, DWORD count, DWORD error) noexcept {
   if (error == ERROR_OPERATION_ABORTED && s.abort) return;
+  // A write against a pipe whose read end already closed completes with ERROR_NO_DATA (or
+  // ERROR_PIPE_NOT_CONNECTED / ERROR_BROKEN_PIPE, as the read path maps them): the peer is
+  // gone, which ends the stream as EOF instead of a native error number the app must decode.
+  if (error == ERROR_NO_DATA || error == ERROR_PIPE_NOT_CONNECTED ||
+      error == ERROR_BROKEN_PIPE) {
+    s.eof = true;
+    s.phase = StreamPhase::stopping;
+    s.abort = true;
+    return;
+  }
   if (error) { Fail(s, error); return; }
   Write& item = *s.head;
   if (!count || count > item.size - item.offset) { Fail(s, ERROR_WRITE_FAULT); return; }
