@@ -136,7 +136,7 @@ Open **Connectors** in the header.
 
 ### 12. Connector secrets and approvals
 
-The app and the daemon talk over a private channel the app creates **before** it spawns the daemon: a named pipe whose name the daemon receives in `GENTLE_DOT_CHANNEL_PIPE`. The credential is the connection itself — the app accepts it only when the connecting process is the daemon it just spawned — so a daemon the app did not start is refused instead of answered.
+The app and the daemon talk over a private channel the app creates **before** it spawns the daemon: a connected pipe pair whose far end the daemon receives as fd 3 through the launch's explicit handle-inheritance list, the launch owned by a stop record written before the child executes. The connection is the credential — a daemon the app did not start is refused instead of answered.
 
 **Expected:** a connector that needs a secret asks for it in the app, and the value reaches the daemon over the channel and is kept in the app's store (step 14). An action that needs approval opens a native dialog naming the connector, the action and the preview; **Decline** is the default, an unanswered dialog is refused after 120 s, and a decline leaves nothing running. A connector whose secret is missing fails closed with "Open the Gentle Dot app to use this connector." Quit the app while a chat is running: the daemon it spawned stops with it, and relaunching starts a new one.
 

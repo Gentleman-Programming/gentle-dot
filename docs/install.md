@@ -218,7 +218,7 @@ On Windows, connector secrets (tokens, client secrets, imported header and envir
 
 The port is incomplete on purpose. Each item names the unit that carries it.
 
-- **Connectors that need a secret or an approval work over the private channel** (W7). The app creates a named pipe before it spawns the daemon and hands over its name in `GENTLE_DOT_CHANNEL_PIPE`; the credential is the accepted connection's pid against the child the app just spawned, so a daemon the app did not start is refused rather than answered. A connector that needs a secret asks for it in the app and the value reaches the daemon over that channel; a connector whose secret is missing fails closed rather than falling back to a file.
+- **Connectors that need a secret or an approval work over the private channel** (W7). The app hands the daemon its end of the private channel as fd 3 through a native handle-inheritance launch (stop record and owner record written before the child executes), so a daemon the app did not start is refused rather than answered. A connector that needs a secret asks for it in the app and the value reaches the daemon over that channel; a connector whose secret is missing fails closed rather than falling back to a file.
 - **Voice** (W12) and **computer control** (W13, macOS-only today) are not available.
 - **The panel's blur is gated and unverified** (W8d): the app asks for `Mica` only on Windows 11 (build ≥ 22000) with transparency effects on, a local session, and DWM composition on; otherwise the panel is opaque. Tauri gives no readback, so the blur can still silently fail even when those facts hold — the gate is the mitigation, and confirming it is the tester's visual check in [docs/windows-testing.md](windows-testing.md).
 
