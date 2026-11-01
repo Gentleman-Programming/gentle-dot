@@ -23,11 +23,12 @@ pub mod server;
 pub mod session;
 pub mod windows;
 // The Windows desktop backend: input, capture, apps, keys bound to the approved recipient, UI
-// Automation, and its `Desktop` implementation. The app starts using it when computer control
-// is turned on for Windows, which removes this allow.
+// Automation, its `Desktop` implementation, and the overlay the app drives. The app starts using
+// it when computer control is turned on for Windows, which removes this allow. Crate-visible for
+// the dialogs, which hold captures off while one shows that is not kept out of them.
 #[cfg(windows)]
 #[allow(dead_code)]
-mod win;
+pub(crate) mod win;
 // The Windows desktop's pure parts, tested everywhere: UI Automation element mapping, which
 // processes are apps, and what Windows posts for each input event. The Windows desktop backend
 // widens each to `any(windows, test)` once it uses it.
@@ -84,8 +85,9 @@ pub struct AppInfo {
     pub active: bool,
 }
 
-/// The `computer_permissions` reply (L60), plus `screenshotsSupported` (false before macOS 14,
-/// where ScreenCaptureKit cannot take screenshots).
+/// The `computer_permissions` reply (L60), plus `screenshotsSupported`: false before macOS 14,
+/// where ScreenCaptureKit cannot take screenshots, and before Windows 10 version 2004, which
+/// cannot leave Gentle Dot's windows out of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Permissions {

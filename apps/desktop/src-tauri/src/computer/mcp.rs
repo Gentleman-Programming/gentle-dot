@@ -72,6 +72,13 @@ type, press tab, type, press return) so it runs in one call; end the batch whene
 before deciding the next step. Shortcuts use ctrl (cmd also presses Ctrl). The user must allow a session, \
 risky actions ask the user to confirm, and some apps (Settings, Windows Security, password managers) are off limits.";
 
+/// Why computer control is unavailable when the system cannot take its screenshots.
+#[cfg(not(windows))]
+const SCREENSHOTS_UNSUPPORTED: &str = "Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.";
+#[cfg(windows)]
+const SCREENSHOTS_UNSUPPORTED: &str =
+    "Screenshots need Windows 10 version 2004 or later, so computer control is unavailable on this PC.";
+
 /// Why a key was not sent when the app receiving it changed after it was checked.
 const KEY_RECIPIENT_CHANGED: &str = "The app receiving the keys changed before the key was sent, so it was not sent.";
 
@@ -529,7 +536,7 @@ impl Helper {
                 | Tool::Key { .. }
         );
         if sees && !permissions.screenshots_supported {
-            return Err("Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.".into());
+            return Err(SCREENSHOTS_UNSUPPORTED.into());
         }
         if sees && !permissions.screen_recording {
             return Err(format!("{NEEDS_PERMISSION} Screen Recording permission. {GRANT_IT}"));
@@ -1359,12 +1366,18 @@ mod tests {
     }
 
     #[test]
-    fn screenshots_before_macos_14_are_a_clear_error() {
+    fn screenshots_the_system_cannot_take_are_a_clear_error() {
         let rig = rig();
         rig.desktop.permissions.lock().unwrap().screenshots_supported = false;
         let result = rig.call("screenshot", json!({}));
         assert!(is_error(&result));
-        assert!(first_text(&result).contains("macOS 14"), "{result}");
+        #[cfg(not(windows))]
+        assert_eq!(first_text(&result), "Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.");
+        #[cfg(windows)]
+        assert_eq!(
+            first_text(&result),
+            "Screenshots need Windows 10 version 2004 or later, so computer control is unavailable on this PC."
+        );
     }
 
     // --- Blocklist and rate limit (S24.4) ---
