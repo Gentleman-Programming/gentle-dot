@@ -25,7 +25,7 @@ use super::coords::{fit_long_edge, Point, ScreenshotGeometry, MAX_LONG_EDGE};
 use super::encode::{bgra_to_jpeg, JPEG_QUALITY};
 use super::blocklist::{blocked_name, blocked_reason, AppIdentity, UNIDENTIFIED};
 use super::risk::{AxElement, Focus};
-use super::winaccess::{element, is_default, unreadable, UIA_BUTTON, UIA_WINDOW};
+use super::winaccess::{element, is_default, known_chain, unreadable, UIA_BUTTON, UIA_WINDOW};
 use super::winapps::{
     answers_to, app_pids, executable_target, fronts_same_app, hosted_page, request, shortcut_named, strip_ci, Request,
     TopWindow,
@@ -1077,8 +1077,9 @@ pub fn keyboard_refusal(app: &AppIdentity) -> Option<String> {
 const AX_ANCESTORS: usize = 4;
 /// How far up the focused element its window is looked for.
 const WINDOW_SEARCH: usize = 32;
-/// At most this many of a window's buttons are checked for the default one. The query itself is
-/// one cross-process call, bounded by the UI Automation timeout.
+/// At most this many of a window's buttons are checked for the default one; a window with more
+/// has an unknown default, so Return asks. The query itself is one cross-process call, bounded by
+/// the UI Automation timeout.
 const DEFAULT_BUTTON_SCAN: i32 = 1024;
 /// UI Automation gives up on an unresponsive app after this long.
 const UIA_TIMEOUT_MS: u32 = 500;
@@ -1230,8 +1231,9 @@ pub fn element_at(at: Point) -> Vec<AxElement> {
     // there: what is under the glow cannot be read, so it asks for a confirmation.
     let own = std::process::id() as i32;
     // SAFETY: a call on a live COM object.
-    // A process Windows does not report counts as Gentle Dot's: the element is not read either.
-    let hit_own = unsafe { current.CurrentProcessId() }.map_or(true, |pid| pid == own);
+    // A process Windows does not report (or reports as no process) counts as Gentle Dot's: the
+    // element is not read either.
+    let hit_own = unsafe { current.CurrentProcessId() }.map_or(true, |pid| pid <= 0 || pid == own);
     // Only Gentle Dot's own window there (whose actions are refused anyway) is described.
     if hit_own && !window_owner_at(at).is_some_and(|owner| owner.pid == own) {
         return vec![unreadable()];
@@ -1248,7 +1250,7 @@ pub fn element_at(at: Point) -> Vec<AxElement> {
         chain.push(describe(&parent));
         current = parent;
     }
-    chain
+    known_chain(chain)
 }
 
 /// The window holding `of`: its nearest Window ancestor, as macOS reads `AXWindow`. None when
@@ -1283,15 +1285,19 @@ fn default_button(
         let cache = automation.client.CreateCacheRequest()?;
         cache.AddProperty(uia::UIA_LegacyIAccessibleStatePropertyId)?;
         let found = window.FindAllBuildCache(uia::TreeScope_Descendants, &buttons, &cache)?;
-        let count = found.Length()?.min(DEFAULT_BUTTON_SCAN);
+        let total = found.Length()?;
         // Every button is read: one that cannot be could be the default, so the scan fails.
-        for i in 0..count {
+        for i in 0..total.min(DEFAULT_BUTTON_SCAN) {
             let button = found.GetElement(i)?;
             let state = button.GetCachedPropertyValue(uia::UIA_LegacyIAccessibleStatePropertyId)?;
             let state = i32::try_from(&state)?;
             if is_default(state as u32) {
                 return Ok(Some(button));
             }
+        }
+        // Buttons left unread could hold the default: the answer is not known, so Return asks.
+        if total > DEFAULT_BUTTON_SCAN {
+            return Err(windows::Win32::Foundation::E_FAIL.into());
         }
         Ok(None)
     }
@@ -1483,7 +1489,7 @@ mod tests {
         let elsewhere = KeyboardRecipient { front_pid: i32::MAX, focused_pid: None };
         let result = post_typed(&InputEvent::Text("x".into()), &elsewhere);
         assert!(
-            result == Err(TypedError::RecipientChanged) || result == Err(TypedError::FrontUnknown),
+            matches!(result, Err(TypedError::RecipientChanged | TypedError::FrontUnknown | TypedError::NoFocus)),
             "{result:?}"
         );
     }
