@@ -24,6 +24,7 @@ import {
 } from "@gentle-dot/protocol";
 import { APPROVAL_WAIT_MS, type AppApproval, type AppLink } from "./app-channel.ts";
 import type { AuthManager } from "./auth.ts";
+import type { ChannelProxy } from "./channel-proxy.ts";
 import type { ConnectorManager, ConnectorRefusal } from "./connectors.ts";
 import {
 	conversationIdOf,
@@ -61,6 +62,8 @@ export interface BridgeOptions {
 	auth?: AuthManager;
 	profiles?: ProfileStore;
 	connectors?: ConnectorManager;
+	/** The external channel bridge's admin client (WhatsApp, phase 1); never spawned here (S9). */
+	channels?: ChannelProxy;
 	/** Speech to text and text to speech with an OpenAI API key (S30.2). */
 	voice?: VoiceService;
 	/** Files the user uploaded for their messages (S31). */
@@ -610,6 +613,34 @@ export class DotBridge {
 				});
 				return;
 			}
+			case "channel_list": {
+				const channels = this.options.channels;
+				this.deliver(client, {
+					type: "channels",
+					channels: channels ? [await channels.info()] : [],
+				});
+				return;
+			}
+			case "channel_allowlist":
+				this.deliver(client, {
+					type: "channel_allowlist",
+					numbers: await this.requireChannels().allowlist(),
+				});
+				return;
+			case "channel_pair_status":
+				this.deliver(client, {
+					type: "channel_pair",
+					status: await this.requireChannels().pairStatus(),
+				});
+				return;
+			case "channel_allowlist_change":
+			case "channel_pair_start":
+			case "channel_pair_regenerate":
+			case "channel_pair_cancel":
+			case "channel_verify":
+			case "channel_unpair":
+				await this.channelCommand(client, message);
+				return;
 			case "profile_save":
 			case "profile_rename":
 			case "profile_duplicate":
@@ -802,6 +833,88 @@ export class DotBridge {
 				break;
 		}
 		if (refused) this.deliver(client, { type: "error", ...refused });
+	}
+
+	private requireChannels(): ChannelProxy {
+		if (!this.options.channels) throw new Error("channels are not available");
+		return this.options.channels;
+	}
+
+	/** Runs one channel change; pairing and unpair confirm in the app first (S8). */
+	private async channelCommand(
+		client: BridgeClient,
+		message: Extract<
+			ClientMessage,
+			{
+				type:
+					| "channel_allowlist_change"
+					| "channel_pair_start"
+					| "channel_pair_regenerate"
+					| "channel_pair_cancel"
+					| "channel_verify"
+					| "channel_unpair";
+			}
+		>,
+	): Promise<void> {
+		if (!this.options.channels) {
+			this.deliver(client, {
+				type: "error",
+				code: "channel_unavailable",
+				message: "No channel bridge is configured.",
+			});
+			return;
+		}
+		const channels = this.options.channels;
+		const pairApproval = (): AppApproval => ({
+			connector: "WhatsApp",
+			action: "link this number as a channel",
+			title: "Pair WhatsApp with Gentle Dot?",
+			summary:
+				"This channel can send WhatsApp messages on your behalf; every send by the assistant still goes through your approval.",
+			preview: [],
+		});
+		const unpairApproval = (): AppApproval => ({
+			connector: "WhatsApp",
+			action: "unlink the channel and clear its credentials",
+			title: "Unpair WhatsApp?",
+			summary: "The linked session and its credentials are removed; a new QR pairs from zero.",
+			preview: [],
+		});
+		try {
+			switch (message.type) {
+				case "channel_allowlist_change": {
+					const numbers = await channels.allowlistChange(message.action, message.number);
+					this.broadcast({ type: "channel_allowlist", numbers });
+					return;
+				}
+				case "channel_pair_start":
+					if (!(await this.confirmChange(client, pairApproval(), message))) return;
+					await channels.pairStart();
+					return;
+				case "channel_pair_regenerate":
+					await channels.pairRegenerate();
+					return;
+				case "channel_pair_cancel":
+					await channels.pairCancel();
+					return;
+				case "channel_verify": {
+					const results = await channels.verify();
+					this.broadcast({ type: "channel_verify_result", results });
+					return;
+				}
+				case "channel_unpair":
+					if (!(await this.confirmChange(client, unpairApproval(), message))) return;
+					await channels.unpair();
+					return;
+			}
+		} catch (error) {
+			this.log(`channel command failed: ${(error as Error).message}`);
+			this.deliver(client, {
+				type: "error",
+				code: "channel_unavailable",
+				message: "The WhatsApp bridge is not reachable. Start it and try again.",
+			});
+		}
 	}
 
 	/**
