@@ -1,92 +1,82 @@
-#!/usr/bin/env node
-import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { inheritedAppSocket } from "./app-channel.ts";
-import { serveAuthHelper } from "./auth-helper.ts";
-import { loadConfig } from "./config.ts";
-import { APPROVAL_GUARD, bundledMcpCli } from "./connectors.ts";
-import { startDaemon, startupMessage } from "./daemon.ts";
-import { resolveEngramBin, runtimeDir } from "./runtime.ts";
-import { SECRETS_KEY_VAR } from "./secret-file.ts";
-import { loadVpsOptions } from "./vps.ts";
-import { IDENTITY_SOURCE } from "./white-label.ts";
-
-/** This file (or the bundled `cli.mjs`), which the sign-in helper runs again. */
-const ENTRY = fileURLToPath(import.meta.url);
-const log = (line: string) => process.stderr.write(`${new Date().toISOString()} ${line}\n`);
-
 /**
- * `--self-check`: resolves the files the daemon runs on, without starting anything or
- * using the network, prints them as JSON, and exits 1 when one is missing.
+ * CLI Entry Point - Gentle Dot Daemon
+ * Single daemon on port 4317 with Bridge Protocol v1
  */
-function selfCheck(): void {
-	const config = loadConfig();
-	const runtime = runtimeDir();
-	const report = {
-		runtime,
-		uiDir: config.uiDir,
-		gentleShell: config.agentArgs[0],
-		engineCli: bundledMcpCli().args[0],
-		approvalGuard: APPROVAL_GUARD,
-		identity: fileURLToPath(IDENTITY_SOURCE),
-		engramBin: runtime ? resolveEngramBin(process.env, runtime) : undefined,
-	};
-	const required = [report.gentleShell, report.engineCli, report.approvalGuard, report.identity];
-	const ok = required.every((path) => path !== undefined && existsSync(path));
-	process.stdout.write(`${JSON.stringify({ ok, ...report }, null, 2)}\n`);
-	process.exit(ok ? 0 : 1);
+
+import { program } from 'commander';
+import { createDaemon, DaemonOptions } from './daemon.js';
+import * as path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+interface CliOptions {
+  port?: number;
+  host?: string;
+  config?: string;
+  dataDir?: string;
+  workspace?: string;
+  logLevel?: 'debug' | 'info' | 'warn' | 'error';
+  noAutoSetup?: boolean;
+  version?: boolean;
 }
 
-async function main(): Promise<void> {
-	const config = loadConfig();
-	// The desktop app that launched the daemon hands over its private channel on fd 3 (S25.1); it is
-	// opened before anything is spawned, and refused if children would inherit it.
-	const appChannel = inheritedAppSocket({ log });
-	// Server mode only when GENTLE_DOT_VPS says so (S25.8). The secrets key is read once and removed
-	// from the process environment, so no child the daemon starts can inherit it.
-	const vps = loadVpsOptions(process.env, { uid: process.getuid?.() ?? -1 });
-	delete process.env[SECRETS_KEY_VAR];
-	const daemon = await startDaemon({
-		port: config.port,
-		host: config.host,
-		dataDir: config.dataDir,
-		workspace: config.workspace,
-		...(config.preferredFolder ? { preferredFolder: config.preferredFolder } : {}),
-		uiDir: config.uiDir,
-		agentCommand: config.agentCommand,
-		agentArgs: config.agentArgs,
-		...(config.agentHome ? { agentHome: config.agentHome } : {}),
-		allowedOrigins: config.allowedOrigins,
-		...(appChannel ? { appChannel } : {}),
-		// Sign-in runs in this same entry point as the engine's user (`--auth-helper`, B1).
-		...(vps
-			? { vps: { ...vps, authHelper: { command: process.execPath, args: [ENTRY, "--auth-helper"] } } }
-			: {}),
-		log,
-	});
-	process.stdout.write(`${startupMessage(daemon.url, config.dataDir, process.stdout.isTTY === true)}\n`);
+program
+  .name('gentle-daemon')
+  .description('Gentle Dot Daemon - Single daemon on port 4317 with Bridge Protocol v1')
+  .version('0.1.0')
+  .option('-p, --port <number>', 'Port to listen on', parseInt)
+  .option('-H, --host <string>', 'Host to bind to')
+  .option('-c, --config <path>', 'Path to connectors.yaml')
+  .option('-d, --data-dir <path>', 'Data directory')
+  .option('-w, --workspace <path>', 'Workspace directory')
+  .option('-l, --log-level <level>', 'Log level (debug|info|warn|error)')
+  .option('--no-auto-setup', 'Disable auto setup (GENTLE_SHELL_NO_AUTO_SETUP=1)')
+  .option('-v, --version', 'Show version')
+  .parse(process.argv);
 
-	let closing = false;
-	const shutdown = (signal: string) => {
-		if (closing) return;
-		closing = true;
-		log(`received ${signal}, shutting down`);
-		daemon.close().then(
-			() => process.exit(0),
-			() => process.exit(1),
-		);
-	};
-	process.on("SIGINT", () => shutdown("SIGINT"));
-	process.on("SIGTERM", () => shutdown("SIGTERM"));
-	// A daemon the app launched stops itself when the app's channel closes (S35.2); so does the process.
-	void daemon.closed.then(() => process.exit(0));
+const options = program.opts<CliOptions>();
+
+// Handle version flag
+if (options.version) {
+  console.log('0.1.0');
+  process.exit(0);
 }
 
-if (process.argv.includes("--auth-helper")) serveAuthHelper();
-else {
-	if (process.argv.includes("--self-check")) selfCheck();
-	main().catch((error: Error) => {
-		log(`failed to start: ${error.message}`);
-		process.exit(1);
-	});
+// Build daemon options
+const daemonOptions: DaemonOptions = {
+  port: options.port,
+  host: options.host,
+  configPath: options.config,
+  dataDir: options.dataDir,
+  workspace: options.workspace,
+  logLevel: options.logLevel,
+  noAutoSetup: options.noAutoSetup,
+};
+
+// Default config path
+if (!daemonOptions.configPath) {
+  daemonOptions.configPath = path.join(__dirname, '..', 'connectors.yaml');
 }
+
+console.log('Starting Gentle Dot Daemon...');
+console.log(`Config: ${daemonOptions.configPath}`);
+console.log(`Port: ${daemonOptions.port || 4317}`);
+console.log(`Host: ${daemonOptions.host || '127.0.0.1'}`);
+
+// Start daemon
+createDaemon(daemonOptions).catch((error) => {
+  console.error('Failed to start daemon:', error);
+  process.exit(1);
+});
+
+// Handle unhandled rejections
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception:', error);
+  process.exit(1);
+});

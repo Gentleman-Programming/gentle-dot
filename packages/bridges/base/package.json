@@ -1,0 +1,27 @@
+{
+  "name": "@gentle-dot/bridges-base",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/base-bridge.js",
+  "types": "dist/base-bridge.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/base-bridge.ts",
+    "test": "vitest run",
+    "lint": "eslint src --ext .ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "yaml": "^2.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/ws": "^8.5.12",
+    "typescript": "^5.5.0",
+    "tsx": "^4.16.0",
+    "vitest": "^2.0.0",
+    "eslint": "^9.8.0"
+  }
+}

@@ -1,0 +1,526 @@
+/**
+ * WebSocket Server - Bridge Protocol v1 implementation
+ * Implements Regla de Oro #5: Handshake obligatorio hello→ready
+ */
+
+import { WebSocketServer, WebSocket } from 'ws';
+import { createServer, IncomingMessage, Server as HttpServer } from 'http';
+import { URL } from 'url';
+import { EventEmitter } from 'events';
+import { ConnectorRegistry, ConnectorInfo, ConnectorType } from './connector-registry.js';
+import { AppConfig } from './config-loader.js';
+
+export type BridgeMessageType =
+  | 'hello'
+  | 'ready'
+  | 'ping'
+  | 'pong'
+  | 'channel_notify'
+  | 'connector_event'
+  | 'command'
+  | 'command_result'
+  | 'error'
+  | 'disconnect';
+
+export interface BridgeMessage {
+  type: BridgeMessageType;
+  payload: unknown;
+  seq?: number;
+  timestamp: number;
+}
+
+export interface HelloPayload {
+  token: string;
+  protocol: number;
+  capabilities: string[];
+  connectorType: ConnectorType;
+  connectorId: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ReadyPayload {
+  sessionId: string;
+  agentState: string;
+  features: string[];
+  daemonVersion: string;
+}
+
+export interface PingPayload {
+  seq: number;
+  ts: number;
+}
+
+export interface PongPayload {
+  seq: number;
+}
+
+export interface ChannelNotifyPayload {
+  channelId: string;
+  event: string;
+  data: unknown;
+}
+
+export interface ConnectorEventPayload {
+  connectorId: string;
+  event: string;
+  data: unknown;
+}
+
+export interface CommandPayload {
+  commandId: string;
+  connectorId: string;
+  action: string;
+  params: Record<string, unknown>;
+}
+
+export interface CommandResultPayload {
+  commandId: string;
+  success: boolean;
+  result?: unknown;
+  error?: string;
+}
+
+export interface ErrorPayload {
+  code: string;
+  message: string;
+  details?: unknown;
+}
+
+export interface WsServerEvents {
+  onConnection: (ws: WebSocket, connectorId: string) => void;
+  onDisconnection: (connectorId: string, code: number, reason: string) => void;
+  onMessage: (connectorId: string, message: BridgeMessage) => void;
+  onError: (connectorId: string | null, error: Error) => void;
+}
+
+const DAEMON_VERSION = '0.1.0';
+const PROTOCOL_VERSION = 1;
+const HEARTBEAT_INTERVAL = 30000; // 30 seconds
+const HEARTBEAT_TIMEOUT = 60000; // 60 seconds
+
+interface ConnectorWithWs extends ConnectorInfo {
+  ws?: WebSocket;
+}
+
+interface ConnectionState {
+  connectorId: string | null;
+  authenticated: boolean;
+}
+
+export class WsServer extends EventEmitter {
+  private wss: WebSocketServer | null = null;
+  private httpServer: HttpServer | null = null;
+  private registry: ConnectorRegistry;
+  private config: AppConfig;
+  private sessionIdCounter = 0;
+  private heartbeatTimers = new Map<string, NodeJS.Timeout>();
+  private pendingPings = new Map<string, number>(); // connectorId -> seq
+
+  constructor(registry: ConnectorRegistry, config: AppConfig) {
+    super();
+    this.registry = registry;
+    this.config = config;
+  }
+
+  /**
+   * Start the WebSocket server
+   */
+  async start(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.httpServer = createServer((req, res) => {
+        this.handleHttpRequest(req, res);
+      });
+
+      this.wss = new WebSocketServer({ server: this.httpServer, path: '/ws' });
+
+      this.wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
+        this.handleConnection(ws, req);
+      });
+
+      this.wss.on('error', (error) => {
+        console.error('[WsServer] WebSocket server error:', error);
+        this.emit('onError', null, error);
+      });
+
+      this.httpServer.listen(this.config.daemon.port, this.config.daemon.host, () => {
+        console.log(`[WsServer] Listening on ${this.config.daemon.host}:${this.config.daemon.port}`);
+        resolve();
+      });
+
+      this.httpServer.on('error', (error) => {
+        console.error('[WsServer] HTTP server error:', error);
+        reject(error);
+      });
+
+      // Start heartbeat interval
+      this.startHeartbeat();
+    });
+  }
+
+  /**
+   * Stop the WebSocket server
+   */
+  async stop(): Promise<void> {
+    // Clear all heartbeat timers
+    for (const timer of this.heartbeatTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.heartbeatTimers.clear();
+    this.pendingPings.clear();
+
+    // Close all WebSocket connections
+    if (this.wss) {
+      for (const client of this.wss.clients) {
+        client.close(1001, 'Server shutting down');
+      }
+      await new Promise<void>((resolve) => {
+        this.wss!.close(() => resolve());
+      });
+    }
+
+    // Close HTTP server
+    if (this.httpServer) {
+      await new Promise<void>((resolve) => {
+        this.httpServer!.close(() => resolve());
+      });
+    }
+
+    console.log('[WsServer] Stopped');
+  }
+
+  /**
+   * Handle incoming HTTP requests (health/ready endpoints)
+   */
+  private handleHttpRequest(req: IncomingMessage, res: import('http').ServerResponse): void {
+    const url = new URL(req.url || '/', `http://${req.headers.host}`);
+
+    if (url.pathname === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, timestamp: Date.now() }));
+      return;
+    }
+
+    if (url.pathname === '/ready') {
+      const ready = this.registry.getReadyCount() > 0 || this.registry.getTotalCount() === 0;
+      res.writeHead(ready ? 200 : 503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ready, connectors: this.registry.getTotalCount(), timestamp: Date.now() }));
+      return;
+    }
+
+    if (url.pathname === '/connectors') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ connectors: this.registry.list().map(c => ({
+        connectorId: c.connectorId,
+        type: c.type,
+        status: c.status,
+        connectedAt: c.connectedAt,
+        capabilities: c.capabilities,
+      })), timestamp: Date.now() }));
+      return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not found' }));
+  }
+
+  /**
+   * Handle new WebSocket connection
+   */
+  private handleConnection(ws: WebSocket, req: IncomingMessage): void {
+    const state: ConnectionState = {
+      connectorId: null,
+      authenticated: false,
+    };
+
+    console.log('[WsServer] New connection from', req.socket.remoteAddress);
+
+    const onMessage = (data: Buffer) => {
+      try {
+        const message = JSON.parse(data.toString()) as BridgeMessage;
+
+        // Validate message structure
+        if (!message.type || typeof message.timestamp !== 'number') {
+          this.sendError(ws, 'INVALID_MESSAGE', 'Message must have type and timestamp');
+          return;
+        }
+
+        // Handle hello message (authentication)
+        if (message.type === 'hello') {
+          this.handleHello(ws, message, state);
+          return;
+        }
+
+        // Require authentication for all other messages
+        if (!state.authenticated || !state.connectorId) {
+          this.sendError(ws, 'NOT_AUTHENTICATED', 'Must send hello first');
+          return;
+        }
+
+        // Update heartbeat
+        this.registry.updateHeartbeat(state.connectorId);
+
+        // Route message
+        switch (message.type) {
+          case 'ping':
+            this.handlePing(ws, state.connectorId, message);
+            break;
+          case 'pong':
+            this.handlePong(state.connectorId, message);
+            break;
+          case 'channel_notify':
+          case 'connector_event':
+          case 'command':
+          case 'command_result':
+            this.emit('onMessage', state.connectorId, message);
+            break;
+          case 'disconnect':
+            this.handleDisconnect(ws, state.connectorId, message);
+            break;
+          default:
+            this.sendError(ws, 'UNKNOWN_MESSAGE_TYPE', `Unknown message type: ${message.type}`);
+        }
+      } catch (error) {
+        console.error('[WsServer] Error parsing message:', error);
+        this.sendError(ws, 'PARSE_ERROR', 'Invalid JSON');
+      }
+    };
+
+    const onClose = (code: number, reason: Buffer) => {
+      console.log('[WsServer] Connection closed:', code, reason.toString());
+      if (state.connectorId) {
+        this.cleanupConnector(state.connectorId, code, reason.toString());
+      }
+    };
+
+    const onError = (error: Error) => {
+      console.error('[WsServer] WebSocket error:', error);
+      this.emit('onError', state.connectorId, error);
+    };
+
+    ws.on('message', onMessage);
+    ws.on('close', onClose);
+    ws.on('error', onError);
+  }
+
+  /**
+   * Handle hello message (authentication handshake)
+   */
+  private handleHello(ws: WebSocket, message: BridgeMessage, state: ConnectionState): void {
+    const payload = message.payload as HelloPayload;
+
+    // Validate protocol version
+    if (payload.protocol !== PROTOCOL_VERSION) {
+      this.sendError(ws, 'PROTOCOL_MISMATCH', `Expected protocol v${PROTOCOL_VERSION}, got v${payload.protocol}`);
+      ws.close(1002, 'Protocol mismatch');
+      return;
+    }
+
+    // Validate token (simple check - in production use proper auth)
+    if (!payload.token || payload.token !== this.getAuthToken()) {
+      this.sendError(ws, 'INVALID_TOKEN', 'Invalid authentication token');
+      ws.close(1008, 'Invalid token');
+      return;
+    }
+
+    // Validate connector type
+    if (!['telegram', 'gmail', 'discord', 'whatsapp'].includes(payload.connectorType)) {
+      this.sendError(ws, 'INVALID_CONNECTOR_TYPE', `Unknown connector type: ${payload.connectorType}`);
+      ws.close(1008, 'Invalid connector type');
+      return;
+    }
+
+    // Check if connectorId already registered
+    if (this.registry.get(payload.connectorId)) {
+      this.sendError(ws, 'CONNECTOR_EXISTS', `Connector ${payload.connectorId} already connected`);
+      ws.close(1008, 'Connector already connected');
+      return;
+    }
+
+    // Register connector
+    const connectorInfo: ConnectorInfo = {
+      connectorId: payload.connectorId,
+      type: payload.connectorType,
+      status: 'connecting',
+      connectedAt: Date.now(),
+      lastPing: Date.now(),
+      capabilities: payload.capabilities || [],
+      metadata: payload.metadata || {},
+    };
+
+    this.registry.register(connectorInfo);
+
+    // Mark as authenticated
+    state.connectorId = payload.connectorId;
+    state.authenticated = true;
+
+    // Store ws reference in registry
+    const registered = this.registry.get(state.connectorId);
+    if (registered) {
+      (registered as ConnectorWithWs).ws = ws;
+    }
+
+    // Send ready response
+    const sessionId = `session-${++this.sessionIdCounter}-${Date.now()}`;
+    const readyPayload: ReadyPayload = {
+      sessionId,
+      agentState: 'ready',
+      features: ['channel_notify', 'connector_event', 'command', 'command_result'],
+      daemonVersion: DAEMON_VERSION,
+    };
+
+    this.send(ws, 'ready', readyPayload);
+
+    // Update status to ready
+    this.registry.updateStatus(state.connectorId, 'ready');
+
+    console.log(`[WsServer] Connector registered: ${state.connectorId} (${payload.connectorType})`);
+    this.emit('onConnection', ws, state.connectorId);
+  }
+
+  /**
+   * Handle ping message
+   */
+  private handlePing(ws: WebSocket, connectorId: string, message: BridgeMessage): void {
+    const payload = message.payload as PingPayload;
+    const pongPayload: PongPayload = { seq: payload.seq };
+    this.send(ws, 'pong', pongPayload);
+  }
+
+  /**
+   * Handle pong message
+   */
+  private handlePong(connectorId: string, message: BridgeMessage): void {
+    const payload = message.payload as PongPayload;
+    const pendingSeq = this.pendingPings.get(connectorId);
+    if (pendingSeq !== undefined && pendingSeq === payload.seq) {
+      this.pendingPings.delete(connectorId);
+    }
+  }
+
+  /**
+   * Handle disconnect message
+   */
+  private handleDisconnect(ws: WebSocket, connectorId: string, message: BridgeMessage): void {
+    ws.close(1000, 'Client requested disconnect');
+  }
+
+  /**
+   * Clean up connector on disconnect
+   */
+  private cleanupConnector(connectorId: string, code: number, reason: string): void {
+    const connector = this.registry.get(connectorId);
+    if (connector) {
+      this.registry.updateStatus(connectorId, 'disconnected');
+    }
+    this.registry.unregister(connectorId);
+
+    const timer = this.heartbeatTimers.get(connectorId);
+    if (timer) {
+      clearTimeout(timer);
+      this.heartbeatTimers.delete(connectorId);
+    }
+    this.pendingPings.delete(connectorId);
+
+    this.emit('onDisconnection', connectorId, code, reason);
+    console.log(`[WsServer] Connector unregistered: ${connectorId}`);
+  }
+
+  /**
+   * Send a message to a WebSocket
+   */
+  send(ws: WebSocket, type: BridgeMessageType, payload: unknown): void {
+    if (ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const message: BridgeMessage = {
+      type,
+      payload,
+      timestamp: Date.now(),
+    };
+
+    ws.send(JSON.stringify(message));
+  }
+
+  /**
+   * Send error to a WebSocket
+   */
+  sendError(ws: WebSocket, code: string, message: string, details?: unknown): void {
+    const payload: ErrorPayload = { code, message, details };
+    this.send(ws, 'error', payload);
+  }
+
+  /**
+   * Broadcast message to all connectors of a specific type
+   */
+  broadcastToType(type: ConnectorType, messageType: BridgeMessageType, payload: unknown): number {
+    const connectors = this.registry.getByType(type);
+    let sent = 0;
+
+    for (const connector of connectors) {
+      const ws = (connector as ConnectorWithWs).ws;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        this.send(ws, messageType, payload);
+        sent++;
+      }
+    }
+
+    return sent;
+  }
+
+  /**
+   * Send message to specific connector
+   */
+  sendToConnector(connectorId: string, messageType: BridgeMessageType, payload: unknown): boolean {
+    const connector = this.registry.get(connectorId);
+    if (!connector) {
+      return false;
+    }
+    const ws = (connector as ConnectorWithWs).ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+
+    this.send(ws, messageType, payload);
+    return true;
+  }
+
+  /**
+   * Start heartbeat mechanism
+   */
+  private startHeartbeat(): void {
+    setInterval(() => {
+      const now = Date.now();
+
+      for (const connector of this.registry.list()) {
+        const cid = connector.connectorId;
+        const ws = (connector as ConnectorWithWs).ws;
+
+        // Check if heartbeat timeout exceeded
+        if (now - connector.lastPing > HEARTBEAT_TIMEOUT) {
+          console.warn(`[WsServer] Heartbeat timeout for ${cid}, disconnecting`);
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.close(1001, 'Heartbeat timeout');
+          }
+          continue;
+        }
+
+        // Send ping if no pending ping
+        if (!this.pendingPings.has(cid) && ws && ws.readyState === WebSocket.OPEN) {
+          const seq = Date.now();
+          this.pendingPings.set(cid, seq);
+          this.send(ws, 'ping', { seq, ts: now });
+        }
+      }
+    }, HEARTBEAT_INTERVAL);
+  }
+
+  /**
+   * Get authentication token from config or env
+   */
+  private getAuthToken(): string {
+    // In production, this should come from a secure config
+    // For now, use a simple shared secret from env or default
+    return process.env['BRIDGE_AUTH_TOKEN'] || 'gentle-dot-bridge-secret';
+  }
+}
