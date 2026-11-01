@@ -10,6 +10,8 @@
   },
   "scripts": {
     "build": "tsc",
+    "build:runtime": "node scripts/build-runtime.ts",
+    "build:windows-stop": "node scripts/build-windows-stop.mjs",
     "dev": "tsx watch src/cli.ts",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -17,10 +19,16 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "ws": "^8.18.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-mcp": "1.4.0",
+    "gentle-pi": "4.3.0",
+    "jiti": "2.7.0",
+    "ws": "^8.22.0",
     "yaml": "^2.5.0",
     "chokidar": "^3.6.0",
-    "commander": "^12.0.0"
+    "commander": "^12.0.0",
+    "@gentle-dot/protocol": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
@@ -28,6 +36,7 @@
     "typescript": "^5.5.0",
     "tsx": "^4.16.0",
     "vitest": "^2.0.0",
-    "eslint": "^9.8.0"
+    "eslint": "^9.8.0",
+    "esbuild": "0.28.2"
   }
 }

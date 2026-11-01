@@ -28,7 +28,7 @@ export interface AppChannelEvents {
   onError: (clientId: string | null, error: Error) => void;
 }
 
-const DEFAULT_SOCKET_PATH = path.join(
+export const DEFAULT_SOCKET_PATH = path.join(
   process.env['HOME'] || '/tmp',
   '.gentle-dot',
   'app-channel.sock'
@@ -436,3 +436,6 @@ export class AppChannelClient extends EventEmitter {
     }
   }
 }
+
+export { DEFAULT_SOCKET_PATH, APPROVAL_WAIT_MS };
+
