@@ -97,6 +97,33 @@ pub trait Host {
     fn label_tray(&self, shortcut: &str);
 }
 
+/// Ordered alternatives tried at launch when the configured shortcut is taken (#50).
+/// Function keys avoid clashing with the shortcuts most desktops already hold.
+pub const FALLBACKS: &[&str] = &[
+    "Super+Space",
+    "Ctrl+Space",
+    "Alt+Shift+Space",
+    "Super+Shift+Space",
+    "F1",
+    "F2",
+    "F3",
+    "F4",
+    "F5",
+];
+
+/// Launch candidates: the configured shortcut first (normalized), then the fallbacks,
+/// without duplicates, comparing as the same keys regardless of spelling.
+pub fn candidates(preferred: &str) -> Vec<String> {
+    let normalized = normalize(preferred).unwrap_or_else(|_| preferred.to_string());
+    let mut options = vec![normalized];
+    for fallback in FALLBACKS {
+        if !options.iter().any(|option| same_keys(option, fallback)) {
+            options.push((*fallback).to_string());
+        }
+    }
+    options
+}
+
 /// Applies a new panel shortcut at once. The new one is bound before the old one is released,
 /// so a refused or unsaved change leaves the old one working. Returns the saved spelling.
 pub fn apply(host: &impl Host, current: Option<&str>, requested: &str) -> Result<String, String> {
@@ -176,6 +203,47 @@ mod tests {
     fn refuses_esc_alone() {
         assert_eq!(normalize("Escape"), Err(ESC_ALONE.to_string()));
         assert_eq!(normalize("esc"), Err(ESC_ALONE.to_string()));
+    }
+
+    #[test]
+    fn launch_candidates_start_with_the_configured_shortcut() {
+        assert_eq!(candidates("alt+space")[0], "Alt+Space");
+    }
+
+    #[test]
+    fn launch_candidates_follow_the_issue_order_without_duplicates() {
+        let list = candidates("Alt+Space");
+        assert_eq!(
+            list,
+            vec![
+                "Alt+Space",
+                "Super+Space",
+                "Ctrl+Space",
+                "Alt+Shift+Space",
+                "Super+Shift+Space",
+                "F1",
+                "F2",
+                "F3",
+                "F4",
+                "F5"
+            ]
+        );
+        // Another spelling of the same keys is still counted only once.
+        assert_eq!(candidates("super+space"), vec!["Super+Space", "Ctrl+Space", "Alt+Shift+Space", "Super+Shift+Space", "F1", "F2", "F3", "F4", "F5"]);
+    }
+
+    #[test]
+    fn a_custom_shortcut_gets_the_same_fallbacks() {
+        let list = candidates("Ctrl+Alt+K");
+        assert_eq!(list[0], "Ctrl+Alt+K");
+        assert!(list.iter().skip(1).eq(FALLBACKS.iter().copied().map(str::to_string)));
+    }
+
+    #[test]
+    fn launch_candidates_keep_the_saved_spelling_when_it_cannot_be_read() {
+        let list = candidates("not a shortcut");
+        assert_eq!(list[0], "not a shortcut");
+        assert_eq!(list.len(), 1 + FALLBACKS.len());
     }
 
     /// Records what `apply` asks of the app, in order.
