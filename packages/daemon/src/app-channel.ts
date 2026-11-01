@@ -26,8 +26,9 @@ export const APPROVAL_WAIT_MS = 130_000;
  * A frame longer than this closes the channel; nothing legitimate comes close. The app has the same
  * rule, and a closed channel stops the daemon (S35.2), so neither side ever sends a longer one: an
  * oversized request fails (an approval is refused) and an oversized answer becomes an error.
+ * Both sides must count the same unit, and bytes is the one the app's end uses.
  */
-const MAX_FRAME = 1024 * 1024;
+export const MAX_FRAME = 1024 * 1024;
 
 /** One argument of the action, in the order shown. */
 export interface PreviewField {
@@ -171,10 +172,17 @@ export class AppChannel implements AppLink {
 		for (let end = this.buffer.indexOf("\n"); end >= 0; end = this.buffer.indexOf("\n")) {
 			const line = this.buffer.slice(0, end);
 			this.buffer = this.buffer.slice(end + 1);
+			// `MAX_FRAME` is a byte cap and the frame is a string: counting characters would let a frame
+			// of multi-byte characters through, while the app's own end refuses to send one.
+			if (Buffer.byteLength(line, "utf8") > MAX_FRAME) {
+				this.log("the app's channel sent a frame that is too long; closing it");
+				this.close();
+				return;
+			}
 			if (line.trim() !== "") this.onFrame(line);
 			if (!this.open) return;
 		}
-		if (this.buffer.length > MAX_FRAME) {
+		if (Buffer.byteLength(this.buffer, "utf8") > MAX_FRAME) {
 			this.log("the app's channel sent a frame that is too long; closing it");
 			this.close();
 		}

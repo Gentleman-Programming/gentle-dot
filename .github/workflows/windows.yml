@@ -39,6 +39,16 @@ jobs:
         shell: pwsh
         run: New-Item -ItemType Directory -Force -Path packages/ui/dist/app | Out-Null
 
+      # sherpa-onnx-sys's build script trusts a restored `sherpa-onnx-prebuilt` tree blindly: a
+      # present `lib` directory short-circuits the download without checking the static libraries
+      # are in it (#92's poisoned-cache class). A partial rust-cache restore then passes
+      # `cargo check` (no linking) and fails `cargo test` with "could not find native static
+      # library sherpa-onnx-c-api". Purge the restored tree so the script downloads it fresh.
+      - name: Purge restored sherpa-onnx prebuilt tree
+        working-directory: apps/desktop/src-tauri
+        shell: pwsh
+        run: Remove-Item -Recurse -Force target/sherpa-onnx-prebuilt -ErrorAction SilentlyContinue
+
       - name: cargo check
         working-directory: apps/desktop/src-tauri
         run: cargo check --locked --all-targets
@@ -96,5 +106,5 @@ jobs:
 
       # The daemon test files that run on Windows (the runtime build uses the addon built above).
       - name: Daemon tests
-        run: pnpm exec vitest run packages/daemon/test/windows-stop.test.ts packages/daemon/test/windows-app-channel.test.ts packages/daemon/test/app-channel-platform.test.ts packages/daemon/test/app-channel.test.ts packages/daemon/test/app-channel-fd.test.ts packages/daemon/test/windows-app-channel-addon.test.ts packages/daemon/test/process-tree.test.ts packages/daemon/test/supervisor.test.ts packages/daemon/test/runtime.test.ts packages/daemon/test/config.test.ts packages/daemon/test/isolation.test.ts packages/daemon/test/private-memory.test.ts packages/daemon/test/lifecycle.test.ts packages/daemon/test/cli.test.ts packages/daemon/test/runtime-build.test.ts scripts/package/test/lib.test.ts scripts/package/test/package-windows.test.ts
+        run: pnpm exec vitest run packages/daemon/test/windows-stop.test.ts packages/daemon/test/windows-app-channel.test.ts packages/daemon/test/app-channel-platform.test.ts packages/daemon/test/app-channel.test.ts packages/daemon/test/app-channel-fd.test.ts packages/daemon/test/windows-app-channel-addon.test.ts packages/daemon/test/windows-stop-addon.test.ts packages/daemon/test/process-tree.test.ts packages/daemon/test/supervisor.test.ts packages/daemon/test/runtime.test.ts packages/daemon/test/config.test.ts packages/daemon/test/isolation.test.ts packages/daemon/test/private-memory.test.ts packages/daemon/test/lifecycle.test.ts packages/daemon/test/cli.test.ts packages/daemon/test/runtime-build.test.ts scripts/package/test/lib.test.ts scripts/package/test/package-windows.test.ts
 

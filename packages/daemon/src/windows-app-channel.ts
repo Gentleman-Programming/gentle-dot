@@ -94,6 +94,7 @@ class WindowsAppChannelDuplex extends Duplex {
 	#timeoutMs: number;
 	#pollTimer?: NodeJS.Timeout;
 	#deadline?: NodeJS.Timeout;
+	#writeDeadline?: NodeJS.Timeout;
 	#reading = false;
 	#driving = false;
 	#disposed = false;
@@ -215,8 +216,13 @@ class WindowsAppChannelDuplex extends Duplex {
 	private observe(status: NativeAppChannelSnapshot): void {
 		this.#snapshot = status;
 		if (status.error) this.#failure ??= new Error(`Windows app channel native error ${status.error}`);
-		else if (status.eof) this.#failure ??= new Error("App channel EOF");
-		else if (status.phase === "retained_failure")
+		else if (status.eof) {
+			// The app's shutdown awaits daemon.close() before the channel closes, so the peer
+			// leaving after consuming every admitted write is the drain's normal end, not a
+			// failure; anything still in flight keeps EOF a failure (the #112 native review).
+			if (!(this.#mode === "drain" && status.acceptedWrite === status.completedWrite))
+				this.#failure ??= new Error("App channel EOF");
+		} else if (status.phase === "retained_failure")
 			this.#failure ??= new Error("App channel native ownership retained");
 	}
 	private stop(mode: "drain" | "abort"): void {
@@ -262,8 +268,10 @@ class WindowsAppChannelDuplex extends Duplex {
 				}
 				if (pending.ticket !== undefined && pending.ticket <= this.#snapshot.completedWrite) {
 					this.#write = undefined;
+					clearTimeout(this.#writeDeadline);
+					this.#writeDeadline = undefined;
 					pending.callback();
-				}
+				} else if (pending.ticket !== undefined) this.armWriteDeadline(pending.ticket);
 			}
 			if (this.#reading && !this.#stopping && !this.#failure && this.#snapshot.readableBytes) {
 				const bytes = this.#owner.read(65536);
@@ -311,6 +319,21 @@ class WindowsAppChannelDuplex extends Duplex {
 			this.drive();
 		}, 10);
 	}
+	/** An admitted write the peer never reads would hold the channel open forever: bound it like
+	 * the close deadline, ending in an abort rather than an unbounded wait. */
+	private armWriteDeadline(ticket: bigint): void {
+		if (this.#writeDeadline) return;
+		this.#writeDeadline = setTimeout(() => {
+			this.#writeDeadline = undefined;
+			if (this.#disposed || this.#write?.ticket !== ticket) return;
+			this.#failure ??= new Error("App channel write deadline exceeded");
+			this.rejectWrite(this.#failure);
+			if (!this.#close) void this.close("abort");
+			else this.stop("abort");
+			this.drive();
+		}, this.#timeoutMs);
+	}
+
 	private rejectWrite(error: Error): void {
 		const pending = this.#write;
 		this.#write = undefined;
@@ -320,7 +343,8 @@ class WindowsAppChannelDuplex extends Duplex {
 		this.#disposed = true;
 		clearTimeout(this.#pollTimer);
 		clearTimeout(this.#deadline);
-		this.#pollTimer = this.#deadline = undefined;
+		clearTimeout(this.#writeDeadline);
+		this.#pollTimer = this.#deadline = this.#writeDeadline = undefined;
 		try {
 			this.#owner.release();
 		} catch {

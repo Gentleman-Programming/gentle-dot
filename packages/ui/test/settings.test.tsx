@@ -8,6 +8,7 @@ import { type DotState, initialState } from "../src/store.ts";
 const h = vi.hoisted(() => ({
 	tauri: true,
 	shortcut: "Alt+Space",
+	memory: "shared" as "shared" | "private",
 	setResult: undefined as undefined | ((shortcut: string) => Promise<unknown>),
 	invoke: vi.fn(),
 	state: undefined as unknown as DotState,
@@ -59,6 +60,7 @@ async function startRecording() {
 beforeEach(() => {
 	h.tauri = true;
 	h.shortcut = "Alt+Space";
+	h.memory = "shared";
 	h.setResult = undefined;
 	h.state = { ...initialState, connection: "open", agentState: "idle" };
 	vi.spyOn(navigator, "userAgent", "get").mockReturnValue(MAC_AGENT);
@@ -73,6 +75,13 @@ beforeEach(() => {
 				if (h.setResult) return h.setResult(shortcut);
 				h.shortcut = shortcut;
 				return { shortcut };
+			}
+			case "memory_get":
+				return { memory: h.memory };
+			case "memory_set": {
+				const memory = String(args?.memory) as "shared" | "private";
+				h.memory = memory;
+				return { memory };
 			}
 			default:
 				return null;
@@ -185,6 +194,32 @@ describe("the Settings screen (S33.1)", () => {
 		h.shortcut = "Shift+Super+K";
 		await openSettings();
 		expect(await screen.findByText("Shift+Super+K")).toBeInTheDocument();
+	});
+});
+
+describe("the Private memory toggle (SW9)", () => {
+	it("shows the stored value and flips it through the app", async () => {
+		h.memory = "private";
+		await openSettings();
+		const toggle = await screen.findByRole("switch", { name: "Private memory" });
+		await waitFor(() => expect(toggle).toBeEnabled());
+		expect(toggle).toBeChecked();
+		expect(invoked("memory_set")).toHaveLength(0);
+		await userEvent.click(toggle);
+		await waitFor(() => expect(invoked("memory_set")).toHaveLength(1));
+		expect(invoked("memory_set")[0]?.[1]).toEqual({ memory: "shared" });
+		await waitFor(() => expect(toggle).not.toBeChecked());
+	});
+
+	it("defaults to the shared Engram and turns private memory on", async () => {
+		await openSettings();
+		const toggle = await screen.findByRole("switch", { name: "Private memory" });
+		await waitFor(() => expect(toggle).toBeEnabled());
+		expect(toggle).not.toBeChecked();
+		await userEvent.click(toggle);
+		await waitFor(() => expect(invoked("memory_set")).toHaveLength(1));
+		expect(invoked("memory_set")[0]?.[1]).toEqual({ memory: "private" });
+		await waitFor(() => expect(toggle).toBeChecked());
 	});
 });
 

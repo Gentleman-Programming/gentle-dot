@@ -9,6 +9,7 @@ import approvalGuard, {
 	POLICY_ENV,
 	parsePolicy,
 } from "../src/extensions/approval-guard.ts";
+import { canCreateFileSymlinks, symlinkDirectory } from "./support/fixture-capabilities.ts";
 
 const AGENT = "/data/agent";
 const PROTECTED = [`${AGENT}/mcp.json`, `${AGENT}/mcp-auth.json`, "/data/connectors.json", "/app/guard.ts"];
@@ -140,7 +141,7 @@ describe("approval guard decisions", () => {
 	it("sees through symlinked folders, for files that do not exist yet too", () => {
 		const real = mkdtempSync(join(tmpdir(), "guard-"));
 		const link = `${real}-link`;
-		symlinkSync(real, link);
+		symlinkDirectory(real, link);
 		const guarded: ConnectorPolicy = { connectors: {}, protectedPaths: [join(link, "mcp.json")] };
 		for (const path of [
 			join(real, "mcp.json"),
@@ -227,7 +228,6 @@ describe("built-in computer server (S24.7)", () => {
 describe("credential and control files (B2)", () => {
 	it("blocks reading them with the read tool, by any path spelling", () => {
 		const { files, guarded, at, workspace, data } = credentialTree();
-		symlinkSync(files.mcpAuth, join(workspace, "notes.json"));
 		linkSync(files.auth, join(workspace, "copy.json"));
 		for (const path of [
 			"../agent/mcp-auth.json",
@@ -241,7 +241,6 @@ describe("credential and control files (B2)", () => {
 			"../connectors.json",
 			"../token",
 			`${data}/token`,
-			"notes.json",
 			"copy.json",
 		]) {
 			expect(decide(at("read", { path }), guarded), path).toEqual({
@@ -252,6 +251,17 @@ describe("credential and control files (B2)", () => {
 		writeFileSync(join(workspace, "plan.md"), "# Plan");
 		expect(decide(at("read", { path: "plan.md" }), guarded)).toEqual({ action: "pass" });
 		expect(decide(at("read", { path: "../agent/settings.json" }), guarded)).toEqual({ action: "pass" });
+	});
+
+	it.skipIf(
+		!canCreateFileSymlinks("approval-guard: a credential file reached through a symlink in the workspace"),
+	)("blocks reading a credential file through a symlink in the workspace too", () => {
+		const { files, guarded, at, workspace } = credentialTree();
+		symlinkSync(files.mcpAuth, join(workspace, "notes.json"));
+		expect(decide(at("read", { path: "notes.json" }), guarded)).toEqual({
+			action: "block",
+			reason: expect.stringContaining("private"),
+		});
 	});
 
 	it("blocks file tools that would show them: grep over them or a folder above them, find and ls on them", () => {

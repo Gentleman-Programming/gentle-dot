@@ -5,6 +5,7 @@ import { agentSpawnEnv } from "./config.ts";
 import { encodeRecord, JsonlDecoder } from "./jsonl.ts";
 import { writePrivateFile } from "./private-file.ts";
 import { terminateProcessTree, WINDOWS_TASKKILL_TIMEOUT_MS } from "./process-tree.ts";
+import { clearStaleSetupLock, writeSetupLockOwner } from "./setup-lock.ts";
 import type { OsUser } from "./vps.ts";
 
 /** A record the agent wrote to stdout that is not a command response. */
@@ -69,6 +70,23 @@ type Pending = {
 };
 
 const DEFAULT_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
+
+/**
+ * The engine home the daemon passed as `--home`, if any. The daemon owns that home and marks it
+ * (`claimEngineHome`), so its engine lock is ours to mend; without `--home` the engine manages a
+ * home of its own that we never touch.
+ */
+function engineHomeArgument(args: string[]): string | undefined {
+	for (let at = args.length - 1; at >= 0; at -= 1) {
+		const arg = args[at];
+		if (arg === "--home") {
+			const value = args[at + 1];
+			return value && !value.startsWith("--") ? value : undefined;
+		}
+		if (arg?.startsWith("--home=")) return arg.slice("--home=".length) || undefined;
+	}
+	return undefined;
+}
 
 /**
  * Runs the agent (`gentle-shell --mode rpc`) as a child process, correlates
@@ -229,6 +247,7 @@ export class AgentSupervisor {
 		this.stopping = true;
 		this.wasLaunched = true;
 		clearTimeout(this.restartTimer);
+		this.restartTimer = undefined;
 		const child = this.child;
 		if (!child) {
 			this.setState("stopped");
@@ -333,6 +352,11 @@ export class AgentSupervisor {
 
 	private spawnChild(): ChildProcess {
 		const { command, args = [], extraArgs = [], cwd, env, prepareSpawn, user } = this.options;
+		const engineHome = engineHomeArgument(args);
+		// An abrupt stop leaves the engine's empty setup lock behind (it releases it only in a
+		// `finally`), so clear an abandoned one first. The decision never touches a lock our own
+		// owner record proves is live.
+		if (engineHome) clearStaleSetupLock(engineHome);
 		const child = spawn(command, [...args, "--mode", "rpc", "--session-dir", this.sessionDir, ...extraArgs], {
 			cwd,
 			env: agentSpawnEnv(
@@ -345,6 +369,9 @@ export class AgentSupervisor {
 			...(user ? { uid: user.uid, gid: user.gid } : {}),
 		});
 		this.child = child;
+		// Recorded only once the child exists (a failed spawn has no pid): this is the proof a later
+		// start uses to tell an abandoned lock from one a live engine still holds.
+		if (engineHome && child.pid !== undefined) writeSetupLockOwner(engineHome, child.pid);
 		const decoder = new JsonlDecoder(
 			(record) => this.handleRecord(record as AgentRecord),
 			(line) => this.log(`agent wrote a malformed record: ${line.slice(0, 200)}`),
@@ -414,16 +441,26 @@ export class AgentSupervisor {
 		}
 		this.log(`agent exited unexpectedly (${signal ?? `code ${code}`})`);
 		if (wasBusy) this.interrupted = true;
+		// The dead run's length, measured now, decides whether the next failures start the backoff
+		// over; the old check ran inside scheduleRestart against a spawnedAt the failed runs never
+		// updated, so a persistent startup crash reset the attempts on every call and retried at
+		// the first delay forever.
+		if (this.spawnedAt && Date.now() - this.spawnedAt > (this.options.stableMs ?? 30_000)) this.attempts = 0;
+		this.spawnedAt = 0;
 		this.scheduleRestart();
 	}
 
 	private scheduleRestart(): void {
+		// One pending respawn at most. A death during startup reaches this from handleClose and
+		// again from the spawn's catch; stacking the timers doubled the attempts every generation
+		// (measured on Windows: one crash became ~416k respawn attempts in five hours).
+		if (this.restartTimer) return;
 		const backoff = this.options.backoffMs ?? DEFAULT_BACKOFF_MS;
-		if (this.spawnedAt && Date.now() - this.spawnedAt > (this.options.stableMs ?? 30_000)) this.attempts = 0;
 		const delay = backoff[Math.min(this.attempts, backoff.length - 1)] ?? 1000;
 		this.attempts += 1;
 		this.setState("restarting");
 		this.restartTimer = setTimeout(() => {
+			this.restartTimer = undefined;
 			if (this.stopping) return;
 			this.initialize().catch((error: Error) => {
 				this.log(`agent restart failed: ${error.message}`);

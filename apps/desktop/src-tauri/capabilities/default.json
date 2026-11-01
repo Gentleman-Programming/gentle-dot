@@ -42,9 +42,9 @@
 		},
 		{
 			"identifier": "settings",
-			"description": "The panel's Settings screen (S33): read and change the shortcut that opens the panel; the Dot never changes it.",
+			"description": "The panel's Settings screen (S33, SW9): read and change the shortcut that opens the panel and the assistant's memory mode; the Dot never changes either.",
 			"windows": ["panel"],
-			"permissions": ["allow-shortcut-get", "allow-shortcut-set"]
+			"permissions": ["allow-shortcut-get", "allow-shortcut-set", "allow-memory-get", "allow-memory-set"]
 		},
 		{
 			"identifier": "connectors",
