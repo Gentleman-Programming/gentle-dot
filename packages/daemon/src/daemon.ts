@@ -318,7 +318,8 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		log,
 	});
 	const voice = new VoiceService({
-		apiKey: () => auth.openAIApiKey(),
+		apiKey: () => auth.nvidiaApiKey(),
+		dataDir: options.dataDir,
 		...(options.voiceFetch ? { fetch: options.voiceFetch } : {}),
 		log,
 	});
