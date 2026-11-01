@@ -9,3 +9,5 @@ allowBuilds:
   '@google/genai': false
   protobufjs: false
   better-sqlite3: true
+  libsignal: true
+exoticSubdeps: true
