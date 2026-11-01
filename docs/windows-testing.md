@@ -45,6 +45,9 @@ apps/desktop/src-tauri/target/release/gentle-dot.exe
 
 A **debug** build is not a substitute. One produced by `tauri dev` loads the UI from the Vite dev server named by `devUrl` and embeds no UI assets, so running `apps/desktop/src-tauri/target/debug/gentle-dot.exe` on its own opens a **blank white window** (measured). To work on the app, run `pnpm --filter @gentle-dot/desktop dev`, which starts that server first.
 
+The desktop build alone is not enough: the daemon the app spawns loads the native addon `packages/daemon/native/windows-stop.node`, a **gitignored artifact** that neither `pnpm install` nor the desktop build produces. Build it once from an existing MSVC/Windows SDK developer environment with the explicit step documented in [packages/daemon/README.md](../packages/daemon/README.md) (`pnpm --filter @gentle-dot/daemon run build:windows-stop -- --compiler <cl.exe> --headers <node headers> --node-lib <node.lib>`). Without it every daemon start fails at initialization (measured on Windows 10 22H2: `failed to start: Windows stop listener initialization failed: Cannot find module ...
+ative/windows-stop.node` once the native cause is preserved; before the passthrough, the same death surfaced only as the collapsed sentence and read like a stop-record provenance problem).
+
 If the build fails inside a dependency's build script with a silent `cl.exe` error and no other output, see the troubleshooting table.
 
 ## Running the JavaScript tests
