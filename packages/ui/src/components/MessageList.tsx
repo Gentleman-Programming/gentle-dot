@@ -1,5 +1,5 @@
 import type { Activity, ActivityKind } from "@gentle-dot/protocol";
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, type ReactNode, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage } from "../store.ts";
@@ -61,9 +61,45 @@ interface MessageListProps {
 	/** Offers "Show earlier" at the top, which calls `onShowEarlier`. */
 	hasEarlier?: boolean;
 	onShowEarlier?: () => void;
+	/** Opens an external link (system browser in the desktop app, new tab on the web). */
+	openUrl?: (url: string) => void;
 }
 
-export function MessageList({ messages, queued = [], hasEarlier = false, onShowEarlier }: MessageListProps) {
+/** Markdown link that leaves the app through openUrl; relative hrefs stay in the webview. */
+function MessageLink({
+	href,
+	children,
+	openUrl,
+}: {
+	href?: string;
+	children?: ReactNode;
+	openUrl?: (url: string) => void;
+}) {
+	const external = href !== undefined && /^https?:\/\//i.test(href);
+	return (
+		<a
+			href={href}
+			onClick={
+				external && openUrl
+					? (e) => {
+							e.preventDefault();
+							openUrl(href);
+						}
+					: undefined
+			}
+		>
+			{children}
+		</a>
+	);
+}
+
+export function MessageList({
+	messages,
+	queued = [],
+	hasEarlier = false,
+	onShowEarlier,
+	openUrl,
+}: MessageListProps) {
 	const end = useRef<HTMLDivElement>(null);
 	const last = messages.at(-1);
 	const lastEarlier = messages.findLastIndex((m) => m.earlier);
@@ -109,7 +145,12 @@ export function MessageList({ messages, queued = [], hasEarlier = false, onShowE
 						) : null}
 						{message.text && message.role === "assistant" ? (
 							<div className="message-body">
-								<Markdown remarkPlugins={[remarkGfm]}>{message.text}</Markdown>
+								<Markdown
+									remarkPlugins={[remarkGfm]}
+									components={{ a: (props) => <MessageLink {...props} openUrl={openUrl} /> }}
+								>
+									{message.text}
+								</Markdown>
 							</div>
 						) : null}
 						{message.streaming ? <span className="caret" aria-hidden="true" /> : null}
