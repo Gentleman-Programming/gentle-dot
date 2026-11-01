@@ -914,6 +914,28 @@ export class ConnectorStore {
 		}
 	}
 
+	/** Credentials already in memory, for outbound activity redaction only; never fetches secrets. */
+	previewSecrets(): string[] {
+		const secrets = [...this.cache.values(), ...this.pending.values()];
+		if (this.computer) secrets.push(this.computer.token);
+		if (this.proxy) secrets.push(this.proxy.key);
+		// OAuth cache entries are JSON records. Mask their individual string values too,
+		// not just the serialized record, so an echoed access/refresh token is covered.
+		const strings = (value: unknown): void => {
+			if (typeof value === "string") secrets.push(value);
+			else if (Array.isArray(value)) value.forEach(strings);
+			else if (value && typeof value === "object") Object.values(value).forEach(strings);
+		};
+		for (const text of [...secrets]) {
+			try {
+				strings(JSON.parse(text));
+			} catch {
+				/* A plain credential, already included. */
+			}
+		}
+		return [...new Set(secrets.filter(Boolean))];
+	}
+
 	/** Forgets every secret read so far (the app's channel closed); the next use asks the app again. */
 	lock(): void {
 		if (this.cache.size === 0) return;

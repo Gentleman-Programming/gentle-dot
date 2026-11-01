@@ -1,14 +1,20 @@
 import { randomBytes } from "node:crypto";
 import {
+	closeSync,
+	constants,
 	createWriteStream,
 	existsSync,
+	fstatSync,
 	openSync,
 	readFileSync,
+	readSync,
+	realpathSync,
 	rmdirSync,
 	rmSync,
+	statSync,
 	unlinkSync,
 } from "node:fs";
-import { extname, join } from "node:path";
+import { dirname, extname, join } from "node:path";
 import type { Readable } from "node:stream";
 import {
 	ATTACHMENT_LIMITS,
@@ -37,6 +43,14 @@ export interface UploadRefusal {
 export type UploadOutcome = { ok: true; file: UploadedFile } | UploadRefusal;
 
 export type ResolveOutcome = { ok: true; files: StoredFile[] } | { ok: false; code: string; message: string };
+
+/** A stored file opened for reading: the caller reads at most `size` bytes from `fd`, then closes it. */
+export interface OpenedFile {
+	fd: number;
+	name: string;
+	size: number;
+	mime: string;
+}
 
 /** One message's folder: its stored files, and the bytes taken by them and by uploads still running. */
 interface Batch {
@@ -71,7 +85,16 @@ const SNIFF_BYTES = 16;
 // biome-ignore lint/suspicious/noControlCharactersInRegex: removing control characters is the point
 const HIDDEN_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g;
 const RESERVED = /^(con|prn|aux|nul|com\d|lpt\d)$/i;
-const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+export const IMAGE_TYPES: ReadonlySet<string> = new Set([
+	"image/png",
+	"image/jpeg",
+	"image/gif",
+	"image/webp",
+]);
+/** The ids {@link UploadStore.receive} makes: `u_` and 16 random bytes in base64url. */
+const UPLOAD_ID = /^u_[A-Za-z0-9_-]{22}$/;
+/** Opened without following a final link, and without waiting on a FIFO the engine may have put there. */
+const OPEN_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
 
 const tooLarge = (limits: AttachmentLimits): UploadRefusal => ({
 	ok: false,
@@ -244,6 +267,54 @@ export class UploadStore {
 		return { ok: true, files };
 	}
 
+	/**
+	 * Opens a stored file to send it back to the user (S14.7), or undefined for anything that is not
+	 * one: the id must be one the store makes and the name one it would store, and the file must be
+	 * a regular file directly in `<workspace>/uploads/<uploadId>/` with no link on the way (the real
+	 * path is checked against the opened file), a single name, no group or other permissions (the
+	 * store writes 0600), within the per-file limit, and not still being written. It is opened as the
+	 * engine's user in server mode, like every other file in the workspace.
+	 */
+	open(uploadId: string, name: string): OpenedFile | undefined {
+		if (!UPLOAD_ID.test(uploadId) || !storableName(name)) return undefined;
+		const batch = this.batches.get(uploadId);
+		if (batch?.writing.has(name)) return undefined;
+		return this.access(() => {
+			const path = join(this.root, uploadId, name);
+			let fd: number;
+			try {
+				fd = openSync(path, OPEN_FLAGS);
+			} catch {
+				return undefined;
+			}
+			try {
+				const opened = fstatSync(fd);
+				const real = realpathSync(path);
+				const expected = join(realpathSync(dirname(this.root)), "uploads", uploadId, name);
+				const there = statSync(real);
+				const valid =
+					opened.isFile() &&
+					opened.nlink === 1 &&
+					(process.platform === "win32" || (opened.mode & 0o077) === 0) &&
+					opened.size <= this.limits.fileBytes &&
+					real === expected &&
+					there.dev === opened.dev &&
+					there.ino === opened.ino;
+				if (!valid) {
+					closeSync(fd);
+					return undefined;
+				}
+				const head = Buffer.alloc(SNIFF_BYTES);
+				const read = readSync(fd, head, 0, SNIFF_BYTES, 0);
+				const mime = batch?.files.get(name)?.mime ?? sniffMime(head.subarray(0, read));
+				return { fd, name, size: opened.size, mime };
+			} catch {
+				closeSync(fd);
+				return undefined;
+			}
+		});
+	}
+
 	/** The files were sent: they stay on disk for the assistant, but no other message can send them. */
 	consume(refs: AttachmentRef[]): void {
 		for (const { uploadId, name } of refs) {
@@ -357,6 +428,18 @@ export class UploadStore {
 	}
 }
 
+/** A name {@link sanitizeName} leaves as it is: one plain path segment, nothing hidden or reserved. */
+function storableName(name: string): boolean {
+	return (
+		name.length > 0 &&
+		name.length <= MAX_NAME_LENGTH &&
+		!/[\\/\0]/.test(name) &&
+		name !== "." &&
+		name !== ".." &&
+		sanitizeName(name) === name
+	);
+}
+
 function removeQuietly(path: string): void {
 	try {
 		unlinkSync(path);
@@ -402,6 +485,15 @@ export function composePrompt(
 	return images.length > 0 ? { message, images } : { message };
 }
 
+/** The id of the message folder in a stored file's path, `…/uploads/<uploadId>/<name>`, or undefined. */
+function uploadIdOf(path: unknown, name: string): string | undefined {
+	if (typeof path !== "string") return undefined;
+	const parts = path.split(/[\\/]/);
+	const [folder, uploadId, file] = parts.slice(-3);
+	if (parts.length < 4 || folder !== "uploads" || file !== name || !storableName(name)) return undefined;
+	return uploadId !== undefined && UPLOAD_ID.test(uploadId) ? uploadId : undefined;
+}
+
 /** Splits a user message into the text the user typed and the chips of the files the daemon appended. */
 export function splitAttachments(message: string): { text: string; attachments: AttachmentInfo[] } {
 	const none = { text: message, attachments: [] };
@@ -420,9 +512,10 @@ export function splitAttachments(message: string): { text: string; attachments: 
 		} catch {
 			return none;
 		}
-		const { name, size, type } = entry;
+		const { name, size, type, path } = entry;
 		if (typeof name !== "string" || typeof size !== "number" || typeof type !== "string") return none;
-		attachments.push({ name, size, mime: type });
+		const uploadId = uploadIdOf(path, name);
+		attachments.push(uploadId ? { name, size, mime: type, uploadId } : { name, size, mime: type });
 	}
 	if (attachments.length === 0) return none;
 	return { text: message.slice(0, Math.max(0, start - 2)), attachments };
