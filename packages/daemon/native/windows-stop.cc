@@ -206,9 +206,16 @@ struct State {
 };
 using Owner = std::shared_ptr<State>;
 void ReleaseParticipant(State& s, napi_threadsafe_function_release_mode mode) {
-  std::lock_guard<std::mutex> lock(s.gate);
-  if (!s.participant) return;
-  s.participant = false;
+  {
+    std::lock_guard<std::mutex> lock(s.gate);
+    if (!s.participant) return;
+    s.participant = false;
+  }
+  // Released outside the gate on purpose: napi_release_threadsafe_function can
+  // run the cleanup hook synchronously on this thread, and that hook re-enters
+  // ReleaseParticipant. The gate is not recursive, so holding it here would
+  // self-deadlock. The participant flag is already cleared under the lock, so a
+  // second release stays impossible.
   napi_release_threadsafe_function(s.tsfn, mode);
 }
 bool Queue(State& s, void* data) {
@@ -261,6 +268,7 @@ bool Complete(State& s, DWORD timeout, DWORD& transferred) {
     if (code != ERROR_NOT_FOUND) { s.Fail(code); s.Stop(); NotifyDeadline(s); }
   }
   ULONGLONG started = GetTickCount64();
+  bool reported = false;
   for (;;) {
     if (GetOverlappedResult(s.pipe.value, &op.overlapped, &transferred, FALSE)) return false;
     DWORD code = GetLastError();
@@ -268,14 +276,19 @@ bool Complete(State& s, DWORD timeout, DWORD& transferred) {
       if (!ExpectedDisconnect(code)) { s.Fail(code); s.Stop(); }
       return false;
     }
-    if (GetTickCount64() - started >= kDeadlineMs) {
+    const ULONGLONG elapsed = GetTickCount64() - started;
+    if (!reported && elapsed >= kDeadlineMs) {
       s.Fail(ERROR_TIMEOUT); s.Stop(); NotifyDeadline(s);
+      reported = true;
     }
     // Poll only the retained operation's completion, not the already-set stop
-    // event. A pathological signaled-but-incomplete event cannot busy-spin.
+    // event. If the kernel never retires the cancelled operation, spinning here
+    // would hold the pipe handle and this thread forever, so the loop gives up
+    // one deadline after the timeout is reported.
+    if (elapsed >= kDeadlineMs * 2) return false;
     DWORD completion = WaitForSingleObject(op.event.value, 50);
     if (completion == WAIT_FAILED) { s.Fail(GetLastError()); Sleep(50); }
-    else if (completion == WAIT_OBJECT_0) Sleep(1);
+    else if (completion == WAIT_OBJECT_0) Sleep(10);
   }
 }
 bool ClientIsOwner(State& s) {
