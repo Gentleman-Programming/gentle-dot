@@ -3,37 +3,19 @@
  * Uses grammY for Telegram Bot API
  */
 
-import { Bot, Context, InlineKeyboard, type Api } from 'grammy';
-import { BaseBridge, BridgeConfig } from '@gentle-dot/bridges-base';
-import { NicknameStore } from './storage/nickname-store';
-import { loadTelegramConfig, TelegramConnectorConfig } from './config';
-import { registerCommands } from './commands';
-import { splitMessage, telegramDownloader } from './utils';
-import {
-  HelloPayload,
-  ReadyPayload,
-  CommandPayload,
-  CommandResultPayload,
-  ConnectorEventPayload,
-  ChannelNotifyPayload,
-  Upload,
-  UploadedFile,
-  IncomingFile,
-  PendingAsk,
-  Ask,
-  ClientMessage,
-  ServerMessage,
-  AgentState,
-  AttachmentRef,
-  ConnectorEvent,
-} from '@gentle-dot/protocol';
+import { Bot, Context, InlineKeyboard } from 'grammy';
+import { BaseBridge, BridgeConfig, BridgeStatus, HelloPayload, ReadyPayload, ChannelNotifyPayload, ConnectorEventPayload, CommandPayload, CommandResultPayload } from '@gentle-dot/bridges-base';
+import { NicknameStore } from './storage/nickname-store.js';
+import { loadConfig, Config } from './config.js';
+import { splitMessage, telegramDownloader } from './utils.js';
+import type { AttachmentRef } from '@gentle-dot/protocol';
 
 const TELEGRAM_TEXT_LIMIT = 4096;
 const DRAFT_REFRESH_MS = 20000;
 const MAX_VOICE_AUDIO = 1024 * 1024; // ~1MB base64
 const TELEGRAM_DOWNLOAD_LIMIT = 20 * 1024 * 1024;
 const MAX_CHOICES = 99;
-const BUSY_STATES: AgentState['state'][] = ['thinking', 'working', 'needs_you'];
+const BUSY_STATES = ['thinking', 'working', 'needs_you'];
 const SEND_REFUSALS = new Set(['no_account', 'agent_unavailable', 'command_failed', 'unsupported']);
 const UNREACHABLE = 'Gentle Dot no está disponible ahora.';
 
@@ -46,36 +28,52 @@ const AUDIO_EXTENSIONS: Record<string, string> = {
   'audio/flac': 'flac',
 };
 
-// Upload function type
-export type UploadFn = (file: Upload) => Promise<UploadedFile>;
+interface Upload {
+  uploadId: string;
+  name: string;
+  size: number;
+  mime: string;
+  data: string;
+}
+
+interface UploadedFile extends Upload {
+  path: string;
+}
+
+interface IncomingFile {
+  fileId: string;
+  name: string;
+  size?: number;
+}
+
+interface PendingAsk {
+  ask: {
+    requestId: string;
+    method: string;
+    title: string;
+    message?: string;
+    options?: string[];
+  };
+  chatId: number;
+  messageId?: number;
+}
+
+type UploadFn = (file: Upload) => Promise<UploadedFile>;
 
 export interface TelegramBridgeOptions {
-  config: TelegramConnectorConfig;
+  config: Config;
   log(message: string): void;
   download?(filePath: string): Promise<Buffer>;
   upload?(file: Upload): Promise<UploadedFile>;
 }
 
 export class TelegramBridge extends BaseBridge {
-  protected config: BridgeConfig;
-  protected ws: WebSocket | null = null;
-  protected reconnectAttempts = 0;
-  protected maxReconnectAttempts = 10;
-  protected reconnectDelay = 5000;
-  protected seq = 0;
-  protected pendingRequests = new Map<
-    number,
-    { resolve: (value: unknown) => void; reject: (error: Error) => void; timeout: NodeJS.Timeout }
-  >();
-  protected eventListeners = new Map<string, Function[]>();
-
-  // Telegram-specific
   private bot: Bot;
   private nicknameStore: NicknameStore;
   private options: TelegramBridgeOptions;
+  private logFn: (message: string) => void;
 
-  // State
-  private uploadFn: UploadFn | null = null;
+  // Telegram-specific state
   private chatId: number;
   private turn: {
     chatId: number;
@@ -87,20 +85,19 @@ export class TelegramBridge extends BaseBridge {
   private asks = new Map<number, PendingAsk>();
   private nextAskKey = 1;
   private awaitingInput: number | undefined;
-  private agentState: AgentState['state'] = 'idle';
+  private agentState = 'idle';
   private canTranscribe = false;
   private transcriptions = new Map<string, number>();
   private nextVoiceId = 1;
   private downloadFn: (filePath: string) => Promise<Buffer>;
-  private uploadFn: (file: Upload) => Promise<UploadedFile>;
-  private logFn: (message: string) => void;
+  private uploadFn: UploadFn;
 
   constructor(options: TelegramBridgeOptions) {
     const bridgeConfig: BridgeConfig = {
-      connectorId: options.config.connectorId,
-      type: 'telegram',
       daemonUrl: options.config.daemonUrl,
-      token: options.config.bridgeToken,
+      connectorId: (options.config as any).connectorId ?? 'telegram',
+      connectorType: 'telegram',
+      token: options.config.botToken,
       capabilities: [
         'channel_notify',
         'message_send',
@@ -116,7 +113,7 @@ export class TelegramBridge extends BaseBridge {
     };
 
     super(bridgeConfig);
-    this.config = bridgeConfig;
+
     this.options = options;
     this.logFn = options.log;
     this.downloadFn = options.download ?? telegramDownloader(options.config.botToken);
@@ -126,7 +123,7 @@ export class TelegramBridge extends BaseBridge {
     this.bot = new Bot(options.config.botToken, {
       client: { timeoutSeconds: 60 },
     });
-    this.nicknameStore = new NicknameStore(options.config.nicknameDb);
+    this.nicknameStore = new NicknameStore(options.config.tokenFile);
 
     // Allowed users
     this.chatId = [...options.config.allowedUsers][0] ?? 0;
@@ -138,7 +135,7 @@ export class TelegramBridge extends BaseBridge {
     this.bot.use((ctx, next) => (this.allowed(ctx) ? next() : undefined));
     this.bot.command(['start', 'help'], (ctx) => this.showMenu(ctx.chat!.id, HELP));
     this.bot.command('menu', (ctx) => this.showMenu(ctx.chat!.id, 'Tu menú de acciones:'));
-    this.bot.command('stop', (ctx) => this.stop(ctx.chat!.id));
+    this.bot.command('stop', (ctx) => this.stopChat(ctx.chat!.id));
     this.bot.command('cancel', (ctx) => this.cancelInput(ctx.chat!.id));
     this.bot.callbackQuery(/^a:(\d+):(y|n|c|\d+)$/, (ctx) =>
       this.onButton(ctx, Number(ctx.match[1]), String(ctx.match[2])),
@@ -170,7 +167,7 @@ export class TelegramBridge extends BaseBridge {
     this.bot.catch((error) => this.logFn(`telegram update failed: ${(error.error as Error).message}`));
   }
 
-  protected allowed(ctx: Context): boolean {
+  private allowed(ctx: Context): boolean {
     const chat = ctx.chat;
     if (chat?.type !== 'private' || !this.options.config.allowedUsers.has(chat.id)) return false;
     if (ctx.from && !this.options.config.allowedUsers.has(ctx.from.id)) return false;
@@ -178,87 +175,79 @@ export class TelegramBridge extends BaseBridge {
     return true;
   }
 
-  async start(): Promise<void> {
-    await this.nicknameStore.init();
-    await super.start();
-    await this.bot.start({
-      allowed_updates: ['message', 'callback_query', 'stopped_message_generation'],
-      onStart: (info) => {
-        this.logFn(`listening as @${info.username}`);
-        this.bot.api
-          .setMyCommands([
-            { command: 'menu', description: 'Menú de acciones rápidas' },
-            { command: 'help', description: 'Qué puede hacer este bot' },
-            { command: 'stop', description: 'Detener la tarea en curso' },
-            { command: 'cancel', description: 'Cancelar la respuesta pendiente' },
-          ])
-          .catch((error: Error) => this.logFn(`could not set the command list: ${error.message}`));
-        this.hello();
-      },
-    });
+  // ============ BaseBridge Abstract Methods ============
+
+  async onReady(): Promise<void> {
+    this.logFn('Telegram bridge ready - bot started');
+    await this.hello();
   }
 
-  async stop(): Promise<void> {
+  async onStop(): Promise<void> {
+    this.logFn('Telegram bridge stopping');
     this.bot.stop();
-    await super.stop();
+    this.endTurn();
+    this.asks.clear();
+    this.awaitingInput = undefined;
+    this.transcriptions.clear();
   }
 
-  // Override BaseBridge methods to adapt to grammY
+  // ============ BaseBridge Overrides ============
 
-  protected sendHello(): void {
+  protected override sendHello(): void {
     const payload: HelloPayload = {
       token: this.config.token,
       protocol: 1,
       capabilities: this.config.capabilities,
-      connectorType: this.config.type,
+      connectorType: this.config.connectorType,
       connectorId: this.config.connectorId,
       metadata: this.config.metadata,
     };
-    this.send({ type: 'hello', ...payload });
+    this.send('hello', payload);
   }
 
-  protected handleMessage(data: Buffer): void {
+  protected override handleMessage(data: Buffer): void {
     try {
-      const msg = JSON.parse(data.toString()) as ServerMessage;
+      const msg = JSON.parse(data.toString()) as { type: string; payload: unknown; seq?: number; timestamp: number };
       this.dispatch(msg);
     } catch (e) {
       this.logFn(`Parse error: ${(e as Error).message}`);
     }
   }
 
-  private async dispatch(message: ServerMessage): Promise<void> {
+  private dispatch(message: { type: string; payload: unknown }): void {
     const turn = this.turn;
     switch (message.type) {
       case 'ready': {
-        const ready = message as ReadyPayload;
-        this.agentState = ready.agentState as AgentState['state'];
+        const ready = message.payload as ReadyPayload;
+        this.agentState = ready.agentState;
         this.canTranscribe = ready.features?.includes('voice_transcription') ?? false;
-        this.emit('ready', ready);
-        break;
-      }
-      case 'auth_providers': {
-        if (message.voice) this.canTranscribe = message.voice.transcribe;
+        this.emit('onReady', ready.sessionId);
         break;
       }
       case 'voice_transcript': {
-        const chatId = this.takeTranscription(message.requestId!);
+        const payload = message.payload as { requestId: string; text: string };
+        const chatId = this.transcriptions.get(payload.requestId);
+        this.transcriptions.delete(payload.requestId);
         if (chatId === undefined) return;
-        const text = message.text!.trim();
+        const text = payload.text.trim();
         if (text === '') {
-          await this.reply(chatId, 'No pude escuchar nada en esa nota de voz.');
+          void this.reply(chatId, 'No pude escuchar nada en esa nota de voz.');
           return;
         }
-        await this.reply(chatId, `🎙️ ${text}`);
-        await this.onText(chatId, text, '');
+        void this.reply(chatId, `🎙️ ${text}`);
+        void this.onText(chatId, text, '');
         break;
       }
       case 'voice_unavailable': {
-        const chatId = this.takeTranscription(message.requestId!);
-        if (chatId !== undefined) await this.reply(chatId, message.reason!);
+        const payload = message.payload as { requestId: string; reason: string };
+        const chatId = this.transcriptions.get(payload.requestId);
+        this.transcriptions.delete(payload.requestId);
+        if (chatId !== undefined) void this.reply(chatId, payload.reason);
         break;
       }
       case 'agent_state': {
-        this.agentState = message.state as AgentState['state'];
+        const payload = message.payload as { state: string };
+        this.agentState = payload.state;
         if (!turn) return;
         if (BUSY_STATES.includes(this.agentState)) {
           turn.sawBusy = true;
@@ -268,37 +257,60 @@ export class TelegramBridge extends BaseBridge {
         break;
       }
       case 'activity': {
-        if (!turn || message.activity?.status !== 'running') return;
-        turn.draftText = `${message.activity.title}…`;
-        await this.draft(turn);
+        const payload = message.payload as { activity: { status: string; title: string } };
+        if (!turn || payload.activity?.status !== 'running') return;
+        turn.draftText = `${payload.activity.title}…`;
+        void this.draft(turn);
         break;
       }
       case 'message_done': {
         if (!turn) return;
-        const text = message.error ?? message.text!;
+        const payload = message.payload as { error?: string; text: string; stopped?: boolean };
+        const text = payload.error ?? payload.text;
         if (text.trim() === '') {
-          if (message.stopped) await this.reply(turn.chatId, 'Detenido.');
+          if (payload.stopped) void this.reply(turn.chatId, 'Detenido.');
           return;
         }
-        for (const chunk of splitMessage(text)) await this.reply(turn.chatId, chunk);
+        for (const chunk of splitMessage(text)) void this.reply(turn.chatId, chunk);
         break;
       }
       case 'toast': {
-        if (turn && message.level !== 'info') await this.reply(turn.chatId, `⚠️ ${message.message}`);
+        const payload = message.payload as { level: string; message: string };
+        if (turn && payload.level !== 'info') void this.reply(turn.chatId, `⚠️ ${payload.message}`);
         break;
       }
       case 'error': {
+        const payload = message.payload as { code: string; message: string };
         if (!turn) return;
-        if (SEND_REFUSALS.has(message.code!) && !BUSY_STATES.includes(this.agentState)) this.endTurn();
-        await this.reply(turn.chatId, `⚠️ ${message.message}`);
+        if (SEND_REFUSALS.has(payload.code) && !BUSY_STATES.includes(this.agentState)) this.endTurn();
+        void this.reply(turn.chatId, `⚠️ ${payload.message}`);
         break;
       }
       case 'ask': {
-        await this.showAsk(message.ask!);
+        const payload = message.payload as { requestId: string; method: string; title: string; message?: string; options?: string[] };
+        void this.showAsk(payload);
         break;
       }
       case 'ask_resolved': {
-        await this.resolveAsk(message.requestId!);
+        const payload = message.payload as { requestId: string };
+        void this.resolveAsk(payload.requestId);
+        break;
+      }
+      case 'channel_notify': {
+        this.emit('onChannelNotify', message.payload as ChannelNotifyPayload);
+        break;
+      }
+      case 'connector_event': {
+        this.emit('onConnectorEvent', message.payload as ConnectorEventPayload);
+        break;
+      }
+      case 'command': {
+        const payload = message.payload as CommandPayload;
+        void this.handleCommand(payload);
+        break;
+      }
+      case 'command_result': {
+        this.emit('onCommandResult', message.payload as CommandResultPayload);
         break;
       }
       default:
@@ -306,13 +318,15 @@ export class TelegramBridge extends BaseBridge {
     }
   }
 
+  // ============ Telegram-Specific Methods ============
+
   private takeTranscription(requestId: string): number | undefined {
     const chatId = this.transcriptions.get(requestId);
     this.transcriptions.delete(requestId);
     return chatId;
   }
 
-  private async showAsk(ask: Ask): Promise<void> {
+  private async showAsk(ask: { requestId: string; method: string; title: string; message?: string; options?: string[] }): Promise<void> {
     if (typeof ask.requestId !== 'string' || typeof ask.title !== 'string') throw new Error('malformed ask');
     for (const pending of this.asks.values()) if (pending.ask.requestId === ask.requestId) return;
 
@@ -350,7 +364,7 @@ export class TelegramBridge extends BaseBridge {
       const replaced = this.awaitingInput === undefined ? undefined : this.asks.get(this.awaitingInput);
       if (this.awaitingInput !== undefined) this.forgetAsk(this.awaitingInput);
       if (replaced) {
-        this.daemon.send({ type: 'ui_response', requestId: replaced.ask.requestId, cancelled: true });
+        this.send('ui_response', { requestId: replaced.ask.requestId, cancelled: true });
       }
       if (await this.show(chatId, this.fitMessage(head, '\n\nResponde con tu respuesta, o /cancel.'))) {
         this.asks.set(key, pending);
@@ -395,21 +409,18 @@ export class TelegramBridge extends BaseBridge {
       return;
     }
     const { requestId, options } = pending.ask;
-    let answer: ClientMessage;
-    if (choice === 'y' || choice === 'n') answer = { type: 'ui_response', requestId, confirmed: choice === 'y' };
-    else if (choice === 'c') answer = { type: 'ui_response', requestId, cancelled: true };
+    let payload: { type: string; requestId: string; confirmed?: boolean; cancelled?: boolean; value?: string };
+    if (choice === 'y' || choice === 'n') payload = { type: 'ui_response', requestId, confirmed: choice === 'y' };
+    else if (choice === 'c') payload = { type: 'ui_response', requestId, cancelled: true };
     else {
       const value = options?.[Number(choice)];
       if (value === undefined) {
         await this.answerButton(ctx, 'Esta solicitud ya no está pendiente.');
         return;
       }
-      answer = { type: 'ui_response', requestId, value };
+      payload = { type: 'ui_response', requestId, value };
     }
-    if (!this.daemon.send(answer)) {
-      await this.answerButton(ctx, UNREACHABLE);
-      return;
-    }
+    this.send(payload.type, payload);
     await this.answerButton(ctx);
     await this.removeButtons(pending);
     this.forgetAsk(key);
@@ -422,10 +433,7 @@ export class TelegramBridge extends BaseBridge {
       await this.reply(chatId, 'Nada que cancelar.');
       return;
     }
-    if (!this.daemon.send({ type: 'ui_response', requestId: pending.ask.requestId, cancelled: true })) {
-      await this.reply(chatId, UNREACHABLE);
-      return;
-    }
+    this.send('ui_response', { requestId: pending.ask.requestId, cancelled: true });
     this.forgetAsk(key);
   }
 
@@ -459,7 +467,6 @@ export class TelegramBridge extends BaseBridge {
     }
   }
 
-  // Text handling
   private async onText(chatId: number, text: string, userId: string): Promise<void> {
     if (text.trimStart().startsWith('/')) {
       await this.reply(chatId, 'Ese comando no es compatible aquí.');
@@ -473,17 +480,13 @@ export class TelegramBridge extends BaseBridge {
     const key = this.awaitingInput;
     const pending = key === undefined ? undefined : this.asks.get(key);
     if (key !== undefined && pending) {
-      if (!this.daemon.send({ type: 'ui_response', requestId: pending.ask.requestId, value: text })) {
-        await this.reply(chatId, UNREACHABLE);
-        return;
-      }
+      this.send('ui_response', { requestId: pending.ask.requestId, value: text });
       this.forgetAsk(key);
       return;
     }
     await this.sendToAssistant(chatId, text);
   }
 
-  // Voice handling
   private async onVoice(chatId: number, fileId: string): Promise<void> {
     if (!this.canTranscribe) {
       await this.reply(chatId, 'La transcripción de voz no está disponible ahora; por favor escribe.');
@@ -505,14 +508,10 @@ export class TelegramBridge extends BaseBridge {
       return;
     }
     const requestId = `telegram-voice-${this.nextVoiceId++}`;
-    if (!this.daemon.send({ type: 'voice_transcribe', requestId, mime: 'audio/ogg', data })) {
-      await this.reply(chatId, UNREACHABLE);
-      return;
-    }
+    this.send('voice_transcribe', { requestId, mime: 'audio/ogg', data });
     this.transcriptions.set(requestId, chatId);
   }
 
-  // File handling
   private async onFile(chatId: number, file: IncomingFile, caption = ''): Promise<void> {
     const upload = this.uploadFn;
     if (!upload) {
@@ -537,9 +536,10 @@ export class TelegramBridge extends BaseBridge {
       await this.reply(chatId, 'No pude descargar ese archivo. Intenta de nuevo.');
       return;
     }
+    const uploadId = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     let stored: UploadedFile;
     try {
-      stored = await upload({ name: file.name, data });
+      stored = await upload({ uploadId, name: file.name, data: data.toString('base64'), size: file.size ?? data.length, mime: 'application/octet-stream' });
     } catch (error) {
       if (error instanceof Error && error.message.includes('refused')) {
         await this.reply(chatId, `⚠️ ${error.message}`);
@@ -552,28 +552,24 @@ export class TelegramBridge extends BaseBridge {
     await this.sendToAssistant(chatId, caption, [{ uploadId: stored.uploadId, name: stored.name }]);
   }
 
-  // Send to assistant
   private async sendToAssistant(chatId: number, text: string, attachments?: AttachmentRef[]): Promise<void> {
-    if (!this.daemon.send(attachments ? { type: 'send', text, attachments } : { type: 'send', text })) {
-      await this.reply(chatId, UNREACHABLE);
-      return;
-    }
+    const payload = attachments ? { type: 'send', text, attachments } : { type: 'send', text };
+    this.send(payload.type, payload);
     if (this.turn) return;
     const turn = {
       chatId,
       draftId: 1 + Math.floor(Math.random() * 2_000_000_000),
       draftText: '',
       sawBusy: BUSY_STATES.includes(this.agentState),
-      refresh: setInterval(() => void this.draft(turn), this.config.draftRefreshMs ?? DRAFT_REFRESH_MS),
+      refresh: setInterval(() => void this.draft(turn), DRAFT_REFRESH_MS),
     };
     this.turn = turn;
     await this.draft(turn);
   }
 
-  private async stop(chatId: number): Promise<void> {
-    if (!this.daemon.send({ type: 'abort' })) {
-      await this.reply(chatId, UNREACHABLE);
-    }
+  private async stopChat(chatId: number): Promise<void> {
+    this.send('abort', {});
+    await this.reply(chatId, 'Deteniendo...');
   }
 
   private endTurn(): void {
@@ -613,7 +609,6 @@ export class TelegramBridge extends BaseBridge {
     }
   }
 
-  // Handle connection lost
   async connectionLost(): Promise<void> {
     const stale = [...this.asks.values()];
     this.asks.clear();
@@ -629,7 +624,6 @@ export class TelegramBridge extends BaseBridge {
     );
   }
 
-  // Nickname management
   async setNickname(userId: string, nickname: string): Promise<void> {
     await this.nicknameStore.set(userId, nickname);
   }
@@ -638,32 +632,38 @@ export class TelegramBridge extends BaseBridge {
     return this.nicknameStore.getByUserId(userId);
   }
 
-  async getStatus(): Promise<any> {
+  async getTelegramStatus(): Promise<{ uptime: number; users: number; memory: number }> {
     return {
       uptime: process.uptime(),
-      users: this.nicknameStore.count(),
+      users: await this.nicknameStore.count(),
       memory: process.memoryUsage().heapUsed,
     };
   }
 
-  // Event emitter methods (from BaseBridge)
-  on(event: string, listener: Function): void {
-    if (!this.eventListeners.has(event)) this.eventListeners.set(event, []);
-    this.eventListeners.get(event)!.push(listener);
+  // ============ Public API ============
+
+  async start(): Promise<void> {
+    await this.nicknameStore.init();
+    await this.connect();
+    await this.bot.start({
+      allowed_updates: ['message', 'callback_query', 'stopped_message_generation'],
+      onStart: (info) => {
+        this.logFn(`listening as @${info.username}`);
+        this.bot.api
+          .setMyCommands([
+            { command: 'menu', description: 'Menú de acciones rápidas' },
+            { command: 'help', description: 'Qué puede hacer este bot' },
+            { command: 'stop', description: 'Detener la tarea en curso' },
+            { command: 'cancel', description: 'Cancelar la respuesta pendiente' },
+          ])
+          .catch((error: Error) => this.logFn(`could not set the command list: ${error.message}`));
+      },
+    });
   }
-  once(event: string, listener: Function): void {
-    const wrapper = (...args: any[]) => {
-      this.off(event, wrapper);
-      listener(...args);
-    };
-    this.on(event, wrapper);
-  }
-  off(event: string, listener: Function): void {
-    const arr = this.eventListeners.get(event);
-    if (arr) this.eventListeners.set(event, arr.filter(l => l !== listener));
-  }
-  protected emit(event: string, ...args: any[]): void {
-    this.eventListeners.get(event)?.forEach(l => l(...args));
+
+  async stop(): Promise<void> {
+    await this.onStop();
+    await this.disconnect();
   }
 }
 
