@@ -7,6 +7,7 @@ import {
 	type ComputerYolo,
 	timeLeft,
 } from "../computer.ts";
+import { isWindows } from "../shortcut.ts";
 
 /** Computer control in the desktop panel (S24.5, S24.6); the web page never gets it. */
 export interface ComputerControls {
@@ -30,8 +31,8 @@ const PERMISSIONS: [ComputerPermission, string][] = [
 
 export const DEBUG_BUILD_NOTE =
 	"Debug builds lose these permissions on every rebuild because macOS ties them to the app's signature; grant them again after updating.";
-const YOLO_NOTE =
-	"Yolo mode lets the assistant send, pay, delete, and submit without asking you first. It turns itself off after 1 hour or when the app quits; Stop and ⌥⇧Esc still work.";
+const yoloNote = (windows: boolean) =>
+	`Yolo mode lets the assistant send, pay, delete, and submit without asking you first. It turns itself off after 1 hour or when the app quits; Stop and ${windows ? "Alt+Shift+Esc" : "⌥⇧Esc"} still work.`;
 const NO_IMAGES_NOTE =
 	"The current model does not accept images, so the assistant cannot see your screen. Choose a model that does in Profiles.";
 
@@ -52,7 +53,10 @@ export function ComputerBanner({ session, yolo, stop }: ComputerBannerProps) {
 	return (
 		<section className="computer-banner" aria-label="Computer control">
 			<span className="computer-banner-light" aria-hidden="true" />
-			<span>Controlling your Mac{left}</span>
+			<span>
+				Controlling your {isWindows() ? "PC" : "Mac"}
+				{left}
+			</span>
 			{yolo ? (
 				<span className="chip computer-yolo-chip" title="Risky actions run without asking you first">
 					Yolo
@@ -71,9 +75,10 @@ interface ComputerEntryProps {
 	controls: ComputerControls;
 }
 
-/** The built-in Computer connector: the macOS permissions it needs and how to grant them. */
+/** The built-in Computer connector: the macOS permissions it needs and how to grant them (Windows asks for none). */
 export function ComputerEntry({ info, controls }: ComputerEntryProps) {
 	const { permissions, requestPermission, yolo, setYolo } = controls;
+	const windows = isWindows();
 	const [granted, setGranted] = useState<ComputerPermissions>();
 	const check = useCallback(() => {
 		permissions().then(setGranted, () => setGranted(undefined));
@@ -92,37 +97,49 @@ export function ComputerEntry({ info, controls }: ComputerEntryProps) {
 					<p className="connector-note">{info.sends}</p>
 				</>
 			) : null}
-			<ul className="computer-permissions">
-				{PERMISSIONS.map(([kind, label]) => {
-					const allowed = granted?.[kind] === true;
-					const id = `computer-permission-${kind}`;
-					return (
-						<li key={kind} aria-labelledby={id}>
-							<span id={id}>{label}</span>
-							<span className={`chip ${allowed ? "connector-connected" : "connector-needs_setup"}`}>
-								{granted === undefined ? "Checking…" : allowed ? "Allowed" : "Not allowed"}
-							</span>
-							{granted !== undefined && !allowed ? (
-								<button
-									type="button"
-									className="primary"
-									aria-label={`Grant ${label}`}
-									onClick={() => {
-										requestPermission(kind).then(check, check);
-									}}
-								>
-									Grant
-								</button>
-							) : null}
-						</li>
-					);
-				})}
-			</ul>
-			<div className="provider-actions">
-				<button type="button" onClick={check}>
-					Check again
-				</button>
-			</div>
+			{windows ? (
+				<p className="connector-note">Windows asks for no permission for computer control.</p>
+			) : null}
+			{windows ? null : (
+				<ul className="computer-permissions">
+					{PERMISSIONS.map(([kind, label]) => {
+						const allowed = granted?.[kind] === true;
+						const id = `computer-permission-${kind}`;
+						return (
+							<li key={kind} aria-labelledby={id}>
+								<span id={id}>{label}</span>
+								<span className={`chip ${allowed ? "connector-connected" : "connector-needs_setup"}`}>
+									{granted === undefined ? "Checking…" : allowed ? "Allowed" : "Not allowed"}
+								</span>
+								{granted !== undefined && !allowed ? (
+									<button
+										type="button"
+										className="primary"
+										aria-label={`Grant ${label}`}
+										onClick={() => {
+											requestPermission(kind).then(check, check);
+										}}
+									>
+										Grant
+									</button>
+								) : null}
+							</li>
+						);
+					})}
+				</ul>
+			)}
+			{windows ? null : (
+				<div className="provider-actions">
+					<button type="button" onClick={check}>
+						Check again
+					</button>
+				</div>
+			)}
+			{windows && granted?.screenshotsSupported === false ? (
+				<p className="connector-note computer-warning">
+					Computer control needs Windows 10 version 2004 (build 19041) or newer for screenshots.
+				</p>
+			) : null}
 			<div className="computer-yolo">
 				<span id="computer-yolo-label">Yolo mode</span>
 				<button
@@ -138,8 +155,8 @@ export function ComputerEntry({ info, controls }: ComputerEntryProps) {
 					<span className="switch-knob" aria-hidden="true" />
 				</button>
 			</div>
-			<p className="connector-note">{YOLO_NOTE}</p>
-			<p className="connector-note">{DEBUG_BUILD_NOTE}</p>
+			<p className="connector-note">{yoloNote(windows)}</p>
+			{windows ? null : <p className="connector-note">{DEBUG_BUILD_NOTE}</p>}
 			{info?.noImages ? <p className="connector-note computer-warning">{NO_IMAGES_NOTE}</p> : null}
 		</li>
 	);
