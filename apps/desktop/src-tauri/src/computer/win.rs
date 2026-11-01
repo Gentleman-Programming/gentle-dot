@@ -14,8 +14,12 @@
 //! An app Windows will not identify (a process that cannot be queried, a frame whose app is not
 //! found) is the blocked `UNIDENTIFIED` app, so an action aimed at it is refused.
 //!
-//! These are the input, capture and apps parts of the backend. UI Automation elements and the
-//! `Desktop` implementation come next; until then nothing outside this module calls it.
+//! Keys go only to the recipient the shared guard approved (`post_typed`), and never to an app
+//! that runs as administrator: Windows drops input sent to a process with a higher integrity
+//! level without saying so (`keyboard_refusal`).
+//!
+//! These are the input, capture, apps and keyboard parts of the backend. UI Automation elements
+//! and the `Desktop` implementation come next; until then nothing outside this module calls it.
 
 use super::coords::{fit_long_edge, Point, ScreenshotGeometry, MAX_LONG_EDGE};
 use super::encode::{bgra_to_jpeg, JPEG_QUALITY};
@@ -25,19 +29,28 @@ use super::winapps::{
     TopWindow,
 };
 use super::winput::{checks_typing_target, releases, send_batches, settles, steps, Step, VirtualScreen};
-use super::{AppInfo, Capture, InputEvent, MouseButton};
+use super::{
+    runs_as_administrator, AppInfo, Capture, InputEvent, KeyboardRecipient, MouseButton, TypedError,
+    KEYS_CHANGED_WHILE_TYPING,
+};
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
 use std::ptr::null_mut;
 use std::time::Duration;
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, SetLastError, ERROR_TIMEOUT, HWND, LPARAM, POINT, RECT};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, SetLastError, ERROR_ACCESS_DENIED, ERROR_TIMEOUT, HWND, LPARAM, POINT, RECT,
+};
 use windows_sys::Win32::Graphics::Dwm::{DwmFlush, DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows_sys::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
 use windows_sys::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
 use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+use windows_sys::Win32::Security::{
+    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, IsValidSid, TokenIntegrityLevel,
+    TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+};
 use windows_sys::Win32::System::Threading::{
-    AttachThreadInput, GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    AttachThreadInput, GetCurrentProcess, GetCurrentThreadId, OpenProcess, OpenProcessToken,
+    QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::Graphics::Gdi::{
@@ -217,28 +230,66 @@ fn typing_windows() -> Option<(HWND, HWND)> {
 /// key releases or a complete pair for the window in front to take it. Text is bound to the
 /// window in front and its keyboard focus when it starts, and stops when either changes. A
 /// failure releases the keys and buttons left pressed by the successfully sent prefix before
-/// reporting the error. Binding keys to the recipient the shared guard approved (`post_typed`)
-/// needs the app identities of the apps part of this backend, so it comes with it.
+/// reporting the error.
 pub fn post(event: &InputEvent) -> Result<(), String> {
-    let typing_target = matches!(event, InputEvent::Text(_)).then(typing_windows);
-    if typing_target == Some(None) {
-        return Err("Cannot tell which window is in front, so nothing was sent.".into());
+    post_input(event, None).map_err(|error| error.message(false))
+}
+
+/// Posts a typed chunk, a Return, or a key only to the recipient the shared guard approved: the
+/// windows it is bound to must still belong to the approved front app and focused app. A refusal
+/// before anything of it was sent is `RecipientChanged` or `FrontUnknown`, which the helper words
+/// from what earlier chunks sent.
+pub fn post_typed(event: &InputEvent, recipient: &KeyboardRecipient) -> Result<(), TypedError> {
+    post_input(event, Some(recipient))
+}
+
+fn post_input(event: &InputEvent, approved: Option<&KeyboardRecipient>) -> Result<(), TypedError> {
+    // Bind both type chunks and their Returns. Standalone combos remain free to switch apps.
+    let typing_target = if approved.is_some() || matches!(event, InputEvent::Text(_)) {
+        Some(typing_windows().ok_or(TypedError::FrontUnknown)?)
+    } else {
+        None
+    };
+    if let (Some(approved), Some((root, focus))) = (approved, typing_target) {
+        // The identities the shared guard approved, computed as it does (`frontmost_app` is
+        // `target_of` the foreground root; a hosted app's frame belongs to its host process, so
+        // raw window owners would never match). The front comes from the pinned root itself;
+        // `focused_app` is a global query, so the windows are pinned again after it and must not
+        // have moved in between.
+        let front = target_of(root).pid;
+        let focused = focused_app().map(|app| app.pid).filter(|pid| *pid != front);
+        // The pinned focus window itself must belong to an approved process (the root's own,
+        // the front app's, or the approved focused one): the global query above could have seen
+        // the focus for a moment elsewhere.
+        let owner = window_pid(focus);
+        let owned = owner == window_pid(root) || owner == front || Some(owner) == approved.focused_pid;
+        let valid = !focus.is_null()
+            && owned
+            && front == approved.front_pid
+            && focused == approved.focused_pid
+            && typing_windows() == Some((root, focus));
+        if !valid {
+            return Err(TypedError::RecipientChanged);
+        }
     }
-    let plan = steps(event, &virtual_screen())?;
+    let plan = steps(event, &virtual_screen()).map_err(TypedError::Failed)?;
     let mut done = 0;
     for batch in send_batches(&plan) {
-        let changed = checks_typing_target(&batch[0])
-            && typing_target.is_some_and(|target| target.is_none() || typing_windows() != target);
+        let checked = checks_typing_target(&batch[0])
+            || (approved.is_some() && matches!(batch[0], Step::Key { down: true, .. }));
+        let changed = checked && typing_target.is_some_and(|target| typing_windows() != Some(target));
         let failed = if changed {
-            Some((done, super::KEYS_CHANGED_WHILE_TYPING.to_string()))
+            // Before the first batch nothing of this post went out; after it, part of it did.
+            let error = if done == 0 { TypedError::RecipientChanged } else { TypedError::Failed(KEYS_CHANGED_WHILE_TYPING.into()) };
+            Some((done, error))
         } else {
             match send_batch(batch) {
-                Err((sent, error)) => Some((done + sent, error)),
+                Err((sent, error)) => Some((done + sent, TypedError::Failed(error))),
                 Ok(()) => {
                     // No sleep or catch_up inside a surrogate pair's single SendInput call.
                     std::thread::sleep(EVENT_GAP);
                     if settles(batch.last().unwrap()) {
-                        catch_up().err().map(|error| (done + batch.len(), error))
+                        catch_up().err().map(|error| (done + batch.len(), TypedError::Failed(error)))
                     } else {
                         None
                     }
@@ -478,16 +529,7 @@ fn title_checked(hwnd: HWND) -> Option<String> {
 }
 
 fn title(hwnd: HWND) -> String {
-    // SAFETY: the buffer holds the reported length plus the terminator.
-    unsafe {
-        let length = GetWindowTextLengthW(hwnd);
-        if length <= 0 {
-            return String::new();
-        }
-        let mut buffer = vec![0u16; length as usize + 1];
-        let copied = GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32);
-        String::from_utf16_lossy(&buffer[..copied.max(0) as usize])
-    }
+    title_checked(hwnd).unwrap_or_default()
 }
 
 /// The app a top-level window belongs to: its own process, or for a Store app's frame the
@@ -967,6 +1009,75 @@ fn resolve_name(wanted: &str, shortcuts: &[String]) -> Result<String, String> {
     }
 }
 
+/// What reading a process's integrity level gave.
+#[derive(Debug, PartialEq, Eq)]
+enum Integrity {
+    /// The last sub-authority of its token's mandatory label.
+    Level(u32),
+    /// Its token refused to be opened: a process of this user and session refuses it when it runs
+    /// at a higher level (elevated).
+    Denied,
+    /// It could not be read.
+    Unknown,
+}
+
+fn integrity_level(process: *mut c_void) -> Integrity {
+    // SAFETY: the token is checked and closed; the label is read from a buffer of the size Windows
+    // asked for, aligned for it, and its SID is validated before its sub-authorities are read.
+    unsafe {
+        let mut token = null_mut();
+        if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
+            return if GetLastError() == ERROR_ACCESS_DENIED { Integrity::Denied } else { Integrity::Unknown };
+        }
+        let mut size = 0u32;
+        GetTokenInformation(token, TokenIntegrityLevel, null_mut(), 0, &mut size);
+        let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+        let read = size != 0
+            && GetTokenInformation(token, TokenIntegrityLevel, buffer.as_mut_ptr() as *mut c_void, size, &mut size) != 0;
+        CloseHandle(token);
+        if !read {
+            return Integrity::Unknown;
+        }
+        let sid = (*(buffer.as_ptr() as *const TOKEN_MANDATORY_LABEL)).Label.Sid;
+        if sid.is_null() || IsValidSid(sid) == 0 {
+            return Integrity::Unknown;
+        }
+        let count = *GetSidSubAuthorityCount(sid);
+        if count == 0 {
+            return Integrity::Unknown;
+        }
+        Integrity::Level(*GetSidSubAuthority(sid, u32::from(count) - 1))
+    }
+}
+
+/// Why keys must not go to `app`: Windows drops input sent to a process with a higher integrity
+/// level than ours (an app run as administrator) without an error, so typing there would report
+/// keys that never arrived. A token that refuses to be opened is taken as elevated; a process
+/// whose level cannot be read at all is refused too.
+pub fn keyboard_refusal(app: &AppIdentity) -> Option<String> {
+    // SAFETY: the pseudo handle needs no closing; the target's handle is checked and closed.
+    let (own, target) = unsafe {
+        let own = integrity_level(GetCurrentProcess());
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, app.pid as u32);
+        let target = if process.is_null() {
+            Integrity::Unknown
+        } else {
+            let level = integrity_level(process);
+            CloseHandle(process);
+            level
+        };
+        (own, target)
+    };
+    match (own, target) {
+        (Integrity::Level(own), Integrity::Level(target)) if target <= own => None,
+        (Integrity::Level(_), Integrity::Level(_) | Integrity::Denied) => Some(runs_as_administrator(&app.name)),
+        _ => Some(format!(
+            "Gentle Dot cannot tell whether {} runs as administrator, so it does not send it keys.",
+            app.name
+        )),
+    }
+}
+
 /// This thread's COM apartment, joined for a shell call; a thread already in another apartment
 /// keeps it.
 struct Apartment(bool);
@@ -1059,6 +1170,43 @@ mod tests {
         for name in ["cmd", "curl", "certutil"] {
             assert_eq!(resolve_name(name, &[]), Err(format!("cannot find an app named `{name}`")), "{name}");
         }
+    }
+
+    #[test]
+    fn this_process_takes_its_own_keys() {
+        assert_eq!(keyboard_refusal(&identity(std::process::id() as i32)), None);
+    }
+
+    #[test]
+    fn a_process_whose_level_cannot_be_read_gets_no_keys() {
+        let ghost = AppIdentity { pid: i32::MAX, bundle_id: None, name: "Ghost".into() };
+        assert_eq!(
+            keyboard_refusal(&ghost).as_deref(),
+            Some("Gentle Dot cannot tell whether Ghost runs as administrator, so it does not send it keys.")
+        );
+    }
+
+    /// A recipient the windows in front do not belong to gets nothing; on a desktop with nothing
+    /// in front, as on CI, the front is unknown instead, so CI rarely reaches the recipient check:
+    /// the interactive run covers it.
+    #[test]
+    fn keys_for_another_recipient_are_not_posted() {
+        let elsewhere = KeyboardRecipient { front_pid: i32::MAX, focused_pid: None };
+        let result = post_typed(&InputEvent::Text("x".into()), &elsewhere);
+        assert!(
+            result == Err(TypedError::RecipientChanged) || result == Err(TypedError::FrontUnknown),
+            "{result:?}"
+        );
+    }
+
+    /// Start an elevated console ("Run as administrator") and pass its process id in
+    /// `GENTLE_DOT_ELEVATED_PID`.
+    #[test]
+    #[ignore = "interactive Windows desktop: run in the user's own session"]
+    fn an_elevated_console_gets_no_keys() {
+        let pid: i32 = std::env::var("GENTLE_DOT_ELEVATED_PID").expect("GENTLE_DOT_ELEVATED_PID").parse().unwrap();
+        let console = identity(pid);
+        assert_eq!(keyboard_refusal(&console), Some(runs_as_administrator(&console.name)));
     }
 
     #[test]
