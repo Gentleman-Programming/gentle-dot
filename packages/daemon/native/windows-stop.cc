@@ -7,6 +7,7 @@
 #include <aclapi.h>
 #include <node_api.h>
 #include "windows-app-channel-napi.h"
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -102,9 +103,15 @@ unsigned Hex(char c) {
   throw std::runtime_error("Invalid record hex");
 }
 struct Record { std::wstring pipe; std::array<BYTE, 32> capability; };
-Record ReadRecord(const std::wstring& path, PSID sid) {
+Record ReadRecord(const std::wstring& argument, PSID sid) {
   // OPEN_REPARSE_POINT protects the final component; reject any reparse parent
   // too. The retained file handle (no write/delete sharing) is authoritative.
+  // Windows treats '/' as a separator and forbids it inside component names, so
+  // every '/' in the spelling is one: normalize before the strict walk, keeping
+  // the daemon's admission aligned with the app's (daemon/windows.rs), which
+  // admits the same forward-slash data dirs produced by tooling and .env files.
+  std::wstring path = argument;
+  std::replace(path.begin(), path.end(), L'/', L'\\');
   Require(path.size() >= 3 && path[1] == L':' && path[2] == L'\\' &&
           ((path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z')),
           "Record path must be an absolute local drive path");

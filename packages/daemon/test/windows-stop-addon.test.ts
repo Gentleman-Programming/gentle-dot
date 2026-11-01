@@ -141,6 +141,19 @@ describe.skipIf(Boolean(skipReason))(`real Windows stop listener addon (${skipRe
 		expect(() => addon.createStopListener(record, () => {})).toThrow("Cannot exclusively own stop pipe");
 	});
 
+	it("admits a record path spelled with forward slashes", () => {
+		// Tooling and cross-platform config spell data dirs with '/'; the daemon-side
+		// walk must normalize the separator exactly like the app's admission does.
+		mkdirSync(dir, { recursive: true });
+		const addon = require(fileURLToPath(artifact)) as {
+			createStopListener(path: string, callback: (frame: Buffer) => void): StopListener;
+		};
+		const record = writeRecord(dir, randomBytes(16).toString("hex"), randomBytes(32), recordIdentity());
+		const listener = addon.createStopListener(record.split("\\").join("/"), () => {});
+		expect(listener.capability.length).toBe(32);
+		listeners.push(listener);
+	});
+
 	it("delivers one authenticated frame end to end through the real pipe", { timeout: 60_000 }, async () => {
 		mkdirSync(dir, { recursive: true });
 		const addon = require(fileURLToPath(artifact)) as {

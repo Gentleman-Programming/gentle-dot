@@ -623,6 +623,10 @@ mod native {
     fn unsafe_record() -> io::Error {
         io::Error::new(io::ErrorKind::InvalidData, "unsafe Windows stop record provenance")
     }
+    fn unsafe_record_path(path: &Path) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidData,
+            format!("unsafe Windows stop record path: {}", path.display()))
+    }
 
     // Aligned buffers are required before interpreting TOKEN_USER or passing SID
     // pointers to Windows. Byte vectors alone do not promise this alignment.
@@ -710,14 +714,22 @@ mod native {
 
     fn record_ancestry(path: &Path, create_missing: bool) -> io::Result<Vec<OwnedHandle>> {
         let name = wide(path.as_os_str())?;
-        let text = &name[..name.len() - 1];
+        // Windows treats '/' as a path separator and forbids it inside component names, so
+        // every '/' in the string is a separator. Tooling, .env files and cross-platform
+        // config routinely spell data dirs with forward slashes; normalize before the shape
+        // check so the same components are walked and pinned, instead of refusing a
+        // separator spelling as an unsafe shape.
+        let mut text: Vec<u16> = name[..name.len() - 1].to_vec();
+        for code in &mut text {
+            if *code == b'/' as u16 { *code = b'\\' as u16; }
+        }
         if text.len() < 4 || text[1] != b':' as u16 || text[2] != b'\\' as u16
             || !((b'A' as u16..=b'Z' as u16).contains(&text[0])
                 || (b'a' as u16..=b'z' as u16).contains(&text[0])) {
-            return Err(unsafe_record());
+            return Err(unsafe_record_path(path));
         }
         let root = [text[0], text[1], text[2], 0];
-        if unsafe { GetDriveTypeW(root.as_ptr()) } != DRIVE_FIXED { return Err(unsafe_record()); }
+        if unsafe { GetDriveTypeW(root.as_ptr()) } != DRIVE_FIXED { return Err(unsafe_record_path(path)); }
         let sid = current_user_sid()?;
         let expected = sid.as_ptr() as PSID;
         let mut ancestry = Vec::new();
@@ -738,7 +750,7 @@ mod native {
                 || component.iter().any(|ch| *ch < 32 || [b':' as u16, b'/' as u16,
                     b'*' as u16, b'?' as u16, b'"' as u16, b'<' as u16, b'>' as u16, b'|' as u16].contains(ch))
                 || matches!(component.last(), Some(ch) if *ch == b'.' as u16 || *ch == b' ' as u16) {
-                return Err(unsafe_record());
+                return Err(unsafe_record_path(path));
             }
             start = end + 1;
             if end == text.len() { break; }
@@ -2252,6 +2264,30 @@ setTimeout(()=>process.exit(74),60000);
             drop(held);
             let _ = std::fs::remove_dir_all(&base);
             assert!(attempt.is_err(), "an ancestor was renamed while the record ancestry was retained");
+        }
+
+        #[test]
+        fn record_ancestry_admits_a_forward_slash_data_dir_spelling() {
+            // Tooling, .env files and cross-platform config spell data dirs with '/'. Windows
+            // itself treats every '/' as a separator, so admission must walk and pin the same
+            // components as the backslash spelling instead of refusing the shape.
+            let base = std::env::temp_dir().join(format!("gd-ancestry-slash-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(base.join(r"a\b")).unwrap();
+            let forward = PathBuf::from(base.to_string_lossy().replace('\\', "/")).join("a/b/daemon.pid");
+            let held = record_ancestry(&forward, false).unwrap();
+            drop(held);
+            let _ = std::fs::remove_dir_all(&base);
+        }
+
+        #[test]
+        fn record_ancestry_names_the_path_when_rejecting_an_unsafe_shape() {
+            // "unsafe provenance" sent testers hunting ACL problems that did not exist;
+            // shape rejections must name the rejected path instead.
+            let malformed = record_ancestry(Path::new("relative/daemon.pid"), false).unwrap_err();
+            let message = malformed.to_string();
+            assert!(message.contains("unsafe Windows stop record path"), "message was: {message}");
+            assert!(message.contains("relative/daemon.pid"), "message was: {message}");
         }
 
         #[test]
