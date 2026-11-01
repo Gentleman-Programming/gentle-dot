@@ -86,7 +86,7 @@ impl FakeDesktop {
 impl Desktop for FakeDesktop {
     fn keyboard_refusal(&self, app: &AppIdentity) -> Option<String> {
         self.elevated.lock().unwrap().contains(&app.pid)
-            .then(|| format!("{} runs as administrator, so Gentle Dot cannot send it keys.", app.name))
+            .then(|| super::runs_as_administrator(&app.name))
     }
 
     fn permissions(&self) -> Permissions {

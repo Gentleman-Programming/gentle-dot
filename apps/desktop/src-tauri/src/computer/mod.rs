@@ -22,9 +22,9 @@ pub mod risk;
 pub mod server;
 pub mod session;
 pub mod windows;
-// The Windows desktop backend, built in parts: input, capture and apps now, then binding keys
-// to the approved recipient, then UI Automation and the `Desktop` implementation. Nothing calls
-// it until that last part, which removes this allow.
+// The Windows desktop backend, built in parts: input, capture, apps, and keys bound to the
+// approved recipient now, then UI Automation and the `Desktop` implementation. Nothing calls it
+// until that last part, which removes this allow.
 #[cfg(windows)]
 #[allow(dead_code)]
 mod win;
@@ -106,6 +106,11 @@ pub enum PermissionKind {
 /// before any of it was (shared by the helper and the Windows backend).
 pub const KEYS_CHANGED_WHILE_TYPING: &str = "The app receiving the keys changed while typing, so the rest was not sent.";
 pub const KEYS_CHANGED_BEFORE_TYPING: &str = "The app receiving the keys changed before typing, so nothing was sent.";
+
+/// Why keys are not sent to an app that runs as administrator (Windows drops them silently).
+pub fn runs_as_administrator(name: &str) -> String {
+    format!("{name} runs as administrator, so Gentle Dot cannot send it keys.")
+}
 
 /// The approved front app and any distinct process receiving its keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

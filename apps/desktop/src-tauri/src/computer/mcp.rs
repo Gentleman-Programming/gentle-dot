@@ -1623,6 +1623,22 @@ mod tests {
     }
 
     #[test]
+    fn elevated_front_refuses_key_at_the_recheck() {
+        let rig = rig();
+        rig.ready();
+        let desktop = rig.desktop.clone();
+        // Safari becomes elevated after the first check, while the focus is read.
+        *rig.desktop.during_focused_element.lock().unwrap() = Some(Box::new(move || {
+            desktop.elevated.lock().unwrap().push(200);
+        }));
+        let result = rig.call("key", json!({"combo": "tab"}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), "Safari runs as administrator, so Gentle Dot cannot send it keys.");
+        assert!(rig.desktop.events().is_empty());
+        assert!(rig.desktop.typed_posts.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn elevated_focused_panel_refuses_type() {
         let rig = rig();
         rig.ready();
