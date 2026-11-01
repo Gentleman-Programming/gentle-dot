@@ -18,12 +18,14 @@
 //! that runs as administrator: Windows drops input sent to a process with a higher integrity
 //! level without saying so (`keyboard_refusal`).
 //!
-//! These are the input, capture, apps and keyboard parts of the backend. UI Automation elements
-//! and the `Desktop` implementation come next; until then nothing outside this module calls it.
+//! Elements come from UI Automation (`winaccess` maps them), with a 0.5 s timeout so a hung app
+//! cannot stall the helper, as the Accessibility timeout does on macOS.
 
 use super::coords::{fit_long_edge, Point, ScreenshotGeometry, MAX_LONG_EDGE};
 use super::encode::{bgra_to_jpeg, JPEG_QUALITY};
 use super::blocklist::{blocked_name, blocked_reason, AppIdentity, UNIDENTIFIED};
+use super::risk::{AxElement, Focus};
+use super::winaccess::{element, is_default, unreadable, UIA_BUTTON, UIA_WINDOW};
 use super::winapps::{
     answers_to, app_pids, executable_target, fronts_same_app, hosted_page, request, shortcut_named, strip_ci, Request,
     TopWindow,
@@ -38,11 +40,10 @@ use std::mem::{size_of, zeroed};
 use std::ptr::null_mut;
 use std::time::Duration;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, SetLastError, ERROR_ACCESS_DENIED, ERROR_TIMEOUT, HWND, LPARAM, POINT, RECT,
+    CloseHandle, GetLastError, SetLastError, ERROR_TIMEOUT, HWND, LPARAM, POINT, RECT,
 };
 use windows_sys::Win32::Graphics::Dwm::{DwmFlush, DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows_sys::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
-use windows_sys::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
 use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
 use windows_sys::Win32::Security::{
     GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, IsValidSid, TokenIntegrityLevel,
@@ -256,6 +257,9 @@ fn post_input(event: &InputEvent, approved: Option<&KeyboardRecipient>) -> Resul
         // raw window owners would never match). The front comes from the pinned root itself;
         // `focused_app` is a global query, so the windows are pinned again after it and must not
         // have moved in between.
+        if focus.is_null() {
+            return Err(TypedError::NoFocus);
+        }
         let front = target_of(root).pid;
         let focused = focused_app().map(|app| app.pid).filter(|pid| *pid != front);
         // The pinned focus window itself must belong to an approved process (the root's own,
@@ -263,8 +267,7 @@ fn post_input(event: &InputEvent, approved: Option<&KeyboardRecipient>) -> Resul
         // the focus for a moment elsewhere.
         let owner = window_pid(focus);
         let owned = owner == window_pid(root) || owner == front || Some(owner) == approved.focused_pid;
-        let valid = !focus.is_null()
-            && owned
+        let valid = owned
             && front == approved.front_pid
             && focused == approved.focused_pid
             && typing_windows() == Some((root, focus));
@@ -710,8 +713,7 @@ pub fn frontmost_app() -> Option<AppIdentity> {
 /// refused app other than Gentle Dot carries no process id, so the helper never drops it as the
 /// front app; a focus window Windows does not report is the refused Unidentified app.
 pub fn focused_app() -> Option<AppIdentity> {
-    // UI Automation's focused element comes with the UI Automation part of this backend.
-    focused_app_with(None)
+    focused_app_with(focused_pid())
 }
 
 /// `focused_app` given the process of UI Automation's focused element, or none when it did not
@@ -888,19 +890,14 @@ fn start_menu_shortcuts() -> Vec<String> {
 /// Asks the shell to start a program.
 fn shell_open(program: &str) -> Result<(), String> {
     let (verb, file) = (wide("open"), wide(program));
-    // SAFETY: valid wide strings; COM is initialized for the call (the shell may need it) and
-    // uninitialized only when this call initialized it.
-    unsafe {
-        let initialized = CoInitializeEx(null_mut(), (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32);
-        let result = ShellExecuteW(null_mut(), verb.as_ptr(), file.as_ptr(), null_mut(), null_mut(), SW_SHOWNORMAL);
-        if initialized >= 0 {
-            CoUninitialize();
-        }
-        if result as isize > 32 {
-            Ok(())
-        } else {
-            Err(format!("cannot open `{program}`: Windows could not start it"))
-        }
+    // The shell may need COM; it asks for a single-threaded apartment.
+    let _apartment = Apartment::join(Apartment::SHELL);
+    // SAFETY: valid wide strings that outlive the call.
+    let result = unsafe { ShellExecuteW(null_mut(), verb.as_ptr(), file.as_ptr(), null_mut(), null_mut(), SW_SHOWNORMAL) };
+    if result as isize > 32 {
+        Ok(())
+    } else {
+        Err(format!("cannot open `{program}`: Windows could not start it"))
     }
 }
 
@@ -917,7 +914,7 @@ fn shortcut_target(path: &str) -> Result<String, String> {
     let unreadable = || format!("cannot tell what `{path}` opens, so it was not opened.");
     let utf16 = |units: &[u16]| String::from_utf16_lossy(&units[..units.iter().position(|&u| u == 0).unwrap_or(units.len())]);
     // Declared first so the shell link is released before COM is left.
-    let _apartment = Apartment::join();
+    let _apartment = Apartment::join(Apartment::OBJECTS);
     let file = wide(path);
     // SAFETY: calls on live COM objects with buffers of the lengths passed.
     unsafe {
@@ -1014,9 +1011,6 @@ fn resolve_name(wanted: &str, shortcuts: &[String]) -> Result<String, String> {
 enum Integrity {
     /// The last sub-authority of its token's mandatory label.
     Level(u32),
-    /// Its token refused to be opened: a process of this user and session refuses it when it runs
-    /// at a higher level (elevated).
-    Denied,
     /// It could not be read.
     Unknown,
 }
@@ -1027,7 +1021,7 @@ fn integrity_level(process: *mut c_void) -> Integrity {
     unsafe {
         let mut token = null_mut();
         if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
-            return if GetLastError() == ERROR_ACCESS_DENIED { Integrity::Denied } else { Integrity::Unknown };
+            return Integrity::Unknown;
         }
         let mut size = 0u32;
         GetTokenInformation(token, TokenIntegrityLevel, null_mut(), 0, &mut size);
@@ -1052,8 +1046,9 @@ fn integrity_level(process: *mut c_void) -> Integrity {
 
 /// Why keys must not go to `app`: Windows drops input sent to a process with a higher integrity
 /// level than ours (an app run as administrator) without an error, so typing there would report
-/// keys that never arrived. A token that refuses to be opened is taken as elevated; a process
-/// whose level cannot be read at all is refused too.
+/// keys that never arrived. A process whose level cannot be read is refused too: an elevated app in
+/// the user's own session lets its level be read (checked on Windows 11), so one that does not is
+/// another user's or a protected process, and the reason is not guessed.
 pub fn keyboard_refusal(app: &AppIdentity) -> Option<String> {
     // SAFETY: the pseudo handle needs no closing; the target's handle is checked and closed.
     let (own, target) = unsafe {
@@ -1070,7 +1065,7 @@ pub fn keyboard_refusal(app: &AppIdentity) -> Option<String> {
     };
     match (own, target) {
         (Integrity::Level(own), Integrity::Level(target)) if target <= own => None,
-        (Integrity::Level(_), Integrity::Level(_) | Integrity::Denied) => Some(runs_as_administrator(&app.name)),
+        (Integrity::Level(_), Integrity::Level(_)) => Some(runs_as_administrator(&app.name)),
         _ => Some(format!(
             "Gentle Dot cannot tell whether {} runs as administrator, so it does not send it keys.",
             app.name
@@ -1078,15 +1073,53 @@ pub fn keyboard_refusal(app: &AppIdentity) -> Option<String> {
     }
 }
 
-/// This thread's COM apartment, joined for a shell call; a thread already in another apartment
-/// keeps it.
+/// How many ancestors of the element under a point are read (text inside a button), as on macOS.
+const AX_ANCESTORS: usize = 4;
+/// How far up the focused element its window is looked for.
+const WINDOW_SEARCH: usize = 32;
+/// At most this many of a window's buttons are checked for the default one. The query itself is
+/// one cross-process call, bounded by the UI Automation timeout.
+const DEFAULT_BUTTON_SCAN: i32 = 1024;
+/// UI Automation gives up on an unresponsive app after this long.
+const UIA_TIMEOUT_MS: u32 = 500;
+
+
+mod uia {
+    pub use windows::core::Interface;
+    pub use windows::Win32::Foundation::POINT;
+    pub use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+    pub use windows::Win32::System::Variant::VARIANT;
+    pub use windows::Win32::UI::Accessibility::{
+        CUIAutomation8, IUIAutomation, IUIAutomation2, IUIAutomationElement, IUIAutomationLegacyIAccessiblePattern,
+        IUIAutomationValuePattern, TreeScope_Descendants, UIA_ControlTypePropertyId,
+        UIA_IsLegacyIAccessiblePatternAvailablePropertyId, UIA_IsValuePatternAvailablePropertyId,
+        UIA_LegacyIAccessiblePatternId, UIA_LegacyIAccessibleStatePropertyId, UIA_PROPERTY_ID, UIA_ValuePatternId,
+    };
+}
+
+/// A UI Automation client for one call, on a COM apartment it owns when it had to join one.
+struct Automation {
+    client: uia::IUIAutomation,
+    /// Declared after `client` so the client is released before COM is left.
+    _apartment: Apartment,
+}
+
+/// This thread's COM apartment, joined for one call: the only place COM is entered. A thread
+/// already in another apartment keeps it (`RPC_E_CHANGED_MODE`), and the call runs there.
 struct Apartment(bool);
 
 impl Apartment {
-    fn join() -> Apartment {
-        use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
-        // SAFETY: COM initialization on this thread, balanced by Drop when it succeeded.
-        Apartment(unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok())
+    /// For the shell (`ShellExecuteW`), which wants a single-threaded apartment.
+    const SHELL: windows::Win32::System::Com::COINIT = windows::Win32::System::Com::COINIT(
+        windows::Win32::System::Com::COINIT_APARTMENTTHREADED.0 | windows::Win32::System::Com::COINIT_DISABLE_OLE1DDE.0,
+    );
+    /// For COM objects called from this thread only (UI Automation, shell links).
+    const OBJECTS: windows::Win32::System::Com::COINIT = windows::Win32::System::Com::COINIT_MULTITHREADED;
+
+    fn join(model: windows::Win32::System::Com::COINIT) -> Apartment {
+        // SAFETY: COM initialization on this thread, balanced by Drop when it succeeded (S_FALSE,
+        // already in that apartment, counts and is balanced too).
+        Apartment(unsafe { windows::Win32::System::Com::CoInitializeEx(None, model) }.is_ok())
     }
 }
 
@@ -1096,6 +1129,262 @@ impl Drop for Apartment {
             // SAFETY: balances the successful CoInitializeEx on this thread.
             unsafe { windows::Win32::System::Com::CoUninitialize() };
         }
+    }
+}
+
+impl Automation {
+    fn new() -> Option<Automation> {
+        let apartment = Apartment::join(Apartment::OBJECTS);
+        // SAFETY: creating the system's UI Automation object.
+        let client: uia::IUIAutomation =
+            unsafe { uia::CoCreateInstance(&uia::CUIAutomation8, None, uia::CLSCTX_INPROC_SERVER) }.ok()?;
+        // Without its timeouts a hung app could stall the helper: no client then (what it would
+        // have read is unreadable, which asks for a confirmation).
+        let timeouts = uia::Interface::cast::<uia::IUIAutomation2>(&client).ok()?;
+        // SAFETY: plain setters on a live client.
+        unsafe {
+            timeouts.SetConnectionTimeout(UIA_TIMEOUT_MS).ok()?;
+            timeouts.SetTransactionTimeout(UIA_TIMEOUT_MS).ok()?;
+        }
+        Some(Automation { client, _apartment: apartment })
+    }
+
+    fn parent(&self, of: &uia::IUIAutomationElement) -> Option<uia::IUIAutomationElement> {
+        // SAFETY: calls on live COM objects.
+        unsafe { self.client.ControlViewWalker().ok()?.GetParentElement(of).ok() }
+    }
+
+    /// Whether `of` ends its chain of ancestors: the desktop itself, or a top-level window.
+    fn ends_chain(&self, of: &uia::IUIAutomationElement) -> bool {
+        // SAFETY: calls on live COM objects.
+        let root = unsafe { self.client.GetRootElement() }
+            .and_then(|root| unsafe { self.client.CompareElements(&root, of) })
+            .is_ok_and(|same| same.as_bool());
+        root || control_type(of) == UIA_WINDOW
+    }
+}
+
+fn control_type(of: &uia::IUIAutomationElement) -> i32 {
+    // SAFETY: a call on a live COM object.
+    unsafe { of.CurrentControlType() }.map_or(0, |t| t.0)
+}
+
+/// A boolean property; an error when UI Automation did not answer.
+fn property_bool(of: &uia::IUIAutomationElement, property: uia::UIA_PROPERTY_ID) -> Result<bool, ()> {
+    // SAFETY: a call on a live COM object.
+    let value = unsafe { of.GetCurrentPropertyValue(property) }.map_err(|_| ())?;
+    bool::try_from(&value).map_err(|_| ())
+}
+
+/// The legacy accessible state, where the default button is marked: none for an element without
+/// one, an error when UI Automation did not answer.
+fn legacy_state(of: &uia::IUIAutomationElement) -> Result<Option<u32>, ()> {
+    if !property_bool(of, uia::UIA_IsLegacyIAccessiblePatternAvailablePropertyId)? {
+        return Ok(None);
+    }
+    // SAFETY: calls on live COM objects.
+    unsafe {
+        let legacy = of
+            .GetCurrentPatternAs::<uia::IUIAutomationLegacyIAccessiblePattern>(uia::UIA_LegacyIAccessiblePatternId)
+            .map_err(|_| ())?;
+        legacy.CurrentState().map(Some).map_err(|_| ())
+    }
+}
+
+/// An element in the risk check's terms. Any property UI Automation does not report (type, name,
+/// help text, whether it is a password, whether it has a value, the value) makes it an unreadable
+/// element, which asks for a confirmation. A password field's value is never read.
+fn describe(of: &uia::IUIAutomationElement) -> AxElement {
+    // SAFETY: calls on live COM objects.
+    unsafe {
+        let (Ok(kind), Ok(name), Ok(help), Ok(password)) =
+            (of.CurrentControlType(), of.CurrentName(), of.CurrentHelpText(), of.CurrentIsPassword())
+        else {
+            return unreadable();
+        };
+        let Ok(has_value) = property_bool(of, uia::UIA_IsValuePatternAvailablePropertyId) else { return unreadable() };
+        let value = if password.as_bool() || !has_value {
+            None
+        } else {
+            let read = of
+                .GetCurrentPatternAs::<uia::IUIAutomationValuePattern>(uia::UIA_ValuePatternId)
+                .and_then(|pattern| pattern.CurrentValue());
+            match read {
+                Ok(value) => Some(value.to_string()),
+                Err(_) => return unreadable(),
+            }
+        };
+        element(kind.0, Some(name.to_string()), Some(help.to_string()), value)
+    }
+}
+
+/// The element under `at`, then its ancestors (as many as macOS reads); empty when unknown.
+/// UI Automation that does not answer makes the element an unreadable one, which asks for a
+/// confirmation: an action is never let through because Windows did not say what is there.
+pub fn element_at(at: Point) -> Vec<AxElement> {
+    let Some(automation) = Automation::new() else { return vec![unreadable()] };
+    let point = uia::POINT { x: at.x.round() as i32, y: at.y.round() as i32 };
+    // SAFETY: a call on a live COM object.
+    let Ok(mut current) = (unsafe { automation.client.ElementFromPoint(point) }) else { return vec![unreadable()] };
+    // The hit test went through Gentle Dot's click-through glow while another app owns the window
+    // there: what is under the glow cannot be read, so it asks for a confirmation.
+    let own = std::process::id() as i32;
+    // SAFETY: a call on a live COM object.
+    // A process Windows does not report counts as Gentle Dot's: the element is not read either.
+    let hit_own = unsafe { current.CurrentProcessId() }.map_or(true, |pid| pid == own);
+    // Only Gentle Dot's own window there (whose actions are refused anyway) is described.
+    if hit_own && !window_owner_at(at).is_some_and(|owner| owner.pid == own) {
+        return vec![unreadable()];
+    }
+    let mut chain = vec![describe(&current)];
+    while chain.len() <= AX_ANCESTORS {
+        let Some(parent) = automation.parent(&current) else {
+            // Cut short before the window: what holds the element is not known, so it asks.
+            if !automation.ends_chain(&current) {
+                chain.push(unreadable());
+            }
+            break;
+        };
+        chain.push(describe(&parent));
+        current = parent;
+    }
+    chain
+}
+
+/// The window holding `of`: its nearest Window ancestor, as macOS reads `AXWindow`. None when
+/// there is none (the desktop); an error when the way up was cut short.
+fn window_of(automation: &Automation, of: &uia::IUIAutomationElement) -> Result<Option<uia::IUIAutomationElement>, ()> {
+    let mut current = of.clone();
+    for _ in 0..WINDOW_SEARCH {
+        // SAFETY: a call on a live COM object.
+        let kind = unsafe { current.CurrentControlType() }.map_err(|_| ())?;
+        if kind.0 == UIA_WINDOW {
+            return Ok(Some(current));
+        }
+        match automation.parent(&current) {
+            Some(parent) => current = parent,
+            None if automation.ends_chain(&current) => return Ok(None),
+            None => return Err(()),
+        }
+    }
+    Err(())
+}
+
+/// The window's default button (`AXDefaultButton` on macOS), if it has one; an error when Windows
+/// did not answer. One cross-process call fetches every button of the window with its legacy
+/// state, within the UI Automation timeout.
+fn default_button(
+    automation: &Automation,
+    window: &uia::IUIAutomationElement,
+) -> windows::core::Result<Option<uia::IUIAutomationElement>> {
+    // SAFETY: calls on live COM objects.
+    unsafe {
+        let buttons = automation.client.CreatePropertyCondition(uia::UIA_ControlTypePropertyId, &uia::VARIANT::from(UIA_BUTTON))?;
+        let cache = automation.client.CreateCacheRequest()?;
+        cache.AddProperty(uia::UIA_LegacyIAccessibleStatePropertyId)?;
+        let found = window.FindAllBuildCache(uia::TreeScope_Descendants, &buttons, &cache)?;
+        let count = found.Length()?.min(DEFAULT_BUTTON_SCAN);
+        // Every button is read: one that cannot be could be the default, so the scan fails.
+        for i in 0..count {
+            let button = found.GetElement(i)?;
+            let state = button.GetCachedPropertyValue(uia::UIA_LegacyIAccessibleStatePropertyId)?;
+            let state = i32::try_from(&state)?;
+            if is_default(state as u32) {
+                return Ok(Some(button));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// The focused element, whether it is its window's default button, and that button.
+/// A focus UI Automation does not report is an unreadable element (Return and Space then ask for
+/// a confirmation), and a default button it does not report an unreadable one (Return asks).
+pub fn focused_element() -> Option<Focus> {
+    let unknown = || Some(Focus { element: unreadable(), is_default_button: false, default_button: None });
+    let Some(automation) = Automation::new() else { return unknown() };
+    // SAFETY: a call on a live COM object.
+    let Ok(focused) = (unsafe { automation.client.GetFocusedElement() }) else { return unknown() };
+    let default = match window_of(&automation, &focused) {
+        Ok(Some(window)) => default_button(&automation, &window).map_err(|_| ()),
+        Ok(None) => Ok(None),
+        Err(()) => Err(()),
+    };
+    // A comparison or state UI Automation does not answer counts as the default button.
+    // SAFETY: a call on a live COM object.
+    let same = |button: &uia::IUIAutomationElement| unsafe { automation.client.CompareElements(button, &focused) }.map_or(true, |b| b.as_bool());
+    let marked = legacy_state(&focused).map_or(true, |state| state.is_some_and(is_default));
+    let is_default_button = marked || default.as_ref().is_ok_and(|d| d.as_ref().is_some_and(same));
+    let default_button = match &default {
+        Ok(found) => found.as_ref().map(describe),
+        Err(()) => Some(unreadable()),
+    };
+    Some(Focus { element: describe(&focused), is_default_button, default_button })
+}
+
+/// The process of the focused UI Automation element.
+fn focused_pid() -> Option<i32> {
+    let automation = Automation::new()?;
+    // SAFETY: calls on live COM objects.
+    let pid = unsafe { automation.client.GetFocusedElement().ok()?.CurrentProcessId().ok()? };
+    (pid > 0).then_some(pid)
+}
+
+/// The Windows desktop the helper drives.
+pub struct WinDesktop;
+
+impl super::Desktop for WinDesktop {
+    fn keyboard_refusal(&self, app: &AppIdentity) -> Option<String> {
+        keyboard_refusal(app)
+    }
+
+    fn permissions(&self) -> super::Permissions {
+        // Windows asks for no permission to send input or take screenshots.
+        super::Permissions { accessibility: true, screen_recording: true, screenshots_supported: true }
+    }
+
+    fn capture(&self) -> Result<Capture, String> {
+        capture()
+    }
+
+    fn post(&self, event: &InputEvent) -> Result<(), String> {
+        post(event)
+    }
+
+    fn post_typed(&self, event: &InputEvent, recipient: &KeyboardRecipient) -> Result<(), TypedError> {
+        post_typed(event, recipient)
+    }
+
+    fn list_apps(&self) -> Result<Vec<AppInfo>, String> {
+        Ok(list_apps())
+    }
+
+    fn open_app(&self, name: &str) -> Result<(), String> {
+        open_app(name)
+    }
+
+    fn element_at(&self, at: Point) -> Vec<AxElement> {
+        element_at(at)
+    }
+
+    fn focused_element(&self) -> Option<Focus> {
+        focused_element()
+    }
+
+    fn frontmost_app(&self) -> Option<AppIdentity> {
+        frontmost_app()
+    }
+
+    fn focused_app(&self) -> Option<AppIdentity> {
+        focused_app()
+    }
+
+    fn window_owner_at(&self, at: Point) -> Option<AppIdentity> {
+        window_owner_at(at)
+    }
+
+    fn activate(&self, pid: i32) {
+        activate(pid)
     }
 }
 
@@ -1207,6 +1496,26 @@ mod tests {
         let pid: i32 = std::env::var("GENTLE_DOT_ELEVATED_PID").expect("GENTLE_DOT_ELEVATED_PID").parse().unwrap();
         let console = identity(pid);
         assert_eq!(keyboard_refusal(&console), Some(runs_as_administrator(&console.name)));
+    }
+
+    /// UI Automation answers, or says it cannot, within its timeout even with no desktop in front
+    /// (CI): an element it cannot read is the unreadable one, which asks for a confirmation.
+    #[test]
+    fn ui_automation_answers_without_a_desktop() {
+        assert!(!element_at(Point { x: 0.0, y: 0.0 }).is_empty());
+        assert!(focused_element().is_some());
+    }
+
+    #[test]
+    fn the_desktop_wires_this_backend() {
+        use super::super::Desktop;
+        let desktop = WinDesktop;
+        let own = identity(std::process::id() as i32);
+        assert_eq!(desktop.keyboard_refusal(&own), None);
+        let ghost = AppIdentity { pid: i32::MAX, bundle_id: None, name: "Ghost".into() };
+        assert_eq!(desktop.keyboard_refusal(&ghost), keyboard_refusal(&ghost));
+        let permissions = desktop.permissions();
+        assert!(permissions.accessibility && permissions.screen_recording && permissions.screenshots_supported);
     }
 
     #[test]
