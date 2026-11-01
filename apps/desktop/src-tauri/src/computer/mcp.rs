@@ -25,7 +25,10 @@ use super::keys::{parse_combo, KeyCombo};
 use super::rate::{RateLimiter, MAX_ACTIONS_PER_SECOND};
 use super::risk::{assess, Act};
 use super::working::{NoPreparation, Preparation};
-use super::{Clock, Desktop, Dialogs, InputEvent, KeyboardRecipient, MouseButton};
+use super::{
+    Clock, Desktop, Dialogs, InputEvent, KeyboardRecipient, MouseButton, KEYS_CHANGED_BEFORE_TYPING,
+    KEYS_CHANGED_WHILE_TYPING,
+};
 use base64::Engine as _;
 use serde_json::{json, Map, Value};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -577,6 +580,9 @@ impl Helper {
     fn keyboard_target(&self, sent: bool) -> Result<(String, KeyboardRecipient), String> {
         let front = self.desktop.frontmost_app().ok_or("Cannot tell which app is in front.")?;
         self.refuse_blocked(&front)?;
+        if let Some(reason) = self.desktop.keyboard_refusal(&front) {
+            return Err(reason);
+        }
         // The user may have switched apps since the agent last looked: it looks again first.
         if *lock(&self.seen_front) != Some(front.pid) {
             return Err(format!(
@@ -588,6 +594,9 @@ impl Helper {
         let focused = self.desktop.focused_app().filter(|focused| focused.pid != front.pid);
         if let Some(focused) = &focused {
             self.refuse_blocked(focused)?;
+            if let Some(reason) = self.desktop.keyboard_refusal(focused) {
+                return Err(reason);
+            }
         }
         let recipient = KeyboardRecipient { front_pid: front.pid, focused_pid: focused.as_ref().map(|app| app.pid) };
         Ok((focused.map_or(front.name, |app| app.name), recipient))
@@ -807,9 +816,9 @@ impl Helper {
                 let mut post_typed = |event, characters| -> Result<(), String> {
                     self.keyboard_target(posted > 0).and_then(|(_, current)| {
                         if current != recipient && posted > 0 {
-                            Err("The app receiving the keys changed while typing, so the rest was not sent.".into())
+                            Err(KEYS_CHANGED_WHILE_TYPING.into())
                         } else if current != recipient {
-                            Err("The app receiving the keys changed before typing, so nothing was sent.".into())
+                            Err(KEYS_CHANGED_BEFORE_TYPING.into())
                         } else {
                             Ok(())
                         }
@@ -1590,6 +1599,70 @@ mod tests {
         assert_eq!(rig.desktop.events(), vec![
             InputEvent::Text("a".repeat(20)), InputEvent::Text("a".repeat(20)), InputEvent::Text("a".repeat(5)),
         ]);
+    }
+
+    fn elevated_front_refuses(tool: &str, args: Value) {
+        let rig = rig();
+        rig.ready();
+        rig.desktop.elevated.lock().unwrap().push(200);
+        let result = rig.call(tool, args);
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), "Safari runs as administrator, so Gentle Dot cannot send it keys.");
+        assert!(rig.desktop.events().is_empty());
+        assert!(rig.desktop.typed_posts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn elevated_front_refuses_type() {
+        elevated_front_refuses("type", json!({"text": "hello"}));
+    }
+
+    #[test]
+    fn elevated_front_refuses_key() {
+        elevated_front_refuses("key", json!({"combo": "cmd+a"}));
+    }
+
+    #[test]
+    fn elevated_focused_panel_refuses_type() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.focused_app.lock().unwrap() = Some(app(401, "panel.exe", "Panel"));
+        rig.desktop.elevated.lock().unwrap().push(401);
+        let result = rig.call("type", json!({"text": "hello"}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), "Panel runs as administrator, so Gentle Dot cannot send it keys.");
+        assert!(rig.desktop.events().is_empty());
+        assert!(rig.desktop.typed_posts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn elevated_after_first_chunk_stops_typing() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.elevated_after_posts.lock().unwrap() = Some((1, 200));
+        let result = rig.call("type", json!({"text": "a".repeat(45)}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), "Safari runs as administrator, so Gentle Dot cannot send it keys. Typing stopped after 20 of 45 characters.");
+        let event = InputEvent::Text("a".repeat(20));
+        assert_eq!(rig.desktop.events(), vec![event.clone()]);
+        assert_eq!(*rig.desktop.typed_posts.lock().unwrap(), vec![(event, KeyboardRecipient { front_pid: 200, focused_pid: None })]);
+    }
+
+    #[test]
+    fn elevated_app_stops_batch() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.elevated_after_posts.lock().unwrap() = Some((1, 200));
+        let result = rig.call("batch", batch(json!([
+            {"tool": "type", "text": "hi"},
+            {"tool": "type", "text": "never"},
+            {"tool": "type", "text": "later"}
+        ])));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), "Stopped at step 2 of 3 (type): Safari runs as administrator, so Gentle Dot cannot send it keys.\nRan 1 of 3 steps:\n1. Type 2 characters in Safari: done.");
+        let event = InputEvent::Text("hi".into());
+        assert_eq!(rig.desktop.events(), vec![event.clone()]);
+        assert_eq!(*rig.desktop.typed_posts.lock().unwrap(), vec![(event, KeyboardRecipient { front_pid: 200, focused_pid: None })]);
     }
 
     #[test]

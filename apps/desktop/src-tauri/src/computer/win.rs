@@ -197,15 +197,17 @@ fn typing_windows() -> Option<(HWND, HWND)> {
 /// reporting the error. Binding keys to the recipient the shared guard approved (`post_typed`)
 /// needs the app identities of the apps part of this backend, so it comes with it.
 pub fn post(event: &InputEvent) -> Result<(), String> {
-    const CHANGED: &str = "The app receiving the keys changed while typing, so the rest was not sent.";
     let typing_target = matches!(event, InputEvent::Text(_)).then(typing_windows);
+    if typing_target == Some(None) {
+        return Err("Cannot tell which window is in front, so nothing was sent.".into());
+    }
     let plan = steps(event, &virtual_screen())?;
     let mut done = 0;
     for batch in send_batches(&plan) {
         let changed = checks_typing_target(&batch[0])
             && typing_target.is_some_and(|target| target.is_none() || typing_windows() != target);
         let failed = if changed {
-            Some((done, CHANGED.to_string()))
+            Some((done, super::KEYS_CHANGED_WHILE_TYPING.to_string()))
         } else {
             match send_batch(batch) {
                 Err((sent, error)) => Some((done + sent, error)),

@@ -102,6 +102,11 @@ pub enum PermissionKind {
     ScreenRecording,
 }
 
+/// Why typing stopped when the app receiving the keys changed, once part of the text was sent and
+/// before any of it was (shared by the helper and the Windows backend).
+pub const KEYS_CHANGED_WHILE_TYPING: &str = "The app receiving the keys changed while typing, so the rest was not sent.";
+pub const KEYS_CHANGED_BEFORE_TYPING: &str = "The app receiving the keys changed before typing, so nothing was sent.";
+
 /// The approved front app and any distinct process receiving its keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyboardRecipient {
@@ -111,6 +116,11 @@ pub struct KeyboardRecipient {
 
 /// The Mac, as the helper sees it.
 pub trait Desktop: Send + Sync {
+    /// Why keyboard input must not go to `app` on this platform (an elevated app on Windows, which
+    /// silently drops input from Gentle Dot), or none.
+    fn keyboard_refusal(&self, _app: &AppIdentity) -> Option<String> {
+        None
+    }
     fn permissions(&self) -> Permissions;
     /// A screenshot of the display under the pointer, downscaled to `coords::MAX_LONG_EDGE`.
     fn capture(&self) -> Result<Capture, String>;
