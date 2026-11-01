@@ -22,16 +22,16 @@ pub mod risk;
 pub mod server;
 pub mod session;
 pub mod windows;
-// The Windows desktop backend, built in parts: input, capture, apps, and keys bound to the
-// approved recipient now, then UI Automation and the `Desktop` implementation. Nothing calls it
-// until that last part, which removes this allow.
+// The Windows desktop backend: input, capture, apps, keys bound to the approved recipient, UI
+// Automation, and its `Desktop` implementation. The app starts using it when computer control
+// is turned on for Windows, which removes this allow.
 #[cfg(windows)]
 #[allow(dead_code)]
 mod win;
 // The Windows desktop's pure parts, tested everywhere: UI Automation element mapping, which
 // processes are apps, and what Windows posts for each input event. The Windows desktop backend
 // widens each to `any(windows, test)` once it uses it.
-#[cfg(test)]
+#[cfg(any(windows, test))]
 pub mod winaccess;
 #[cfg(any(windows, test))]
 pub mod winapps;
@@ -116,6 +116,9 @@ pub enum TypedError {
     RecipientChanged,
     /// The system did not say which window is in front.
     FrontUnknown,
+    /// The window in front has no keyboard focus, so where the keys would go is not the approved
+    /// recipient's field.
+    NoFocus,
     /// Posting failed; part of the post may have been sent.
     Failed(String),
 }
@@ -129,6 +132,8 @@ impl TypedError {
             (TypedError::RecipientChanged, true) => KEYS_CHANGED_WHILE_TYPING.into(),
             (TypedError::FrontUnknown, false) => "Cannot tell which window is in front, so nothing was sent.".into(),
             (TypedError::FrontUnknown, true) => "Cannot tell which window is in front, so the rest was not sent.".into(),
+            (TypedError::NoFocus, false) => "The window in front has no keyboard focus, so nothing was sent.".into(),
+            (TypedError::NoFocus, true) => "The window in front has no keyboard focus, so the rest was not sent.".into(),
             (TypedError::Failed(error), _) => error.clone(),
         }
     }

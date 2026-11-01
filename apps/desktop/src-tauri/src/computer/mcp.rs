@@ -72,6 +72,9 @@ type, press tab, type, press return) so it runs in one call; end the batch whene
 before deciding the next step. Shortcuts use ctrl (cmd also presses Ctrl). The user must allow a session, \
 risky actions ask the user to confirm, and some apps (Settings, Windows Security, password managers) are off limits.";
 
+/// Why a key was not sent when the app receiving it changed after it was checked.
+const KEY_RECIPIENT_CHANGED: &str = "The app receiving the keys changed before the key was sent, so it was not sent.";
+
 /// The `key` and `open_app` tool descriptions, and the system an `open_app` confirmation names.
 #[cfg(not(windows))]
 const KEY_DESCRIPTION: &str = "Press a key combo in the frontmost app, for example `shift+cmd+t`, `return`, or `esc`.";
@@ -871,10 +874,14 @@ impl Helper {
                 // to the recipient approved above, as each typed chunk does.
                 let (_, current) = self.keyboard_target(false)?;
                 if current != recipient {
-                    return Err("The app receiving the keys changed before the key was sent, so it was not sent.".into());
+                    return Err(KEY_RECIPIENT_CHANGED.into());
                 }
                 self.still_running(epoch)?;
-                self.desktop.post_typed(&InputEvent::Key(combo), &recipient).map_err(|error| error.message(false))?;
+                self.desktop.post_typed(&InputEvent::Key(combo), &recipient).map_err(|error| match error {
+                    // Worded as the recheck above words it (#167).
+                    TypedError::RecipientChanged => KEY_RECIPIENT_CHANGED.to_string(),
+                    other => other.message(false),
+                })?;
                 (self.glow)(Mark::Key);
                 Ok((format!("{action} in {target}: done."), SETTLE_MS))
             }
@@ -1641,6 +1648,10 @@ mod tests {
              "Cannot tell which window is in front, so the rest was not sent. Typing stopped after 20 of 45 characters.", 1),
             (1, TypedError::FrontUnknown,
              "Cannot tell which window is in front, so nothing was sent. Typing stopped after 0 of 45 characters.", 0),
+            (2, TypedError::NoFocus,
+             "The window in front has no keyboard focus, so the rest was not sent. Typing stopped after 20 of 45 characters.", 1),
+            (1, TypedError::NoFocus,
+             "The window in front has no keyboard focus, so nothing was sent. Typing stopped after 0 of 45 characters.", 0),
         ] {
             let rig = rig();
             rig.ready();
@@ -1653,13 +1664,14 @@ mod tests {
     }
 
     #[test]
-    fn a_backend_refusal_of_a_key_says_nothing_was_sent() {
+    fn a_backend_refusal_of_a_key_says_the_key_was_not_sent() {
+        // The same wording as the helper's own recheck of the key (#167).
         let rig = rig();
         rig.ready();
         *rig.desktop.refuse_typed_at.lock().unwrap() = Some((1, TypedError::RecipientChanged));
         let result = rig.call("key", json!({"combo": "tab"}));
         assert!(is_error(&result), "{result}");
-        assert_eq!(first_text(&result), KEYS_CHANGED_BEFORE_TYPING);
+        assert_eq!(first_text(&result), "The app receiving the keys changed before the key was sent, so it was not sent.");
         assert!(rig.desktop.events().is_empty());
     }
 
