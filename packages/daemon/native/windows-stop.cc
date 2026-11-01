@@ -169,6 +169,8 @@ Record ReadRecord(const std::wstring& path, PSID sid) {
 }
 // Only the native worker uses this heap storage. It is never freed/reused while
 // the kernel owns an OVERLAPPED, even after close rejection or env destruction.
+// When the worker gives up on a cancellation it abandons this storage instead of
+// freeing it, so a retirement later than the deadline always has valid memory.
 struct Operation {
   Handle event{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
   OVERLAPPED overlapped{};
@@ -193,6 +195,7 @@ struct State {
   bool participant = false; // gate protects every native TSFN call/release
   bool authenticated = false; // worker only: one stop for this launch
   bool deadlineQueued = false; // worker only
+  bool abandoned = false; // worker only: the kernel may still own the operation
   bool finalized = false; // JS only
   std::shared_ptr<State>* hookOwner = nullptr; // JS only, independently owns hook data
   std::atomic<bool> stopping{false}, teardown{false}, deadlineExpired{false}, nativeComplete{false};
@@ -206,9 +209,16 @@ struct State {
 };
 using Owner = std::shared_ptr<State>;
 void ReleaseParticipant(State& s, napi_threadsafe_function_release_mode mode) {
-  std::lock_guard<std::mutex> lock(s.gate);
-  if (!s.participant) return;
-  s.participant = false;
+  {
+    std::lock_guard<std::mutex> lock(s.gate);
+    if (!s.participant) return;
+    s.participant = false;
+  }
+  // Released outside the gate on purpose: napi_release_threadsafe_function can
+  // run the cleanup hook synchronously on this thread, and that hook re-enters
+  // ReleaseParticipant. The gate is not recursive, so holding it here would
+  // self-deadlock. The participant flag is already cleared under the lock, so a
+  // second release stays impossible.
   napi_release_threadsafe_function(s.tsfn, mode);
 }
 bool Queue(State& s, void* data) {
@@ -240,7 +250,9 @@ bool ExpectedDisconnect(DWORD code) {
 }
 // No blocking GetOverlappedResult and no JS-thread join. Once cancellation is
 // requested, completion alone permits storage/handle release. If completion is
-// late, report failure and keep the worker + pipe + heap operation alive.
+// late, this reports failure and returns while the kernel may still own the
+// operation: the caller must then abandon that storage instead of freeing it,
+// because Windows does not promise when, or whether, a cancellation retires.
 bool Complete(State& s, DWORD timeout, DWORD& transferred) {
   Operation& op = *s.operation;
   HANDLE events[] = {s.stop.value, op.event.value};
@@ -261,6 +273,7 @@ bool Complete(State& s, DWORD timeout, DWORD& transferred) {
     if (code != ERROR_NOT_FOUND) { s.Fail(code); s.Stop(); NotifyDeadline(s); }
   }
   ULONGLONG started = GetTickCount64();
+  bool reported = false;
   for (;;) {
     if (GetOverlappedResult(s.pipe.value, &op.overlapped, &transferred, FALSE)) return false;
     DWORD code = GetLastError();
@@ -268,14 +281,25 @@ bool Complete(State& s, DWORD timeout, DWORD& transferred) {
       if (!ExpectedDisconnect(code)) { s.Fail(code); s.Stop(); }
       return false;
     }
-    if (GetTickCount64() - started >= kDeadlineMs) {
+    const ULONGLONG elapsed = GetTickCount64() - started;
+    if (!reported && elapsed >= kDeadlineMs) {
       s.Fail(ERROR_TIMEOUT); s.Stop(); NotifyDeadline(s);
+      reported = true;
     }
     // Poll only the retained operation's completion, not the already-set stop
-    // event. A pathological signaled-but-incomplete event cannot busy-spin.
+    // event. If the kernel never retires the cancelled operation, spinning here
+    // would hold the pipe handle and this thread forever, so the loop gives up
+    // one deadline after the timeout is reported. The operation is still the
+    // kernel's at that point, so it is marked abandoned: the caller must leak it
+    // instead of freeing it, since a retirement later than this deadline writes
+    // into the OVERLAPPED it owns.
+    if (elapsed >= kDeadlineMs * 2) {
+      s.abandoned = true;
+      return false;
+    }
     DWORD completion = WaitForSingleObject(op.event.value, 50);
     if (completion == WAIT_FAILED) { s.Fail(GetLastError()); Sleep(50); }
-    else if (completion == WAIT_OBJECT_0) Sleep(1);
+    else if (completion == WAIT_OBJECT_0) Sleep(10);
   }
 }
 bool ClientIsOwner(State& s) {
@@ -380,8 +404,18 @@ DWORD WINAPI Listen(void* data) {
     }
   }
   s.Stop();
-  // Every issued operation has completed before these resources are released.
-  s.operation.reset();
+  // Every issued operation has completed before these resources are released,
+  // except when the worker gave up on the cancellation: then the kernel may
+  // still retire it into this storage, so the operation is abandoned instead of
+  // being freed here or by ~State. Closing the pipe is still correct: a handle
+  // closed with I/O pending cancels it and completes into the OVERLAPPED, which
+  // stays alive. This is a deliberate one-Operation leak, the heap analogue of
+  // keeping the pipe alive.
+  if (s.abandoned) {
+    static_cast<void>(s.operation.release());
+  } else {
+    s.operation.reset();
+  }
   // A failed CloseHandle leaves ownership uncertain; never close the value a second time.
   HANDLE pipe = s.pipe.value;
   s.pipe.value = INVALID_HANDLE_VALUE;
