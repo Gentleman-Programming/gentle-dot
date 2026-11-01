@@ -26,7 +26,7 @@ use super::rate::{RateLimiter, MAX_ACTIONS_PER_SECOND};
 use super::risk::{assess, Act};
 use super::working::{NoPreparation, Preparation};
 use super::{
-    Clock, Desktop, Dialogs, InputEvent, KeyboardRecipient, MouseButton, KEYS_CHANGED_BEFORE_TYPING,
+    Clock, Desktop, Dialogs, InputEvent, KeyboardRecipient, MouseButton, TypedError, KEYS_CHANGED_BEFORE_TYPING,
     KEYS_CHANGED_WHILE_TYPING,
 };
 use base64::Engine as _;
@@ -828,8 +828,14 @@ impl Helper {
                     // A stop before the post sent nothing more; only a failed post leaves a range uncertain.
                     self.still_running(epoch)
                         .map_err(|error| format!("{error} Typing stopped after {posted} of {total} characters."))?;
-                    self.desktop.post_typed(&event, &recipient).map_err(|error| {
-                        format!("{error} Typing stopped within characters {}-{} of {total}.", posted + 1, posted + characters)
+                    self.desktop.post_typed(&event, &recipient).map_err(|error| match error {
+                        TypedError::Failed(error) => format!(
+                            "{error} Typing stopped within characters {}-{} of {total}.",
+                            posted + 1,
+                            posted + characters
+                        ),
+                        // Refused before any of this post went out: what was sent is certain.
+                        refused => format!("{} Typing stopped after {posted} of {total} characters.", refused.message(posted > 0)),
                     })?;
                     posted += characters;
                     Ok(())
@@ -868,7 +874,7 @@ impl Helper {
                     return Err("The app receiving the keys changed before the key was sent, so it was not sent.".into());
                 }
                 self.still_running(epoch)?;
-                self.desktop.post_typed(&InputEvent::Key(combo), &recipient)?;
+                self.desktop.post_typed(&InputEvent::Key(combo), &recipient).map_err(|error| error.message(false))?;
                 (self.glow)(Mark::Key);
                 Ok((format!("{action} in {target}: done."), SETTLE_MS))
             }
@@ -1620,6 +1626,41 @@ mod tests {
     #[test]
     fn elevated_front_refuses_key() {
         elevated_front_refuses("key", json!({"combo": "cmd+a"}));
+    }
+
+    /// The backend refusing a post before sending any of it (#167): the helper words it from what
+    /// earlier posts already sent, and reports no uncertain range.
+    #[test]
+    fn a_backend_refusal_is_reported_after_the_characters_already_sent() {
+        for (at, error, expected, sent) in [
+            (2, TypedError::RecipientChanged,
+             "The app receiving the keys changed while typing, so the rest was not sent. Typing stopped after 20 of 45 characters.", 1),
+            (1, TypedError::RecipientChanged,
+             "The app receiving the keys changed before typing, so nothing was sent. Typing stopped after 0 of 45 characters.", 0),
+            (2, TypedError::FrontUnknown,
+             "Cannot tell which window is in front, so the rest was not sent. Typing stopped after 20 of 45 characters.", 1),
+            (1, TypedError::FrontUnknown,
+             "Cannot tell which window is in front, so nothing was sent. Typing stopped after 0 of 45 characters.", 0),
+        ] {
+            let rig = rig();
+            rig.ready();
+            *rig.desktop.refuse_typed_at.lock().unwrap() = Some((at, error.clone()));
+            let result = rig.call("type", json!({"text": "a".repeat(45)}));
+            assert!(is_error(&result), "{error:?} at {at}: {result}");
+            assert_eq!(first_text(&result), expected, "{error:?} at {at}");
+            assert_eq!(rig.desktop.events(), vec![InputEvent::Text("a".repeat(20)); sent], "{error:?} at {at}");
+        }
+    }
+
+    #[test]
+    fn a_backend_refusal_of_a_key_says_nothing_was_sent() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.refuse_typed_at.lock().unwrap() = Some((1, TypedError::RecipientChanged));
+        let result = rig.call("key", json!({"combo": "tab"}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), KEYS_CHANGED_BEFORE_TYPING);
+        assert!(rig.desktop.events().is_empty());
     }
 
     #[test]

@@ -107,6 +107,33 @@ pub enum PermissionKind {
 pub const KEYS_CHANGED_WHILE_TYPING: &str = "The app receiving the keys changed while typing, so the rest was not sent.";
 pub const KEYS_CHANGED_BEFORE_TYPING: &str = "The app receiving the keys changed before typing, so nothing was sent.";
 
+/// Why a typed post (`Desktop::post_typed`) did not go through. The first two are refusals
+/// before anything of that post was sent; only the helper knows how much of the text went out
+/// before it, so it words them (`message`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypedError {
+    /// The windows in front no longer belong to the approved recipient.
+    RecipientChanged,
+    /// The system did not say which window is in front.
+    FrontUnknown,
+    /// Posting failed; part of the post may have been sent.
+    Failed(String),
+}
+
+impl TypedError {
+    /// The error for the agent, given whether earlier posts of the same action already sent part
+    /// of it.
+    pub fn message(&self, sent: bool) -> String {
+        match (self, sent) {
+            (TypedError::RecipientChanged, false) => KEYS_CHANGED_BEFORE_TYPING.into(),
+            (TypedError::RecipientChanged, true) => KEYS_CHANGED_WHILE_TYPING.into(),
+            (TypedError::FrontUnknown, false) => "Cannot tell which window is in front, so nothing was sent.".into(),
+            (TypedError::FrontUnknown, true) => "Cannot tell which window is in front, so the rest was not sent.".into(),
+            (TypedError::Failed(error), _) => error.clone(),
+        }
+    }
+}
+
 /// Why keys are not sent to an app that runs as administrator (Windows drops them silently).
 pub fn runs_as_administrator(name: &str) -> String {
     format!("{name} runs as administrator, so Gentle Dot cannot send it keys.")
@@ -132,8 +159,8 @@ pub trait Desktop: Send + Sync {
     fn post(&self, event: &InputEvent) -> Result<(), String>;
     /// Posts a type chunk or Return bound to the recipient approved by the shared guard.
     /// Platforms with targeted input checks can validate it immediately before sending.
-    fn post_typed(&self, event: &InputEvent, _recipient: &KeyboardRecipient) -> Result<(), String> {
-        self.post(event)
+    fn post_typed(&self, event: &InputEvent, _recipient: &KeyboardRecipient) -> Result<(), TypedError> {
+        self.post(event).map_err(TypedError::Failed)
     }
     fn list_apps(&self) -> Result<Vec<AppInfo>, String>;
     /// Opens (or activates) an app by name or bundle id.

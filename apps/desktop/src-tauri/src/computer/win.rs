@@ -30,14 +30,16 @@ use super::winapps::{
 };
 use super::winput::{checks_typing_target, releases, send_batches, settles, steps, Step, VirtualScreen};
 use super::{
-    runs_as_administrator, AppInfo, Capture, InputEvent, KeyboardRecipient, MouseButton, KEYS_CHANGED_BEFORE_TYPING,
+    runs_as_administrator, AppInfo, Capture, InputEvent, KeyboardRecipient, MouseButton, TypedError,
     KEYS_CHANGED_WHILE_TYPING,
 };
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
 use std::ptr::null_mut;
 use std::time::Duration;
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, SetLastError, ERROR_TIMEOUT, HWND, LPARAM, POINT, RECT};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, SetLastError, ERROR_ACCESS_DENIED, ERROR_TIMEOUT, HWND, LPARAM, POINT, RECT,
+};
 use windows_sys::Win32::Graphics::Dwm::{DwmFlush, DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows_sys::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
 use windows_sys::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
@@ -224,27 +226,27 @@ fn typing_windows() -> Option<(HWND, HWND)> {
     }
 }
 
-const CANNOT_TELL_FRONT: &str = "Cannot tell which window is in front, so nothing was sent.";
-
 /// Posts `event` with a short gap between steps (surrogate pairs form one batch), waiting after
 /// key releases or a complete pair for the window in front to take it. Text is bound to the
 /// window in front and its keyboard focus when it starts, and stops when either changes. A
 /// failure releases the keys and buttons left pressed by the successfully sent prefix before
 /// reporting the error.
 pub fn post(event: &InputEvent) -> Result<(), String> {
-    post_input(event, None)
+    post_input(event, None).map_err(|error| error.message(false))
 }
 
 /// Posts a typed chunk, a Return, or a key only to the recipient the shared guard approved: the
-/// windows it is bound to must still belong to the approved front app and focused app.
-pub fn post_typed(event: &InputEvent, recipient: &KeyboardRecipient) -> Result<(), String> {
+/// windows it is bound to must still belong to the approved front app and focused app. A refusal
+/// before anything of it was sent is `RecipientChanged` or `FrontUnknown`, which the helper words
+/// from what earlier chunks sent.
+pub fn post_typed(event: &InputEvent, recipient: &KeyboardRecipient) -> Result<(), TypedError> {
     post_input(event, Some(recipient))
 }
 
-fn post_input(event: &InputEvent, approved: Option<&KeyboardRecipient>) -> Result<(), String> {
+fn post_input(event: &InputEvent, approved: Option<&KeyboardRecipient>) -> Result<(), TypedError> {
     // Bind both type chunks and their Returns. Standalone combos remain free to switch apps.
     let typing_target = if approved.is_some() || matches!(event, InputEvent::Text(_)) {
-        Some(typing_windows().ok_or(CANNOT_TELL_FRONT)?)
+        Some(typing_windows().ok_or(TypedError::FrontUnknown)?)
     } else {
         None
     };
@@ -267,26 +269,27 @@ fn post_input(event: &InputEvent, approved: Option<&KeyboardRecipient>) -> Resul
             && focused == approved.focused_pid
             && typing_windows() == Some((root, focus));
         if !valid {
-            return Err(KEYS_CHANGED_BEFORE_TYPING.into());
+            return Err(TypedError::RecipientChanged);
         }
     }
-    let plan = steps(event, &virtual_screen())?;
+    let plan = steps(event, &virtual_screen()).map_err(TypedError::Failed)?;
     let mut done = 0;
     for batch in send_batches(&plan) {
         let checked = checks_typing_target(&batch[0])
             || (approved.is_some() && matches!(batch[0], Step::Key { down: true, .. }));
         let changed = checked && typing_target.is_some_and(|target| typing_windows() != Some(target));
         let failed = if changed {
-            let message = if done == 0 { KEYS_CHANGED_BEFORE_TYPING } else { KEYS_CHANGED_WHILE_TYPING };
-            Some((done, message.to_string()))
+            // Before the first batch nothing of this post went out; after it, part of it did.
+            let error = if done == 0 { TypedError::RecipientChanged } else { TypedError::Failed(KEYS_CHANGED_WHILE_TYPING.into()) };
+            Some((done, error))
         } else {
             match send_batch(batch) {
-                Err((sent, error)) => Some((done + sent, error)),
+                Err((sent, error)) => Some((done + sent, TypedError::Failed(error))),
                 Ok(()) => {
                     // No sleep or catch_up inside a surrogate pair's single SendInput call.
                     std::thread::sleep(EVENT_GAP);
                     if settles(batch.last().unwrap()) {
-                        catch_up().err().map(|error| (done + batch.len(), error))
+                        catch_up().err().map(|error| (done + batch.len(), TypedError::Failed(error)))
                     } else {
                         None
                     }
@@ -1006,15 +1009,25 @@ fn resolve_name(wanted: &str, shortcuts: &[String]) -> Result<String, String> {
     }
 }
 
-/// The integrity level of a process (the last sub-authority of its token's mandatory label), or
-/// none when its token cannot be read.
-fn integrity_level(process: *mut c_void) -> Option<u32> {
+/// What reading a process's integrity level gave.
+#[derive(Debug, PartialEq, Eq)]
+enum Integrity {
+    /// The last sub-authority of its token's mandatory label.
+    Level(u32),
+    /// Its token refused to be opened: a process of this user and session refuses it when it runs
+    /// at a higher level (elevated).
+    Denied,
+    /// It could not be read.
+    Unknown,
+}
+
+fn integrity_level(process: *mut c_void) -> Integrity {
     // SAFETY: the token is checked and closed; the label is read from a buffer of the size Windows
     // asked for, aligned for it, and its SID is validated before its sub-authorities are read.
     unsafe {
         let mut token = null_mut();
         if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
-            return None;
+            return if GetLastError() == ERROR_ACCESS_DENIED { Integrity::Denied } else { Integrity::Unknown };
         }
         let mut size = 0u32;
         GetTokenInformation(token, TokenIntegrityLevel, null_mut(), 0, &mut size);
@@ -1023,27 +1036,31 @@ fn integrity_level(process: *mut c_void) -> Option<u32> {
             && GetTokenInformation(token, TokenIntegrityLevel, buffer.as_mut_ptr() as *mut c_void, size, &mut size) != 0;
         CloseHandle(token);
         if !read {
-            return None;
+            return Integrity::Unknown;
         }
         let sid = (*(buffer.as_ptr() as *const TOKEN_MANDATORY_LABEL)).Label.Sid;
         if sid.is_null() || IsValidSid(sid) == 0 {
-            return None;
+            return Integrity::Unknown;
         }
         let count = *GetSidSubAuthorityCount(sid);
-        (count > 0).then(|| *GetSidSubAuthority(sid, u32::from(count) - 1))
+        if count == 0 {
+            return Integrity::Unknown;
+        }
+        Integrity::Level(*GetSidSubAuthority(sid, u32::from(count) - 1))
     }
 }
 
 /// Why keys must not go to `app`: Windows drops input sent to a process with a higher integrity
 /// level than ours (an app run as administrator) without an error, so typing there would report
-/// keys that never arrived. A process whose level cannot be read is refused the same way.
+/// keys that never arrived. A token that refuses to be opened is taken as elevated; a process
+/// whose level cannot be read at all is refused too.
 pub fn keyboard_refusal(app: &AppIdentity) -> Option<String> {
     // SAFETY: the pseudo handle needs no closing; the target's handle is checked and closed.
     let (own, target) = unsafe {
         let own = integrity_level(GetCurrentProcess());
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, app.pid as u32);
         let target = if process.is_null() {
-            None
+            Integrity::Unknown
         } else {
             let level = integrity_level(process);
             CloseHandle(process);
@@ -1052,8 +1069,8 @@ pub fn keyboard_refusal(app: &AppIdentity) -> Option<String> {
         (own, target)
     };
     match (own, target) {
-        (Some(own), Some(target)) if target <= own => None,
-        (Some(_), Some(_)) => Some(runs_as_administrator(&app.name)),
+        (Integrity::Level(own), Integrity::Level(target)) if target <= own => None,
+        (Integrity::Level(_), Integrity::Level(_) | Integrity::Denied) => Some(runs_as_administrator(&app.name)),
         _ => Some(format!(
             "Gentle Dot cannot tell whether {} runs as administrator, so it does not send it keys.",
             app.name
@@ -1170,13 +1187,14 @@ mod tests {
     }
 
     /// A recipient the windows in front do not belong to gets nothing; on a desktop with nothing
-    /// in front (CI), that is said instead.
+    /// in front, as on CI, the front is unknown instead, so CI rarely reaches the recipient check:
+    /// the interactive run covers it.
     #[test]
     fn keys_for_another_recipient_are_not_posted() {
         let elsewhere = KeyboardRecipient { front_pid: i32::MAX, focused_pid: None };
         let result = post_typed(&InputEvent::Text("x".into()), &elsewhere);
         assert!(
-            result == Err(KEYS_CHANGED_BEFORE_TYPING.into()) || result == Err(CANNOT_TELL_FRONT.into()),
+            result == Err(TypedError::RecipientChanged) || result == Err(TypedError::FrontUnknown),
             "{result:?}"
         );
     }

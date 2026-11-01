@@ -3,7 +3,7 @@
 use super::blocklist::AppIdentity;
 use super::coords::{Point, ScreenshotGeometry};
 use super::risk::{AxElement, Focus};
-use super::{AppInfo, Capture, Clock, Desktop, Dialogs, InputEvent, KeyboardRecipient, Permissions};
+use super::{AppInfo, Capture, Clock, Desktop, Dialogs, InputEvent, KeyboardRecipient, Permissions, TypedError};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -21,6 +21,9 @@ pub struct FakeDesktop {
     pub focused_app: Mutex<Option<AppIdentity>>,
     /// Changes the foreground app after this many recorded posts; disabled by default.
     pub front_after_posts: Mutex<Option<(usize, AppIdentity)>>,
+    /// The backend refuses this typed post (1-based), sending nothing of it; disabled by default.
+    pub refuse_typed_at: Mutex<Option<(usize, TypedError)>>,
+    pub typed_calls: Mutex<usize>,
     /// Apps that run as administrator, refused for keyboard input.
     pub elevated: Mutex<Vec<i32>>,
     /// Marks an app as elevated after this many recorded posts; disabled by default.
@@ -58,6 +61,8 @@ impl Default for FakeDesktop {
             frontmost: Mutex::new(Some(safari)),
             focused_app: Mutex::new(None),
             front_after_posts: Mutex::new(None),
+            refuse_typed_at: Mutex::new(None),
+            typed_calls: Mutex::new(0),
             elevated: Mutex::new(Vec::new()),
             elevated_after_posts: Mutex::new(None),
             front_during_capture: Mutex::new(None),
@@ -130,9 +135,19 @@ impl Desktop for FakeDesktop {
         Ok(())
     }
 
-    fn post_typed(&self, event: &InputEvent, recipient: &KeyboardRecipient) -> Result<(), String> {
+    fn post_typed(&self, event: &InputEvent, recipient: &KeyboardRecipient) -> Result<(), TypedError> {
+        let call = {
+            let mut calls = self.typed_calls.lock().unwrap();
+            *calls += 1;
+            *calls
+        };
+        if let Some((at, error)) = self.refuse_typed_at.lock().unwrap().as_ref() {
+            if call == *at {
+                return Err(error.clone());
+            }
+        }
         // Only posts that went through, so this stays in step with `events`.
-        self.post(event)?;
+        self.post(event).map_err(TypedError::Failed)?;
         self.typed_posts.lock().unwrap().push((event.clone(), *recipient));
         Ok(())
     }
