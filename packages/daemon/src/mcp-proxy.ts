@@ -401,3 +401,28 @@ class McpServerInstance {
     }
   }
 }
+
+export interface ProxiedConnector {
+  id: string;
+  name: string;
+  enabled: boolean;
+  mode: McpMode;
+  readOnlyTools: string[];
+  server: { url: string } | { command: string; args?: string[]; cwd?: string };
+  revision: string;
+  unavailable?: string;
+}
+
+export interface UpstreamCredentials {
+  type?: 'oauth' | 'api_key' | 'basic' | 'bearer';
+  clientId?: string;
+  clientSecret?: string;
+  accessToken?: string;
+  refreshToken?: string;
+  expiresAt?: number;
+  scopes?: string[];
+  metadata?: Record<string, unknown>;
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
+  authProvider?: unknown; // Accepts AuthProvider from @earendil-works/pi-mcp
+}

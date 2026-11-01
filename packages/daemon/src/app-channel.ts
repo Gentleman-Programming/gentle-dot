@@ -21,6 +21,24 @@ export interface AppMessage {
   timestamp: number;
 }
 
+export interface AppApproval {
+  connector: string;
+  action: string;
+  title: string;
+  summary: string;
+  preview: Array<{ name: string; value: unknown }>;
+  approved?: boolean;
+  reason?: string;
+}
+
+export interface AppLink {
+  connected: boolean;
+  approve(request: AppApproval, signal?: AbortSignal): Promise<boolean>;
+  disconnect(): Promise<void>;
+  url: string;
+  label: string;
+}
+
 export interface AppChannelEvents {
   onConnect: (clientId: string) => void;
   onDisconnect: (clientId: string) => void;
@@ -28,6 +46,7 @@ export interface AppChannelEvents {
   onError: (clientId: string | null, error: Error) => void;
 }
 
+export const APPROVAL_WAIT_MS = 30000;
 export const DEFAULT_SOCKET_PATH = path.join(
   process.env['HOME'] || '/tmp',
   '.gentle-dot',
@@ -83,11 +102,9 @@ export class AppChannel extends EventEmitter {
 
       this.server.listen(this.config.socketPath, () => {
         console.log(`[AppChannel] Listening on ${this.config.socketPath}`);
-        // Set permissions to user-only
         try {
           fs.chmodSync(this.config.socketPath, 0o600);
         } catch {
-          // Ignore chmod errors
         }
         resolve();
       });
@@ -98,13 +115,11 @@ export class AppChannel extends EventEmitter {
    * Stop the Unix socket server
    */
   async stop(): Promise<void> {
-    // Close all client connections
     for (const [id, socket] of this.clients.entries()) {
       socket.destroy();
     }
     this.clients.clear();
 
-    // Close server
     if (this.server) {
       await new Promise<void>((resolve) => {
         this.server!.close(() => resolve());
@@ -112,21 +127,16 @@ export class AppChannel extends EventEmitter {
       this.server = null;
     }
 
-    // Remove socket file
     try {
       if (fs.existsSync(this.config.socketPath)) {
         fs.unlinkSync(this.config.socketPath);
       }
     } catch {
-      // Ignore
     }
 
     console.log('[AppChannel] Stopped');
   }
 
-  /**
-   * Handle new client connection
-   */
   private handleConnection(socket: Socket): void {
     const clientId = randomUUID();
     console.log(`[AppChannel] Client connected: ${clientId}`);
@@ -152,16 +162,12 @@ export class AppChannel extends EventEmitter {
       this.emit('onError', clientId, error);
     });
 
-    // Send welcome message
     this.send(clientId, 'welcome', {
       daemonPort: this.config.daemonPort,
       protocolVersion: 1,
     });
   }
 
-  /**
-   * Process incoming buffer for complete messages
-   */
   private processBuffer(clientId: string, buffer: string): string {
     const lines = buffer.split('\n');
     const incomplete = lines.pop() || '';
@@ -174,20 +180,16 @@ export class AppChannel extends EventEmitter {
         this.handleMessage(clientId, message);
       } catch (error) {
         console.error(`[AppChannel] Parse error from ${clientId}:`, error);
-        this.sendError(clientId, 'PARSE_ERROR', 'Invalid JSON');
+        this.sendError(clientId, 'parse_error', 'Invalid JSON');
       }
     }
 
     return incomplete;
   }
 
-  /**
-   * Handle incoming message
-   */
   private async handleMessage(clientId: string, message: AppMessage): Promise<void> {
     this.emit('onMessage', clientId, message);
 
-    // Handle request-response pattern
     if (message.requestId) {
       const handler = this.messageHandlers.get(message.type);
       if (handler) {
@@ -204,7 +206,7 @@ export class AppChannel extends EventEmitter {
   }
 
   /**
-   * Send message to client
+   * Send message to a specific client
    */
   send(clientId: string, type: string, payload: unknown, requestId?: string): boolean {
     const socket = this.clients.get(clientId);
@@ -212,7 +214,7 @@ export class AppChannel extends EventEmitter {
       return false;
     }
 
-    const message: AppMessage = {
+    const message = {
       type,
       payload,
       requestId,
@@ -241,9 +243,6 @@ export class AppChannel extends EventEmitter {
     return sent;
   }
 
-  /**
-   * Send error response
-   */
   sendError(clientId: string, code: string, message: string, requestId?: string): void {
     this.send(clientId, 'error', { code, message }, requestId);
   }
@@ -255,28 +254,17 @@ export class AppChannel extends EventEmitter {
     this.messageHandlers.set(type, handler);
   }
 
-  /**
-   * Unregister a message handler
-   */
   unregisterHandler(type: string): void {
     this.messageHandlers.delete(type);
   }
 
-  /**
-   * Get connected client count
-   */
   getClientCount(): number {
     return this.clients.size;
   }
 
-  /**
-   * Get list of connected client IDs
-   */
   getClientIds(): string[] {
     return Array.from(this.clients.keys());
   }
-
-  // Default handlers
 
   private async handleDaemonStatus(): Promise<unknown> {
     return {
@@ -288,12 +276,10 @@ export class AppChannel extends EventEmitter {
   }
 
   private async handleConnectorList(): Promise<unknown> {
-    // This will be populated by the daemon
     return { connectors: [] };
   }
 
   private async handleConnectorStatus(payload: unknown): Promise<unknown> {
-    // This will be populated by the daemon
     return { status: 'unknown' };
   }
 }
@@ -303,6 +289,7 @@ export class AppChannel extends EventEmitter {
  */
 export class AppChannelClient extends EventEmitter {
   private socket: Socket | null = null;
+  private _connected = false;
   private socketPath: string;
   private pendingRequests = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   private requestId = 0;
@@ -322,6 +309,7 @@ export class AppChannelClient extends EventEmitter {
 
       this.socket.on('connect', () => {
         console.log('[AppChannelClient] Connected to daemon');
+        this._connected = true;
         resolve();
       });
 
@@ -332,11 +320,13 @@ export class AppChannelClient extends EventEmitter {
 
       this.socket.on('close', () => {
         console.log('[AppChannelClient] Disconnected from daemon');
+        this._connected = false;
         this.emit('disconnect');
       });
 
       this.socket.on('error', (error) => {
         console.error('[AppChannelClient] Error:', error);
+        this._connected = false;
         this.emit('error', error);
         reject(error);
       });
@@ -353,12 +343,17 @@ export class AppChannelClient extends EventEmitter {
       this.socket.destroy();
       this.socket = null;
     }
+    this._connected = false;
+  }
+
+  get connected(): boolean {
+    return this._connected;
   }
 
   /**
    * Send request and wait for response
    */
-  async request(type: string, payload: unknown): Promise<unknown> {
+  async request(type: string, payload: unknown, timeoutMs = 10000): Promise<unknown> {
     if (!this.socket || this.socket.destroyed) {
       throw new Error('Not connected');
     }
@@ -383,7 +378,7 @@ export class AppChannelClient extends EventEmitter {
           this.pendingRequests.delete(id);
           reject(new Error(`Request ${type} timed out`));
         }
-      }, 10000);
+      }, timeoutMs);
     });
   }
 
@@ -402,6 +397,13 @@ export class AppChannelClient extends EventEmitter {
     };
 
     this.socket.write(JSON.stringify(message) + '\n');
+  }
+
+  /**
+   * Approve a request via the app channel
+   */
+  async approve(request: AppApproval, signal?: AbortSignal): Promise<boolean> {
+    return this.request('approve', request).then((result) => result as boolean);
   }
 
   /**
@@ -436,6 +438,3 @@ export class AppChannelClient extends EventEmitter {
     }
   }
 }
-
-export { DEFAULT_SOCKET_PATH, APPROVAL_WAIT_MS };
-

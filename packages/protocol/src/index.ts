@@ -715,3 +715,71 @@ export function parseClientMessage(raw: string): ClientMessage | undefined {
 			return undefined;
 	}
 }
+
+/** Internal payload types for specific message types (used by bridges). */
+export interface HelloPayload {
+	token: string;
+	protocol: number;
+}
+
+export interface ReadyPayload {
+	agentState: AgentState;
+	clientId?: string;
+	conversationId?: string;
+	model?: string;
+	features?: Features;
+	voice?: VoiceCapability;
+	pin?: PinStatus;
+}
+
+export interface CommandPayload {
+	type: string;
+	[key: string]: unknown;
+}
+
+export interface CommandResultPayload {
+	success: boolean;
+	result?: unknown;
+	error?: string;
+}
+
+export interface ConnectorEventPayload {
+	connectorId: string;
+	event: string;
+	data?: unknown;
+}
+
+export interface ChannelNotifyPayload {
+	channelId: string;
+	event: string;
+	data?: unknown;
+}
+
+export interface Upload {
+	uploadId: string;
+	name: string;
+	size: number;
+	mime: string;
+	data: string; // base64
+}
+
+export interface IncomingFile {
+	name: string;
+	size: number;
+	mime: string;
+	data: string; // base64
+}
+
+export interface PendingAsk {
+	requestId: string;
+	ask: Ask;
+	timestamp: number;
+}
+
+export interface ConnectorEvent {
+	id: string;
+	connectorId: string;
+	type: string;
+	data?: unknown;
+	timestamp: number;
+}

@@ -493,30 +493,15 @@ export abstract class BaseBridge extends EventEmitter {
       this.heartbeatTimer = null;
     }
     this.pendingPings.clear();
-  }
+}
 
   /**
    * Subscribe to bridge events
    */
-  on<K extends keyof BridgeEvents>(event: K, handler: EventHandler<K>): () => void {
-    const handlers = (this as any)._events[event] || [];
-    handlers.push(handler);
-    (this as any)._events[event] = handlers;
-
-    return () => {
-      const idx = handlers.indexOf(handler);
-      if (idx !== -1) {
-        handlers.splice(idx, 1);
-      }
-    };
+  override on<K extends keyof BridgeEvents>(event: K, handler: EventHandler<K>): this {
+    super.on(event, handler);
+    return this;
   }
-
-  /**
-   * Abstract method to be implemented by subclasses
-   * Called when bridge is ready to start its specific logic
-   */
-  abstract onReady(): Promise<void>;
-
   /**
    * Abstract method to be implemented by subclasses
    * Called when bridge needs to stop its specific logic
@@ -543,13 +528,13 @@ export function loadBridgeConfig(configPath: string): BridgeConfig {
  * Create bridge config from environment variables
  */
 export function createBridgeConfigFromEnv(connectorType: string): BridgeConfig {
-  const daemonHost = process.env.DAEMON_HOST || '127.0.0.1';
-  const daemonPort = process.env.DAEMON_PORT || '4317';
-  const token = process.env.BRIDGE_AUTH_TOKEN || 'gentle-dot-bridge-secret';
+  const daemonHost = process.env['DAEMON_HOST'] || '127.0.0.1';
+  const daemonPort = process.env['DAEMON_PORT'] || '4317';
+  const token = process.env['BRIDGE_AUTH_TOKEN'] || 'gentle-dot-bridge-secret';
 
   return {
     daemonUrl: `ws://${daemonHost}:${daemonPort}/ws`,
-    connectorId: `${connectorType}-${process.env.HOSTNAME || 'local'}-${process.pid}`,
+    connectorId: `${connectorType}-${process.env['HOSTNAME'] || 'local'}-${process.pid}`,
     connectorType,
     token,
     capabilities: [],

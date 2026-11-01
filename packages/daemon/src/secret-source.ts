@@ -8,7 +8,7 @@
  * need a secret fail closed with {@link NO_APP}; there is no file fallback. A server in server mode
  * (S25.8) has its own source instead: an encrypted file (`secret-file.ts`).
  */
-import { APPROVAL_WAIT_MS, type AppChannel } from "./app-channel.ts";
+import { APPROVAL_WAIT_MS, type AppChannelClient } from "./app-channel.ts";
 
 /** Why a connector that needs a secret cannot run: the secrets are only in the app's store. */
 export const NO_APP = "Open the Gentle Dot app to use this connector.";
@@ -51,10 +51,10 @@ const ID = /^[A-Za-z0-9._:@/-]{1,200}$/;
  * carries a secret: the app answers with the store's error, and the daemon adds nothing.
  */
 export class AppSecretSource implements SecretSource {
-	private readonly channel: AppChannel | undefined;
+	private readonly channel: AppChannelClient | undefined;
 	private readonly timeoutMs: number;
 
-	constructor(channel: AppChannel | undefined, timeoutMs = APPROVAL_WAIT_MS) {
+	constructor(channel: AppChannelClient | undefined, timeoutMs = APPROVAL_WAIT_MS) {
 		this.channel = channel;
 		this.timeoutMs = timeoutMs;
 	}
