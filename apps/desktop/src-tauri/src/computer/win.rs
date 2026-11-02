@@ -428,10 +428,12 @@ pub fn capture() -> Result<Capture, String> {
     restore_affinity(&changed);
     let shot = shot?;
     if !clean {
-        return Err("Gentle Dot's window could show in the screenshot, so it was not taken. Take another.".into());
+        return Err(OWN_WINDOW_SHOWN.into());
     }
     Ok(shot)
 }
+
+const OWN_WINDOW_SHOWN: &str = "Gentle Dot's window could show in the screenshot, so it was not taken. Take another.";
 
 /// The screenshot itself, once Gentle Dot's windows are out of it.
 fn grab() -> Result<Capture, String> {
@@ -478,20 +480,23 @@ pub fn exclude_from_capture(hwnd: *mut c_void) -> Result<(), String> {
     set_capture_excluded(hwnd, true)
 }
 
-/// The visible top-level windows of this process.
-fn own_visible_windows() -> Vec<HWND> {
+/// The visible top-level windows of this process, or why they cannot be listed.
+fn own_visible_windows() -> Result<Vec<HWND>, String> {
     unsafe extern "system" fn collect(hwnd: HWND, state: LPARAM) -> i32 {
         // SAFETY: `state` is the vector passed below, alive for the whole enumeration.
         unsafe { (*(state as *mut Vec<HWND>)).push(hwnd) };
         1
     }
     let mut handles: Vec<HWND> = Vec::new();
-    // SAFETY: the callback only appends to `handles`, which outlives the call.
-    unsafe { EnumWindows(Some(collect), &mut handles as *mut Vec<HWND> as LPARAM) };
+    // SAFETY: the callback only appends to `handles`, which outlives the call. It never stops the
+    // enumeration, so 0 is a failure, and a list that may be missing our windows is no list.
+    if unsafe { EnumWindows(Some(collect), &mut handles as *mut Vec<HWND> as LPARAM) } == 0 {
+        return Err(format!("cannot list its windows: {}", std::io::Error::last_os_error()));
+    }
     let own = std::process::id() as i32;
     // SAFETY: plain queries on a window handle (a vanished window just reads as hidden).
     handles.retain(|&hwnd| window_pid(hwnd) == own && unsafe { IsWindowVisible(hwnd) } != 0);
-    handles
+    Ok(handles)
 }
 
 fn is_excluded(hwnd: HWND) -> bool {
@@ -505,7 +510,8 @@ fn is_excluded(hwnd: HWND) -> bool {
 /// newly excluded is out of the picture after the next composition (`DwmFlush`).
 fn exclude_own_windows() -> Result<Vec<HWND>, String> {
     let mut changed = Vec::new();
-    for hwnd in own_visible_windows().into_iter().filter(|&hwnd| !is_excluded(hwnd)) {
+    let windows = own_visible_windows().map_err(|error| format!("Gentle Dot's window would show in the screenshot: {error}"))?;
+    for hwnd in windows.into_iter().filter(|&hwnd| !is_excluded(hwnd)) {
         if let Err(error) = set_capture_excluded(hwnd, true) {
             restore_affinity(&changed);
             return Err(format!("Gentle Dot's window would show in the screenshot: {error}"));
@@ -521,7 +527,12 @@ fn exclude_own_windows() -> Result<Vec<HWND>, String> {
 
 /// Whether every visible window of this process is still out of captures.
 fn own_windows_excluded() -> bool {
-    own_visible_windows().into_iter().all(is_excluded)
+    every_window_excluded(own_visible_windows())
+}
+
+/// Whether every window listed is out of captures; windows that could not be listed are not.
+fn every_window_excluded(windows: Result<Vec<HWND>, String>) -> bool {
+    windows.is_ok_and(|windows| windows.into_iter().all(is_excluded))
 }
 
 /// How many changes of this process's windows began or ended: one shown or hidden, let show in
@@ -571,10 +582,13 @@ fn unchanged_since(baseline: u64) -> bool {
 }
 
 /// Lets the windows a capture excluded show in screenshots again, as they did before it. A window
-/// that vanished meanwhile just fails.
+/// that vanished meanwhile just fails; any failure is logged, since a window left out would be
+/// missing from the user's own screenshots.
 fn restore_affinity(changed: &[HWND]) {
     for &hwnd in changed {
-        let _ = set_capture_excluded(hwnd, false);
+        if let Err(error) = set_capture_excluded(hwnd, false) {
+            eprintln!("gentle-dot: a window may stay out of screenshots: {error}");
+        }
     }
 }
 
@@ -1229,7 +1243,8 @@ impl Drop for Apartment {
 
 // The client never leaves its thread. It is released before the apartment is uninitialized at
 // thread exit; an existing apartment of a different model remains owned by its original caller.
-// A failed client creation or timeout configuration is cached as None and stays fail-closed.
+// A failed client creation or timeout configuration is cached as None for the thread's life and
+// never retried: that thread's queries all read as unreadable, which stays fail-closed.
 thread_local! {
     static AUTOMATION: Option<std::rc::Rc<Automation>> = Automation::create().map(std::rc::Rc::new);
 }
@@ -1539,9 +1554,10 @@ fn windows_build() -> Option<u32> {
 }
 
 /// Whether screenshots can leave Gentle Dot's windows out. A build that cannot be read counts as
-/// able: a capture whose exclusion fails is refused anyway (`exclude_own_windows`).
+/// unable: before Windows 10 version 2004 the exclusion does not fail, it just leaves a black box
+/// (`WDA_MONITOR`), so a failed exclusion cannot be relied on to say so.
 fn supports_capture_exclusion(build: Option<u32>) -> bool {
-    build.map_or(true, |build| build >= CAPTURE_EXCLUSION_BUILD)
+    build.is_some_and(|build| build >= CAPTURE_EXCLUSION_BUILD)
 }
 
 /// The Windows desktop the helper drives.
@@ -1734,19 +1750,35 @@ mod tests {
         let ghost = AppIdentity { pid: i32::MAX, bundle_id: None, name: "Ghost".into() };
         assert_eq!(desktop.keyboard_refusal(&ghost), keyboard_refusal(&ghost));
         let permissions = desktop.permissions();
-        assert!(permissions.accessibility && permissions.screen_recording && permissions.screenshots_supported);
+        assert!(permissions.accessibility && permissions.screen_recording);
+        assert_eq!(permissions.screenshots_supported, supports_capture_exclusion(windows_build()));
     }
 
+    /// The machine's own answer follows its build, so the test holds before 2004 too.
     #[test]
     fn screenshots_need_windows_10_2004() {
         assert!(!supports_capture_exclusion(Some(19040)));
         assert!(supports_capture_exclusion(Some(19041)));
         assert!(supports_capture_exclusion(Some(26100)));
-        assert!(supports_capture_exclusion(None));
+        assert!(!supports_capture_exclusion(None), "an unreadable build is not trusted");
         let build = windows_build().expect("the build number is readable");
-        assert!(build >= CAPTURE_EXCLUSION_BUILD, "{build}");
         use super::super::Desktop;
-        assert!(WinDesktop.permissions().screenshots_supported);
+        assert_eq!(WinDesktop.permissions().screenshots_supported, build >= CAPTURE_EXCLUSION_BUILD, "{build}");
+    }
+
+    /// Windows that could not be listed may include ours: the capture is not clean. Nothing
+    /// visible is.
+    #[test]
+    fn unlisted_windows_are_not_excluded() {
+        assert!(!every_window_excluded(Err("cannot list its windows".into())));
+        assert!(every_window_excluded(Ok(Vec::new())));
+        assert!(!every_window_excluded(Ok(vec![null_mut()])));
+    }
+
+    /// The message CC8 quotes to the agent.
+    #[test]
+    fn a_capture_our_window_could_show_in_says_so() {
+        assert_eq!(OWN_WINDOW_SHOWN, "Gentle Dot's window could show in the screenshot, so it was not taken. Take another.");
     }
 
     /// A window of this process shown and not excluded is left out of a capture, then shows in
