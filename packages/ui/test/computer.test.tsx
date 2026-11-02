@@ -8,6 +8,8 @@ import { type DotState, initialState } from "../src/store.ts";
 
 const HELPER = "http://127.0.0.1:51234/mcp";
 const KEY = "s3cr3t-Computer-Key-0123456789abcdef";
+const WINDOWS_2004_NOTE =
+	"Computer control needs Windows 10 version 2004 (build 19041) or newer for screenshots.";
 
 const h = vi.hoisted(() => ({
 	tauri: true,
@@ -294,13 +296,49 @@ describe("on Windows", () => {
 		h.permissions.screenshotsSupported = false;
 		h.state = connectorsOpen([computerEntry()]);
 		await renderApp("?surface=panel");
-		expect(await screen.findByText(/Windows 10 version 2004/)).toBeInTheDocument();
+		expect(await screen.findByText(WINDOWS_2004_NOTE)).toBeInTheDocument();
+	});
+
+	it("says nothing about Windows 10 version 2004 when screenshots are supported", async () => {
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		await within(entry).findByText("Windows asks for no permission for computer control.");
+		expect(within(entry).queryByText(WINDOWS_2004_NOTE)).toBeNull();
 	});
 
 	it("names the PC in the session banner", async () => {
 		h.status = { active: true };
 		await renderApp("?surface=panel");
 		expect(await screen.findByText("Controlling your PC")).toBeInTheDocument();
+	});
+});
+
+describe("on macOS", () => {
+	beforeEach(() => {
+		vi.spyOn(navigator, "userAgent", "get").mockReturnValue(
+			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+		);
+	});
+	afterEach(() => vi.restoreAllMocks());
+
+	it("shows none of the Windows texts, even when screenshots are reported unsupported", async () => {
+		h.permissions.screenshotsSupported = false;
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		await within(entry).findByText("Accessibility");
+		expect(within(entry).queryByText("Windows asks for no permission for computer control.")).toBeNull();
+		expect(within(entry).queryByText(WINDOWS_2004_NOTE)).toBeNull();
+		expect(within(entry).queryByText(/Alt\+Shift\+Esc/)).toBeNull();
+		expect(within(entry).getByText(/Stop and ⌥⇧Esc still work/)).toBeInTheDocument();
+	});
+
+	it("names the Mac in the session banner", async () => {
+		h.status = { active: true };
+		await renderApp("?surface=panel");
+		expect(await screen.findByText("Controlling your Mac")).toBeInTheDocument();
+		expect(screen.queryByText("Controlling your PC")).toBeNull();
 	});
 });
 
