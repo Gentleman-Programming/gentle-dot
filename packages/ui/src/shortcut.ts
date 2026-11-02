@@ -20,6 +20,11 @@ export function isMac(userAgent: string = navigator.userAgent): boolean {
 	return /Mac|iPhone|iPad/.test(userAgent);
 }
 
+/** WebView2 says Windows in its user agent. */
+export function isWindows(userAgent: string = navigator.userAgent): boolean {
+	return /Windows/.test(userAgent);
+}
+
 type Modifier = "Ctrl" | "Alt" | "Shift" | "Super";
 
 /** The macOS order of modifiers (⌃⌥⇧⌘), also used for the accelerator the app saves. */

@@ -12,7 +12,7 @@ const KEY = "s3cr3t-Computer-Key-0123456789abcdef";
 const h = vi.hoisted(() => ({
 	tauri: true,
 	endpoint: null as unknown,
-	permissions: { accessibility: false, screenRecording: true },
+	permissions: { accessibility: false, screenRecording: true, screenshotsSupported: true },
 	status: { active: false } as unknown,
 	invoke: vi.fn(),
 	send: vi.fn(),
@@ -92,7 +92,7 @@ async function emitState(payload: unknown) {
 beforeEach(() => {
 	h.tauri = true;
 	h.endpoint = { url: HELPER, token: KEY };
-	h.permissions = { accessibility: false, screenRecording: true };
+	h.permissions = { accessibility: false, screenRecording: true, screenshotsSupported: true };
 	h.status = { active: false };
 	h.listeners.clear();
 	h.send = vi.fn();
@@ -189,7 +189,7 @@ describe("the Computer entry in Connectors (S24.5)", () => {
 		expect(h.invoke).toHaveBeenCalledWith("computer_request_permission", { kind: "accessibility" });
 		await waitFor(() => expect(invoked("computer_permissions").length).toBe(checks + 1));
 
-		h.permissions = { accessibility: true, screenRecording: true };
+		h.permissions = { accessibility: true, screenRecording: true, screenshotsSupported: true };
 		await userEvent.click(within(entry).getByRole("button", { name: "Check again" }));
 		await waitFor(() => expect(accessibility).toHaveTextContent("Allowed"));
 		expect(accessibility).not.toHaveTextContent("Not allowed");
@@ -197,7 +197,7 @@ describe("the Computer entry in Connectors (S24.5)", () => {
 	});
 
 	it("asks for Screen Recording with its own kind", async () => {
-		h.permissions = { accessibility: true, screenRecording: false };
+		h.permissions = { accessibility: true, screenRecording: false, screenshotsSupported: true };
 		h.state = connectorsOpen([computerEntry()]);
 		await renderApp("?surface=panel");
 		const recording = await screen.findByRole("listitem", { name: "Screen Recording" });
@@ -267,6 +267,40 @@ describe("while the assistant controls the Mac (S24.6)", () => {
 		expect(rule(".rose-control .rose-light path")).toMatch(/animation: rose-run/);
 		expect(rule(".computer-banner")).toMatch(/var\(--accent/);
 		expect(rule(".computer-banner")).toMatch(/border-radius: var\(--radius-md\)/);
+	});
+});
+
+describe("on Windows", () => {
+	beforeEach(() => {
+		vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+	});
+	afterEach(() => vi.restoreAllMocks());
+
+	it("shows Windows guidance without macOS permissions", async () => {
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		expect(
+			within(entry).getByText("Windows asks for no permission for computer control."),
+		).toBeInTheDocument();
+		expect(within(entry).queryByText("Accessibility")).toBeNull();
+		expect(within(entry).queryByText("Screen Recording")).toBeNull();
+		expect(within(entry).queryByRole("button", { name: "Check again" })).toBeNull();
+		expect(within(entry).queryByText(DEBUG_NOTE)).toBeNull();
+		expect(within(entry).getByText(/Stop and Alt\+Shift\+Esc still work/)).toBeInTheDocument();
+	});
+
+	it("explains unsupported screenshots require Windows 10 version 2004 or newer", async () => {
+		h.permissions.screenshotsSupported = false;
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		expect(await screen.findByText(/Windows 10 version 2004/)).toBeInTheDocument();
+	});
+
+	it("names the PC in the session banner", async () => {
+		h.status = { active: true };
+		await renderApp("?surface=panel");
+		expect(await screen.findByText("Controlling your PC")).toBeInTheDocument();
 	});
 });
 

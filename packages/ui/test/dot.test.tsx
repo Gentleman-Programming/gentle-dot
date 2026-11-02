@@ -118,6 +118,13 @@ describe("DotSurface", () => {
 		if (state !== "needs_you") expect(screen.queryByText("!")).toBeNull();
 	});
 
+	it("names the PC while controlling Windows", () => {
+		const agent = vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Windows NT 10.0");
+		render(<DotSurface agentState="working" connected toggle={vi.fn()} startDrag={vi.fn()} inControl yolo />);
+		expect(screen.getByRole("button")).toHaveAccessibleName("Gentle Dot: controlling your PC, yolo mode on");
+		agent.mockRestore();
+	});
+
 	it("shows a restarting rose while disconnected", () => {
 		const { dot } = setup("working", false);
 		expect(dot).toHaveAccessibleName("Gentle Dot: restarting");

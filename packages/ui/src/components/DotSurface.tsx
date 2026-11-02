@@ -1,6 +1,7 @@
 import type { AgentState } from "@gentle-dot/protocol";
 import { useRef } from "react";
 import { Rose, type RoseMood } from "../rose/Rose.tsx";
+import { isWindows } from "../shortcut.ts";
 
 const LABELS: Record<AgentState, string> = {
 	starting: "starting",
@@ -46,7 +47,7 @@ export function DotSurface({
 }: DotSurfaceProps) {
 	const press = useRef<{ x: number; y: number; dragging: boolean } | undefined>(undefined);
 	const state = connected ? agentState : "restarting";
-	const label = inControl ? "controlling your Mac" : LABELS[state];
+	const label = inControl ? `controlling your ${isWindows() ? "PC" : "Mac"}` : LABELS[state];
 
 	return (
 		<button
