@@ -1,8 +1,9 @@
 //! The Windows desktop for computer control (S24 on Windows): input through `SendInput`, and
 //! screenshots of the monitor under the pointer through GDI. Gentle Dot's own windows are
 //! left out of captures by their display affinity (`WDA_EXCLUDEFROMCAPTURE`): the glow and the
-//! dialogs always, the Dot and the panel while a session is active (Windows cannot leave a window
-//! out of one capture only, and the user's own screenshots should still show them).
+//! dialogs always; the Dot and the panel, hidden during every call anyway, only for the length
+//! of each capture, so the user's own screenshots show them even during a session (Windows
+//! cannot leave a window out of one capture only).
 //!
 //! Points are physical pixels of the virtual screen: the app is per-monitor DPI aware, so the
 //! pointer, the monitors, and `SendInput` all use them.
@@ -25,6 +26,7 @@ use super::coords::{fit_long_edge, Point, ScreenshotGeometry, MAX_LONG_EDGE};
 use super::encode::{bgra_to_jpeg, JPEG_QUALITY};
 use super::blocklist::{blocked_name, blocked_reason, AppIdentity, UNIDENTIFIED};
 use super::risk::{AxElement, Focus};
+use super::glow::Frame;
 use super::winaccess::{element, is_default, known_chain, unreadable, UIA_BUTTON, UIA_WINDOW};
 use super::winapps::{
     answers_to, app_pids, executable_target, fronts_same_app, hosted_page, request, shortcut_named, strip_ci, Request,
@@ -38,6 +40,7 @@ use super::{
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
 use std::ptr::null_mut;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, SetLastError, ERROR_TIMEOUT, HWND, LPARAM, POINT, RECT,
@@ -54,6 +57,7 @@ use windows_sys::Win32::System::Threading::{
     QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
+use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GdiFlush, GetDC, GetMonitorInfoW, MonitorFromPoint,
     ReleaseDC, SelectObject, SetBrushOrgEx, SetStretchBltMode, StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
@@ -73,7 +77,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WindowFromPoint, CURSORINFO, CURSOR_SHOWING, DI_NORMAL, GA_ROOT, GA_ROOTOWNER, GUITHREADINFO, GWL_EXSTYLE,
     GW_OWNER, ICONINFO, SMTO_ABORTIFHUNG, SM_CXCURSOR, SM_CXVIRTUALSCREEN, SM_CYCURSOR, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_RESTORE, SW_SHOWNORMAL, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
-    WM_NULL, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    WM_NULL, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, SetWindowLongPtrW, SetWindowPos, HWND_TOPMOST,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, WS_EX_NOACTIVATE,
 };
 
 /// Pause between the events of one action, so apps see distinct presses (as on macOS).
@@ -409,7 +414,27 @@ fn draw_pointer(canvas: &Canvas, frame: MonitorFrame, width: u32, height: u32) {
 /// A screenshot of the monitor under the pointer, downscaled to `MAX_LONG_EDGE`, Gentle Dot's
 /// windows excluded.
 pub fn capture() -> Result<Capture, String> {
-    exclude_own_windows()?;
+    let baseline = capture_baseline()?;
+    let changed = exclude_own_windows()?;
+    let shot = grab();
+    // A window of ours can show during the copy and be gone by now (the user opens the panel and
+    // closes it again, Stop gives the Dot back, a dialog opens and closes). Every change of our
+    // windows runs inside a `WindowChange`, and an image taken while one overlapped it is not
+    // returned. Checked after the windows, so a change ending between the two is still seen. The
+    // windows this capture excluded go back as they were, so the user's own screenshots show them
+    // (#163 finding 3).
+    let excluded = own_windows_excluded();
+    let clean = excluded && unchanged_since(baseline);
+    restore_affinity(&changed);
+    let shot = shot?;
+    if !clean {
+        return Err("Gentle Dot's window could show in the screenshot, so it was not taken. Take another.".into());
+    }
+    Ok(shot)
+}
+
+/// The screenshot itself, once Gentle Dot's windows are out of it.
+fn grab() -> Result<Capture, String> {
     let pointer = pointer_location().ok_or("cannot read the pointer position")?;
     let frame = monitor_at(pointer).ok_or("no display under the pointer")?;
     if frame.width <= 0 || frame.height <= 0 {
@@ -453,10 +478,8 @@ pub fn exclude_from_capture(hwnd: *mut c_void) -> Result<(), String> {
     set_capture_excluded(hwnd, true)
 }
 
-/// Makes sure no visible window of this process shows in the capture about to be taken: the
-/// session's own exclusion is applied later on the main thread, so it is not relied on here. A
-/// window newly excluded is out of the picture after the next composition (`DwmFlush`).
-fn exclude_own_windows() -> Result<(), String> {
+/// The visible top-level windows of this process.
+fn own_visible_windows() -> Vec<HWND> {
     unsafe extern "system" fn collect(hwnd: HWND, state: LPARAM) -> i32 {
         // SAFETY: `state` is the vector passed below, alive for the whole enumeration.
         unsafe { (*(state as *mut Vec<HWND>)).push(hwnd) };
@@ -466,29 +489,100 @@ fn exclude_own_windows() -> Result<(), String> {
     // SAFETY: the callback only appends to `handles`, which outlives the call.
     unsafe { EnumWindows(Some(collect), &mut handles as *mut Vec<HWND> as LPARAM) };
     let own = std::process::id() as i32;
-    let mut changed = false;
-    for hwnd in handles {
-        // SAFETY: plain queries on a window handle (a vanished window just reads as hidden).
-        if window_pid(hwnd) != own || unsafe { IsWindowVisible(hwnd) } == 0 {
-            continue;
+    // SAFETY: plain queries on a window handle (a vanished window just reads as hidden).
+    handles.retain(|&hwnd| window_pid(hwnd) == own && unsafe { IsWindowVisible(hwnd) } != 0);
+    handles
+}
+
+fn is_excluded(hwnd: HWND) -> bool {
+    let mut affinity = 0u32;
+    // SAFETY: `affinity` is a valid out-pointer.
+    (unsafe { GetWindowDisplayAffinity(hwnd, &mut affinity) }) != 0 && affinity == WDA_EXCLUDEFROMCAPTURE
+}
+
+/// Makes sure no visible window of this process shows in the capture about to be taken, and
+/// returns the ones it had to exclude, for `restore_affinity` once the capture is taken. A window
+/// newly excluded is out of the picture after the next composition (`DwmFlush`).
+fn exclude_own_windows() -> Result<Vec<HWND>, String> {
+    let mut changed = Vec::new();
+    for hwnd in own_visible_windows().into_iter().filter(|&hwnd| !is_excluded(hwnd)) {
+        if let Err(error) = set_capture_excluded(hwnd, true) {
+            restore_affinity(&changed);
+            return Err(format!("Gentle Dot's window would show in the screenshot: {error}"));
         }
-        let mut affinity = 0u32;
-        // SAFETY: `affinity` is a valid out-pointer.
-        if unsafe { GetWindowDisplayAffinity(hwnd, &mut affinity) } == 0 || affinity != WDA_EXCLUDEFROMCAPTURE {
-            set_capture_excluded(hwnd, true).map_err(|e| format!("Gentle Dot's window would show in the screenshot: {e}"))?;
-            changed = true;
-        }
+        changed.push(hwnd);
     }
-    if changed {
+    if !changed.is_empty() {
         // SAFETY: a plain call; it waits for the next composition.
         unsafe { DwmFlush() };
     }
-    Ok(())
+    Ok(changed)
+}
+
+/// Whether every visible window of this process is still out of captures.
+fn own_windows_excluded() -> bool {
+    own_visible_windows().into_iter().all(is_excluded)
+}
+
+/// How many changes of this process's windows began or ended: one shown or hidden, let show in
+/// captures again, or a dialog that could not be kept out of them, for its whole life.
+static OWN_WINDOW_CHANGES: AtomicU64 = AtomicU64::new(0);
+/// How many such changes are under way.
+static OWN_WINDOWS_CHANGING: AtomicUsize = AtomicUsize::new(0);
+
+const OWN_WINDOW_BUSY: &str =
+    "A Gentle Dot window is opening, closing, or waiting for you, so no screenshot was taken. Take another in a moment.";
+
+/// A change of this process's windows under way, from before it starts until after it ends (when
+/// dropped). A capture that overlaps one in any way is not returned: either one is under way when
+/// it starts, or the count moved by the time it ends. The order matters: a change is marked under
+/// way before it is counted, and counted before it is no longer under way; a capture reads the
+/// count before what is under way when it starts, and the other way round when it ends.
+#[must_use]
+pub(crate) struct WindowChange(());
+
+impl WindowChange {
+    pub(crate) fn begin() -> WindowChange {
+        OWN_WINDOWS_CHANGING.fetch_add(1, Ordering::SeqCst);
+        OWN_WINDOW_CHANGES.fetch_add(1, Ordering::SeqCst);
+        WindowChange(())
+    }
+}
+
+impl Drop for WindowChange {
+    fn drop(&mut self) {
+        OWN_WINDOW_CHANGES.fetch_add(1, Ordering::SeqCst);
+        OWN_WINDOWS_CHANGING.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// The count a capture compares with when it ends, or why it cannot start.
+fn capture_baseline() -> Result<u64, String> {
+    let changes = OWN_WINDOW_CHANGES.load(Ordering::SeqCst);
+    if OWN_WINDOWS_CHANGING.load(Ordering::SeqCst) > 0 {
+        return Err(OWN_WINDOW_BUSY.into());
+    }
+    Ok(changes)
+}
+
+/// Whether no change of our windows overlapped the capture that started at `baseline`.
+fn unchanged_since(baseline: u64) -> bool {
+    OWN_WINDOWS_CHANGING.load(Ordering::SeqCst) == 0 && OWN_WINDOW_CHANGES.load(Ordering::SeqCst) == baseline
+}
+
+/// Lets the windows a capture excluded show in screenshots again, as they did before it. A window
+/// that vanished meanwhile just fails.
+fn restore_affinity(changed: &[HWND]) {
+    for &hwnd in changed {
+        let _ = set_capture_excluded(hwnd, false);
+    }
 }
 
 /// Leaves a window of this process out of screenshots, or lets it show in them again.
 pub fn set_capture_excluded(hwnd: *mut c_void, excluded: bool) -> Result<(), String> {
     let affinity = if excluded { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE };
+    // Letting a window show again is a change a capture under way must see, whatever its result.
+    let _change = (!excluded).then(WindowChange::begin);
     // SAFETY: a plain call on a window handle of this process.
     if unsafe { SetWindowDisplayAffinity(hwnd, affinity) } != 0 {
         Ok(())
@@ -1098,7 +1192,7 @@ mod uia {
     };
 }
 
-/// A UI Automation client for one call, on a COM apartment it owns when it had to join one.
+/// A UI Automation client and its thread's COM apartment.
 struct Automation {
     client: uia::IUIAutomation,
     /// Declared after `client` so the client is released before COM is left.
@@ -1133,8 +1227,21 @@ impl Drop for Apartment {
     }
 }
 
+// The client never leaves its thread. It is released before the apartment is uninitialized at
+// thread exit; an existing apartment of a different model remains owned by its original caller.
+// A failed client creation or timeout configuration is cached as None and stays fail-closed.
+thread_local! {
+    static AUTOMATION: Option<std::rc::Rc<Automation>> = Automation::create().map(std::rc::Rc::new);
+}
+
 impl Automation {
-    fn new() -> Option<Automation> {
+    /// This thread's client: created on its first query and kept for the thread's life (the
+    /// helper serves each request on a thread of its own, so a request's queries share one).
+    fn new() -> Option<std::rc::Rc<Automation>> {
+        AUTOMATION.try_with(Clone::clone).ok().flatten()
+    }
+
+    fn create() -> Option<Automation> {
         let apartment = Apartment::join(Apartment::OBJECTS);
         // SAFETY: creating the system's UI Automation object.
         let client: uia::IUIAutomation =
@@ -1155,7 +1262,8 @@ impl Automation {
         unsafe { self.client.ControlViewWalker().ok()?.GetParentElement(of).ok() }
     }
 
-    /// Whether `of` ends its chain of ancestors: the desktop itself, or a top-level window.
+    /// Whether `of` ends its chain: the desktop or any Window ancestor. A nested Window still
+    /// holds the element, and the risk check reads the pressable element before its ancestors.
     fn ends_chain(&self, of: &uia::IUIAutomationElement) -> bool {
         // SAFETY: calls on live COM objects.
         let root = unsafe { self.client.GetRootElement() }
@@ -1336,6 +1444,106 @@ fn focused_pid() -> Option<i32> {
     (pid > 0).then_some(pid)
 }
 
+/// The frame of the display containing the point, in physical pixels.
+pub fn display_frame_at(at: Point) -> Option<Frame> {
+    monitor_at(at).map(|m| Frame { x: f64::from(m.x), y: f64::from(m.y), width: f64::from(m.width), height: f64::from(m.height) })
+}
+
+/// Physical pixels per CSS pixel for this display.
+pub fn display_scale(display: Frame) -> f64 {
+    let center = POINT { x: (display.x + display.width / 2.0) as i32, y: (display.y + display.height / 2.0) as i32 };
+    let (mut dpi_x, mut dpi_y) = (0u32, 0u32);
+    // SAFETY: valid monitor and out-pointers.
+    let read = unsafe { GetDpiForMonitor(MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST), MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
+    if read == 0 && dpi_x > 0 { f64::from(dpi_x) / 96.0 } else { 1.0 }
+}
+
+/// The focused element's frame, in physical pixels.
+pub fn focused_frame() -> Option<Frame> {
+    let automation = Automation::new()?;
+    // SAFETY: calls on live COM objects.
+    let rect = unsafe { automation.client.GetFocusedElement().ok()?.CurrentBoundingRectangle().ok()? };
+    let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+    (width > 0 && height > 0).then(|| Frame { x: f64::from(rect.left), y: f64::from(rect.top), width: f64::from(width), height: f64::from(height) })
+}
+
+/// Prevent activation and capture of the click-through glow. A glow that cannot be kept out of
+/// screenshots is not used: without it no call captures or acts (S5).
+pub fn prepare_overlay(hwnd: *mut c_void) -> Result<(), String> {
+    // SAFETY: calls on this process's window.
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) as isize);
+    }
+    exclude_from_capture(hwnd).map_err(|error| format!("it would show in computer-control screenshots: {error}"))
+}
+
+/// Show above other windows without activation, or hide.
+pub fn show_overlay(hwnd: *mut c_void, visible: bool) {
+    // SAFETY: calls on this process's window.
+    unsafe {
+        if visible {
+            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        } else { ShowWindow(hwnd, SW_HIDE); }
+    }
+}
+
+pub fn show_without_activating(hwnd: *mut c_void) {
+    let _change = WindowChange::begin();
+    // SAFETY: a call on this process's window.
+    unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
+}
+
+pub fn hide_window(hwnd: *mut c_void) {
+    let _change = WindowChange::begin();
+    // SAFETY: a call on this process's window.
+    unsafe { ShowWindow(hwnd, SW_HIDE) };
+}
+
+pub fn show_window(hwnd: *mut c_void) {
+    let _change = WindowChange::begin();
+    // SAFETY: a call on this process's window.
+    unsafe { ShowWindow(hwnd, SW_SHOW) };
+}
+
+/// Move the glow over a display without activating it.
+pub fn cover(hwnd: *mut c_void, display: Frame) {
+    // SAFETY: a call on this process's window.
+    unsafe { SetWindowPos(hwnd, HWND_TOPMOST, display.x as i32, display.y as i32, display.width as i32, display.height as i32, SWP_NOACTIVATE); }
+}
+
+/// The first build that can leave a window out of captures (`WDA_EXCLUDEFROMCAPTURE`): Windows
+/// 10 version 2004.
+const CAPTURE_EXCLUSION_BUILD: u32 = 19041;
+
+/// This system's build number. The registry says it as it is; `GetVersionEx` answers what the
+/// app's manifest names.
+fn windows_build() -> Option<u32> {
+    let key = wide(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
+    let value = wide("CurrentBuildNumber");
+    let mut buffer = vec![0u16; 64];
+    let mut bytes = (buffer.len() * 2) as u32;
+    // SAFETY: the buffer's size in bytes is passed and updated.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE, key.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ, null_mut(),
+            buffer.as_mut_ptr() as *mut c_void, &mut bytes,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let units = &buffer[..(bytes as usize / 2).min(buffer.len())];
+    String::from_utf16_lossy(units).trim_end_matches('\0').trim().parse().ok()
+}
+
+/// Whether screenshots can leave Gentle Dot's windows out. A build that cannot be read counts as
+/// able: a capture whose exclusion fails is refused anyway (`exclude_own_windows`).
+fn supports_capture_exclusion(build: Option<u32>) -> bool {
+    build.map_or(true, |build| build >= CAPTURE_EXCLUSION_BUILD)
+}
+
 /// The Windows desktop the helper drives.
 pub struct WinDesktop;
 
@@ -1345,8 +1553,13 @@ impl super::Desktop for WinDesktop {
     }
 
     fn permissions(&self) -> super::Permissions {
-        // Windows asks for no permission to send input or take screenshots.
-        super::Permissions { accessibility: true, screen_recording: true, screenshots_supported: true }
+        // Windows asks for no permission to send input or take screenshots; leaving Gentle Dot's
+        // windows out of them needs a recent enough build.
+        super::Permissions {
+            accessibility: true,
+            screen_recording: true,
+            screenshots_supported: supports_capture_exclusion(windows_build()),
+        }
     }
 
     fn capture(&self) -> Result<Capture, String> {
@@ -1522,6 +1735,80 @@ mod tests {
         assert_eq!(desktop.keyboard_refusal(&ghost), keyboard_refusal(&ghost));
         let permissions = desktop.permissions();
         assert!(permissions.accessibility && permissions.screen_recording && permissions.screenshots_supported);
+    }
+
+    #[test]
+    fn screenshots_need_windows_10_2004() {
+        assert!(!supports_capture_exclusion(Some(19040)));
+        assert!(supports_capture_exclusion(Some(19041)));
+        assert!(supports_capture_exclusion(Some(26100)));
+        assert!(supports_capture_exclusion(None));
+        let build = windows_build().expect("the build number is readable");
+        assert!(build >= CAPTURE_EXCLUSION_BUILD, "{build}");
+        use super::super::Desktop;
+        assert!(WinDesktop.permissions().screenshots_supported);
+    }
+
+    /// A window of this process shown and not excluded is left out of a capture, then shows in
+    /// screenshots again: the capture puts back what it changed (#163 finding 3, CC8 review).
+    #[test]
+    #[ignore = "interactive Windows desktop: run in the user's own session"]
+    fn a_capture_puts_our_windows_back_as_it_found_them() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WS_OVERLAPPEDWINDOW, WS_VISIBLE};
+        per_monitor_aware();
+        let class = wide("STATIC");
+        let title = wide("Gentle Dot capture test");
+        // SAFETY: a plain window of this test process, destroyed below.
+        let hwnd = unsafe {
+            CreateWindowExW(0, class.as_ptr(), title.as_ptr(), WS_OVERLAPPEDWINDOW | WS_VISIBLE, 100, 100, 300, 200, null_mut(), null_mut(), null_mut(), null_mut())
+        };
+        assert!(!hwnd.is_null());
+        assert!(!is_excluded(hwnd));
+        let shot = capture();
+        let excluded_after = is_excluded(hwnd);
+        // SAFETY: the window created above.
+        unsafe { DestroyWindow(hwnd) };
+        shot.expect("a screenshot");
+        assert!(!excluded_after, "the capture put the window's affinity back");
+    }
+
+    /// A capture overlapping a change of our windows in any way is not returned: one under way
+    /// when it starts stops it, and one that begins or ends before it ends moves the count. Every
+    /// route counts: letting a window show again (even a failed attempt), a capture's own restore,
+    /// showing and hiding. One test: all use the same counters.
+    #[test]
+    fn captures_notice_windows_changed_meanwhile() {
+        // Under way when the capture starts.
+        let change = WindowChange::begin();
+        assert_eq!(capture_baseline(), Err(OWN_WINDOW_BUSY.to_string()));
+        drop(change);
+        // Begins and ends within the capture.
+        let baseline = capture_baseline().expect("nothing under way");
+        drop(WindowChange::begin());
+        assert!(!unchanged_since(baseline));
+        // Begins within the capture, still under way when it ends.
+        let baseline = capture_baseline().expect("nothing under way");
+        let change = WindowChange::begin();
+        assert!(!unchanged_since(baseline));
+        drop(change);
+        // Every route is a whole change.
+        let routes: [(&str, &dyn Fn()); 5] = [
+            ("let show again", &|| { let _ = set_capture_excluded(null_mut(), false); }),
+            ("restored after a capture", &|| restore_affinity(&[null_mut()])),
+            ("shown", &|| show_window(null_mut())),
+            ("shown without activation", &|| show_without_activating(null_mut())),
+            ("hidden", &|| hide_window(null_mut())),
+        ];
+        for (what, route) in routes {
+            let baseline = capture_baseline().expect("nothing under way");
+            route();
+            assert!(!unchanged_since(baseline), "{what}");
+            assert!(capture_baseline().is_ok(), "{what} ended");
+        }
+        // Excluding a window is not a change a capture must see.
+        let baseline = capture_baseline().expect("nothing under way");
+        let _ = set_capture_excluded(null_mut(), true);
+        assert!(unchanged_since(baseline));
     }
 
     #[test]
