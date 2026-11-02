@@ -14,9 +14,10 @@ export interface ComputerEndpoint {
 export interface ComputerPermissions {
 	accessibility: boolean;
 	screenRecording: boolean;
+	screenshotsSupported?: boolean;
 }
 
-export type ComputerPermission = keyof ComputerPermissions;
+export type ComputerPermission = "accessibility" | "screenRecording";
 
 /** A control session the user allowed; `endsAt` in milliseconds since the epoch. */
 export interface ComputerSession {

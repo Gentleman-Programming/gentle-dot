@@ -82,7 +82,7 @@ The command stages the runtime (`build/runtime/darwin-arm64`), signs the runtime
 
 ## Windows
 
-Requirements: Windows 10 or 11, 64-bit (x64).
+Requirements: Windows 10 or 11, 64-bit (x64). Computer control screenshots require Windows 10 version 2004 (build 19041) or newer: excluding Gentle Dot's windows from captures requires `WDA_EXCLUDEFROMCAPTURE`.
 
 ### Install
 
@@ -94,7 +94,7 @@ If Gentle Dot is running, the installer says **Gentle Dot is running! Click OK t
 
 ### First open
 
-Open **Gentle Dot** from the Start menu. The first open needs the network once: the engine installs its companion packages. Computer control and voice input are not available on Windows yet.
+Open **Gentle Dot** from the Start menu. The first open needs the network once: the engine installs its companion packages. The computer-control emergency stop is **Alt+Shift+Esc**. Voice input is not available on Windows yet.
 
 ### Where data lives
 

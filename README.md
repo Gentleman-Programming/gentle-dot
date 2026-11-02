@@ -146,7 +146,7 @@ A small Node daemon starts the agent engine (Gentle Shell, `gentle-shell --mode 
 - **Your data:** `~/.gentle-dot` (mode 0700): sessions, settings, the access key (`token`), and the engine's own home and workspace. Point the assistant at a folder of yours with `GENTLE_DOT_WORKSPACE` or `"workspace"` in `~/.gentle-dot/config.json`.
 - **Memory:** your global Engram (`~/.engram`, port 7437), project `gentle-dot`; `GENTLE_DOT_ENGRAM=private` gives the assistant a memory of its own.
 - **Connectors:** the daemon alone writes `~/.gentle-dot/connectors.json` and the engine's `mcp.json`, and puts them back if anything else changes them. `connectors.json` is signed with a key kept in the Keychain; if it was changed while Gentle Dot was closed, it is set aside and you are told.
-- **Screenshots:** each model call carries only the latest one; earlier ones become one-line log entries, which keeps long control sessions fast.
+- **Screenshots:** each model call carries only the latest one; earlier ones become one-line log entries, which keeps long control sessions fast. On Windows, computer control needs Windows 10 version 2004 (build 19041) or newer to exclude Gentle Dot's windows from screenshots.
 
 <div align="right"><a href="#top">Back to top</a></div>
 
