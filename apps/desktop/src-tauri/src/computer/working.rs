@@ -311,8 +311,23 @@ impl Preparation for Working {
     }
 }
 
+/// End the current drawing only when the session ends.
+pub fn session_clears(drawing: &mut Option<u64>, active: bool) -> Option<u64> {
+    if active { None } else { drawing.take() }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_the_end_of_the_session_clears_the_rings_being_drawn() {
+        let mut drawing = Some(7);
+        assert_eq!(super::session_clears(&mut drawing, true), None);
+        assert_eq!(drawing, Some(7));
+        assert_eq!(super::session_clears(&mut drawing, false), Some(7));
+        assert_eq!(drawing, None);
+        assert_eq!(super::session_clears(&mut drawing, false), None);
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Weak;
