@@ -35,6 +35,61 @@ pub mod winapps;
 pub mod winput;
 pub mod working;
 
+// Windows capture ordering, kept platform-independent so CI exercises the contract.
+#[cfg(any(windows, test))]
+mod capture_order {
+    pub(super) fn capture<T>(flush: impl FnOnce() -> Result<(), String>, grab: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        flush()?;
+        grab()
+    }
+
+    pub(super) fn hide<T>(exclude: impl FnOnce() -> Result<T, String>, hide: impl FnOnce()) -> Result<T, String> {
+        let excluded = exclude();
+        hide();
+        excluded
+    }
+
+    pub(super) fn show(show: impl FnOnce(), restore: impl FnOnce()) {
+        show();
+        restore();
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::cell::RefCell;
+
+        #[test]
+        fn capture_waits_even_without_new_exclusions() {
+            let events = RefCell::new(Vec::new());
+            capture(|| { events.borrow_mut().push("flush"); Ok(()) }, || { events.borrow_mut().push("grab"); Ok(()) }).unwrap();
+            assert_eq!(*events.borrow(), ["flush", "grab"]);
+        }
+
+        #[test]
+        fn failed_composition_never_grabs() {
+            let result = capture(|| Err("composition failed".into()), || panic!("must not grab"));
+            assert_eq!(result, Err::<(), _>("composition failed".into()));
+        }
+
+        #[test]
+        fn exclusion_spans_hide_through_show() {
+            let events = RefCell::new(Vec::new());
+            let previous = hide(|| { events.borrow_mut().push("exclude"); Ok(7) }, || events.borrow_mut().push("hide")).unwrap();
+            show(|| events.borrow_mut().push("show"), || { assert_eq!(previous, 7); events.borrow_mut().push("restore"); });
+            assert_eq!(*events.borrow(), ["exclude", "hide", "show", "restore"]);
+        }
+
+        #[test]
+        fn failed_exclusion_still_hides_and_remains_an_error() {
+            let hidden = std::cell::Cell::new(false);
+            let result = hide(|| Err::<(), _>("exclusion failed".into()), || hidden.set(true));
+            assert!(hidden.get());
+            assert_eq!(result, Err("exclusion failed".into()));
+        }
+    }
+}
+
 use blocklist::AppIdentity;
 use coords::{Point, ScreenshotGeometry};
 use keys::KeyCombo;

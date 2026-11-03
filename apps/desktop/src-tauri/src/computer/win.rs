@@ -416,7 +416,7 @@ fn draw_pointer(canvas: &Canvas, frame: MonitorFrame, width: u32, height: u32) {
 pub fn capture() -> Result<Capture, String> {
     let baseline = capture_baseline()?;
     let changed = exclude_own_windows()?;
-    let shot = grab();
+    let shot = super::capture_order::capture(wait_for_composition, grab);
     // A window of ours can show during the copy and be gone by now (the user opens the panel and
     // closes it again, Stop gives the Dot back, a dialog opens and closes). Every change of our
     // windows runs inside a `WindowChange`, and an image taken while one overlapped it is not
@@ -519,22 +519,37 @@ fn is_excluded(hwnd: HWND) -> bool {
     (unsafe { GetWindowDisplayAffinity(hwnd, &mut affinity) }) != 0 && affinity == WDA_EXCLUDEFROMCAPTURE
 }
 
+/// Wait even when no visible windows needed exclusion: a just-hidden panel may still be composed.
+fn wait_for_composition() -> Result<(), String> {
+    // SAFETY: a plain call; it waits for the next composition.
+    let result = unsafe { DwmFlush() };
+    if result < 0 {
+        Err(format!("Cannot wait for Windows composition (DwmFlush HRESULT 0x{:08X}), so no screenshot was taken.", result as u32))
+    } else {
+        Ok(())
+    }
+}
+
 /// Makes sure no visible window of this process shows in the capture about to be taken, and
-/// returns the ones it had to exclude, for `restore_affinity` once the capture is taken. A window
-/// newly excluded is out of the picture after the next composition (`DwmFlush`).
-fn exclude_own_windows() -> Result<Vec<HWND>, String> {
+/// returns the ones it had to exclude, for `restore_affinity` once the capture is taken.
+fn exclude_own_windows() -> Result<Vec<(HWND, u32)>, String> {
     let mut changed = Vec::new();
     let windows = own_visible_windows().map_err(|error| format!("Gentle Dot's window would show in the screenshot: {error}"))?;
     for hwnd in windows.into_iter().filter(|&hwnd| !is_excluded(hwnd)) {
+        let mut previous = 0;
+        // SAFETY: a query on our window with a valid out-pointer.
+        if unsafe { GetWindowDisplayAffinity(hwnd, &mut previous) } == 0 {
+            restore_affinity(&changed);
+            return Err(format!("{OWN_WINDOW_SHOWN} Cannot read its capture affinity."));
+        }
+        if previous == WDA_EXCLUDEFROMCAPTURE {
+            continue;
+        }
         if let Err(error) = set_capture_excluded(hwnd, true) {
             restore_affinity(&changed);
             return Err(format!("Gentle Dot's window would show in the screenshot: {error}"));
         }
-        changed.push(hwnd);
-    }
-    if !changed.is_empty() {
-        // SAFETY: a plain call; it waits for the next composition.
-        unsafe { DwmFlush() };
+        changed.push((hwnd, previous));
     }
     Ok(changed)
 }
@@ -598,10 +613,19 @@ fn unchanged_since(baseline: u64) -> bool {
 /// Lets the windows a capture excluded show in screenshots again, as they did before it. A window
 /// that vanished meanwhile just fails; any failure is logged, since a window left out would be
 /// missing from the user's own screenshots.
-fn restore_affinity(changed: &[HWND]) {
-    for &hwnd in changed {
-        if let Err(error) = set_capture_excluded(hwnd, false) {
-            eprintln!("gentle-dot: a window may stay out of screenshots: {error}");
+fn restore_affinity(changed: &[(HWND, u32)]) {
+    let mut saved = CALL_AFFINITIES.lock().unwrap_or_else(|error| error.into_inner());
+    for &(hwnd, previous) in changed {
+        // A hide may have taken ownership since enumeration. Hand it the original affinity
+        // instead of undoing its exclusion; it will restore only after showing the window.
+        if let Some((_, original)) = saved.iter_mut().find(|(window, _)| *window == hwnd as usize) {
+            *original = previous;
+            continue;
+        }
+        let _change = WindowChange::begin();
+        // SAFETY: restore the value read from this window before excluding it.
+        if unsafe { SetWindowDisplayAffinity(hwnd, previous) } == 0 {
+            eprintln!("gentle-dot: a window may stay out of screenshots: {}", std::io::Error::last_os_error());
         }
     }
 }
@@ -1517,10 +1541,61 @@ pub fn show_overlay(hwnd: *mut c_void, visible: bool) {
     }
 }
 
+// Main-thread show/hide callers serialize these entries. Keep the original value, including
+// WDA_MONITOR, rather than assuming every window started at WDA_NONE. A user-hidden Dot retains
+// its entry only until it is next shown; no visible window stays excluded for the session.
+static CALL_AFFINITIES: std::sync::Mutex<Vec<(usize, u32)>> = std::sync::Mutex::new(Vec::new());
+
+/// Exclude before hiding. If exclusion fails, still hide, then put this window back and fail
+/// preparation: Working has not yet recorded it as hidden and cannot restore it on that error.
+/// The failed call therefore never reaches capture, and no persistent failure poisons later calls.
+pub fn hide_for_call(hwnd: *mut c_void) -> Result<(), String> {
+    let _change = WindowChange::begin();
+    let mut saved = CALL_AFFINITIES.lock().unwrap_or_else(|error| error.into_inner());
+    let result = super::capture_order::hide(|| {
+        if saved.iter().any(|&(window, _)| window == hwnd as usize) {
+            return set_capture_excluded(hwnd, true);
+        }
+        let mut previous = 0;
+        // SAFETY: a query on our window with a valid out-pointer.
+        if unsafe { GetWindowDisplayAffinity(hwnd, &mut previous) } == 0 {
+            return Err(format!("cannot read its capture affinity: {}", std::io::Error::last_os_error()));
+        }
+        set_capture_excluded(hwnd, true)?;
+        saved.push((hwnd as usize, previous));
+        Ok(())
+    }, || {
+        // SAFETY: a call on this process's window.
+        unsafe { ShowWindow(hwnd, SW_HIDE) };
+    });
+    drop(saved);
+    if let Err(error) = result {
+        show_without_activating(hwnd);
+        return Err(format!("{OWN_WINDOW_SHOWN} {error}"));
+    }
+    Ok(())
+}
+
+fn restore_call_affinity(hwnd: HWND) {
+    let mut saved = CALL_AFFINITIES.lock().unwrap_or_else(|error| error.into_inner());
+    let Some(index) = saved.iter().position(|&(window, _)| window == hwnd as usize) else { return };
+    let previous = saved[index].1;
+    // This function is called only inside the showing WindowChange, after ShowWindow. Restoring
+    // even a nonzero affinity must count as a change, so an overlapping capture cannot be accepted.
+    // SAFETY: a call on this process's window, restoring the value read before the call.
+    if unsafe { SetWindowDisplayAffinity(hwnd, previous) } != 0 {
+        saved.remove(index);
+    } else {
+        eprintln!("gentle-dot: a window may stay out of screenshots: {}", std::io::Error::last_os_error());
+    }
+}
+
 pub fn show_without_activating(hwnd: *mut c_void) {
     let _change = WindowChange::begin();
-    // SAFETY: a call on this process's window.
-    unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
+    super::capture_order::show(|| {
+        // SAFETY: a call on this process's window.
+        unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
+    }, || restore_call_affinity(hwnd));
 }
 
 pub fn hide_window(hwnd: *mut c_void) {
@@ -1531,8 +1606,10 @@ pub fn hide_window(hwnd: *mut c_void) {
 
 pub fn show_window(hwnd: *mut c_void) {
     let _change = WindowChange::begin();
-    // SAFETY: a call on this process's window.
-    unsafe { ShowWindow(hwnd, SW_SHOW) };
+    super::capture_order::show(|| {
+        // SAFETY: a call on this process's window.
+        unsafe { ShowWindow(hwnd, SW_SHOW) };
+    }, || restore_call_affinity(hwnd));
 }
 
 /// Move the glow over a display without activating it.
@@ -1847,7 +1924,7 @@ mod tests {
         // Every route is a whole change.
         let routes: [(&str, &dyn Fn()); 5] = [
             ("let show again", &|| { let _ = set_capture_excluded(null_mut(), false); }),
-            ("restored after a capture", &|| restore_affinity(&[null_mut()])),
+            ("restored after a capture", &|| restore_affinity(&[(null_mut(), WDA_NONE)])),
             ("shown", &|| show_window(null_mut())),
             ("shown without activation", &|| show_without_activating(null_mut())),
             ("hidden", &|| hide_window(null_mut())),
