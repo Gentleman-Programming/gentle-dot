@@ -20,7 +20,7 @@ export interface Config {
 export class ConfigError extends Error {}
 
 export function loadConfig(env: Record<string, string | undefined>, home: string): Config {
-  const token = env.DISCORD_TOKEN?.trim();
+  const token = (env.DISCORD_BOT_TOKEN?? env.DISCORD_TOKEN)?.trim();
   if (!token) throw new ConfigError("DISCORD_TOKEN environment variable required");
 
   const daemonUrl = env.GENTLE_DOT_URL?.trim() || "ws://127.0.0.1:4317/ws";
