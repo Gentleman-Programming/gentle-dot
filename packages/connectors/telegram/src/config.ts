@@ -10,7 +10,6 @@ export interface Config {
 	tokenFile: string;
 }
 
-/** A configuration problem; the message names the variable and never repeats its value. */
 export class ConfigError extends Error {}
 
 const USER_ID = /^[1-9][0-9]{0,15}$/;

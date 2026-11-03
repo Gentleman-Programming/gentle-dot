@@ -1,122 +1,110 @@
-import { readFileSync } from "node:fs";
-import WebSocket from "ws";
-import { type ClientMessage, CloseCode, PROTOCOL_VERSION, type ServerMessage } from "./protocol.ts";
+import { WebSocket } from "ws";
+import { EventEmitter } from "events";
+import type { ClientMessage, ServerMessage, CloseCode } from "./protocol.js";
+
+const HEARTBEAT_MS = 30_000;
+const RECONNECT_DELAY = 5_000;
 
 export interface DaemonClientOptions {
-	/** The daemon's WebSocket address, for example `ws://127.0.0.1:4317/ws`. */
 	url: string;
-	/** File holding the access key; read again before every connection. */
 	tokenFile: string;
+	log(message: string): void;
 	onMessage(message: ServerMessage): void;
-	/** Called once when retrying cannot help (wrong key, other protocol, no key file); the client stops. */
+	onConnection(connected: boolean): void;
 	onFatal(reason: string): void;
-	/** Connected after `hello`, or disconnected. */
-	onConnection?(connected: boolean): void;
-	log?(message: string): void;
-	/** Milliseconds to wait before reconnect attempt `attempt` (1-based). */
-	delay?(attempt: number): number;
 }
 
-/** 1 s, doubling, at most 30 s. */
-export function reconnectDelay(attempt: number): number {
-	return Math.min(1000 * 2 ** (attempt - 1), 30_000);
-}
-
-/** One connection to the Gentle Dot daemon that comes back on its own when it drops. */
-export class DaemonClient {
+/** Connects to the Gentle Dot daemon over WebSocket and keeps the connection alive. */
+export class DaemonClient extends EventEmitter {
 	private readonly options: DaemonClientOptions;
-	private socket: WebSocket | undefined;
-	private timer: NodeJS.Timeout | undefined;
-	private attempt = 0;
-	private stopped = false;
-	/** The daemon answered at least once, so a missing key file is a restart, not a wrong setup. */
-	private answered = false;
+	private ws: WebSocket | null = null;
+	private readonly tokenFile: string;
+	private seq = 0;
+	private heartbeatInterval: NodeJS.Timeout | null = null;
+	private reconnectTimeout: NodeJS.Timeout | null = null;
+	private connecting = false;
 
 	constructor(options: DaemonClientOptions) {
+		super();
 		this.options = options;
+		this.tokenFile = options.tokenFile;
 	}
 
-	start(): void {
-		this.stopped = false;
-		this.connect();
+	private async readToken(): Promise<string> {
+		const { readFile } = await import("node:fs/promises");
+		return readFile(this.tokenFile, "utf8").then((t) => t.trim());
 	}
 
-	stop(): void {
-		this.stopped = true;
-		clearTimeout(this.timer);
-		this.socket?.terminate();
-		this.socket = undefined;
+	async start(): Promise<void> {
+		if (this.connecting) return;
+		this.connecting = true;
+
+		const token = await this.readToken();
+		const wsUrl = `${this.options.url}?token=${encodeURIComponent(token)}`;
+
+		return new Promise((resolve, reject) => {
+			this.ws = new WebSocket(wsUrl);
+
+			this.ws.on("open", () => {
+				this.connecting = false;
+				this.options.onConnection(true);
+				this.startHeartbeat();
+				resolve();
+			});
+
+			this.ws.on("message", (data: Buffer) => {
+				try {
+					const message = JSON.parse(data.toString()) as ServerMessage;
+					this.options.onMessage(message);
+				} catch (error) {
+					this.options.log(`failed to parse daemon message: ${(error as Error).message}`);
+				}
+			});
+
+			this.ws.on("close", (code) => {
+				this.options.onConnection(false);
+				this.stopHeartbeat();
+				if (code === CloseCode.unauthorized) {
+					this.options.onFatal("Daemon rejected our token; is it stale?");
+					return;
+				}
+				this.scheduleReconnect();
+			});
+
+			this.ws.on("error", (error) => {
+				this.options.log(`WebSocket error: ${error.message}`);
+				if (this.connecting) reject(error);
+			});
+		});
 	}
 
-	/** Sends a message; false when there is no open connection. */
+	async stop(): Promise<void> {
+		if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout);
+		this.stopHeartbeat();
+		if (this.ws) this.ws.close();
+	}
+
 	send(message: ClientMessage): boolean {
-		if (this.socket?.readyState !== WebSocket.OPEN) return false;
-		this.socket.send(JSON.stringify(message));
+		if (this.ws?.readyState !== WebSocket.OPEN) return false;
+		this.ws.send(JSON.stringify({ ...message, seq: ++this.seq, timestamp: Date.now() }));
 		return true;
 	}
 
-	get connected(): boolean {
-		return this.socket?.readyState === WebSocket.OPEN;
+	private startHeartbeat(): void {
+		this.heartbeatInterval = setInterval(() => {
+			if (this.ws?.readyState === WebSocket.OPEN) this.send({ type: "ping" });
+		}, HEARTBEAT_MS);
 	}
 
-	private connect(): void {
-		if (this.stopped) return;
-		let token: string;
-		try {
-			token = readFileSync(this.options.tokenFile, "utf8").trim();
-		} catch {
-			if (this.answered) {
-				this.options.log?.(`the access key at ${this.options.tokenFile} is missing; retrying`);
-				this.retry();
-			} else this.fatal(`Cannot read the Gentle Dot access key at ${this.options.tokenFile}. Is Gentle Dot installed?`);
-			return;
-		}
-		const socket = new WebSocket(this.options.url);
-		this.socket = socket;
-		socket.on("open", () => {
-			socket.send(JSON.stringify({ type: "hello", token, protocol: PROTOCOL_VERSION }));
-			this.options.onConnection?.(true);
-		});
-		socket.on("message", (data) => {
-			let value: unknown;
-			try {
-				value = JSON.parse(String(data));
-			} catch {
-				return;
-			}
-			if (typeof value === "object" && value !== null && typeof (value as { type?: unknown }).type === "string") {
-				// Only an answer proves the hello was accepted; until then the delay keeps growing.
-				this.attempt = 0;
-				this.answered = true;
-				this.options.onMessage(value as ServerMessage);
-			}
-		});
-		// Without a listener an unreachable daemon would throw; "close" follows and retries.
-		socket.on("error", () => {});
-		socket.on("close", (code) => {
-			if (this.socket !== socket) return;
-			this.socket = undefined;
-			this.options.onConnection?.(false);
-			if (code === CloseCode.unauthorized) {
-				this.fatal("The daemon refused the access key. Check GENTLE_DOT_TOKEN_FILE.");
-			} else if (code === CloseCode.badProtocol) {
-				this.fatal("The daemon speaks another protocol version; update dot-telegram.");
-			} else {
-				this.retry();
-			}
-		});
+	private stopHeartbeat(): void {
+		if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
 	}
 
-	private retry(): void {
-		if (this.stopped) return;
-		this.attempt += 1;
-		const wait = (this.options.delay ?? reconnectDelay)(this.attempt);
-		this.timer = setTimeout(() => this.connect(), wait);
-	}
-
-	private fatal(reason: string): void {
-		if (this.stopped) return;
-		this.stopped = true;
-		this.options.onFatal(reason);
+	private scheduleReconnect(): void {
+		if (this.reconnectTimeout) return;
+		this.reconnectTimeout = setTimeout(() => {
+			this.reconnectTimeout = null;
+			this.start().catch((error) => this.options.log(`reconnect failed: ${error.message}`));
+		}, RECONNECT_DELAY);
 	}
 }

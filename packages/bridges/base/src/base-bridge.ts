@@ -202,6 +202,7 @@ export abstract class BaseBridge extends EventEmitter {
         return;
       }
 
+      // Base lifecycle first: status, heartbeat and the onReady hook depend on these.
       switch (message.type) {
         case 'ready':
           this.handleReady(message.payload as ReadyPayload);
@@ -212,28 +213,23 @@ export abstract class BaseBridge extends EventEmitter {
         case 'pong':
           this.handlePong(message.payload as { seq: number });
           break;
-        case 'channel_notify':
-          this.handleChannelNotify(message.payload as ChannelNotifyPayload);
-          break;
-        case 'connector_event':
-          this.handleConnectorEvent(message.payload as ConnectorEventPayload);
-          break;
-        case 'command':
-          this.handleCommand(message.payload as CommandPayload);
-          break;
-        case 'command_result':
-          this.handleCommandResult(message.payload as CommandResultPayload);
-          break;
-        case 'error':
-          this.handleError(message.payload as { code: string; message: string; details?: unknown });
-          break;
         default:
-          console.warn(`[${this.config.connectorType}] Unknown message type: ${message.type}`);
+          break;
       }
+
+      // The subclass sees every message (lifecycle included) for its own state.
+      this.handleConnectorMessage(message);
     } catch (error) {
       console.error(`[${this.config.connectorType}] Parse error:`, error);
     }
   }
+
+  /**
+   * Connector-specific message handling. Called for every daemon message after
+   * the base lifecycle (ready/ping/pong) ran, so overriding this — unlike the
+   * old handleMessage override — never bypasses the handshake state machine.
+   */
+  protected abstract handleConnectorMessage(message: BridgeMessage): void;
 
   /**
    * Handle ready response (handshake step 2)

@@ -4,7 +4,7 @@
  */
 
 import { spawn, ChildProcess } from "node:child_process";
-import { BaseBridge, type BridgeConfig, type BridgeStatus, type HelloPayload, type ReadyPayload, type ChannelNotifyPayload, type ConnectorEventPayload, type CommandPayload, type CommandResultPayload } from '@gentle-dot/bridges-base';
+import { BaseBridge, type BridgeConfig, type BridgeMessage, type BridgeStatus, type HelloPayload, type ReadyPayload, type ChannelNotifyPayload, type ConnectorEventPayload, type CommandPayload, type CommandResultPayload } from '@gentle-dot/bridges-base';
 import { type Config, loadConfig, type ConfigError } from './config.js';
 
 const SOURCE_LABEL = "📝 [Notion] ";
@@ -92,13 +92,8 @@ export class NotionBridge extends BaseBridge {
     this.send('hello', payload);
   }
 
-  protected override handleMessage(data: Buffer): void {
-    try {
-      const msg = JSON.parse(data.toString()) as { type: string; payload: unknown; seq?: number; timestamp: number };
-      this.dispatch(msg);
-    } catch (e) {
-      this.logFn(`Parse error: ${(e as Error).message}`);
-    }
+  protected override handleConnectorMessage(message: BridgeMessage): void {
+    this.dispatch(message);
   }
 
   private dispatch(message: { type: string; payload: unknown }): void {

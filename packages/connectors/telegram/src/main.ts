@@ -1,13 +1,13 @@
 import { homedir } from "node:os";
-import { Bot } from "grammy";
-import { Bridge } from "./bridge.ts";
-import { ConfigError, loadConfig } from "./config.ts";
-import { DaemonClient } from "./daemon-client.ts";
-import { daemonUploader } from "./uploads.ts";
+import { Bridge } from "./bridge.js";
+import { ConfigError, loadConfig } from "./config.js";
+import { DaemonClient } from "./daemon-client.js";
+import { daemonUploader } from "./uploads.js";
+import { NicknameStore } from "./storage/nickname-store.js";
 
 const log = (message: string) => console.error(`[dot-telegram] ${message}`);
 
-function main(): void {
+async function main(): Promise<void> {
 	let config: ReturnType<typeof loadConfig>;
 	try {
 		config = loadConfig(process.env, homedir());
@@ -17,66 +17,40 @@ function main(): void {
 		process.exit(1);
 	}
 
-	process.on("unhandledRejection", (error) => log(`unexpected error: ${(error as Error)?.message ?? String(error)}`));
+	process.on("unhandledRejection", (error) =>
+		log(`unexpected error: ${(error as Error)?.message ?? String(error)}`),
+	);
 
-	// Bot API calls give up after 60 s (long polling waits 30 s), so one stuck call cannot hold every update.
-	const bot = new Bot(config.botToken, { client: { timeoutSeconds: 60 } });
-	let bridge: Bridge | undefined;
-	let failed = false;
+	const nicknameStore = new NicknameStore();
+	await nicknameStore.init();
+
 	const daemon = new DaemonClient({
 		url: config.daemonUrl,
 		tokenFile: config.tokenFile,
 		log,
-		onMessage: (message) => void bridge?.handleDaemon(message),
-		onConnection: (connected) => {
-			log(connected ? "connected to Gentle Dot" : "disconnected from Gentle Dot, retrying");
-			if (!connected) void bridge?.connectionLost();
-		},
+		onMessage: (message) => void bridge.handleDaemon(message),
+		onConnection: (connected) => log(connected ? "connected to Gentle Dot" : "disconnected from Gentle Dot, retrying"),
 		onFatal: (reason) => {
-			failed = true;
 			log(reason);
-			void bot.stop().finally(() => process.exit(1));
+			process.exit(1);
 		},
 	});
-	bridge = new Bridge({
-		bot,
+
+	const bridge = new Bridge({
+		bot: new Bot(config.botToken),
 		daemon,
 		allowedUsers: config.allowedUsers,
 		log,
-		upload: daemonUploader({ daemonUrl: config.daemonUrl, tokenFile: config.tokenFile }),
+		download: telegramDownloader(config.botToken, { timeoutMs: 30_000 }),
+		upload: daemonUploader,
 	});
 
-	const shutdown = () => {
-		daemon.stop();
-		void bot.stop().finally(() => process.exit(0));
-	};
-	process.once("SIGINT", shutdown);
-	process.once("SIGTERM", shutdown);
-
-	daemon.start();
-	// A missing key file fails at once; do not start polling Telegram for a bridge that cannot work.
-	if (failed) return;
-	void bot
-		.start({
-			allowed_updates: ["message", "callback_query", "stopped_message_generation"],
-			onStart: (info) => {
-				log(`listening as @${info.username}`);
-				void bot.api
-					.setMyCommands([
-						{ command: "menu", description: "Menú de acciones rápidas" },
-						{ command: "help", description: "Qué puede hacer este bot" },
-						{ command: "stop", description: "Detener la tarea en curso" },
-						{ command: "cancel", description: "Cancelar la respuesta pendiente" },
-					])
-					.catch((error: Error) => log(`could not set the command list: ${error.message}`));
-				void bridge?.hello();
-			},
-		})
-		.catch((error: Error) => {
-			log(`Telegram polling stopped: ${error.message}`);
-			daemon.stop();
-			process.exit(1);
-		});
+	await daemon.start();
+	await bridge.hello();
+	await bridge.bot.start({
+		allowed_updates: ["message", "callback_query", "stopped_message_generation"],
+	});
+	log("listening");
 }
 
-main();
+void main();

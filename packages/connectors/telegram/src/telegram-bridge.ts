@@ -4,7 +4,7 @@
  */
 
 import { Bot, Context, InlineKeyboard } from 'grammy';
-import { BaseBridge, BridgeConfig, BridgeStatus, HelloPayload, ReadyPayload, ChannelNotifyPayload, ConnectorEventPayload, CommandPayload, CommandResultPayload } from '@gentle-dot/bridges-base';
+import { BaseBridge, type BridgeConfig, type BridgeStatus, type HelloPayload, type ReadyPayload, type ChannelNotifyPayload, type ConnectorEventPayload, type CommandPayload, type CommandResultPayload, type BridgeMessage } from '@gentle-dot/bridges-base';
 import { NicknameStore } from './storage/nickname-store.js';
 import { loadConfig, Config } from './config.js';
 import { splitMessage, telegramDownloader } from './utils.js';
@@ -205,13 +205,8 @@ export class TelegramBridge extends BaseBridge {
     this.send('hello', payload);
   }
 
-  protected override handleMessage(data: Buffer): void {
-    try {
-      const msg = JSON.parse(data.toString()) as { type: string; payload: unknown; seq?: number; timestamp: number };
-      this.dispatch(msg);
-    } catch (e) {
-      this.logFn(`Parse error: ${(e as Error).message}`);
-    }
+  protected override handleConnectorMessage(message: BridgeMessage): void {
+    this.dispatch(message);
   }
 
   private dispatch(message: { type: string; payload: unknown }): void {

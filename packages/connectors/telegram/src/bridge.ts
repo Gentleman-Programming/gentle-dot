@@ -7,8 +7,8 @@ import {
 	MAX_VOICE_AUDIO,
 	type ServerMessage,
 	type UploadedFile,
-} from "./protocol.ts";
-import { UploadRefused } from "./uploads.ts";
+} from "./protocol.js";
+import { UploadRefused } from "./uploads.js";
 
 /** Telegram's longest text message. */
 export const TELEGRAM_TEXT_LIMIT = 4096;
@@ -106,42 +106,6 @@ const AUDIO_EXTENSIONS: Record<string, string> = {
 	"audio/flac": "flac",
 };
 
-/**
- * Downloads from the Bot API file endpoint, giving up after `timeoutMs` (updates are handled one at a
- * time, so a hung download would hold up /stop). Errors never carry the address, which holds the token.
- */
-export function telegramDownloader(
-	botToken: string,
-	options: { timeoutMs?: number; fetch?: typeof fetch } = {},
-): (filePath: string) => Promise<Buffer> {
-	const get = options.fetch ?? fetch;
-	return async (filePath) => {
-		const signal = AbortSignal.timeout(options.timeoutMs ?? 30_000);
-		let response: Response;
-		try {
-			response = await get(`https://api.telegram.org/file/bot${botToken}/${filePath}`, { signal });
-		} catch {
-			throw new Error(signal.aborted ? "timed out" : "network error");
-		}
-		if (!response.ok) throw new Error(`HTTP ${response.status}`);
-		return Buffer.from(await response.arrayBuffer());
-	};
-}
-
-/** Splits text into chunks of at most `limit` characters, at a line break when one is close. */
-export function splitMessage(text: string, limit = TELEGRAM_TEXT_LIMIT): string[] {
-	const chunks: string[] = [];
-	let rest = text;
-	while (rest.length > limit) {
-		const breakAt = rest.lastIndexOf("\n", limit);
-		const cut = breakAt > limit / 2 ? breakAt : limit;
-		chunks.push(rest.slice(0, cut));
-		rest = rest.slice(cut).replace(/^\n/, "");
-	}
-	if (rest !== "") chunks.push(rest);
-	return chunks;
-}
-
 /** An ask shown in Telegram and not answered yet. */
 interface PendingAsk {
 	ask: Ask;
@@ -189,37 +153,36 @@ export class Bridge {
 		this.bot = options.bot;
 		this.chatId = [...options.allowedUsers][0] ?? 0;
 		this.bot.use((ctx, next) => (this.allowed(ctx) ? next() : undefined));
-		this.bot.command(["start", "help"], (ctx) => this.showMenu(ctx.chat.id, HELP));
-		this.bot.command("menu", (ctx) => this.showMenu(ctx.chat.id, "Tu menú de acciones:"));
-		this.bot.command("stop", (ctx) => this.stop(ctx.chat.id));
-		this.bot.command("cancel", (ctx) => this.cancelInput(ctx.chat.id));
+		this.bot.command(["start", "help"], (ctx) => this.showMenu(ctx.chat!.id, HELP));
+		this.bot.command("menu", (ctx) => this.showMenu(ctx.chat!.id, "Tu menú de acciones:"));
+		this.bot.command("stop", (ctx) => this.stop(ctx.chat!.id));
+		this.bot.command("cancel", (ctx) => this.cancelInput(ctx.chat!.id));
 		this.bot.callbackQuery(/^a:(\d+):(y|n|c|\d+)$/, (ctx) =>
-			this.onButton(ctx, Number(ctx.match[1]), String(ctx.match[2])),
+			this.onButton(ctx, Number(ctx.match![1]), String(ctx.match![2])),
 		);
-		this.bot.on("message:text", (ctx) => this.onText(ctx.chat.id, ctx.message.text));
-		this.bot.on("message:voice", (ctx) => this.onVoice(ctx.chat.id, ctx.message.voice.file_id));
+		this.bot.on("message:text", (ctx) => this.onText(ctx.chat!.id, ctx.message!.text));
+		this.bot.on("message:voice", (ctx) => this.onVoice(ctx.chat!.id, ctx.message!.voice.file_id));
 		this.bot.on("message:document", (ctx) => {
-			const { document } = ctx.message;
+			const { document } = ctx.message!;
 			const name = document.file_name || `file-${document.file_unique_id}`;
-			return this.onFile(ctx.chat.id, { fileId: document.file_id, name, size: document.file_size }, ctx.message.caption);
+			return this.onFile(ctx.chat!.id, { fileId: document.file_id, name, size: document.file_size }, ctx.message!.caption);
 		});
 		this.bot.on("message:photo", (ctx) => {
-			// Telegram sends every size, smallest first; the largest one is the photo.
-			const photo = ctx.message.photo.at(-1);
+			const photo = ctx.message!.photo.at(-1);
 			if (!photo) return;
 			const name = `photo-${photo.file_unique_id}.jpg`;
-			return this.onFile(ctx.chat.id, { fileId: photo.file_id, name, size: photo.file_size }, ctx.message.caption);
+			return this.onFile(ctx.chat!.id, { fileId: photo.file_id, name, size: photo.file_size }, ctx.message!.caption);
 		});
 		this.bot.on("message:video", (ctx) => {
-			const { video } = ctx.message;
+			const { video } = ctx.message!;
 			const name = video.file_name || `video-${video.file_unique_id}.mp4`;
-			return this.onFile(ctx.chat.id, { fileId: video.file_id, name, size: video.file_size }, ctx.message.caption);
+			return this.onFile(ctx.chat!.id, { fileId: video.file_id, name, size: video.file_size }, ctx.message!.caption);
 		});
 		this.bot.on("message:audio", (ctx) => {
-			const { audio } = ctx.message;
+			const { audio } = ctx.message!;
 			const extension = AUDIO_EXTENSIONS[audio.mime_type ?? ""] ?? "audio";
 			const name = audio.file_name || `audio-${audio.file_unique_id}.${extension}`;
-			return this.onFile(ctx.chat.id, { fileId: audio.file_id, name, size: audio.file_size }, ctx.message.caption);
+			return this.onFile(ctx.chat!.id, { fileId: audio.file_id, name, size: audio.file_size }, ctx.message!.caption);
 		});
 		this.bot.on("stopped_message_generation", (ctx) => {
 			const stopped = ctx.update.stopped_message_generation;
@@ -248,9 +211,9 @@ export class Bridge {
 				if (message.voice) this.canTranscribe = message.voice.transcribe;
 				return;
 			case "voice_transcript": {
-				const chatId = this.takeTranscription(message.requestId);
+				const chatId = this.takeTranscription(message.requestId!);
 				if (chatId === undefined) return;
-				const text = message.text.trim();
+				const text = message.text!.trim();
 				if (text === "") {
 					await this.reply(chatId, "I could not hear anything in that voice note.");
 					return;
@@ -260,8 +223,8 @@ export class Bridge {
 				return;
 			}
 			case "voice_unavailable": {
-				const chatId = this.takeTranscription(message.requestId);
-				if (chatId !== undefined) await this.reply(chatId, message.reason);
+				const chatId = this.takeTranscription(message.requestId!);
+				if (chatId !== undefined) await this.reply(chatId, message.reason!);
 				return;
 			}
 			case "agent_state":
@@ -274,13 +237,13 @@ export class Bridge {
 				}
 				return;
 			case "activity":
-				if (!turn || message.activity.status !== "running") return;
+				if (!turn || message.activity?.status !== "running") return;
 				turn.draftText = `${message.activity.title}…`;
 				await this.draft(turn);
 				return;
 			case "message_done": {
 				if (!turn) return;
-				const text = message.error ?? message.text;
+				const text = message.error ?? message.text!;
 				if (text.trim() === "") {
 					if (message.stopped) await this.reply(turn.chatId, "Stopped.");
 					return;
@@ -293,15 +256,14 @@ export class Bridge {
 				return;
 			case "error":
 				if (!turn) return;
-				// The daemon refused the message itself, so no run will end this turn.
-				if (SEND_REFUSALS.has(message.code) && !BUSY_STATES.includes(this.agentState)) this.endTurn();
+				if (SEND_REFUSALS.has(message.code!) && !BUSY_STATES.includes(this.agentState)) this.endTurn();
 				await this.reply(turn.chatId, `⚠️ ${message.message}`);
 				return;
 			case "ask":
-				await this.showAsk(message.ask);
+				await this.showAsk(message.ask!);
 				return;
 			case "ask_resolved":
-				await this.resolveAsk(message.requestId);
+				await this.resolveAsk(message.requestId!);
 				return;
 			default:
 				return;
@@ -310,7 +272,6 @@ export class Bridge {
 
 	/** The daemon connection dropped: a Telegram turn cannot finish, so it ends here. */
 	async connectionLost(): Promise<void> {
-		// The daemon never resolves what it lost; a restarted daemon sends its open questions again.
 		const stale = [...this.asks.values()];
 		this.asks.clear();
 		this.awaitingInput = undefined;
@@ -480,7 +441,6 @@ export class Bridge {
 			options.forEach((option, index) => keyboard.text(option, `a:${key}:${index}`).row());
 			keyboard.text("Cancel", `a:${key}:c`);
 		}
-		// Registered only once shown, so a question Telegram refused is shown when the daemon sends it again.
 		const messageId = await this.show(chatId, fitMessage(head, ""), keyboard);
 		if (messageId === undefined) return;
 		pending.messageId = messageId;
@@ -579,7 +539,6 @@ export class Bridge {
 			chatId,
 			draftId: 1 + Math.floor(Math.random() * 2_000_000_000),
 			draftText: "",
-			// Sent into a run already going (a steer): that run's idle ends this turn too.
 			sawBusy: BUSY_STATES.includes(this.agentState),
 			refresh: setInterval(() => void this.draft(turn), this.options.draftRefreshMs ?? DRAFT_REFRESH_MS),
 		};
@@ -631,4 +590,38 @@ export class Bridge {
 			this.options.log(`sending a message failed: ${(error as Error).message}`);
 		}
 	}
+}
+
+/** Downloads from the Bot API file endpoint, giving up after `timeoutMs` (updates are handled one at
+ * a time, so a hung download would hold up /stop). Errors never carry the address, which holds the token. */
+export function telegramDownloader(
+	botToken: string,
+	options: { timeoutMs?: number; fetch?: typeof fetch } = {},
+): (filePath: string) => Promise<Buffer> {
+	const get = options.fetch ?? fetch;
+	return async (filePath) => {
+		const signal = AbortSignal.timeout(options.timeoutMs ?? 30_000);
+		let response: Response;
+		try {
+			response = await get(`https://api.telegram.org/file/bot${botToken}/${filePath}`, { signal });
+		} catch {
+			throw new Error(signal.aborted ? "timed out" : "network error");
+		}
+		if (!response.ok) throw new Error(`HTTP ${response.status}`);
+		return Buffer.from(await response.arrayBuffer());
+	};
+}
+
+/** Splits text into chunks of at most `limit` characters, at a line break when one is close. */
+export function splitMessage(text: string, limit = TELEGRAM_TEXT_LIMIT): string[] {
+	const chunks: string[] = [];
+	let rest = text;
+	while (rest.length > limit) {
+		const breakAt = rest.lastIndexOf("\n", limit);
+		const cut = breakAt > limit / 2 ? breakAt : limit;
+		chunks.push(rest.slice(0, cut));
+		rest = rest.slice(cut).replace(/^\n/, "");
+	}
+	if (rest !== "") chunks.push(rest);
+	return chunks;
 }
