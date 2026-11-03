@@ -785,7 +785,9 @@ fn restart_daemon(app: AppHandle) {
     });
 }
 
-/// ⌥⇧Esc ends computer control from anywhere, even while another app is in front.
+/// The panic shortcut (⌥⇧Esc on macOS, Alt+Shift+Esc on Windows) ends computer control from
+/// anywhere, even while another app is in front. When another app or the system already holds it,
+/// the user is told once and the yolo dialog stops promising it; Stop keeps working.
 #[cfg(any(target_os = "macos", windows))]
 fn register_panic_shortcut(app: &AppHandle) {
     let handler = |app: &AppHandle, _: &_, event: tauri_plugin_global_shortcut::ShortcutEvent| {
@@ -793,8 +795,11 @@ fn register_panic_shortcut(app: &AppHandle) {
             computer::stop(app, Reason::Panic);
         }
     };
-    if let Err(error) = app.global_shortcut().on_shortcut(computer::PANIC_SHORTCUT, handler) {
+    let registered = app.global_shortcut().on_shortcut(computer::PANIC_SHORTCUT, handler);
+    computer::set_panic_shortcut_registered(registered.is_ok());
+    if let Err(error) = registered {
         eprintln!("gentle-dot: the computer-control panic shortcut is unavailable: {error}");
+        show_message(app, MessageDialogKind::Warning, computer::PANIC_UNAVAILABLE_TEXT);
     }
 }
 

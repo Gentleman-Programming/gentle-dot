@@ -20,6 +20,7 @@ use super::working::Windows;
 use super::working::{MainThread, Rings, Task, Working, WorkingEvent, READY_TIMEOUT, WORKING_EVENT};
 use super::{Clock, PermissionKind, Permissions, SystemClock};
 use crate::alert::Choice;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -44,6 +45,33 @@ for up to 1 hour. Stop and ⌥⇧Esc still work.";
 pub const YOLO_TEXT: &str = "Turn on yolo mode? Gentle Dot will send, pay, delete, and submit without asking you first, \
 for up to 1 hour. Stop and Alt+Shift+Esc still work.";
 pub const YOLO_CHOICE: Choice = Choice { allow: "Turn On", refuse: "Cancel" };
+/// The yolo dialog when the panic shortcut is not registered: it promises only what works.
+pub const YOLO_TEXT_WITHOUT_PANIC: &str = "Turn on yolo mode? Gentle Dot will send, pay, delete, and submit without asking you \
+first, for up to 1 hour. Stop still works.";
+/// Told once at launch when the panic shortcut cannot be registered.
+#[cfg(not(windows))]
+pub const PANIC_UNAVAILABLE_TEXT: &str = "⌥⇧Esc cannot stop computer control: another app or macOS already uses it. \
+Use Stop in the panel or the menu bar instead.";
+#[cfg(windows)]
+pub const PANIC_UNAVAILABLE_TEXT: &str = "Alt+Shift+Esc cannot stop computer control: another app or Windows already uses \
+it. Use Stop in the panel or the tray menu instead.";
+
+/// Whether the panic shortcut was registered at launch.
+static PANIC_SHORTCUT_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+/// Records whether the panic shortcut was registered, so the yolo dialog only promises it when it works.
+pub fn set_panic_shortcut_registered(registered: bool) {
+    PANIC_SHORTCUT_REGISTERED.store(registered, Ordering::SeqCst);
+}
+
+/// The yolo dialog's text, naming the panic shortcut only when it is registered.
+pub fn yolo_text(panic_registered: bool) -> &'static str {
+    if panic_registered {
+        YOLO_TEXT
+    } else {
+        YOLO_TEXT_WITHOUT_PANIC
+    }
+}
 
 /// The tray's "Yolo mode" item, kept in step with the state.
 pub struct YoloMenuItem(pub tauri::menu::CheckMenuItem<tauri::Wry>);
@@ -596,7 +624,7 @@ impl super::Dialogs for NativeDialogs {
     }
 
     fn ask_yolo(&self) -> bool {
-        self.ask(YOLO_TEXT, YOLO_CHOICE)
+        self.ask(yolo_text(PANIC_SHORTCUT_REGISTERED.load(Ordering::SeqCst)), YOLO_CHOICE)
     }
 }
 
@@ -630,6 +658,36 @@ for up to 1 hour. Stop and ⌥⇧Esc still work."
         assert_eq!(YOLO_TEXT, "Turn on yolo mode? Gentle Dot will send, pay, delete, and submit without asking you first, \
 for up to 1 hour. Stop and Alt+Shift+Esc still work.");
         assert_eq!(YOLO_CHOICE, Choice { allow: "Turn On", refuse: "Cancel" });
+    }
+
+    #[test]
+    fn the_yolo_dialog_promises_the_panic_shortcut_only_when_it_is_registered() {
+        assert_eq!(yolo_text(true), YOLO_TEXT);
+        assert_eq!(
+            yolo_text(false),
+            "Turn on yolo mode? Gentle Dot will send, pay, delete, and submit without asking you first, \
+for up to 1 hour. Stop still works."
+        );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn a_missing_panic_shortcut_is_explained_once_on_the_mac() {
+        assert_eq!(
+            PANIC_UNAVAILABLE_TEXT,
+            "⌥⇧Esc cannot stop computer control: another app or macOS already uses it. \
+Use Stop in the panel or the menu bar instead."
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_missing_panic_shortcut_is_explained_once_on_windows() {
+        assert_eq!(
+            PANIC_UNAVAILABLE_TEXT,
+            "Alt+Shift+Esc cannot stop computer control: another app or Windows already uses it. \
+Use Stop in the panel or the tray menu instead."
+        );
     }
 
     #[test]

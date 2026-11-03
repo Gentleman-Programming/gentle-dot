@@ -491,9 +491,17 @@ fn enumerate_windows() -> Result<Vec<HWND>, String> {
     // SAFETY: the callback only appends to `handles`, which outlives the call. It never stops the
     // enumeration, so 0 is a failure, and a list that may be missing windows is no list.
     if unsafe { EnumWindows(Some(collect), &mut handles as *mut Vec<HWND> as LPARAM) } == 0 {
-        return Err(std::io::Error::last_os_error().to_string());
+        return Err(enumeration_failure(std::io::Error::last_os_error()));
     }
     Ok(handles)
+}
+
+/// Why `EnumWindows` failed. It may fail without setting an error code, which would read "(os error 0)".
+fn enumeration_failure(error: std::io::Error) -> String {
+    match error.raw_os_error() {
+        Some(0) | None => "EnumWindows failed without an error code".to_string(),
+        Some(_) => error.to_string(),
+    }
 }
 
 /// The visible top-level windows of this process, or why they cannot be listed.
@@ -1487,6 +1495,9 @@ pub fn focused_frame() -> Option<Frame> {
 /// Prevent activation and capture of the click-through glow. A glow that cannot be kept out of
 /// screenshots is not used: without it no call captures or acts (S5).
 pub fn prepare_overlay(hwnd: *mut c_void) -> Result<(), String> {
+    // These extended styles are written behind tao's back, so tao's cached flags do not have them:
+    // any later tao call that sets window flags on the glow would drop WS_EX_TOOLWINDOW. Nothing
+    // does today; keep it that way, or set them again after such a call.
     // SAFETY: calls on this process's window.
     unsafe {
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
@@ -1692,6 +1703,13 @@ mod tests {
     /// T48: a bare name never resolves through PATH, so shell tools in System32 are not opened by
     /// name (`cmd.exe` and `curl.exe` are in System32, which is in PATH, and neither is in App
     /// Paths). No shortcut is passed, so only App Paths could answer.
+    #[test]
+    fn a_window_listing_failure_without_an_error_code_says_so() {
+        assert_eq!(enumeration_failure(std::io::Error::from_raw_os_error(0)), "EnumWindows failed without an error code");
+        let denied = std::io::Error::from_raw_os_error(5);
+        assert_eq!(enumeration_failure(denied), std::io::Error::from_raw_os_error(5).to_string());
+    }
+
     #[test]
     fn a_bare_name_is_not_resolved_through_path() {
         for name in ["cmd", "curl", "certutil"] {
