@@ -24,7 +24,7 @@
     "@gentle-dot/protocol": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "^20.14.0",
+    "@types/node": "^24.0.0",
     "@types/better-sqlite3": "^7.6.0",
     "@types/ws": "^8.18.2",
     "typescript": "^5.5.0",

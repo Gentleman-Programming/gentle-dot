@@ -1,54 +1,20 @@
-import { Bridge } from "./bridge.js";
-import { ConfigError, loadConfig } from "./config.js";
-import { DaemonClient } from "./daemon-client.js";
-import { daemonUploader } from "./uploads.js";
+/**
+ * Telegram Connector — public exports.
+ */
 
-const log = (message: string) => console.error(`[dot-telegram] ${message}`);
-
-async function main(): Promise<void> {
-	let config: ReturnType<typeof loadConfig>;
-	try {
-		config = loadConfig(process.env, homedir());
-	} catch (error) {
-		if (!(error instanceof ConfigError)) throw error;
-		log(error.message);
-		process.exit(1);
-	}
-
-	process.on("unhandledRejection", (error) =>
-		log(`unexpected error: ${(error as Error)?.message ?? String(error)}`),
-	);
-
-	const nicknameStore = new NicknameStore();
-	await nicknameStore.init();
-
-	const daemon = new DaemonClient({
-		url: config.daemonUrl,
-		tokenFile: config.tokenFile,
-		log,
-		onMessage: (message) => void bridge.handleDaemon(message),
-		onConnection: (connected) => log(connected ? "connected to Gentle Dot" : "disconnected from Gentle Dot, retrying"),
-		onFatal: (reason) => {
-			log(reason);
-			process.exit(1);
-		},
-	});
-
-	const bridge = new Bridge({
-		bot: new Bot(config.botToken),
-		daemon,
-		allowedUsers: config.allowedUsers,
-		log,
-		download: telegramDownloader(config.botToken, { timeoutMs: 30_000 }),
-		upload: daemonUploader,
-	});
-
-	await daemon.start();
-	await bridge.hello();
-	await bridge.bot.start({
-		allowed_updates: ["message", "callback_query", "stopped_message_generation"],
-	});
-	log("listening");
-}
-
-void main();
+export { TelegramBridge, type TelegramBridgeOptions } from './telegram-bridge.js';
+export { type Config, loadConfig, ConfigError } from './config.js';
+export { splitMessage, telegramDownloader, TELEGRAM_TEXT_LIMIT, TELEGRAM_DOWNLOAD_LIMIT } from './utils.js';
+export { NicknameStore, type NicknameEntry } from './storage/nickname-store.js';
+export { UploadRefused, UPLOAD_MAX_BASE64 } from './uploads.js';
+export {
+	PROTOCOL_VERSION,
+	CloseCode,
+	MAX_VOICE_AUDIO,
+	type AgentState,
+	type Ask,
+	type AttachmentRef,
+	type ClientMessage,
+	type ServerMessage,
+	type UploadedFile,
+} from './protocol.js';

@@ -123,7 +123,7 @@ export class TelegramBridge extends BaseBridge {
     this.bot = new Bot(options.config.botToken, {
       client: { timeoutSeconds: 60 },
     });
-    this.nicknameStore = new NicknameStore(options.config.tokenFile);
+    this.nicknameStore = new NicknameStore(options.config.nicknameDb);
 
     // Allowed users
     this.chatId = [...options.config.allowedUsers][0] ?? 0;

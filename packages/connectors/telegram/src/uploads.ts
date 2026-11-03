@@ -1,7 +1,6 @@
 /**
  * Uploads a file to the daemon via `POST /upload`.
  */
-import { UploadRefused } from "./uploads.js";
 
 export interface Upload {
 	name: string;

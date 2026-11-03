@@ -1,26 +1,21 @@
-import { open } from "node:sqlite";
-import { join } from "node:path";
+/**
+ * SQLite-backed nickname store for Telegram users (node:sqlite, no native deps).
+ */
+import { DatabaseSync } from "node:sqlite";
+import type { NicknameEntry } from "../types.js";
 
-export interface NicknameEntry {
-	user_id: string;
-	nickname: string;
-	created_at: number;
-	updated_at: number;
-}
+export type { NicknameEntry };
 
 export class NicknameStore {
-	private dbPromise: Promise<ReturnType<typeof open>>;
+	private readonly db: DatabaseSync;
 
-	constructor(dbPath: string = ":memory:") {
-		this.dbPromise = open({
-			filename: dbPath,
-			driver: (await import("sqlite3")).Database,
-		});
+	constructor(dbPath = ":memory:") {
+		this.db = new DatabaseSync(dbPath);
+		this.init();
 	}
 
-	async init(): Promise<void> {
-		const db = await this.dbPromise;
-		await db.exec(`
+	init(): void {
+		this.db.exec(`
 			CREATE TABLE IF NOT EXISTS nicknames (
 				user_id TEXT PRIMARY KEY,
 				nickname TEXT NOT NULL,
@@ -31,59 +26,48 @@ export class NicknameStore {
 		`);
 	}
 
-	async set(userId: string, nickname: string): Promise<void> {
-		const db = await this.dbPromise;
+	set(userId: string, nickname: string): void {
 		const now = Date.now();
-		await db.run(
-			`
-			INSERT INTO nicknames (user_id, nickname, created_at, updated_at)
-			VALUES (?, ?, ?, ?)
-			ON CONFLICT(user_id) DO UPDATE SET
-				nickname = excluded.nickname,
-				updated_at = excluded.updated_at
-			`,
-			userId,
-			nickname,
-			now,
-			now,
-		);
+		this.db.prepare(
+			`INSERT INTO nicknames (user_id, nickname, created_at, updated_at)
+			 VALUES (?, ?, ?, ?)
+			 ON CONFLICT(user_id) DO UPDATE SET
+			   nickname = excluded.nickname,
+			   updated_at = excluded.updated_at`,
+		).run(userId, nickname, now, now);
 	}
 
-	async getByUserId(userId: string): Promise<string | undefined> {
-		const db = await this.dbPromise;
-		const row = await db.get("SELECT nickname FROM nicknames WHERE user_id = ?", userId);
+	getByUserId(userId: string): string | undefined {
+		const row = this.db.prepare(
+			"SELECT nickname FROM nicknames WHERE user_id = ?",
+		).get(userId) as { nickname: string } | undefined;
 		return row?.nickname;
 	}
 
-	async getByNickname(nickname: string): Promise<string | undefined> {
-		const db = await this.dbPromise;
-		const row = await db.get("SELECT user_id FROM nicknames WHERE nickname = ?", nickname);
+	getByNickname(nickname: string): string | undefined {
+		const row = this.db.prepare(
+			"SELECT user_id FROM nicknames WHERE nickname = ?",
+		).get(nickname) as { user_id: string } | undefined;
 		return row?.user_id;
 	}
 
-	async delete(userId: string): Promise<boolean> {
-		const db = await this.dbPromise;
-		const result = await db.run("DELETE FROM nicknames WHERE user_id = ?", userId);
+	delete(userId: string): boolean {
+		const result = this.db.prepare("DELETE FROM nicknames WHERE user_id = ?").run(userId);
 		return result.changes > 0;
 	}
 
-	async count(): Promise<number> {
-		const db = await this.dbPromise;
-		const row = await db.get("SELECT COUNT(*) as count FROM nicknames");
-		return row?.count ?? 0;
+	count(): number {
+		const row = this.db.prepare("SELECT COUNT(*) as count FROM nicknames").get() as { count: number };
+		return row.count;
 	}
 
-	async list(limit = 100, offset = 0): Promise<NicknameEntry[]> {
-		const db = await this.dbPromise;
-		return db.all(
+	list(limit = 100, offset = 0): NicknameEntry[] {
+		return this.db.prepare(
 			"SELECT * FROM nicknames ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-			limit,
-			offset,
-		) as Promise<NicknameEntry[]>;
+		).all(limit, offset) as unknown as NicknameEntry[];
 	}
 
-	async close(): Promise<void> {
-		const db = await this.dbPromise;
-		await db.close();
+	close(): void {
+		this.db.close();
 	}
 }

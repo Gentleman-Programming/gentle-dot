@@ -1,14 +1,19 @@
-import { homedir } from "node:os";
-import { Bridge } from "./bridge.js";
-import { ConfigError, loadConfig } from "./config.js";
-import { DaemonClient } from "./daemon-client.js";
-import { daemonUploader } from "./uploads.js";
-import { NicknameStore } from "./storage/nickname-store.js";
+/**
+ * Telegram Connector — Gentle Dot bridge over BaseBridge v2 (grammY).
+ *
+ * Entry point: loads the config, builds the bridge and starts it. The bridge
+ * connects to the daemon itself (BaseBridge.connect) and then opens the
+ * Telegram gateway with its own bot token.
+ */
 
-const log = (message: string) => console.error(`[dot-telegram] ${message}`);
+import { homedir } from "node:os";
+import { TelegramBridge } from "./telegram-bridge.js";
+import { ConfigError, loadConfig } from "./config.js";
+
+const log = (message: string) => console.error(`[gentle-telegram] ${message}`);
 
 async function main(): Promise<void> {
-	let config: ReturnType<typeof loadConfig>;
+	let config;
 	try {
 		config = loadConfig(process.env, homedir());
 	} catch (error) {
@@ -21,36 +26,23 @@ async function main(): Promise<void> {
 		log(`unexpected error: ${(error as Error)?.message ?? String(error)}`),
 	);
 
-	const nicknameStore = new NicknameStore();
-	await nicknameStore.init();
+	const bridge = new TelegramBridge({ config, log });
 
-	const daemon = new DaemonClient({
-		url: config.daemonUrl,
-		tokenFile: config.tokenFile,
-		log,
-		onMessage: (message) => void bridge.handleDaemon(message),
-		onConnection: (connected) => log(connected ? "connected to Gentle Dot" : "disconnected from Gentle Dot, retrying"),
-		onFatal: (reason) => {
-			log(reason);
-			process.exit(1);
-		},
-	});
+	const shutdown = async () => {
+		log("shutting down...");
+		await bridge.stop();
+		process.exit(0);
+	};
+	process.once("SIGINT", shutdown);
+	process.once("SIGTERM", shutdown);
 
-	const bridge = new Bridge({
-		bot: new Bot(config.botToken),
-		daemon,
-		allowedUsers: config.allowedUsers,
-		log,
-		download: telegramDownloader(config.botToken, { timeoutMs: 30_000 }),
-		upload: daemonUploader,
-	});
-
-	await daemon.start();
-	await bridge.hello();
-	await bridge.bot.start({
-		allowed_updates: ["message", "callback_query", "stopped_message_generation"],
-	});
-	log("listening");
+	try {
+		await bridge.start();
+		log("listening");
+	} catch (error) {
+		log(`failed to start: ${(error as Error).message}`);
+		process.exit(1);
+	}
 }
 
 void main();
