@@ -35,6 +35,110 @@ pub mod winapps;
 pub mod winput;
 pub mod working;
 
+// Windows capture ordering, kept platform-independent so CI exercises the contract.
+#[cfg(any(windows, test))]
+mod capture_order {
+    pub(super) fn capture<T>(flush: impl FnOnce() -> Result<(), String>, grab: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        flush()?;
+        grab()
+    }
+
+    pub(super) fn hide<T>(exclude: impl FnOnce() -> Result<T, String>, hide: impl FnOnce()) -> Result<T, String> {
+        let excluded = exclude();
+        hide();
+        excluded
+    }
+
+    pub(super) fn show(show: impl FnOnce(), restore: impl FnOnce()) {
+        show();
+        restore();
+    }
+
+    /// Match only the process-lifetime handles recorded at window creation. No resolver or
+    /// main-thread dispatch is permitted here: callers may hold the affinity lock on a worker.
+    pub(super) fn current_window(saved: &[(Option<u64>, (super::working::Part, u32))], hwnd: usize,
+        handles: [Option<usize>; 2]) -> Option<usize> {
+        saved.iter().position(|(_, (window, _))| handles[*window as usize] == Some(hwnd))
+    }
+
+    /// End call ownership, retaining an ownerless recovery value if native restoration fails.
+    /// Callers keep at most one entry per window and adopt it on a later hide.
+    pub(super) fn release<T: Copy>(saved: &mut Vec<(Option<u64>, T)>, operation: u64, mut restore: impl FnMut(T) -> bool) {
+        saved.retain_mut(|(owner, entry)| {
+            if *owner != Some(operation) { return true; }
+            *owner = None;
+            !restore(*entry)
+        });
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::cell::RefCell;
+
+        #[test]
+        fn matching_under_the_affinity_lock_never_dispatches_a_window_query() {
+            let saved = std::sync::Mutex::new(vec![(Some(1), (super::super::working::Part::Dot, 7))]);
+            let guard = saved.lock().unwrap();
+            // The API accepts only recorded values, so querying Tauri is not an option.
+            assert_eq!(current_window(&guard, 101, [Some(101), Some(102)]), Some(0));
+            assert_eq!(current_window(&guard, 201, [Some(101), Some(102)]), None);
+            assert_eq!(current_window(&guard, 101, [None, None]), None);
+        }
+
+        #[test]
+        fn release_restores_original_values_and_leaves_no_stale_entry_for_the_next_call() {
+            let mut saved = vec![(Some(10), (1, 7)), (Some(10), (2, 0)), (Some(11), (3, 9))];
+            let mut restored = Vec::new();
+            release(&mut saved, 10, |entry| { restored.push(entry); true });
+            assert_eq!(restored, [(1, 7), (2, 0)]);
+            assert_eq!(saved, [(Some(11), (3, 9))]);
+            release(&mut saved, 11, |_| true);
+            assert!(saved.is_empty());
+            // The next hide can save a different current affinity for the same window.
+            saved.push((Some(12), (1, 9)));
+            release(&mut saved, 12, |entry| { restored.push(entry); true });
+            assert_eq!(restored.last(), Some(&(1, 9)));
+            assert!(saved.is_empty());
+            // Native failure ends call ownership but must not discard the true original.
+            saved.push((Some(12), (1, 9)));
+            release(&mut saved, 12, |_| false);
+            assert_eq!(saved, [(None, (1, 9))]);
+            release(&mut saved, 12, |_| panic!("an old call cannot touch recovery state"));
+            assert_eq!(saved, [(None, (1, 9))]);
+        }
+
+        #[test]
+        fn capture_waits_even_without_new_exclusions() {
+            let events = RefCell::new(Vec::new());
+            capture(|| { events.borrow_mut().push("flush"); Ok(()) }, || { events.borrow_mut().push("grab"); Ok(()) }).unwrap();
+            assert_eq!(*events.borrow(), ["flush", "grab"]);
+        }
+
+        #[test]
+        fn failed_composition_never_grabs() {
+            let result = capture(|| Err("composition failed".into()), || panic!("must not grab"));
+            assert_eq!(result, Err::<(), _>("composition failed".into()));
+        }
+
+        #[test]
+        fn exclusion_spans_hide_through_show() {
+            let events = RefCell::new(Vec::new());
+            let previous = hide(|| { events.borrow_mut().push("exclude"); Ok(7) }, || events.borrow_mut().push("hide")).unwrap();
+            show(|| events.borrow_mut().push("show"), || { assert_eq!(previous, 7); events.borrow_mut().push("restore"); });
+            assert_eq!(*events.borrow(), ["exclude", "hide", "show", "restore"]);
+        }
+
+        #[test]
+        fn failed_exclusion_still_hides_and_remains_an_error() {
+            let hidden = std::cell::Cell::new(false);
+            let result = hide(|| Err::<(), _>("exclusion failed".into()), || hidden.set(true));
+            assert!(hidden.get());
+            assert_eq!(result, Err("exclusion failed".into()));
+        }
+    }
+}
+
 use blocklist::AppIdentity;
 use coords::{Point, ScreenshotGeometry};
 use keys::KeyCombo;

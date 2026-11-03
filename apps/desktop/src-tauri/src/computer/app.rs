@@ -142,13 +142,6 @@ pub fn show_without_focus(window: &tauri::WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
-// Both sides bypass tao so its visibility flag continues to represent the user's choice.
-#[cfg(windows)]
-pub fn hide_for_call(window: &tauri::WebviewWindow) -> Result<(), String> {
-    super::win::hide_window(window.hwnd().map_err(|e| e.to_string())?.0);
-    Ok(())
-}
-
 /// A window of Gentle Dot is shown or hidden through tao (the panel, the Dot) while the returned
 /// change lives: a computer-control capture overlapping it is not returned.
 #[cfg(windows)]
