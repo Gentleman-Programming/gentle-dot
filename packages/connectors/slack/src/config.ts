@@ -49,7 +49,7 @@ export function loadConfig(env: Record<string, string | undefined>, home: string
   const tokenFile = env.GENTLE_DOT_TOKEN_FILE?.trim() || join(home, ".gentle-dot", "token");
 
   const mcpCommand = env.SLACK_MCP_COMMAND?.trim() || "npx";
-  const mcpArgs = (env.SLACK_MCP_ARGS ?? "@slack/mcp-server").split(" ").map(s => s.trim()).filter(Boolean);
+  const mcpArgs = (env.SLACK_MCP_ARGS ?? "@modelcontextprotocol/server-slack").split(" ").map(s => s.trim()).filter(Boolean);
 
   const allowedChannelIds = (env.SLACK_ALLOWED_CHANNEL_IDS ?? "")
     .split(",")
