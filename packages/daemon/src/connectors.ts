@@ -38,8 +38,9 @@ import {
 	recordMac,
 } from "./connector-integrity.ts";
 import { type OAuthSettings, type SignIn, SignInCancelledError, startSignIn } from "./connector-oauth.ts";
-import { directAccess, type EngineAccess } from "./engine-access.ts";
+import { directAccess, type EngineAccess, insideEngineAccess } from "./engine-access.ts";
 import { type ConnectorPolicy, draftSecretProblem, POLICY_ENV } from "./extensions/approval-guard.ts";
+import { ensurePrivateDir } from "./isolation.ts";
 import type { ProxiedConnector, UpstreamCredentials } from "./mcp-proxy.ts";
 import { PrivateFileProtectionError, readPrivateFileSync, writePrivateFile } from "./private-file.ts";
 import { runtimeDir, runtimeModules } from "./runtime.ts";
@@ -608,6 +609,14 @@ export function renderMcpJson(
 }
 
 function writePrivate(path: string, text: string): void {
+	// Windows needs the native protected DACL; Unix keeps engine-user ownership in VPS brackets.
+	if (process.platform === "win32") {
+		// The native writer requires a private parent. Let its existing bracket guard reject
+		// engine access before any helper process can start.
+		if (!insideEngineAccess()) ensurePrivateDir(dirname(path));
+		writePrivateFile(path, text);
+		return;
+	}
 	const temp = `${path}.${process.pid}.tmp`;
 	writeFileSync(temp, text, { mode: 0o600 });
 	renameSync(temp, path);
