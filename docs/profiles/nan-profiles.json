@@ -1,0 +1,39 @@
+{
+  "kind": "gentle-pi.agent_model_profiles",
+  "version": 1,
+  "profiles": {
+    "nan-full-power": {
+      "orchestrator": { "model": "nvidia-ultra/z-ai/glm-5.3", "thinking": "high" },
+      "gentle-ai-explore": { "model": "nvidia-flash/z-ai/glm-5.3", "thinking": "low" },
+      "gentle-ai-worker": { "model": "nvidia-flash/deepseek-ai/deepseek-v4.1-flash", "thinking": "medium" },
+      "gentle-ai-verify": { "model": "nvidia-zai/deepseek-ai/deepseek-v4.1-flash", "thinking": "low" },
+      "review-refuter": { "model": "nvidia-zai/deepseek-ai/deepseek-v4.1-flash", "thinking": "high" },
+      "review-validator": { "model": "nvidia-ultra/nvidia/nemotron-3-ultra-550b-a55b", "thinking": "high" },
+      "jd-judge-a": { "model": "nvidia-ultra/nvidia/nemotron-3-ultra-550b-a55b", "thinking": "medium" },
+      "jd-judge-b": { "model": "nvidia-flash/nvidia/nemotron-3-super-120b-a12b", "thinking": "medium" },
+      "jd-fix-agent": { "model": "nvidia-flash/z-ai/glm-5.3", "thinking": "medium" }
+    },
+    "nan-review-hard": {
+      "orchestrator": { "model": "nvidia-ultra/z-ai/glm-5.3", "thinking": "medium" },
+      "gentle-ai-explore": { "model": "nvidia-flash/deepseek-ai/deepseek-v4.1-flash", "thinking": "low" },
+      "gentle-ai-worker": { "model": "nvidia-ultra/z-ai/glm-5.3", "thinking": "medium" },
+      "gentle-ai-verify": { "model": "nvidia-flash/nvidia/nemotron-3-super-120b-a12b", "thinking": "low" },
+      "review-refuter": { "model": "nvidia-ultra/z-ai/glm-5.3", "thinking": "high" },
+      "review-validator": { "model": "nvidia-ultra/nvidia/nemotron-3-ultra-550b-a55b", "thinking": "high" },
+      "jd-judge-a": { "model": "nvidia-flash/deepseek-ai/deepseek-v4.1-flash", "thinking": "medium" },
+      "jd-judge-b": { "model": "nvidia-zai/nvidia/nemotron-3-ultra-550b-a55b", "thinking": "medium" },
+      "jd-fix-agent": { "model": "nvidia-flash/z-ai/glm-5.3", "thinking": "medium" }
+    },
+    "nan-eco-flash": {
+      "orchestrator": { "model": "nvidia-flash/z-ai/glm-5.3", "thinking": "low" },
+      "gentle-ai-explore": { "model": "nvidia-flash/deepseek-ai/deepseek-v4.1-flash", "thinking": "off" },
+      "gentle-ai-worker": { "model": "nvidia-flash/deepseek-ai/deepseek-v4.1-flash", "thinking": "low" },
+      "gentle-ai-verify": { "model": "nvidia-flash/nvidia/nemotron-3-super-120b-a12b", "thinking": "off" },
+      "review-refuter": { "model": "nvidia-flash/z-ai/glm-5.3", "thinking": "low" },
+      "review-validator": { "model": "nvidia-flash/nvidia/nemotron-3-super-120b-a12b", "thinking": "low" },
+      "jd-judge-a": { "model": "nvidia-flash/deepseek-ai/deepseek-v4.1-flash", "thinking": "off" },
+      "jd-judge-b": { "model": "nvidia-flash/nvidia/nemotron-3-super-120b-a12b", "thinking": "off" },
+      "jd-fix-agent": { "model": "nvidia-flash/z-ai/glm-5.3", "thinking": "low" }
+    }
+  }
+}
