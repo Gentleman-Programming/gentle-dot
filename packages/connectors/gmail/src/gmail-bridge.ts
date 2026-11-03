@@ -128,7 +128,6 @@ export class GmailBridge extends BaseBridge {
       case 'ready': {
         const ready = message.payload as ReadyPayload;
         this.logFn(`Daemon ready, session: ${ready.sessionId}`);
-        this.updateDaemonToken();
         break;
       }
       case 'agent_state': {
@@ -146,7 +145,8 @@ export class GmailBridge extends BaseBridge {
         const payload = message.payload as { code: string; message: string };
         if (payload.code === 'unauthorized') {
           this.logFn('Daemon rejected token, attempting re-auth');
-          this.updateDaemonToken();
+          // Re-auth: clean reconnect re-hello after the daemon cleaned up the old registration.
+          void this.disconnect().then(() => this.connect());
         }
         break;
       }
@@ -155,15 +155,6 @@ export class GmailBridge extends BaseBridge {
     }
   }
 
-  private async updateDaemonToken(): Promise<void> {
-    try {
-      const accessToken = await getValidAccessToken(this.tokenStore, this.oauth2Client);
-      this.config.token = accessToken;
-      this.sendHello();
-    } catch (e) {
-      this.logFn(`Failed to update daemon token: ${(e as Error).message}`);
-    }
-  }
 
   // ============ Gmail-Specific Methods ============
 
@@ -355,8 +346,14 @@ export class GmailBridge extends BaseBridge {
   async handleOAuthCallback(code: string): Promise<void> {
     const tokens = await exchangeCodeForTokens(this.oauth2Client, code);
     this.tokenStore.save(tokens);
+    this.config.token = tokens.access_token;
     this.logFn('OAuth tokens saved successfully');
-    await this.updateDaemonToken();
+    // Fresh credentials require a clean reconnect: the daemon cleans up the old
+    // registration on close, so the next hello registers with the new token.
+    if (this.isReady()) {
+      await this.disconnect();
+      await this.connect();
+    }
   }
 
   // ============ Public API ============
