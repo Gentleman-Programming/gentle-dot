@@ -5,7 +5,20 @@
 
 import { EventEmitter } from 'events';
 
-export type ConnectorType = 'telegram' | 'gmail' | 'discord' | 'whatsapp';
+/** Tipos de conector aceptados en el handshake (Regla de Oro #5). */
+export const CONNECTOR_TYPES = [
+  'telegram',
+  'gmail',
+  'discord',
+  'whatsapp',
+  'linear',
+  'notion',
+  'atlassian',
+  'slack',
+  'voice',
+] as const;
+
+export type ConnectorType = (typeof CONNECTOR_TYPES)[number];
 export type ConnectorStatus = 'connecting' | 'ready' | 'disconnected' | 'error';
 
 export interface ConnectorInfo {

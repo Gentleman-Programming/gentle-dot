@@ -7,7 +7,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage, Server as HttpServer } from 'http';
 import { URL } from 'url';
 import { EventEmitter } from 'events';
-import { ConnectorRegistry, ConnectorInfo, ConnectorType } from './connector-registry.js';
+import { CONNECTOR_TYPES, ConnectorRegistry, ConnectorInfo, ConnectorType } from './connector-registry.js';
 import { AppConfig } from './config-loader.js';
 
 export type BridgeMessageType =
@@ -323,8 +323,8 @@ export class WsServer extends EventEmitter {
     }
 
     // Validate connector type
-    if (!['telegram', 'gmail', 'discord', 'whatsapp'].includes(payload.connectorType)) {
-      this.sendError(ws, 'INVALID_CONNECTOR_TYPE', `Unknown connector type: ${payload.connectorType}`);
+    if (!payload.connectorType || !(CONNECTOR_TYPES as readonly string[]).includes(payload.connectorType)) {
+      this.sendError(ws, 'INVALID_CONNECTOR_TYPE', `Unknown connector type: ${payload.connectorType}. Accepted: ${CONNECTOR_TYPES.join(', ')}`);
       ws.close(1008, 'Invalid connector type');
       return;
     }

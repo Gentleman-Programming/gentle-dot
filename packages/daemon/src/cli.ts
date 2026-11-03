@@ -33,16 +33,9 @@ program
   .option('-w, --workspace <path>', 'Workspace directory')
   .option('-l, --log-level <level>', 'Log level (debug|info|warn|error)')
   .option('--no-auto-setup', 'Disable auto setup (GENTLE_SHELL_NO_AUTO_SETUP=1)')
-  .option('-v, --version', 'Show version')
   .parse(process.argv);
 
 const options = program.opts<CliOptions>();
-
-// Handle version flag
-if (options.version) {
-  console.log('0.1.0');
-  process.exit(0);
-}
 
 // Build daemon options
 const daemonOptions: DaemonOptions = {
