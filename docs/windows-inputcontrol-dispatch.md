@@ -1,4 +1,4 @@
-# Dot-only InputControl dispatch (T7a)
+# Dot-only InputControl dispatch and release reporting (T7a–T7b)
 
 `inputControlServerForClient(source, { client: 'gentle-dot' })` generates a
 separate server variant. Default and unknown clients return source byte-identically;
@@ -27,8 +27,9 @@ Fenced queued/while-stopping requests return exactly
 If `bool(getattr(CONTROL_MANAGER, '_dot_release_failed', False))`, Stop returns
 `{"status":"error","message":"Input release failed; control remains blocked."}`
 after drain; ordinary tools/start are denied with that same result. Nothing clears
-the latch. T7b must reliably set it on native cleanup failure; message parsing is
-not release evidence. Original result errors and raised exceptions are not hidden.
+the latch. The release generator below sets it on known-held cleanup failure;
+message parsing is not release evidence. Original result errors and raised
+exceptions are not hidden.
 
 ## Source-only verification
 
@@ -50,6 +51,36 @@ concurrency execution still uses the synthetic source. Missing/invalid explicit
 source or Python is a failure, not a skip. Default synthetic proof alone is not
 actual pinned-source compatibility proof.
 Use authorized child-only temp/home/cache isolation; tests create/delete no files.
-This unit does not build, import/start an actual provider/MCP, patch keyboard/mouse,
-or prove physical release. Activation requires T7b, a new versioned artifact,
-native host session/allowlist integration and separately authorized runtime proof.
+These source units do not build, import/start an actual provider/MCP or prove
+physical release. Activation requires a new versioned artifact, native host
+session/allowlist integration and separately authorized runtime proof.
+
+## Dot-only cleanup latch (T7b)
+
+`inputControlReleaseForClient(source, { client: 'gentle-dot', module: 'keyboard' })`
+also accepts explicit `module: 'mouse'`. Default/unknown clients retain exact source
+bytes; nonstrings throw `TypeError`. Dot rejects missing/unknown modules and
+unsupported/already-adapted cleanup shapes. Unique targeted functions must match
+the pinned algorithm digests (excluding blank, comment and one-line docstring
+lines); this is a structural guard, not full-module provenance verification.
+
+Keyboard passes the manager at both hotkey cleanup callsites. All known pressed
+keys are attempted in reverse order; the first release error sets the sticky flag
+before rethrow. Thus even cancellation cleanup's swallowed release error is
+reported without changing the original cancellation exception. Mouse sets the
+flag before recording a failed known-down `finally` release, preserving its
+original exception and never releasing an unknown button. Success/ordinary
+cancellation does not set or clear the flag. No emergency gesture is synthesized;
+process termination does not establish physical release or reconcile this latch.
+
+Run `node --test scripts/providers/test/inputcontrol-release.test.mjs` first, then
+`node --test scripts/providers/test/inputcontrol-release.test.mjs scripts/providers/test/inputcontrol-dispatch.test.mjs scripts/providers/test/inputcontrol-theme.test.mjs`.
+The default compact fixture contains only the selected cleanup algorithms, not
+full provider modules. Python 3.12 stdlib executes only named AST functions with
+fake actuators/helpers, then chains an actual generated latch into synthetic
+T7a tools to prove Stop waits for drain and refuses success/start/new actions.
+For separate pinned-source proof, set test-only `INPUTCONTROL_SOURCE_DIR` to the
+authorized directory containing `keyboard.py` and `mouse.py`; additionally set
+`INPUTCONTROL_SOURCE` to `server.py` for dispatch AST comparison. Run the same
+commands. No imports from provider source execute; all other ASTs are compared
+unchanged. Use the same child-only isolation and retained-receipt discipline.
