@@ -208,7 +208,7 @@ pub enum PermissionKind {
 pub const KEYS_CHANGED_WHILE_TYPING: &str = "The app receiving the keys changed while typing, so the rest was not sent.";
 pub const KEYS_CHANGED_BEFORE_TYPING: &str = "The app receiving the keys changed before typing, so nothing was sent.";
 
-/// Why a typed post (`Desktop::post_typed`) did not go through. The first two are refusals
+/// Why a typed post (`Desktop::post_typed`) did not go through. All but `Failed` are refusals
 /// before anything of that post was sent; only the helper knows how much of the text went out
 /// before it, so it words them (`message`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,6 +220,9 @@ pub enum TypedError {
     /// The window in front has no keyboard focus, so where the keys would go is not the approved
     /// recipient's field.
     NoFocus,
+    /// Windows reported modifiers down before the post pressed any keys of its own: the user's,
+    /// or one a failed post could not release.
+    HeldModifiers(Vec<&'static str>),
     /// Posting failed; part of the post may have been sent.
     Failed(String),
 }
@@ -235,6 +238,19 @@ impl TypedError {
             (TypedError::FrontUnknown, true) => "Cannot tell which window is in front, so the rest was not sent.".into(),
             (TypedError::NoFocus, false) => "The window in front has no keyboard focus, so nothing was sent.".into(),
             (TypedError::NoFocus, true) => "The window in front has no keyboard focus, so the rest was not sent.".into(),
+            (TypedError::HeldModifiers(keys), sent) => {
+                let unsent = if sent { "the rest was not sent" } else { "nothing was sent" };
+                match keys.as_slice() {
+                    [key] => format!(
+                        "{key} is pressed, so {unsent}. Release {key}, or press and release it once if no one is holding it, and try again."
+                    ),
+                    [rest @ .., last] => format!(
+                        "{} and {last} are pressed, so {unsent}. Release them, or press and release each once if no one is holding them, and try again.",
+                        rest.join(", ")
+                    ),
+                    [] => format!("A modifier is pressed, so {unsent}."),
+                }
+            }
             (TypedError::Failed(error), _) => error.clone(),
         }
     }

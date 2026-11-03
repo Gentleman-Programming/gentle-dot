@@ -24,6 +24,8 @@ pub struct FakeDesktop {
     /// The backend refuses this typed post (1-based), sending nothing of it; disabled by default.
     pub refuse_typed_at: Mutex<Option<(usize, TypedError)>>,
     pub typed_calls: Mutex<usize>,
+    /// Windows key-state snapshot at a typed post (1-based); absent means all keys up.
+    pub held_keys_at: Mutex<Option<(usize, Vec<u16>)>>,
     /// Apps that run as administrator, refused for keyboard input.
     pub elevated: Mutex<Vec<i32>>,
     /// Marks an app as elevated after this many recorded posts; disabled by default.
@@ -63,6 +65,7 @@ impl Default for FakeDesktop {
             front_after_posts: Mutex::new(None),
             refuse_typed_at: Mutex::new(None),
             typed_calls: Mutex::new(0),
+            held_keys_at: Mutex::new(None),
             elevated: Mutex::new(Vec::new()),
             elevated_after_posts: Mutex::new(None),
             front_during_capture: Mutex::new(None),
@@ -147,7 +150,12 @@ impl Desktop for FakeDesktop {
             }
         }
         // Only posts that went through, so this stays in step with `events`.
-        self.post(event).map_err(TypedError::Failed)?;
+        let held = self.held_keys_at.lock().unwrap().clone()
+            .filter(|(at, _)| *at == call).map(|(_, keys)| keys).unwrap_or_default();
+        super::winput::without_held_modifiers(
+            |key| if held.contains(&key) { i16::MIN } else { 0 },
+            || self.post(event).map_err(TypedError::Failed),
+        )?;
         self.typed_posts.lock().unwrap().push((event.clone(), *recipient));
         Ok(())
     }

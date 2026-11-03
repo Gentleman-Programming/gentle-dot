@@ -32,7 +32,7 @@ use super::winapps::{
     answers_to, app_pids, executable_target, fronts_same_app, hosted_page, request, shortcut_named, strip_ci, Request,
     TopWindow,
 };
-use super::winput::{checks_typing_target, releases, send_batches, settles, steps, Step, VirtualScreen};
+use super::winput::{checks_typing_target, releases, send_batches, settles, steps, without_held_modifiers, Step, VirtualScreen};
 use super::{
     runs_as_administrator, AppInfo, Capture, InputEvent, KeyboardRecipient, MouseButton, TypedError,
     KEYS_CHANGED_WHILE_TYPING,
@@ -64,7 +64,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     CAPTUREBLT, DIB_RGB_COLORS, HALFTONE, HBITMAP, HDC, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST, SRCCOPY,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+    GetAsyncKeyState, SendInput, INPUT, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
     KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
     MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL,
     MOUSEINPUT,
@@ -243,7 +243,7 @@ pub fn post(event: &InputEvent) -> Result<(), String> {
 
 /// Posts a typed chunk, a Return, or a key only to the recipient the shared guard approved: the
 /// windows it is bound to must still belong to the approved front app and focused app. A refusal
-/// before anything of it was sent is `RecipientChanged` or `FrontUnknown`, which the helper words
+/// before anything of it was sent is a `TypedError` refusal, which the helper words
 /// from what earlier chunks sent.
 pub fn post_typed(event: &InputEvent, recipient: &KeyboardRecipient) -> Result<(), TypedError> {
     post_input(event, Some(recipient))
@@ -281,6 +281,16 @@ fn post_input(event: &InputEvent, approved: Option<&KeyboardRecipient>) -> Resul
         }
     }
     let plan = steps(event, &virtual_screen()).map_err(TypedError::Failed)?;
+    // Sample after recipient queries and before any of this event's own modifiers go down.
+    // Do not sample inside the step loop: ctrl+t would then observe its own injected Ctrl.
+    // This is a snapshot, not an atomic fence against a user pressing a key during SendInput.
+    if matches!(event, InputEvent::Key(_) | InputEvent::Text(_)) {
+        without_held_modifiers(
+            // SAFETY: plain key-state query using the Windows virtual-key codes in winput.
+            |key| unsafe { GetAsyncKeyState(i32::from(key)) },
+            || Ok(()),
+        )?;
+    }
     let mut done = 0;
     for batch in send_batches(&plan) {
         let checked = checks_typing_target(&batch[0])
