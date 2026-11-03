@@ -25,6 +25,11 @@ import {
 	policyEnv,
 } from "./connectors.ts";
 import { directAccess, type EngineAccess, engineAccess } from "./engine-access.ts";
+import {
+	type AcquiredComponent,
+	type ComputerProviderStatus,
+	resolveComputerProviders,
+} from "./computer-providers.ts";
 import { approvalRequest } from "./extensions/approval-guard.ts";
 import {
 	claimEngineHome,
@@ -47,6 +52,10 @@ import { PIN_FILE, PinGate } from "./web-pin.ts";
 import { identityArgs } from "./white-label.ts";
 
 export interface DaemonOptions {
+	/** Trusted host-acquired local files only; never read from env, engine or app messages.
+	 * Preparation does not activate providers or grant a desktop session.
+	 */
+	computerComponents?: Partial<Record<"eyes" | "hands", AcquiredComponent>>;
 	port: number;
 	host: string;
 	dataDir: string;
@@ -102,6 +111,8 @@ export interface DaemonOptions {
 }
 
 export interface DotDaemon {
+	/** Artifact readiness only, not native-session authorization; no paths or launch handles. */
+	readonly computerProviders: Readonly<ComputerProviderStatus>;
 	port: number;
 	token: string;
 	url: string;
@@ -154,6 +165,10 @@ export function startupMessage(url: string, dataDir: string, interactive: boolea
 
 export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	const log = options.log ?? (() => {});
+	const preparedComputer = await resolveComputerProviders({ components: options.computerComponents });
+	// Deliberately not connected to McpProxy or engine config until T3 supplies an authentic
+	// native session gate. Later activation must reuse that proxy's owned stdio lifecycle.
+	const computerProviders = Object.freeze({ status: preparedComputer.status, kind: preparedComputer.kind });
 	const token = ensureToken(options.dataDir);
 	const vps = options.vps;
 	// Server mode (S25.8): the daemon's files stay its own, the engine's folders become the engine's,
@@ -442,6 +457,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	}
 
 	return {
+		computerProviders,
 		port,
 		token,
 		url: `http://${options.host === "0.0.0.0" ? "127.0.0.1" : options.host}:${port}/#token=${token}`,
