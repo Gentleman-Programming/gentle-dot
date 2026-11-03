@@ -148,6 +148,35 @@ fn a_late_click_on_a_stale_dialog_approves_nothing() {
     assert_eq!(prompt.shown_titles().len(), 2);
 }
 
+/// Returns once the dialog's thread has ended; it frees the screen only after sending its answer.
+fn wait_until_answered(approvals: &Approvals) {
+    let ticket = approvals.gate.acquire(Instant::now() + LONG).expect("the dialog closed");
+    approvals.gate.release(ticket);
+}
+
+#[test]
+fn an_allow_given_after_the_deadline_is_declined_even_when_already_waiting() {
+    // A descheduled receiver: it only looks once the late Allow is queued, and the deadline gone.
+    let timeout = Duration::from_millis(50);
+    let prompt = Arc::new(FakePrompt::new([Answer::After(timeout * 2, true)]));
+    let approvals = approvals(&prompt, timeout);
+    let shown = approvals.show(&request(vec![])).expect("shown");
+    wait_until_answered(&approvals);
+    assert_eq!(approvals.wait(shown), Decision::Declined);
+    assert_eq!(prompt.dismissals(), 0, "the dialog had already closed");
+}
+
+#[test]
+fn an_allow_given_in_time_counts_even_when_seen_after_the_deadline() {
+    let timeout = Duration::from_millis(500);
+    let prompt = Arc::new(FakePrompt::new([Answer::After(Duration::ZERO, true)]));
+    let approvals = approvals(&prompt, timeout);
+    let shown = approvals.show(&request(vec![])).expect("shown");
+    wait_until_answered(&approvals);
+    std::thread::sleep(timeout + Duration::from_millis(100));
+    assert_eq!(approvals.wait(shown), Decision::Approved);
+}
+
 #[test]
 fn only_one_dialog_shows_at_a_time() {
     let hold = Duration::from_millis(40);
