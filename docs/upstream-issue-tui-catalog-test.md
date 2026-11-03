@@ -48,7 +48,11 @@ handling may have regressed with the model-picker discovery work.
 
 ---
 
-## Checklist para publicar (flujo contribuciones)
+## Publicado
+
+**Issue #5928**: https://github.com/Gentleman-Programming/gentle-ai/issues/5928 (HTTP 201)
+
+## Checklist usado al publicar
 
 - [ ] Cuenta con acceso a gh (`gh auth status`)
 - [ ] Publicar en Gentleman-Programming/gentle-ai (issue-first, sin PR hasta approved)
