@@ -9,6 +9,9 @@ import { spawn, ChildProcess, SpawnOptions } from 'child_process';
 import { EventEmitter } from 'events';
 import * as path from 'path';
 
+/** Id del comando get_state usado como sonda de readiness del engine (protocolo RPC de pi). */
+const RPC_PROBE_ID = 'gentle-shell-ready-probe';
+
 export interface ShellConfig {
   home: string;           // ~/.gentle-dot/agent
   engramProject: string;  // gentle-dot
@@ -72,14 +75,34 @@ export class GentleShellSpawner extends EventEmitter {
         return;
       }
 
-      // Handle stdout
+      // Readiness probe: pi's RPC mode has no startup banner; a get_state
+      // command queued on stdin is answered once the RPC loop is up.
+      this.shellProcess.stdin?.write(
+        JSON.stringify({ id: RPC_PROBE_ID, type: 'get_state' }) + '\n',
+      );
+
+      // Handle stdout: pi RPC mode speaks strict JSONL on stdout.
+      let stdoutBuffer = '';
       this.shellProcess.stdout?.on('data', (data: Buffer) => {
-        const output = data.toString().trim();
-        if (output) {
-          console.log('[GentleShellSpawner:stdout]', output);
-          // Check for ready signal in stdout
-          if (output.includes('ready') || output.includes('RPC server listening')) {
+        stdoutBuffer += data.toString();
+        let index: number;
+        while ((index = stdoutBuffer.indexOf('\n')) !== -1) {
+          const line = stdoutBuffer.slice(0, index).replace(/\r$/, '').trim();
+          stdoutBuffer = stdoutBuffer.slice(index + 1);
+          if (!line) continue;
+          console.log('[GentleShellSpawner:stdout]', line);
+          // Legacy heuristic kept for older engines, plus the protocol-correct
+          // probe: pi answers our get_state with a response repeating its id.
+          if (line.includes('ready') || line.includes('RPC server listening')) {
             this.handleReady();
+          }
+          try {
+            const record = JSON.parse(line) as { id?: string; type?: string };
+            if (record.id === RPC_PROBE_ID && record.type === 'response') {
+              this.handleReady();
+            }
+          } catch {
+            // Non-JSON stdout line: the legacy heuristic result stands.
           }
         }
       });
@@ -139,23 +162,20 @@ export class GentleShellSpawner extends EventEmitter {
 
   /**
    * Build command line arguments
+   *
+   * The installed gentle-shell is a launcher: its own options come first
+   * (--home, --link, --isolated, --package-root) and everything after `--` is
+   * forwarded to pi, which accepts --mode rpc and --append-system-prompt.
+   * The legacy flags (--log-level, --no-auto-setup) are not pi options and the
+   * launcher rejects them.
    */
   private buildArgs(config: ShellConfig): string[] {
     const args = [
-      '--mode', 'rpc',
       '--home', config.home,
+      '--',
+      '--mode', config.mode,
+      '--append-system-prompt', IDENTITY_PROMPT,
     ];
-
-    if (config.logLevel) {
-      args.push('--log-level', config.logLevel);
-    }
-
-    if (config.noAutoSetup) {
-      args.push('--no-auto-setup');
-    }
-
-    // Append sanitized identity prompt
-    args.push('--append-system-prompt', IDENTITY_PROMPT);
 
     return args;
   }
