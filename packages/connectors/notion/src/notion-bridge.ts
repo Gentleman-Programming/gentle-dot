@@ -106,7 +106,6 @@ export class NotionBridge extends BaseBridge {
       case 'ready': {
         const ready = message.payload as ReadyPayload;
         this.logFn(`Daemon ready, session: ${ready.sessionId}`);
-        this.updateDaemonToken();
         break;
       }
       case 'agent_state': {
@@ -124,7 +123,8 @@ export class NotionBridge extends BaseBridge {
         const payload = message.payload as { code: string; message: string };
         if (payload.code === 'unauthorized') {
           this.logFn('Daemon rejected token, attempting re-auth');
-          this.updateDaemonToken();
+          // Re-auth: clean reconnect re-hello after the daemon cleaned up the old registration.
+          void this.disconnect().then(() => this.connect());
         }
         break;
       }
@@ -133,13 +133,6 @@ export class NotionBridge extends BaseBridge {
     }
   }
 
-  private async updateDaemonToken(): Promise<void> {
-    try {
-      this.sendHello();
-    } catch (e) {
-      this.logFn(`Failed to update daemon token: ${(e as Error).message}`);
-    }
-  }
 
   // ============ MCP Server Management ============
 
