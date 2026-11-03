@@ -521,6 +521,7 @@ fn is_excluded(hwnd: HWND) -> bool {
 
 /// Wait even when no visible windows needed exclusion: a just-hidden panel may still be composed.
 fn wait_for_composition() -> Result<(), String> {
+    // No timeout: if DwmFlush stalls, it holds the tool call open with no ceiling.
     // SAFETY: a plain call; it waits for the next composition.
     let result = unsafe { DwmFlush() };
     if result < 0 {
@@ -617,9 +618,9 @@ fn restore_affinity(changed: &[(HWND, u32)]) {
     let mut saved = CALL_AFFINITIES.lock().unwrap_or_else(|error| error.into_inner());
     for &(hwnd, previous) in changed {
         // A hide may have taken ownership since enumeration. Hand it the original affinity
-        // instead of undoing its exclusion; it will restore only after showing the window.
-        if let Some((_, original)) = saved.iter_mut().find(|(window, _)| *window == hwnd as usize) {
-            *original = previous;
+        // instead of undoing its exclusion; it restores after showing, or at call end if left hidden.
+        if let Some(index) = super::capture_order::current_window(&saved, hwnd as usize, call_handles()) {
+            saved[index].1.1 = previous;
             continue;
         }
         let _change = WindowChange::begin();
@@ -1542,19 +1543,42 @@ pub fn show_overlay(hwnd: *mut c_void, visible: bool) {
 }
 
 // Main-thread show/hide callers serialize these entries. Keep the original value, including
-// WDA_MONITOR, rather than assuming every window started at WDA_NONE. A user-hidden Dot retains
-// its entry only until it is next shown; no visible window stays excluded for the session.
-static CALL_AFFINITIES: std::sync::Mutex<Vec<(usize, u32)>> = std::sync::Mutex::new(Vec::new());
+// WDA_MONITOR, rather than assuming every window started at WDA_NONE. Showing releases an entry;
+// the owning call's restore phase releases its remainder, including a user-hidden Dot.
+// A newer hide takes ownership without losing the original affinity; delayed older restores
+// cannot release it. Failed dispatch restores affinity directly without showing the window.
+// If native restoration fails, owner None retains the original for the next show (after showing)
+// or hide (adopt, never read the still-excluded value). Logical keys bound this to one record
+// per Dot/panel for the process lifetime, never per recyclable HWND or failed call.
+static CALL_AFFINITIES: std::sync::Mutex<Vec<(Option<u64>, (super::working::Part, u32))>> = std::sync::Mutex::new(Vec::new());
+// The Dot and panel are created once and live until process exit. Record their handles on
+// the main thread at creation; worker cleanup must never query Tauri while holding our lock.
+static CALL_WINDOWS: [std::sync::OnceLock<usize>; 2] = [std::sync::OnceLock::new(), std::sync::OnceLock::new()];
+
+pub fn record_call_window(part: super::working::Part, hwnd: HWND) {
+    CALL_WINDOWS[part as usize].set(hwnd as usize).expect("call window is created only once");
+}
+
+fn call_window(part: super::working::Part) -> Option<usize> {
+    CALL_WINDOWS[part as usize].get().copied()
+}
+
+fn call_handles() -> [Option<usize>; 2] {
+    [call_window(super::working::Part::Dot), call_window(super::working::Part::Panel)]
+}
 
 /// Exclude before hiding. If exclusion fails, still hide, then put this window back and fail
 /// preparation: Working has not yet recorded it as hidden and cannot restore it on that error.
 /// The failed call therefore never reaches capture, and no persistent failure poisons later calls.
-pub fn hide_for_call(hwnd: *mut c_void) -> Result<(), String> {
+pub fn hide_for_call(part: super::working::Part, operation: u64) -> Result<(), String> {
+    let hwnd = call_window(part).ok_or_else(|| format!("window {part:?} is missing"))? as HWND;
     let _change = WindowChange::begin();
     let mut saved = CALL_AFFINITIES.lock().unwrap_or_else(|error| error.into_inner());
     let result = super::capture_order::hide(|| {
-        if saved.iter().any(|&(window, _)| window == hwnd as usize) {
-            return set_capture_excluded(hwnd, true);
+        if let Some((owner, _)) = saved.iter_mut().find(|(_, (window, _))| *window == part) {
+            set_capture_excluded(hwnd, true)?;
+            *owner = Some(operation);
+            return Ok(());
         }
         let mut previous = 0;
         // SAFETY: a query on our window with a valid out-pointer.
@@ -1562,7 +1586,7 @@ pub fn hide_for_call(hwnd: *mut c_void) -> Result<(), String> {
             return Err(format!("cannot read its capture affinity: {}", std::io::Error::last_os_error()));
         }
         set_capture_excluded(hwnd, true)?;
-        saved.push((hwnd as usize, previous));
+        saved.push((Some(operation), (part, previous)));
         Ok(())
     }, || {
         // SAFETY: a call on this process's window.
@@ -1578,8 +1602,8 @@ pub fn hide_for_call(hwnd: *mut c_void) -> Result<(), String> {
 
 fn restore_call_affinity(hwnd: HWND) {
     let mut saved = CALL_AFFINITIES.lock().unwrap_or_else(|error| error.into_inner());
-    let Some(index) = saved.iter().position(|&(window, _)| window == hwnd as usize) else { return };
-    let previous = saved[index].1;
+    let Some(index) = super::capture_order::current_window(&saved, hwnd as usize, call_handles()) else { return };
+    let previous = saved[index].1.1;
     // This function is called only inside the showing WindowChange, after ShowWindow. Restoring
     // even a nonzero affinity must count as a change, so an overlapping capture cannot be accepted.
     // SAFETY: a call on this process's window, restoring the value read before the call.
@@ -1588,6 +1612,30 @@ fn restore_call_affinity(hwnd: HWND) {
     } else {
         eprintln!("gentle-dot: a window may stay out of screenshots: {}", std::io::Error::last_os_error());
     }
+}
+
+/// End the serialized call's affinity ownership after its eligible windows have been shown.
+/// Remaining windows were left hidden by the user (or their show/affinity restore failed).
+/// Read the recorded handles only; native failures retain ownerless recovery values.
+pub fn finish_call_affinities(operation: u64) {
+    let _change = WindowChange::begin();
+    let mut saved = CALL_AFFINITIES.lock().unwrap_or_else(|error| error.into_inner());
+    super::capture_order::release(&mut saved, operation, |(part, previous)| {
+        let Some(hwnd) = call_window(part) else { return true };
+        // SAFETY: the current handle of our logical window. This API requires process
+        // ownership, not the window's thread, so dispatch failure can restore it directly.
+        let restored = unsafe { SetWindowDisplayAffinity(hwnd as HWND, previous) } != 0;
+        if !restored {
+            eprintln!("gentle-dot: a window may stay out of screenshots: {}", std::io::Error::last_os_error());
+        }
+        restored
+    });
+}
+
+/// Main-thread dispatch failed: leave windows hidden but restore their original affinity
+/// inside WindowChange. The owner filter protects a newer hide; failures keep recovery values.
+pub fn abandon_call_affinities(operation: u64) {
+    finish_call_affinities(operation);
 }
 
 pub fn show_without_activating(hwnd: *mut c_void) {

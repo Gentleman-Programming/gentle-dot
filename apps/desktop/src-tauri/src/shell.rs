@@ -92,10 +92,13 @@ impl working::Windows for ShellWindows {
 
     fn hide(&self, part: Part) -> Result<(), String> {
         let window = self.get(part).ok_or_else(|| format!("window {part:?} is missing"))?;
-        #[cfg(windows)]
-        return computer::hide_for_call(&window);
-        #[cfg(not(windows))]
         window.hide().map_err(err)
+    }
+
+    #[cfg(windows)]
+    fn hide_for_operation(&self, part: Part, operation: u64) -> Result<(), String> {
+        // Bypass tao so its visibility flag continues to represent the user's choice.
+        crate::computer::win::hide_for_call(part, operation)
     }
 
     fn show(&self, part: Part) {
@@ -107,6 +110,16 @@ impl working::Windows for ShellWindows {
         if let Err(error) = shown {
             eprintln!("gentle-dot: cannot show the {part:?} again: {error}");
         }
+    }
+
+    #[cfg(windows)]
+    fn finish_restore(&self, operation: u64) {
+        crate::computer::win::finish_call_affinities(operation);
+    }
+
+    #[cfg(windows)]
+    fn abandon_restore(&self, operation: u64) {
+        crate::computer::win::abandon_call_affinities(operation);
     }
 
     fn rose_hidden(&self) -> bool {
@@ -584,6 +597,8 @@ fn build_windows(
     #[cfg(windows)]
     let dot = dot.minimizable(false);
     let dot = dot.build()?;
+    #[cfg(windows)]
+    crate::computer::win::record_call_window(Part::Dot, dot.hwnd()?.0);
     // Linux has no window effects; the panel URL tells the UI to paint an opaque background.
     let panel = WebviewWindowBuilder::new(app, PANEL, WebviewUrl::App(platform::panel_url(Os::CURRENT).into()))
         .title(PANEL_TITLE)
@@ -601,6 +616,12 @@ fn build_windows(
     #[cfg(target_os = "macos")]
     let panel = panel
         .effects(EffectsBuilder::new().effect(Effect::HudWindow).state(EffectState::Active).radius(20.0).build());
+    #[cfg(windows)]
+    {
+        let panel = panel.build()?;
+        crate::computer::win::record_call_window(Part::Panel, panel.hwnd()?.0);
+    }
+    #[cfg(not(windows))]
     panel.build()?;
 
     if !places_windows {

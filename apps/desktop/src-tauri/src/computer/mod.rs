@@ -54,10 +54,59 @@ mod capture_order {
         restore();
     }
 
+    /// Match only the process-lifetime handles recorded at window creation. No resolver or
+    /// main-thread dispatch is permitted here: callers may hold the affinity lock on a worker.
+    pub(super) fn current_window(saved: &[(Option<u64>, (super::working::Part, u32))], hwnd: usize,
+        handles: [Option<usize>; 2]) -> Option<usize> {
+        saved.iter().position(|(_, (window, _))| handles[*window as usize] == Some(hwnd))
+    }
+
+    /// End call ownership, retaining an ownerless recovery value if native restoration fails.
+    /// Callers keep at most one entry per window and adopt it on a later hide.
+    pub(super) fn release<T: Copy>(saved: &mut Vec<(Option<u64>, T)>, operation: u64, mut restore: impl FnMut(T) -> bool) {
+        saved.retain_mut(|(owner, entry)| {
+            if *owner != Some(operation) { return true; }
+            *owner = None;
+            !restore(*entry)
+        });
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
         use std::cell::RefCell;
+
+        #[test]
+        fn matching_under_the_affinity_lock_never_dispatches_a_window_query() {
+            let saved = std::sync::Mutex::new(vec![(Some(1), (super::super::working::Part::Dot, 7))]);
+            let guard = saved.lock().unwrap();
+            // The API accepts only recorded values, so querying Tauri is not an option.
+            assert_eq!(current_window(&guard, 101, [Some(101), Some(102)]), Some(0));
+            assert_eq!(current_window(&guard, 201, [Some(101), Some(102)]), None);
+            assert_eq!(current_window(&guard, 101, [None, None]), None);
+        }
+
+        #[test]
+        fn release_restores_original_values_and_leaves_no_stale_entry_for_the_next_call() {
+            let mut saved = vec![(Some(10), (1, 7)), (Some(10), (2, 0)), (Some(11), (3, 9))];
+            let mut restored = Vec::new();
+            release(&mut saved, 10, |entry| { restored.push(entry); true });
+            assert_eq!(restored, [(1, 7), (2, 0)]);
+            assert_eq!(saved, [(Some(11), (3, 9))]);
+            release(&mut saved, 11, |_| true);
+            assert!(saved.is_empty());
+            // The next hide can save a different current affinity for the same window.
+            saved.push((Some(12), (1, 9)));
+            release(&mut saved, 12, |entry| { restored.push(entry); true });
+            assert_eq!(restored.last(), Some(&(1, 9)));
+            assert!(saved.is_empty());
+            // Native failure ends call ownership but must not discard the true original.
+            saved.push((Some(12), (1, 9)));
+            release(&mut saved, 12, |_| false);
+            assert_eq!(saved, [(None, (1, 9))]);
+            release(&mut saved, 12, |_| panic!("an old call cannot touch recovery state"));
+            assert_eq!(saved, [(None, (1, 9))]);
+        }
 
         #[test]
         fn capture_waits_even_without_new_exclusions() {
