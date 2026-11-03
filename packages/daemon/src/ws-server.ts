@@ -20,7 +20,14 @@ export type BridgeMessageType =
   | 'command'
   | 'command_result'
   | 'error'
-  | 'disconnect';
+  | 'disconnect'
+  | 'agent_state'
+  | 'message_delta'
+  | 'message_done'
+  | 'activity'
+  | 'send'
+  | 'abort'
+  | 'ui_response';
 
 export interface BridgeMessage {
   type: BridgeMessageType;
@@ -271,6 +278,9 @@ export class WsServer extends EventEmitter {
           case 'connector_event':
           case 'command':
           case 'command_result':
+          case 'send':
+          case 'abort':
+          case 'ui_response':
             this.emit('onMessage', state.connectorId, message);
             break;
           case 'disconnect':

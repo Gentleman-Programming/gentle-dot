@@ -91,6 +91,14 @@ export class Daemon {
 
     this.wsServer.on('onDisconnection', (connectorId, code, reason) => {
       console.log(`[Daemon] Bridge disconnected: ${connectorId} (${code}: ${reason})`);
+      // Si el conector origen del run activo se cae, cerramos el run:
+      // la respuesta no tendría destino. El steer de otros conectores sigue vivo.
+      const run = this.activeRun;
+      if (run && run.connectorId === connectorId) {
+        console.log(`[Daemon] run activo ${run.messageId} abandonado (conector ${connectorId} desconectado)`);
+        this.activeRun = null;
+        this.shellSpawner.rpc('abort', {}, 60_000).catch(() => {});
+      }
     });
 
     // MCP Proxy events
@@ -114,11 +122,129 @@ export class Daemon {
     });
   }
 
+  /** Run activo: el conector que originó el prompt actual y su messageId. */
+  private activeRun: { connectorId: string; messageId: string } | null = null;
+
+  /** Fija el modelo del engine (GENTLE_DOT_ENGINE_MODEL, default nan/glm5.3). */
+  private configureEngineModel(): void {
+    const model = process.env['GENTLE_DOT_ENGINE_MODEL'] ?? 'nan/glm5.3';
+    const slash = model.indexOf('/');
+    if (slash <= 0) {
+      console.warn(`[Daemon] GENTLE_DOT_ENGINE_MODEL inválido: ${model} (se espera provider/model)`);
+      return;
+    }
+    const provider = model.slice(0, slash);
+    const modelId = model.slice(slash + 1);
+    this.shellSpawner
+      .rpc('set_model', { provider, modelId })
+      .then(() => console.log(`[Daemon] Engine model: ${model}`))
+      .catch((error) => console.error(`[Daemon] set_model falló: ${(error as Error).message}`));
+  }
+
+  /**
+   * Eventos del engine (pi RPC) → protocolo de conectores:
+   * text_delta → message_delta · message_end (assistant) → message_done ·
+   * tool_execution_start → activity · agent_settled → agent_state idle.
+   * Todo se espeja al appChannel; lo dirigido al chat va al conector de origen.
+   */
+  private wireEngineEvents(): void {
+    this.shellSpawner.on('engine-event', (event: Record<string, unknown>) => {
+      const type = event['type'] as string;
+      const origin = this.activeRun?.connectorId;
+
+      switch (type) {
+        case 'agent_start':
+          if (origin) this.wsServer.sendToConnector(origin, 'agent_state', { state: 'working' });
+          this.appChannel.broadcast('agent_state', { state: 'working' });
+          break;
+
+        case 'message_update': {
+          const nested = event['assistantMessageEvent'] as { type?: string; delta?: string } | undefined;
+          if (nested?.type === 'text_delta' && nested.delta && origin && this.activeRun) {
+            this.wsServer.sendToConnector(origin, 'message_delta', {
+              messageId: this.activeRun.messageId,
+              delta: nested.delta,
+            });
+          }
+          break;
+        }
+
+        case 'message_end': {
+          const message = event['message'] as { role?: string; content?: unknown } | undefined;
+          if (message?.role !== 'assistant' || !origin || !this.activeRun) break;
+          const text = this.extractText(message.content);
+          if (text.trim() !== '') {
+            this.wsServer.sendToConnector(origin, 'message_done', {
+              messageId: this.activeRun.messageId,
+              text,
+            });
+            this.appChannel.broadcast('message_done', {
+              messageId: this.activeRun.messageId,
+              connectorId: origin,
+              text,
+            });
+          }
+          break;
+        }
+
+        case 'tool_execution_start': {
+          const toolName = event['toolName'] as string | undefined;
+          const toolCallId = event['toolCallId'] as string | undefined;
+          if (toolName && origin && this.activeRun) {
+            this.wsServer.sendToConnector(origin, 'activity', {
+              messageId: this.activeRun.messageId,
+              activity: { id: toolCallId, kind: 'run', title: toolName, status: 'running' },
+            });
+          }
+          break;
+        }
+
+        case 'agent_settled': {
+          if (origin) this.wsServer.sendToConnector(origin, 'agent_state', { state: 'idle' });
+          this.appChannel.broadcast('agent_state', { state: 'idle' });
+          this.activeRun = null;
+          break;
+        }
+
+        default:
+          break;
+      }
+
+      // Espejo completo para la app de escritorio.
+      this.appChannel.broadcast('engine_event', event);
+    });
+  }
+
+  /** Extrae el texto de los content blocks de un mensaje del engine. */
+  private extractText(content: unknown): string {
+    if (typeof content === 'string') return content;
+    if (!Array.isArray(content)) return '';
+    return content
+      .map((block) => (typeof block === 'object' && block !== null && (block as { type?: string }).type === 'text'
+        ? String((block as { text?: unknown }).text ?? '')
+        : ''))
+      .join('');
+  }
+
   /**
    * Handle messages from bridges (WebSocket)
    */
   private async handleBridgeMessage(connectorId: string, message: any): Promise<void> {
     switch (message.type) {
+      case 'send': {
+        const payload = message.payload as { text?: string; attachments?: unknown };
+        const text = payload?.text?.trim();
+        if (!text) return;
+        this.chatSend(connectorId, text);
+        break;
+      }
+
+      case 'abort': {
+        this.shellSpawner.rpc('abort', {}, 60_000).catch((error) =>
+          console.error(`[Daemon] abort falló: ${(error as Error).message}`));
+        break;
+      }
+
       case 'channel_notify': {
         const payload = message.payload as { channelId: string; event: string; data: unknown };
         console.log(`[Daemon] Channel notify from ${connectorId}: ${payload.event} on ${payload.channelId}`);
@@ -155,6 +281,42 @@ export class Daemon {
         break;
       }
     }
+  }
+
+  /**
+   * Un prompt de un conector al engine. Con run activo de OTRO origen, el
+   * mensaje va como steer (influye la corrida; la respuesta sigue yendo al
+   * origen original). El 'send' rechazado por ocupado lo resuelve el bridge.
+   */
+  private chatSend(connectorId: string, text: string): void {
+    if (!this.shellSpawner.isReady()) {
+      this.wsServer.sendToConnector(connectorId, 'error', {
+        code: 'engine_unavailable',
+        message: 'El asistente no está disponible ahora.',
+      });
+      return;
+    }
+
+    const params: Record<string, unknown> = { message: text };
+    if (this.activeRun) {
+      params['streamingBehavior'] = 'steer';
+      console.log(`[Daemon] steer desde ${connectorId} (run activo de ${this.activeRun.connectorId})`);
+    } else {
+      this.activeRun = {
+        connectorId,
+        messageId: `msg-${Date.now().toString(36)}`,
+      };
+      console.log(`[Daemon] prompt desde ${connectorId} (run ${this.activeRun.messageId})`);
+    }
+
+    this.shellSpawner.rpc('prompt', params).catch((error) => {
+      console.error(`[Daemon] prompt falló: ${(error as Error).message}`);
+      this.activeRun = null;
+      this.wsServer.sendToConnector(connectorId, 'error', {
+        code: 'prompt_failed',
+        message: (error as Error).message,
+      });
+    });
   }
 
   /**
@@ -268,6 +430,7 @@ export class Daemon {
     } else {
     const shellConfig: ShellConfig = {
       home: this.config.daemon.workspace,
+      agentHome: process.env['GENTLE_DOT_AGENT_HOME'],
       engramProject: 'gentle-dot',
       mode: 'rpc',
       logLevel: this.config.daemon.log_level as any,
@@ -276,7 +439,11 @@ export class Daemon {
 
     await this.shellSpawner.start({
       config: shellConfig,
-      onReady: () => console.log('[Daemon] Gentle Shell RPC ready'),
+      onReady: () => {
+        console.log('[Daemon] Gentle Shell RPC ready');
+        this.configureEngineModel();
+        this.wireEngineEvents();
+      },
       onError: (error) => console.error('[Daemon] Gentle Shell error:', error),
       onExit: (code, signal) => console.log('[Daemon] Gentle Shell exited:', code, signal),
     });

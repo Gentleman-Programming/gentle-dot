@@ -12,12 +12,23 @@ import * as path from 'path';
 /** Id del comando get_state usado como sonda de readiness del engine (protocolo RPC de pi). */
 const RPC_PROBE_ID = 'gentle-shell-ready-probe';
 
+/** Respuesta correlacionada del protocolo RPC de pi. */
+export interface RpcResponse {
+  id: string;
+  type: 'response';
+  command: string;
+  success: boolean;
+  data?: unknown;
+}
+
 export interface ShellConfig {
   home: string;           // ~/.gentle-dot/agent
   engramProject: string;  // gentle-dot
   mode: 'rpc';            // siempre RPC
   logLevel?: 'debug' | 'info' | 'warn' | 'error';
   noAutoSetup?: boolean;  // GENTLE_SHELL_NO_AUTO_SETUP=1
+  /** Agent home for the engine's own state (auth, settings). Defaults to config.home. */
+  agentHome?: string;
 }
 
 export interface ShellSpawnOptions {
@@ -35,10 +46,18 @@ Eres un asistente personal directo y cálido.`;
 export class GentleShellSpawner extends EventEmitter {
   private shellProcess: ChildProcess | null = null;
   private config: ShellConfig | null = null;
+  /** RPC requests en flight, correlacionados por id (protocolo pi). */
+  private rpcPending = new Map<string, {
+    resolve: (value: RpcResponse) => void;
+    reject: (error: Error) => void;
+    timer: NodeJS.Timeout;
+  }>();
+  private rpcSeq = 0;
   private ready = false;
   private startPromise: Promise<void> | null = null;
   private startResolve: (() => void) | null = null;
   private startReject: ((error: Error) => void) | null = null;
+  private spawnOptions: ShellSpawnOptions | null = null;
 
   /**
    * Start Gentle Shell in RPC mode
@@ -49,6 +68,7 @@ export class GentleShellSpawner extends EventEmitter {
     }
 
     this.config = options.config;
+    this.spawnOptions = options;
 
     return new Promise((resolve, reject) => {
       this.startResolve = resolve;
@@ -101,6 +121,17 @@ export class GentleShellSpawner extends EventEmitter {
             if (record.id === RPC_PROBE_ID && record.type === 'response') {
               this.handleReady();
             }
+            // RPC client: correlated responses resolve pending requests; every
+            // parsed record is re-emitted as an engine event for the daemon.
+            if (record.id && record.type === 'response' && this.rpcPending.has(record.id)) {
+              const pending = this.rpcPending.get(record.id)!;
+              this.rpcPending.delete(record.id);
+              clearTimeout(pending.timer);
+              pending.resolve(record as unknown as { id: string; type: 'response'; command: string; success: boolean; data?: unknown });
+            }
+            if (record.type) {
+              this.emit('engine-event', record);
+            }
           } catch {
             // Non-JSON stdout line: the legacy heuristic result stands.
           }
@@ -131,6 +162,7 @@ export class GentleShellSpawner extends EventEmitter {
       this.shellProcess.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
         console.log('[GentleShellSpawner] Process exited:', code, signal);
         this.ready = false;
+        this.rejectAllRpc('Gentle Shell engine exited');
         this.cleanup();
         options.onExit?.(code, signal);
         this.emit('exit', code, signal);
@@ -161,6 +193,39 @@ export class GentleShellSpawner extends EventEmitter {
   }
 
   /**
+   * Sends one RPC command to the engine and resolves with its correlated
+   * response (pi protocol: strict JSONL, responses repeat the command id).
+   * Events arrive separately through 'engine-event'.
+   */
+  rpc<T = unknown>(type: string, params: Record<string, unknown> = {}, timeoutMs = 180_000): Promise<T> {
+    if (!this.shellProcess?.stdin || !this.ready) {
+      return Promise.reject(new Error('Gentle Shell engine is not ready'));
+    }
+    const id = `daemon-${++this.rpcSeq}-${Date.now().toString(36)}`;
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.rpcPending.delete(id);
+        reject(new Error(`RPC ${type} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.rpcPending.set(id, {
+        resolve: (value) => resolve(value as T),
+        reject,
+        timer,
+      });
+      this.shellProcess!.stdin!.write(JSON.stringify({ id, type, ...params }) + '\n');
+    });
+  }
+
+  /** Rejects every pending RPC when the engine dies. */
+  private rejectAllRpc(reason: string): void {
+    for (const [id, pending] of this.rpcPending) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(reason));
+      this.rpcPending.delete(id);
+    }
+  }
+
+  /**
    * Build command line arguments
    *
    * Matches the invocation the installed daemon uses (proven in production):
@@ -170,7 +235,7 @@ export class GentleShellSpawner extends EventEmitter {
    */
   private buildArgs(config: ShellConfig): string[] {
     return [
-      '--home', config.home,
+      '--home', config.agentHome ?? config.home,
       '--mode', config.mode,
       '--append-system-prompt', IDENTITY_PROMPT,
     ];
@@ -219,6 +284,7 @@ export class GentleShellSpawner extends EventEmitter {
     }
 
     this.emit('ready');
+    this.spawnOptions?.onReady?.();
   }
 
   /**
