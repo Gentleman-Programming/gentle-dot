@@ -17,7 +17,7 @@ and executable SHA256 against fixed production pins in `computer-providers.ts`.
 Missing files, wrong hashes, non-files and invalid identities fail closed.
 ScreenView's executable pin was derived without execution from the unique
 `screenview-mcp.exe` entry in its SHA256-verified Arise archive. Hands pins come
-from the local audited derivative manifest. There is no download or installation.
+from the local audited derivative manifest. There is no automatic download or installation.
 The resolver's optional expected-record argument is a deterministic test seam;
 daemon composition always uses production pins.
 
@@ -47,7 +47,37 @@ bounded by the declared size. This is intentionally not a general ZIP library.
 
 This API performs no filesystem writes, extraction, network access or execution.
 Acquisition must preserve the entire returned onedir payload, not just the EXE.
-It is not yet connected to daemon activation or the component cache.
+The standalone cache API below consumes this reader; daemon discovery wiring and
+activation remain separate work.
+
+## Private full-payload cache API
+
+`computer-components.ts` exports synchronous, trusted-host-only APIs on Windows x64:
+
+- `installComputerComponent(dataDir, archiveBuffer, kind)` validates all acquired bytes
+  before any filesystem mutation and returns `{ archivePath, executablePath }`.
+- `verifyCachedComputerComponent(dataDir, kind)` returns a verified record, `undefined`
+  when absent, or throws the path-free `Invalid computer component cache` error.
+- `discoverComputerComponents(dataDir)` returns only a complete verified eyes/hands pair,
+  or `undefined`. Discovery is read-only, including when missing or invalid.
+
+Production uses fixed `COMPUTER_ARTIFACTS`; optional expected pins are test-only.
+Versions live below the existing daemon data directory at
+`components/windows-x64/<kind>/<version>-<full archive SHA256>/`, with the original
+`archive.zip` separate from `payload/` (including every `_internal` file).
+Installation uses exclusive random staging, native private directories/buffer writes,
+full staged verification and a non-replacing Windows directory rename. Same-process
+calls serialize synchronously; a concurrent winner is reused only after verification.
+Old/invalid versions and failed staging are never overwritten or removed; no cache GC.
+
+Every verification revalidates the full pinned archive and compares the exact payload
+file/directory list and all file hashes, without trusting a generated receipt.
+Junctions/symlinks, escaping paths and multiply linked files fail closed. Native writes
+also reject reparse ancestors and enforce current-user/SYSTEM protected DACLs.
+This is artifact preparation, not a launch-time ownership check or a session grant.
+No network, executable loading, MCP exposure, model/WebSocket API or startup install
+is added. Public eyes download and honest local unpublished Dot-hands sourcing are
+still unimplemented, as are daemon cache fallback, native grant and effective Stop.
 
 ## Not activation
 
@@ -55,7 +85,7 @@ No managed provider starts, no managed tools enter the engine's MCP config,
 and readiness grants no session or approval exemption. Existing app-channel
 `computer_register` and generic connector per-call approvals are unchanged.
 
-Acquisition remains a later slice of the selected separate app/runtime/eyes/hands
+Source acquisition remains a later slice of the selected separate app/runtime/eyes/hands
 component distribution. Activation must validate the full extracted payload,
 revalidate executable identity and ownership at launch, obtain an authentic
 native session grant, and implement effective Stop before exposure. It must
