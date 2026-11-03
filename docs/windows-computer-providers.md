@@ -12,6 +12,15 @@ already-acquired local component records. Each record supplies absolute
 `archivePath` and `executablePath`. No environment flag, engine configuration,
 WebSocket message or app-channel registration supplies these records.
 
+When `computerComponents` is absent, startup calls the read-only
+`discoverComputerComponents(dataDir)` and passes its result through the same
+fixed-production-pin resolver. Discovery inspects only Windows x64; other
+platforms keep their existing routing without inspecting the cache. Explicit
+host records, including `{}` or a partial pair, take priority: they are never
+merged with or silently replaced by cached records. Missing or invalid caches
+remain unavailable without repairing the cache, installing, downloading or
+starting a provider. Ordinary daemon startup still creates its own runtime files.
+
 Preparation checks archive size/SHA256, the exact executable entry basename,
 and executable SHA256 against fixed production pins in `computer-providers.ts`.
 Missing files, wrong hashes, non-files and invalid identities fail closed.
@@ -23,8 +32,9 @@ daemon composition always uses production pins.
 
 `DotDaemon.computerProviders` exposes only `{ status, kind }`, never paths or
 credentials. `ready` means **artifact preparation only**, not permission to
-capture or control the desktop. Defaults are unavailable because acquisition
-has not supplied paths. `native-macos` describes routing, not helper readiness.
+capture or control the desktop. Default startup is unavailable unless discovery
+finds a complete verified cached pair. `native-macos` describes routing, not helper readiness.
+The returned status object is frozen and contains only `status` and `kind`.
 
 ## Read-only archive validation
 
@@ -47,8 +57,8 @@ bounded by the declared size. This is intentionally not a general ZIP library.
 
 This API performs no filesystem writes, extraction, network access or execution.
 Acquisition must preserve the entire returned onedir payload, not just the EXE.
-The standalone cache API below consumes this reader; daemon discovery wiring and
-activation remain separate work.
+The cache API below consumes this reader; daemon startup uses its read-only
+discovery, while acquisition and activation remain separate work.
 
 ## Private full-payload cache API
 
@@ -77,7 +87,9 @@ also reject reparse ancestors and enforce current-user/SYSTEM protected DACLs.
 This is artifact preparation, not a launch-time ownership check or a session grant.
 No network, executable loading, MCP exposure, model/WebSocket API or startup install
 is added. Public eyes download and honest local unpublished Dot-hands sourcing are
-still unimplemented, as are daemon cache fallback, native grant and effective Stop.
+still unimplemented, as are native grant and effective Stop. Cached readiness is
+cryptographic artifact verification only: full payload and ownership must be
+revalidated before any future launch.
 
 ## Not activation
 

@@ -24,6 +24,7 @@ import {
 	ConnectorStore,
 	policyEnv,
 } from "./connectors.ts";
+import { discoverComputerComponents } from "./computer-components.ts";
 import { directAccess, type EngineAccess, engineAccess } from "./engine-access.ts";
 import {
 	type AcquiredComponent,
@@ -53,6 +54,7 @@ import { identityArgs } from "./white-label.ts";
 
 export interface DaemonOptions {
 	/** Trusted host-acquired local files only; never read from env, engine or app messages.
+	 * When absent, discover the verified cache; explicit records (even {}) never fall back.
 	 * Preparation does not activate providers or grant a desktop session.
 	 */
 	computerComponents?: Partial<Record<"eyes" | "hands", AcquiredComponent>>;
@@ -165,7 +167,10 @@ export function startupMessage(url: string, dataDir: string, interactive: boolea
 
 export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	const log = options.log ?? (() => {});
-	const preparedComputer = await resolveComputerProviders({ components: options.computerComponents });
+	const components = options.computerComponents === undefined
+		? discoverComputerComponents(options.dataDir)
+		: options.computerComponents;
+	const preparedComputer = await resolveComputerProviders({ components });
 	// Deliberately not connected to McpProxy or engine config until T3 supplies an authentic
 	// native session gate. Later activation must reuse that proxy's owned stdio lifecycle.
 	const computerProviders = Object.freeze({ status: preparedComputer.status, kind: preparedComputer.kind });
