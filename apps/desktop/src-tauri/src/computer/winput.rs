@@ -7,7 +7,70 @@
 
 use super::coords::Point;
 use super::keys::KeyCombo;
-use super::{InputEvent, MouseButton};
+use super::{InputEvent, MouseButton, TypedError};
+
+/// Sample before the post presses its own modifiers, never between a combo's steps.
+/// GetAsyncKeyState's high bit means down; its low (pressed-since-query) bit is irrelevant.
+/// Pointer actions do not check held modifiers yet.
+pub fn without_held_modifiers(
+    mut key_state: impl FnMut(u16) -> i16,
+    post: impl FnOnce() -> Result<(), TypedError>,
+) -> Result<(), TypedError> {
+    let mut held = Vec::new();
+    for (name, left, right) in [
+        ("Ctrl", 0xa2, 0xa3), ("Alt", 0xa4, 0xa5),
+        ("Shift", 0xa0, 0xa1), ("Win", 0x5b, 0x5c),
+    ] {
+        if key_state(left) < 0 || key_state(right) < 0 {
+            held.push(name);
+        }
+    }
+    if held.is_empty() {
+        post()
+    } else {
+        Err(TypedError::HeldModifiers(held.join(" and ")))
+    }
+}
+
+#[cfg(test)]
+mod held_modifier_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn either_side_of_every_modifier_refuses_before_posting() {
+        for (name, keys) in [("Ctrl", [0xa2, 0xa3]), ("Alt", [0xa4, 0xa5]),
+            ("Shift", [0xa0, 0xa1]), ("Win", [0x5b, 0x5c])] {
+            for held in keys {
+                assert_eq!(without_held_modifiers(
+                    |key| if key == held { i16::MIN } else { 0 },
+                    || panic!("held modifier must prevent the post")),
+                    Err(TypedError::HeldModifiers(name.into())));
+            }
+        }
+    }
+
+    #[test]
+    fn multiple_modifiers_are_named_once_in_stable_order() {
+        let error = without_held_modifiers(
+            |key| if [0xa2, 0xa3, 0xa0].contains(&key) { i16::MIN } else { 0 },
+            || panic!("must not post")).unwrap_err();
+        assert_eq!(error.message(false), "Ctrl and Shift are held down, so nothing was sent. Release Ctrl and Shift and try again.");
+    }
+
+    #[test]
+    fn own_combo_modifiers_are_pressed_only_after_the_snapshot() {
+        let injecting = Cell::new(false);
+        without_held_modifiers(|_| {
+            assert!(!injecting.get(), "must not read our own injected modifier");
+            1 // Previously pressed, but no longer held.
+        }, || {
+            injecting.set(true);
+            Ok(())
+        }).unwrap();
+        assert!(injecting.get());
+    }
+}
 
 /// One notch of the mouse wheel (`WHEEL_DELTA`).
 pub const WHEEL_DELTA: i32 = 120;

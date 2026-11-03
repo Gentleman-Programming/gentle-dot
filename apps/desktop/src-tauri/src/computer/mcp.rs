@@ -1677,6 +1677,38 @@ mod tests {
     }
 
     #[test]
+    fn held_ctrl_refuses_key_without_sending_anything() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.held_keys_at.lock().unwrap() = Some((1, vec![0xa2]));
+        let result = rig.call("key", json!({"combo": "return"}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), "Ctrl is held down, so nothing was sent. Release Ctrl and try again.");
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn held_shift_stops_type_before_the_next_return() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.held_keys_at.lock().unwrap() = Some((2, vec![0xa1]));
+        let result = rig.call("type", json!({"text": "hello\nworld"}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), "Shift is held down, so the rest was not sent. Release Shift and try again. Typing stopped after 5 of 11 characters.");
+        assert_eq!(rig.desktop.events(), vec![InputEvent::Text("hello".into())]);
+    }
+
+    #[test]
+    fn no_held_modifiers_leaves_a_combo_unchanged() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.held_keys_at.lock().unwrap() = Some((1, vec![]));
+        let result = rig.call("key", json!({"combo": "ctrl+t"}));
+        assert!(!is_error(&result), "{result}");
+        assert_eq!(rig.desktop.events(), vec![InputEvent::Key(parse_combo("ctrl+t").unwrap())]);
+    }
+
+    #[test]
     fn a_backend_refusal_of_a_key_says_the_key_was_not_sent() {
         // The same wording as the helper's own recheck of the key (#167).
         let rig = rig();
