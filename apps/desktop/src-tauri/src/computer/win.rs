@@ -29,8 +29,8 @@ use super::risk::{AxElement, Focus};
 use super::glow::Frame;
 use super::winaccess::{element, is_default, known_chain, unreadable, UIA_BUTTON, UIA_WINDOW};
 use super::winapps::{
-    answers_to, app_pids, executable_target, fronts_same_app, hosted_page, request, shortcut_named, strip_ci, Request,
-    TopWindow,
+    answers_to, executable_target, fronts_same_app, hosted_page, listed_name, listed_windows, request, shortcut_named,
+    strip_ci, Request, TopWindow,
 };
 use super::winput::{checks_typing_target, releases, send_batches, settles, steps, Step, VirtualScreen};
 use super::{
@@ -915,18 +915,99 @@ pub fn window_owner_at(at: Point) -> Option<AppIdentity> {
     (!root.is_null()).then(|| target_of(root))
 }
 
+/// The shell display name for the AppUserModelID stored on a frame. These shell COM interfaces
+/// are used only here; all returned objects and strings are released before leaving the apartment.
+fn frame_app_name(hwnd: HWND) -> Option<String> {
+    use windows_sys::core::GUID;
+
+    #[repr(C)]
+    struct PropertyKey { fmtid: GUID, pid: u32 }
+    // PROPVARIANT: the value union has room for two pointers on either supported pointer width.
+    #[repr(C)]
+    struct PropVariant { vt: u16, reserved: [u16; 3], value: [usize; 2] }
+    #[repr(C)]
+    struct PropertyStoreVtable {
+        prefix: [*const c_void; 5],
+        get_value: unsafe extern "system" fn(*mut c_void, *const PropertyKey, *mut PropVariant) -> i32,
+    }
+    #[repr(C)]
+    struct ShellItemVtable {
+        prefix: [*const c_void; 5],
+        get_display_name: unsafe extern "system" fn(*mut c_void, u32, *mut *mut u16) -> i32,
+    }
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SHGetPropertyStoreForWindow(hwnd: HWND, iid: *const GUID, out: *mut *mut c_void) -> i32;
+        fn SHCreateItemInKnownFolder(folder: *const GUID, flags: u32, path: *const u16, iid: *const GUID, out: *mut *mut c_void) -> i32;
+    }
+    #[link(name = "ole32")]
+    extern "system" {
+        fn PropVariantClear(value: *mut PropVariant) -> i32;
+        fn CoTaskMemFree(ptr: *mut c_void);
+    }
+    struct ComPtr(*mut c_void);
+    impl Drop for ComPtr {
+        fn drop(&mut self) {
+            // SAFETY: all ComPtr values hold a live interface with IUnknown as its first vtable.
+            unsafe {
+                let vtable = *(self.0 as *const *const *const c_void);
+                let release: unsafe extern "system" fn(*mut c_void) -> u32 = std::mem::transmute(*vtable.add(2));
+                release(self.0);
+            }
+        }
+    }
+    const STORE: GUID = GUID::from_u128(0x886d8eeb_8cf2_4446_8d02_cdba1dbdcf99);
+    const ITEM: GUID = GUID::from_u128(0x43826d1e_e718_42ee_bc55_a1e261c37bfe);
+    const APPS: GUID = GUID::from_u128(0x1e87508d_89c2_42f0_8a7e_645a0f50ca58);
+    const AUMID: PropertyKey = PropertyKey { fmtid: GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3), pid: 5 };
+    let _apartment = Apartment::join(Apartment::SHELL);
+    // SAFETY: shell calls fill the indicated out-pointers; successful interfaces are released,
+    // the PROPVARIANT is cleared, and the shell-allocated display name is freed.
+    unsafe {
+        let mut raw = null_mut();
+        if SHGetPropertyStoreForWindow(hwnd, &STORE, &mut raw) < 0 || raw.is_null() { return None; }
+        let store = ComPtr(raw);
+        let vtable = &**(store.0 as *const *const PropertyStoreVtable);
+        let mut value: PropVariant = zeroed();
+        let result = (vtable.get_value)(store.0, &AUMID, &mut value);
+        let mut item_raw = null_mut();
+        if result >= 0 && value.vt == 31 && value.value[0] != 0 {
+            SHCreateItemInKnownFolder(&APPS, 0, value.value[0] as *const u16, &ITEM, &mut item_raw);
+        }
+        PropVariantClear(&mut value);
+        if item_raw.is_null() { return None; }
+        let item = ComPtr(item_raw);
+        let vtable = &**(item.0 as *const *const ShellItemVtable);
+        let mut name = null_mut();
+        if (vtable.get_display_name)(item.0, 0, &mut name) < 0 || name.is_null() { return None; }
+        let mut len = 0;
+        while *name.add(len) != 0 { len += 1; }
+        let result = String::from_utf16_lossy(std::slice::from_raw_parts(name, len));
+        CoTaskMemFree(name.cast());
+        Some(result)
+    }
+}
+
 /// The running apps, front to back, or why they cannot be listed (a partial list would read as
 /// apps that are not running).
 pub fn list_apps() -> Result<Vec<AppInfo>, String> {
     let active = frontmost_app().map(|app| app.pid);
-    let windows: Vec<TopWindow> = top_windows()?.into_iter().map(|(_, window)| window).collect();
-    Ok(app_pids(&windows)
-        .into_iter()
-        .map(|pid| {
-            let id = identity(pid);
-            AppInfo { name: id.name, bundle_id: id.bundle_id, active: active == Some(pid) }
-        })
-        .collect())
+    let windows = top_windows()?;
+    let listing: Vec<(TopWindow, bool)> = windows.iter().map(|(hwnd, window)| {
+        let detached = class_name(*hwnd).as_deref() == Some(FRAME_CLASS)
+            && app_pid(*hwnd).is_none() && is_frame_host(&identity(window.pid));
+        (window.clone(), detached)
+    }).collect();
+    Ok(listed_windows(&listing).into_iter().map(|index| {
+        let (hwnd, _) = &windows[index];
+        let (window, detached) = &listing[index];
+        let id = identity(window.pid);
+        // A detached frame is only named for listing; it cannot be acted on until restored and
+        // identified. target_of and every blocklist/activation check keep their existing identity.
+        let name = listed_name(*detached, if *detached { frame_app_name(*hwnd) } else { None },
+            if *detached { Some(window.title.clone()) } else { None }, id.name);
+        AppInfo { name, bundle_id: id.bundle_id, active: active == Some(window.pid) }
+    }).collect())
 }
 
 /// Brings a window to the front. Windows lets only the process that received the last input
@@ -1764,6 +1845,21 @@ impl super::Desktop for WinDesktop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "interactive Windows desktop: minimize Settings before running"]
+    fn detached_settings_is_still_an_unidentified_refused_target() {
+        let (hwnd, _) = top_windows().unwrap().into_iter().find(|(hwnd, window)| {
+            window.is_app() && class_name(*hwnd).as_deref() == Some(FRAME_CLASS)
+                && app_pid(*hwnd).is_none() && is_frame_host(&identity(window.pid))
+                && listed_name(true, frame_app_name(*hwnd), Some(window.title.clone()), String::new())
+                    .eq_ignore_ascii_case("Settings")
+        }).expect("minimize Settings in an English Windows session first");
+        let target = target_of(hwnd);
+        assert_eq!(target.name, UNIDENTIFIED);
+        assert!(target.bundle_id.is_none());
+        assert!(blocked_reason(&target, std::process::id() as i32).is_some());
+    }
 
     fn per_monitor_aware() {
         use windows_sys::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};

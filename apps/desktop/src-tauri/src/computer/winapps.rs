@@ -26,6 +26,7 @@ impl TopWindow {
 }
 
 /// The processes with an app window, front to back, each once.
+#[cfg(test)]
 pub fn app_pids(windows: &[TopWindow]) -> Vec<i32> {
     let mut pids = Vec::new();
     for window in windows.iter().filter(|w| w.is_app()) {
@@ -34,6 +35,31 @@ pub fn app_pids(windows: &[TopWindow]) -> Vec<i32> {
         }
     }
     pids
+}
+
+/// Indices to list, given each window and whether its Store frame is detached.
+pub fn listed_windows(windows: &[(TopWindow, bool)]) -> Vec<usize> {
+    let mut pids = Vec::new();
+    let mut indices = Vec::new();
+    for (index, (window, detached)) in windows.iter().enumerate() {
+        if window.is_app() && (*detached || !pids.contains(&window.pid)) {
+            if !detached {
+                pids.push(window.pid);
+            }
+            indices.push(index);
+        }
+    }
+    indices
+}
+
+/// Display name for a detached frame; never changes the action identity.
+pub fn listed_name(detached: bool, aumid_name: Option<String>, title: Option<String>, original: String) -> String {
+    if !detached {
+        return original;
+    }
+    aumid_name.filter(|name| !name.trim().is_empty())
+        .or_else(|| title.filter(|name| !name.trim().is_empty()))
+        .unwrap_or(original)
 }
 
 /// What `open_app` was asked for: an app's name, or a local program or shortcut by path.
@@ -151,6 +177,25 @@ mod tests {
 
     fn window(pid: i32, title: &str) -> TopWindow {
         TopWindow { pid, title: title.into(), visible: true, cloaked: false, tool: false, app_window: false, owned: false }
+    }
+
+    #[test]
+    fn detached_frame_name_prefers_app_name_then_title_then_host() {
+        let s = |x: &str| Some(x.to_string());
+        assert_eq!(listed_name(true, s("Calculator"), s("Title"), "Application Frame Host".into()), "Calculator");
+        assert_eq!(listed_name(true, None, s("Settings"), "Application Frame Host".into()), "Settings");
+        assert_eq!(listed_name(true, None, s("  "), "Application Frame Host".into()), "Application Frame Host");
+        assert_eq!(listed_name(true, None, None, "Application Frame Host".into()), "Application Frame Host");
+        assert_eq!(listed_name(false, s("wrong"), s("wrong"), "Notepad".into()), "Notepad");
+    }
+
+    #[test]
+    fn detached_frames_are_listed_individually_other_apps_by_pid() {
+        let windows = [(window(7, "Calculator"), true), (window(7, "Settings"), true),
+            (window(9, "attached"), false), (window(9, "attached again"), false),
+            (window(10, "Notepad"), false), (window(10, "Notepad again"), false),
+            (TopWindow { visible: false, ..window(7, "hidden") }, true)];
+        assert_eq!(listed_windows(&windows), [0, 1, 2, 4]);
     }
 
     #[test]
