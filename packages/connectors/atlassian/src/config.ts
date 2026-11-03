@@ -47,7 +47,7 @@ export function loadConfig(env: Record<string, string | undefined>, home: string
   const tokenFile = env.GENTLE_DOT_TOKEN_FILE?.trim() || join(home, ".gentle-dot", "token");
 
   const mcpCommand = env.ATLASSIAN_MCP_COMMAND?.trim() || "npx";
-  const mcpArgs = (env.ATLASSIAN_MCP_ARGS ?? "@atlassian/mcp-server").split(" ").map(s => s.trim()).filter(Boolean);
+  const mcpArgs = (env.ATLASSIAN_MCP_ARGS ?? "mcp-atlassian").split(" ").map(s => s.trim()).filter(Boolean);
 
   const allowedCloudIds = (env.ATLASSIAN_ALLOWED_CLOUD_IDS ?? "")
     .split(",")

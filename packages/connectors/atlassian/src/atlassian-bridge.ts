@@ -139,9 +139,9 @@ export class AtlassianBridge extends BaseBridge {
       this.mcpProcess = spawn(mcpCommand, mcpArgs, {
         env: {
           ...process.env,
-          ATLASSIAN_SITE_URL: this.options.config.siteUrl,
+          ATLASSIAN_URL: this.options.config.siteUrl,
+          ATLASSIAN_USER_EMAIL: this.options.config.email,
           ATLASSIAN_API_TOKEN: this.options.config.apiToken,
-          ATLASSIAN_EMAIL: this.options.config.email,
         },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
