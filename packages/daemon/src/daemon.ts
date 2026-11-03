@@ -262,6 +262,10 @@ export class Daemon {
     console.log('[Daemon] App Channel started');
 
     // Start Gentle Shell in RPC mode
+    // Dev/smoke: skip the engine entirely (bridges and WS still work).
+    if (process.env['GENTLE_DOT_NO_SHELL'] === '1') {
+      console.log('[Daemon] GENTLE_DOT_NO_SHELL=1 — skipping Gentle Shell spawn');
+    } else {
     const shellConfig: ShellConfig = {
       home: this.config.daemon.workspace,
       engramProject: 'gentle-dot',
@@ -276,6 +280,8 @@ export class Daemon {
       onError: (error) => console.error('[Daemon] Gentle Shell error:', error),
       onExit: (code, signal) => console.log('[Daemon] Gentle Shell exited:', code, signal),
     });
+
+    } // end GENTLE_DOT_NO_SHELL skip
 
     // Register MCP servers based on config
     await this.registerMcpServers();
@@ -302,52 +308,70 @@ export class Daemon {
     // Gmail MCP (official)
     if (connectors.gmail.enabled) {
       const mode: McpMode = connectors.gmail.mode;
-      await this.mcpProxy.registerServer({
-        name: 'gmail',
-        command: 'npx',
-        args: ['-y', '@google/mcp-gmail'],
-        env: {
-          GMAIL_WEBHOOK_SECRET: process.env[connectors.gmail.webhook_secret_env] || '',
-        },
-        mode,
-        writeTools: ['send_email', 'modify_labels', 'trash_message'],
-        approvalTools: ['send_email', 'trash_message'],
-      });
+      try {
+        await this.mcpProxy.registerServer({
+                name: 'gmail',
+                command: 'npx',
+                args: ['-y', '@google/mcp-gmail'],
+                env: {
+                  GMAIL_WEBHOOK_SECRET: process.env[connectors.gmail.webhook_secret_env] || '',
+                },
+                mode,
+                writeTools: ['send_email', 'modify_labels', 'trash_message'],
+                approvalTools: ['send_email', 'trash_message'],
+              });
+      } catch (error) {
+        // Fail-soft: a broken/unreachable MCP server must not kill the daemon
+        // (the connectors themselves are the integration in the BaseBridge v2 architecture).
+        console.error(`[Daemon] MCP server 'gmail' failed to register (continuing):`, (error as Error).message);
+      }
     }
 
     // Discord MCP (community)
     if (connectors.discord.enabled) {
       const mode: McpMode = connectors.discord.mode;
-      await this.mcpProxy.registerServer({
-        name: 'discord',
-        command: 'npx',
-        args: ['-y', 'mcp-discord'],
-        env: {
-          DISCORD_BOT_TOKEN: process.env[connectors.discord.bot_token_env] || '',
-          DISCORD_CLIENT_ID: process.env[connectors.discord.client_id_env] || '',
-        },
-        mode,
-        writeTools: ['send_message', 'create_channel', 'ban_user', 'kick_user'],
-        approvalTools: ['ban_user', 'kick_user', 'delete_channel'],
-      });
+      try {
+        await this.mcpProxy.registerServer({
+                name: 'discord',
+                command: 'npx',
+                args: ['-y', 'mcp-discord'],
+                env: {
+                  DISCORD_BOT_TOKEN: process.env[connectors.discord.bot_token_env] || '',
+                  DISCORD_CLIENT_ID: process.env[connectors.discord.client_id_env] || '',
+                },
+                mode,
+                writeTools: ['send_message', 'create_channel', 'ban_user', 'kick_user'],
+                approvalTools: ['ban_user', 'kick_user', 'delete_channel'],
+              });
+      } catch (error) {
+        // Fail-soft: a broken/unreachable MCP server must not kill the daemon
+        // (the connectors themselves are the integration in the BaseBridge v2 architecture).
+        console.error(`[Daemon] MCP server 'discord' failed to register (continuing):`, (error as Error).message);
+      }
     }
 
     // WhatsApp Meta Cloud MCP (official)
     if (connectors.whatsapp.enabled && connectors.whatsapp.modes.meta_cloud.enabled) {
       const mode: McpMode = connectors.whatsapp.mode;
-      await this.mcpProxy.registerServer({
-        name: 'whatsapp-meta',
-        command: 'npx',
-        args: ['-y', '@meta/mcp-whatsapp'],
-        env: {
-          WHATSAPP_PHONE_ID: process.env[connectors.whatsapp.modes.meta_cloud.phone_number_id_env] || '',
-          WHATSAPP_ACCESS_TOKEN: process.env[connectors.whatsapp.modes.meta_cloud.access_token_env] || '',
-          WHATSAPP_WEBHOOK_VERIFY: process.env[connectors.whatsapp.modes.meta_cloud.webhook_verify_token_env] || '',
-        },
-        mode,
-        writeTools: ['send_message', 'send_template'],
-        approvalTools: ['send_template'],
-      });
+      try {
+        await this.mcpProxy.registerServer({
+                name: 'whatsapp-meta',
+                command: 'npx',
+                args: ['-y', '@meta/mcp-whatsapp'],
+                env: {
+                  WHATSAPP_PHONE_ID: process.env[connectors.whatsapp.modes.meta_cloud.phone_number_id_env] || '',
+                  WHATSAPP_ACCESS_TOKEN: process.env[connectors.whatsapp.modes.meta_cloud.access_token_env] || '',
+                  WHATSAPP_WEBHOOK_VERIFY: process.env[connectors.whatsapp.modes.meta_cloud.webhook_verify_token_env] || '',
+                },
+                mode,
+                writeTools: ['send_message', 'send_template'],
+                approvalTools: ['send_template'],
+              });
+      } catch (error) {
+        // Fail-soft: a broken/unreachable MCP server must not kill the daemon
+        // (the connectors themselves are the integration in the BaseBridge v2 architecture).
+        console.error(`[Daemon] MCP server 'whatsapp-meta' failed to register (continuing):`, (error as Error).message);
+      }
     }
   }
 
