@@ -40,14 +40,18 @@ it("is unavailable by default and when either Windows component is missing", asy
 	}
 });
 
-it("pins only immutable ScreenView and the audited Dot hands, not upstream blue hands", () => {
+it("pins only immutable ScreenView and audited responsive Dot.2 hands, not upstream or Dot.1", () => {
 	expect(COMPUTER_ARTIFACTS.map((p) => [p.kind, p.version, p.entry])).toEqual([
 		["eyes", "0.2.1", "screenview-mcp.exe"],
-		["hands", "0.2.1-dot.1", "gentle-dot-inputcontrol.exe"],
+		["hands", "0.2.1-dot.2", "gentle-dot-inputcontrol.exe"],
 	]);
 	expect(COMPUTER_ARTIFACTS.map((p) => p.entrySha256)).toEqual([
 		"1c879efe55bdc543eec68b464a4fcaf879da95e6b660752a2b76bd66c21e10dd",
-		"b6945f388eba47e95e959b3d8a7ab2103d25cb64fa417ae893507ff689ff0a11",
+		"ea581fe8a586daa3c3e0ae7521453ec60440f5af966c4ee40776b048c0a4703f",
+	]);
+	expect(COMPUTER_ARTIFACTS.map((p) => [p.archiveSize, p.archiveSha256])).toEqual([
+		[38900095, "5903547b9cdec9463ed848cf4e2a2fc6928af47fa4d166eba240776ec410e17d"],
+		[22421353, "3117d925cd397fd79bfbb786723a294cfdc1bcc775790bbd4e2e10c78aedca0a"],
 	]);
 	expect(Object.isFrozen(COMPUTER_ARTIFACTS)).toBe(true);
 	expect(COMPUTER_ARTIFACTS.every(Object.isFrozen)).toBe(true);

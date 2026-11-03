@@ -1,7 +1,7 @@
 # Windows computer provider preparation
 
 The daemon prepares **only Windows x64** managed eyes (ScreenView 0.2.1)
-and hands (the audited Dot-only InputControl 0.2.1-dot.1). It never substitutes
+and hands (the statically audited Dot-only InputControl 0.2.1-dot.2). It never substitutes
 the upstream blue hands artifact. macOS keeps its existing native helper
 registration; other platforms have no managed provider.
 
@@ -29,6 +29,26 @@ ScreenView's executable pin was derived without execution from the unique
 from the local audited derivative manifest. There is no automatic download or installation.
 The resolver's optional expected-record argument is a deterministic test seam;
 daemon composition always uses production pins.
+
+### Current hands identity and evidence limits
+
+Dot.2 pins the local, unpublished archive to **22,421,353 bytes**, SHA256
+`3117d925cd397fd79bfbb786723a294cfdc1bcc775790bbd4e2e10c78aedca0a`, and its EXE to
+`ea581fe8a586daa3c3e0ae7521453ec60440f5af966c4ee40776b048c0a4703f`.
+Independent static inspection verified all 1,042 payload files and all 15 embedded
+provider modules against the intended sources, including responsive dispatch,
+release-failure fencing and the hands-owned pink indicator.
+
+The original compile command still records exit 1: its preservation guard rejected
+six additional historical dependency `ctime` changes. The operator accepted only
+those exact historical changes after the independent audit; all 6,269 input file
+hashes and sizes matched. This is not a successful-build claim or a blanket metadata
+exception. Failed receipts remain intact. Runtime dependency completeness, the
+physical indicator and effective physical Stop are **not yet verified**.
+
+Older Dot.1 caches remain on disk but do not satisfy current fixed pins. There is
+no downgrade or upstream fallback, automatic migration, deletion or invented release URL.
+Pinning the audited bytes does not install, start or grant permission to a provider.
 
 `DotDaemon.computerProviders` exposes only `{ status, kind }`, never paths or
 credentials. `ready` means **artifact preparation only**, not permission to

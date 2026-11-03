@@ -21,7 +21,8 @@ export interface ComputerProviderOptions {
 }
 
 // Archive pins: build/windows/computer-factory-research/arise-distribution-0.2.1/manifests.json
-// and build/windows/inputcontrol-dot-build-0.2.1-dot.1/out/manifest.json. No upstream hands fallback.
+// and build/windows/inputcontrol-dot-build-0.2.1-dot.2/out/manifest.json, independently
+// statically audited. Build-record limits: docs/windows-computer-providers.md. No upstream hands fallback.
 // Eyes entry hash was derived statically from the unique screenview-mcp.exe entry
 // in the SHA256-verified archive (Python zipfile/hashlib; no extraction/execution).
 export const COMPUTER_ARTIFACTS: readonly Readonly<ArtifactPin>[] = Object.freeze([
@@ -35,11 +36,11 @@ export const COMPUTER_ARTIFACTS: readonly Readonly<ArtifactPin>[] = Object.freez
 	}),
 	Object.freeze({
 		kind: "hands",
-		version: "0.2.1-dot.1",
+		version: "0.2.1-dot.2",
 		entry: "gentle-dot-inputcontrol.exe",
-		archiveSize: 23415547,
-		archiveSha256: "59acec247710eb06cd49b678d4a80ae84fcbcf4e7d4255a79437862b2dc3be07",
-		entrySha256: "b6945f388eba47e95e959b3d8a7ab2103d25cb64fa417ae893507ff689ff0a11",
+		archiveSize: 22421353,
+		archiveSha256: "3117d925cd397fd79bfbb786723a294cfdc1bcc775790bbd4e2e10c78aedca0a",
+		entrySha256: "ea581fe8a586daa3c3e0ae7521453ec60440f5af966c4ee40776b048c0a4703f",
 	}),
 ]);
 
