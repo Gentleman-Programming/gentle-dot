@@ -139,7 +139,12 @@ export class NotionBridge extends BaseBridge {
       this.mcpProcess = spawn(mcpCommand, mcpArgs, {
         env: {
           ...process.env,
-          NOTION_API_KEY: this.options.config.apiKey,
+          // The official stdio server reads the integration token from
+          // OPENAPI_MCP_HEADERS (JSON), not from a plain env var.
+          OPENAPI_MCP_HEADERS: JSON.stringify({
+            Authorization: `Bearer ${this.options.config.apiKey}`,
+            'Notion-Version': '2022-06-28',
+          }),
         },
         stdio: ['pipe', 'pipe', 'pipe'],
       });

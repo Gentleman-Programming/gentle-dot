@@ -34,7 +34,7 @@ export function loadConfig(env: Record<string, string | undefined>, home: string
   const tokenFile = env.GENTLE_DOT_TOKEN_FILE?.trim() || join(home, ".gentle-dot", "token");
 
   const mcpCommand = env.NOTION_MCP_COMMAND?.trim() || "npx";
-  const mcpArgs = (env.NOTION_MCP_ARGS ?? "@notionhq/mcp-server").split(" ").map(s => s.trim()).filter(Boolean);
+  const mcpArgs = (env.NOTION_MCP_ARGS ?? "@notionhq/notion-mcp-server").split(" ").map(s => s.trim()).filter(Boolean);
 
   const allowedWorkspaceIds = (env.NOTION_ALLOWED_WORKSPACE_IDS ?? "")
     .split(",")
