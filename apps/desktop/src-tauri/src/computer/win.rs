@@ -29,8 +29,8 @@ use super::risk::{AxElement, Focus};
 use super::glow::Frame;
 use super::winaccess::{element, is_default, known_chain, unreadable, UIA_BUTTON, UIA_WINDOW};
 use super::winapps::{
-    answers_to, executable_target, fronts_same_app, hosted_page, listed_name, listed_windows, request, shortcut_named,
-    strip_ci, Request, TopWindow,
+    active_entries, answers_to, distinct_names, executable_target, fronts_same_app, hosted_page, listed_name,
+    listed_windows, request, shortcut_named, strip_ci, Request, TopWindow,
 };
 use super::winput::{checks_typing_target, releases, send_batches, settles, steps, Step, VirtualScreen};
 use super::{
@@ -915,76 +915,45 @@ pub fn window_owner_at(at: Point) -> Option<AppIdentity> {
     (!root.is_null()).then(|| target_of(root))
 }
 
-/// The shell display name for the AppUserModelID stored on a frame. These shell COM interfaces
-/// are used only here; all returned objects and strings are released before leaving the apartment.
+/// The shell display name for the AppUserModelID stored on a frame (the name Start shows for the
+/// app), or none when the shell does not give one. Every interface is released and every
+/// PROPVARIANT and string the shell allocated is freed before the apartment is left.
 fn frame_app_name(hwnd: HWND) -> Option<String> {
-    use windows_sys::core::GUID;
-
-    #[repr(C)]
-    struct PropertyKey { fmtid: GUID, pid: u32 }
-    // PROPVARIANT: the value union has room for two pointers on either supported pointer width.
-    #[repr(C)]
-    struct PropVariant { vt: u16, reserved: [u16; 3], value: [usize; 2] }
-    #[repr(C)]
-    struct PropertyStoreVtable {
-        prefix: [*const c_void; 5],
-        get_value: unsafe extern "system" fn(*mut c_void, *const PropertyKey, *mut PropVariant) -> i32,
-    }
-    #[repr(C)]
-    struct ShellItemVtable {
-        prefix: [*const c_void; 5],
-        get_display_name: unsafe extern "system" fn(*mut c_void, u32, *mut *mut u16) -> i32,
-    }
-    #[link(name = "shell32")]
-    extern "system" {
-        fn SHGetPropertyStoreForWindow(hwnd: HWND, iid: *const GUID, out: *mut *mut c_void) -> i32;
-        fn SHCreateItemInKnownFolder(folder: *const GUID, flags: u32, path: *const u16, iid: *const GUID, out: *mut *mut c_void) -> i32;
-    }
-    #[link(name = "ole32")]
-    extern "system" {
-        fn PropVariantClear(value: *mut PropVariant) -> i32;
-        fn CoTaskMemFree(ptr: *mut c_void);
-    }
-    struct ComPtr(*mut c_void);
-    impl Drop for ComPtr {
-        fn drop(&mut self) {
-            // SAFETY: all ComPtr values hold a live interface with IUnknown as its first vtable.
-            unsafe {
-                let vtable = *(self.0 as *const *const *const c_void);
-                let release: unsafe extern "system" fn(*mut c_void) -> u32 = std::mem::transmute(*vtable.add(2));
-                release(self.0);
-            }
+    use windows::core::{GUID, PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{HWND as ComHwnd, PROPERTYKEY};
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToStringAlloc};
+    use windows::Win32::System::Variant::VT_LPWSTR;
+    use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
+    use windows::Win32::UI::Shell::{IShellItem, SHCreateItemInKnownFolder, FOLDERID_AppsFolder, KF_FLAG_DEFAULT, SIGDN_NORMALDISPLAY};
+    /// `PKEY_AppUserModel_ID` (propkey.h): declared here rather than enabling the Enhanced
+    /// Storage bindings for one constant.
+    const AUMID: PROPERTYKEY = PROPERTYKEY { fmtid: GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3), pid: 5 };
+    /// A string the shell allocated, copied and then freed exactly once.
+    fn take(text: PWSTR) -> Option<String> {
+        // SAFETY: `text` is null or a terminated string from CoTaskMemAlloc, not used afterwards.
+        unsafe {
+            let copied = if text.is_null() { None } else { text.to_string().ok() };
+            CoTaskMemFree(Some(text.0 as *const c_void));
+            copied
         }
     }
-    const STORE: GUID = GUID::from_u128(0x886d8eeb_8cf2_4446_8d02_cdba1dbdcf99);
-    const ITEM: GUID = GUID::from_u128(0x43826d1e_e718_42ee_bc55_a1e261c37bfe);
-    const APPS: GUID = GUID::from_u128(0x1e87508d_89c2_42f0_8a7e_645a0f50ca58);
-    const AUMID: PropertyKey = PropertyKey { fmtid: GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3), pid: 5 };
+    // Declared first so every interface below is released before COM is left.
     let _apartment = Apartment::join(Apartment::SHELL);
-    // SAFETY: shell calls fill the indicated out-pointers; successful interfaces are released,
-    // the PROPVARIANT is cleared, and the shell-allocated display name is freed.
+    // SAFETY: typed shell calls on a window handle and on the interfaces they return; each
+    // HRESULT is checked by the binding, and the PROPVARIANT is cleared once it is read.
     unsafe {
-        let mut raw = null_mut();
-        if SHGetPropertyStoreForWindow(hwnd, &STORE, &mut raw) < 0 || raw.is_null() { return None; }
-        let store = ComPtr(raw);
-        let vtable = &**(store.0 as *const *const PropertyStoreVtable);
-        let mut value: PropVariant = zeroed();
-        let result = (vtable.get_value)(store.0, &AUMID, &mut value);
-        let mut item_raw = null_mut();
-        if result >= 0 && value.vt == 31 && value.value[0] != 0 {
-            SHCreateItemInKnownFolder(&APPS, 0, value.value[0] as *const u16, &ITEM, &mut item_raw);
+        let store: IPropertyStore = SHGetPropertyStoreForWindow(ComHwnd(hwnd)).ok()?;
+        let mut value = store.GetValue(&AUMID).ok()?;
+        let aumid = if value.Anonymous.Anonymous.vt == VT_LPWSTR { PropVariantToStringAlloc(&value).ok() } else { None };
+        let _ = PropVariantClear(&mut value);
+        let aumid = take(aumid?)?;
+        if aumid.trim().is_empty() {
+            return None;
         }
-        PropVariantClear(&mut value);
-        if item_raw.is_null() { return None; }
-        let item = ComPtr(item_raw);
-        let vtable = &**(item.0 as *const *const ShellItemVtable);
-        let mut name = null_mut();
-        if (vtable.get_display_name)(item.0, 0, &mut name) < 0 || name.is_null() { return None; }
-        let mut len = 0;
-        while *name.add(len) != 0 { len += 1; }
-        let result = String::from_utf16_lossy(std::slice::from_raw_parts(name, len));
-        CoTaskMemFree(name.cast());
-        Some(result)
+        let path = wide(&aumid);
+        let item: IShellItem = SHCreateItemInKnownFolder(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, PCWSTR(path.as_ptr())).ok()?;
+        take(item.GetDisplayName(SIGDN_NORMALDISPLAY).ok()?).filter(|name| !name.trim().is_empty())
     }
 }
 
@@ -992,22 +961,34 @@ fn frame_app_name(hwnd: HWND) -> Option<String> {
 /// apps that are not running).
 pub fn list_apps() -> Result<Vec<AppInfo>, String> {
     let active = frontmost_app().map(|app| app.pid);
+    // SAFETY: plain queries.
+    let front_root = unsafe { GetAncestor(GetForegroundWindow(), GA_ROOT) } as usize;
     let windows = top_windows()?;
     let listing: Vec<(TopWindow, bool)> = windows.iter().map(|(hwnd, window)| {
         let detached = class_name(*hwnd).as_deref() == Some(FRAME_CLASS)
             && app_pid(*hwnd).is_none() && is_frame_host(&identity(window.pid));
         (window.clone(), detached)
     }).collect();
-    Ok(listed_windows(&listing).into_iter().map(|index| {
-        let (hwnd, _) = &windows[index];
-        let (window, detached) = &listing[index];
+    let shown = listed_windows(&listing);
+    // A detached frame is only named for listing; it cannot be acted on until restored and
+    // identified. target_of and every blocklist/activation check keep their existing identity.
+    let ids: Vec<(AppIdentity, String)> = shown.iter().map(|&index| {
+        let ((hwnd, _), (window, detached)) = (&windows[index], &listing[index]);
         let id = identity(window.pid);
-        // A detached frame is only named for listing; it cannot be acted on until restored and
-        // identified. target_of and every blocklist/activation check keep their existing identity.
         let name = listed_name(*detached, if *detached { frame_app_name(*hwnd) } else { None },
-            if *detached { Some(window.title.clone()) } else { None }, id.name);
-        AppInfo { name, bundle_id: id.bundle_id, active: active == Some(window.pid) }
-    }).collect())
+            if *detached { Some(window.title.clone()) } else { None }, id.name.clone());
+        (id, name)
+    }).collect();
+    // Frames share the frame host's process: the one in front is told by its window handle.
+    let actives = active_entries(
+        &shown.iter().map(|&index| (listing[index].0.pid, listing[index].1, windows[index].0 as usize)).collect::<Vec<_>>(),
+        active,
+        front_root,
+    );
+    let names = distinct_names(
+        shown.iter().zip(&ids).map(|(&index, (_, name))| (name.clone(), listing[index].1, listing[index].0.title.clone())).collect(),
+    );
+    Ok(ids.into_iter().zip(names).zip(actives).map(|(((id, _), name), active)| AppInfo { name, bundle_id: id.bundle_id, active }).collect())
 }
 
 /// Brings a window to the front. Windows lets only the process that received the last input

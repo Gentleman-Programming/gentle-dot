@@ -25,18 +25,6 @@ impl TopWindow {
     }
 }
 
-/// The processes with an app window, front to back, each once.
-#[cfg(test)]
-pub fn app_pids(windows: &[TopWindow]) -> Vec<i32> {
-    let mut pids = Vec::new();
-    for window in windows.iter().filter(|w| w.is_app()) {
-        if !pids.contains(&window.pid) {
-            pids.push(window.pid);
-        }
-    }
-    pids
-}
-
 /// Indices to list, given each window and whether its Store frame is detached.
 pub fn listed_windows(windows: &[(TopWindow, bool)]) -> Vec<usize> {
     let mut pids = Vec::new();
@@ -60,6 +48,40 @@ pub fn listed_name(detached: bool, aumid_name: Option<String>, title: Option<Str
     aumid_name.filter(|name| !name.trim().is_empty())
         .or_else(|| title.filter(|name| !name.trim().is_empty()))
         .unwrap_or(original)
+}
+
+/// Which listed entries (process, detached Store frame, window handle) are the app in front. A
+/// detached frame's process is the frame host, shared by every minimized Store app, so a frame is
+/// in front only when it is the foreground root window itself; any other entry is in front by its
+/// process, as before. Entries other than frames are listed once per process, so at most one is.
+pub fn active_entries(entries: &[(i32, bool, usize)], front_pid: Option<i32>, front_root: usize) -> Vec<bool> {
+    let front_frame = entries.iter().position(|&(_, detached, handle)| detached && front_root != 0 && handle == front_root);
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, &(pid, detached, _))| match front_frame {
+            Some(front) => index == front,
+            None => !detached && front_pid == Some(pid),
+        })
+        .collect()
+}
+
+/// The listed names (name, detached Store frame, frame title). Detached frames that share a name
+/// (two minimized windows of one Store app) get their title appended, so the agent can tell them
+/// apart; a title that is blank or only repeats the name adds nothing.
+pub fn distinct_names(entries: Vec<(String, bool, String)>) -> Vec<String> {
+    let shared = |name: &str| entries.iter().filter(|(other, detached, _)| *detached && other == name).count() > 1;
+    entries
+        .iter()
+        .map(|(name, detached, title)| {
+            let title = title.trim();
+            if *detached && shared(name) && !title.is_empty() && title != name {
+                format!("{name} — {title}")
+            } else {
+                name.clone()
+            }
+        })
+        .collect()
 }
 
 /// What `open_app` was asked for: an app's name, or a local program or shortcut by path.
@@ -174,6 +196,48 @@ pub fn fronts_same_app(front_pid: i32, pid: i32, front_owner: usize, owner: usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The processes with an app window, front to back, each once.
+    fn app_pids(windows: &[TopWindow]) -> Vec<i32> {
+        let mut pids = Vec::new();
+        for window in windows.iter().filter(|w| w.is_app()) {
+            if !pids.contains(&window.pid) {
+                pids.push(window.pid);
+            }
+        }
+        pids
+    }
+
+    #[test]
+    fn only_the_detached_frame_in_front_is_active_not_every_frame_of_its_host() {
+        // Two minimized Store apps share the frame host's process (40); the second is in front.
+        let entries = [(40, true, 0x100), (40, true, 0x200), (7, false, 0x300)];
+        assert_eq!(active_entries(&entries, Some(40), 0x200), [false, true, false]);
+        // A detached frame never counts as in front by its host's process alone.
+        assert_eq!(active_entries(&entries, Some(40), 0x999), [false, false, false]);
+        // Other apps stay active by their process, as before.
+        assert_eq!(active_entries(&entries, Some(7), 0x300), [false, false, true]);
+        assert_eq!(active_entries(&entries, Some(7), 0x301), [false, false, true]);
+        assert_eq!(active_entries(&entries, None, 0), [false, false, false]);
+    }
+
+    #[test]
+    fn detached_frames_with_the_same_name_are_told_apart_by_their_titles() {
+        let entry = |name: &str, detached: bool, title: &str| (name.to_string(), detached, title.to_string());
+        let names = distinct_names(vec![
+            entry("Fotos", true, "img.jpg"),
+            entry("Fotos", true, "beach.png"),
+            entry("Calculator", true, "Calculator"),
+            entry("Notepad", false, "notes.txt - Notepad"),
+        ]);
+        assert_eq!(names, ["Fotos — img.jpg", "Fotos — beach.png", "Calculator", "Notepad"]);
+        // A title that only repeats the name, or is blank, adds nothing.
+        let names = distinct_names(vec![entry("Fotos", true, "Fotos"), entry("Fotos", true, "  "), entry("Fotos", true, "a.jpg")]);
+        assert_eq!(names, ["Fotos", "Fotos", "Fotos — a.jpg"]);
+        // Only detached frames are renamed; a desktop app with the same name keeps its own.
+        let names = distinct_names(vec![entry("Fotos", true, "img.jpg"), entry("Fotos", false, "Fotos")]);
+        assert_eq!(names, ["Fotos", "Fotos"]);
+    }
 
     fn window(pid: i32, title: &str) -> TopWindow {
         TopWindow { pid, title: title.into(), visible: true, cloaked: false, tool: false, app_window: false, owned: false }
