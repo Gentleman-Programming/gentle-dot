@@ -1708,6 +1708,74 @@ mod tests {
         assert_eq!(rig.desktop.events(), vec![InputEvent::Key(parse_combo("ctrl+t").unwrap())]);
     }
 
+    const POINTER_ACTIONS: [(&str, fn() -> Value); 3] = [
+        ("click", || json!({"x": 10, "y": 10})),
+        ("drag", || json!({"fromX": 10, "fromY": 20, "toX": 30, "toY": 40})),
+        ("scroll", || json!({"x": 5, "y": 6, "dx": 0, "dy": 120})),
+    ];
+
+    #[test]
+    fn held_ctrl_refuses_click_drag_and_scroll_without_sending_anything() {
+        for (tool, args) in POINTER_ACTIONS {
+            let rig = rig();
+            rig.ready();
+            *rig.desktop.held_keys.lock().unwrap() = vec![0xa2];
+            let result = rig.call(tool, args());
+            assert!(is_error(&result), "{tool}: {result}");
+            assert_eq!(first_text(&result), "Ctrl is pressed, so nothing was sent. Release Ctrl, or press and release it once if no one is holding it, and try again.", "{tool}");
+            assert!(rig.desktop.events().is_empty(), "{tool}");
+        }
+    }
+
+    #[test]
+    fn either_side_of_each_modifier_refuses_a_click() {
+        for (name, keys) in [("Ctrl", [0xa2, 0xa3]), ("Alt", [0xa4, 0xa5]), ("Shift", [0xa0, 0xa1]), ("Win", [0x5b, 0x5c])] {
+            for key in keys {
+                let rig = rig();
+                rig.ready();
+                *rig.desktop.held_keys.lock().unwrap() = vec![key];
+                let result = rig.call("click", json!({"x": 10, "y": 10}));
+                assert_eq!(first_text(&result), format!("{name} is pressed, so nothing was sent. Release {name}, or press and release it once if no one is holding it, and try again."), "{key:#x}");
+                assert!(rig.desktop.events().is_empty(), "{key:#x}");
+            }
+        }
+    }
+
+    #[test]
+    fn several_held_modifiers_are_named_once_in_order_for_a_pointer_action() {
+        for (tool, args) in POINTER_ACTIONS {
+            let rig = rig();
+            rig.ready();
+            // Both Ctrls, out of order, still name Ctrl once and first.
+            *rig.desktop.held_keys.lock().unwrap() = vec![0x5c, 0xa1, 0xa4, 0xa3, 0xa2];
+            let result = rig.call(tool, args());
+            assert_eq!(first_text(&result), "Ctrl, Alt, Shift and Win are pressed, so nothing was sent. Release them, or press and release each once if no one is holding them, and try again.", "{tool}");
+            assert!(rig.desktop.events().is_empty(), "{tool}");
+        }
+    }
+
+    #[test]
+    fn no_held_modifiers_leaves_pointer_actions_unchanged_and_a_move_ignores_them() {
+        let rig = rig();
+        rig.ready();
+        for (tool, args) in POINTER_ACTIONS {
+            assert!(!is_error(&rig.call(tool, args())), "{tool}");
+        }
+        // A plain move presses no button: Ctrl held does not change it.
+        *rig.desktop.held_keys.lock().unwrap() = vec![0xa2];
+        assert!(!is_error(&rig.call("move", json!({"x": 1, "y": 2}))));
+        let p = |x, y| Point { x, y };
+        assert_eq!(
+            rig.desktop.events(),
+            vec![
+                InputEvent::Click { at: p(20.0, 20.0), button: MouseButton::Left, count: 1 },
+                InputEvent::Drag { from: p(20.0, 40.0), to: p(60.0, 80.0) },
+                InputEvent::Scroll { at: p(10.0, 12.0), dx: 0, dy: 120 },
+                InputEvent::Move(p(2.0, 4.0)),
+            ]
+        );
+    }
+
     #[test]
     fn a_backend_refusal_of_a_key_says_the_key_was_not_sent() {
         // The same wording as the helper's own recheck of the key (#167).

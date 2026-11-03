@@ -32,7 +32,10 @@ use super::winapps::{
     answers_to, app_pids, executable_target, fronts_same_app, hosted_page, request, shortcut_named, strip_ci, Request,
     TopWindow,
 };
-use super::winput::{checks_typing_target, releases, send_batches, settles, steps, without_held_modifiers, Step, VirtualScreen};
+use super::winput::{
+    checks_held_modifiers, checks_typing_target, releases, send_batches, settles, steps, without_held_modifiers, Step,
+    VirtualScreen,
+};
 use super::{
     runs_as_administrator, AppInfo, Capture, InputEvent, KeyboardRecipient, MouseButton, TypedError,
     KEYS_CHANGED_WHILE_TYPING,
@@ -281,10 +284,11 @@ fn post_input(event: &InputEvent, approved: Option<&KeyboardRecipient>) -> Resul
         }
     }
     let plan = steps(event, &virtual_screen()).map_err(TypedError::Failed)?;
-    // Sample after recipient queries and before any of this event's own modifiers go down.
+    // Sample after recipient queries and before any of this event's own modifiers or buttons go
+    // down (a refused drag presses nothing). Pointer refusals reach the agent through `post`.
     // Do not sample inside the step loop: ctrl+t would then observe its own injected Ctrl.
     // This is a snapshot, not an atomic fence against a user pressing a key during SendInput.
-    if matches!(event, InputEvent::Key(_) | InputEvent::Text(_)) {
+    if checks_held_modifiers(event) {
         without_held_modifiers(
             // SAFETY: plain key-state query using the Windows virtual-key codes in winput.
             |key| unsafe { GetAsyncKeyState(i32::from(key)) },

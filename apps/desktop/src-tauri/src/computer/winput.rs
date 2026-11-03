@@ -13,7 +13,6 @@ use super::{InputEvent, MouseButton, TypedError};
 /// GetAsyncKeyState's high bit means down; its low (pressed-since-query) bit is irrelevant.
 /// A down modifier may be the user's or one a failed post could not release, so the message
 /// names both ways out.
-/// Pointer actions do not check held modifiers yet.
 pub fn without_held_modifiers(
     mut key_state: impl FnMut(u16) -> i16,
     post: impl FnOnce() -> Result<(), TypedError>,
@@ -34,10 +33,48 @@ pub fn without_held_modifiers(
     }
 }
 
+/// Whether a held modifier changes what `event` does, so the post samples the key state first:
+/// keys, and pointer actions that press a button or turn the wheel (Ctrl+click, Shift+click,
+/// Ctrl+wheel zoom). A plain move presses nothing. Pointer posts press no modifiers of their own.
+pub fn checks_held_modifiers(event: &InputEvent) -> bool {
+    !matches!(event, InputEvent::Move(_))
+}
+
 #[cfg(test)]
 mod held_modifier_tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn every_event_that_presses_a_key_a_button_or_the_wheel_checks_held_modifiers() {
+        let at = Point { x: 0.0, y: 0.0 };
+        for event in [
+            InputEvent::Key(super::super::keys::parse_combo("tab").unwrap()),
+            InputEvent::Text("a".into()),
+            InputEvent::Click { at, button: MouseButton::Left, count: 1 },
+            InputEvent::Click { at, button: MouseButton::Right, count: 2 },
+            InputEvent::Drag { from: at, to: at },
+            InputEvent::Scroll { at, dx: 0, dy: 50 },
+        ] {
+            assert!(checks_held_modifiers(&event), "{event:?}");
+        }
+        // A plain move presses nothing, so a modifier the user holds does not change it.
+        assert!(!checks_held_modifiers(&InputEvent::Move(at)));
+    }
+
+    #[test]
+    fn pointer_posts_press_no_key_that_the_snapshot_could_read() {
+        let screen = VirtualScreen { x: 0, y: 0, width: 1920, height: 1080 };
+        let at = Point { x: 10.0, y: 10.0 };
+        for event in [
+            InputEvent::Click { at, button: MouseButton::Right, count: 3 },
+            InputEvent::Drag { from: at, to: Point { x: 500.0, y: 500.0 } },
+            InputEvent::Scroll { at, dx: 120, dy: -120 },
+        ] {
+            let plan = steps(&event, &screen).unwrap();
+            assert!(!plan.iter().any(|step| matches!(step, Step::Key { .. } | Step::Unicode { .. })), "{event:?}");
+        }
+    }
 
     #[test]
     fn either_side_of_every_modifier_refuses_before_posting() {
