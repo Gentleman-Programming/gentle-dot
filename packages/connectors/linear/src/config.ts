@@ -31,7 +31,7 @@ export function loadConfig(env: Record<string, string | undefined>, home: string
   const tokenFile = env.GENTLE_DOT_TOKEN_FILE?.trim() || join(home, ".gentle-dot", "token");
 
   const mcpCommand = env.LINEAR_MCP_COMMAND?.trim() || "npx";
-  const mcpArgs = (env.LINEAR_MCP_ARGS ?? "@linear/mcp-server").split(" ").map(s => s.trim()).filter(Boolean);
+  const mcpArgs = (env.LINEAR_MCP_ARGS ?? "mcp-remote https://mcp.linear.app/sse").split(" ").map(s => s.trim()).filter(Boolean);
 
   const allowedTeamIds = (env.LINEAR_ALLOWED_TEAM_IDS ?? "")
     .split(",")

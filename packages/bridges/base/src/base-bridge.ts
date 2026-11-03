@@ -245,6 +245,11 @@ export abstract class BaseBridge extends EventEmitter {
     this.startHeartbeat();
     this.emit('onReady', payload.sessionId);
     console.log(`[${this.config.connectorType}] Ready (session: ${payload.sessionId})`);
+    // The subclass lifecycle starts only after the daemon handshake succeeded.
+    void this.onReady().catch((error) => {
+      console.error(`[${this.config.connectorType}] onReady failed:`, error);
+      this.emit('onError', error);
+    });
   }
 
   /**
@@ -502,6 +507,12 @@ export abstract class BaseBridge extends EventEmitter {
     super.on(event, handler);
     return this;
   }
+  /**
+   * Abstract method to be implemented by subclasses
+   * Called when bridge is ready to start its specific logic
+   */
+  abstract onReady(): Promise<void>;
+
   /**
    * Abstract method to be implemented by subclasses
    * Called when bridge needs to stop its specific logic
