@@ -480,8 +480,8 @@ pub fn exclude_from_capture(hwnd: *mut c_void) -> Result<(), String> {
     set_capture_excluded(hwnd, true)
 }
 
-/// The visible top-level windows of this process, or why they cannot be listed.
-fn own_visible_windows() -> Result<Vec<HWND>, String> {
+/// Every top-level window, front to back, or why they cannot be listed.
+fn enumerate_windows() -> Result<Vec<HWND>, String> {
     unsafe extern "system" fn collect(hwnd: HWND, state: LPARAM) -> i32 {
         // SAFETY: `state` is the vector passed below, alive for the whole enumeration.
         unsafe { (*(state as *mut Vec<HWND>)).push(hwnd) };
@@ -489,10 +489,24 @@ fn own_visible_windows() -> Result<Vec<HWND>, String> {
     }
     let mut handles: Vec<HWND> = Vec::new();
     // SAFETY: the callback only appends to `handles`, which outlives the call. It never stops the
-    // enumeration, so 0 is a failure, and a list that may be missing our windows is no list.
+    // enumeration, so 0 is a failure, and a list that may be missing windows is no list.
     if unsafe { EnumWindows(Some(collect), &mut handles as *mut Vec<HWND> as LPARAM) } == 0 {
-        return Err(format!("cannot list its windows: {}", std::io::Error::last_os_error()));
+        return Err(enumeration_failure(std::io::Error::last_os_error()));
     }
+    Ok(handles)
+}
+
+/// Why `EnumWindows` failed. It may fail without setting an error code, which would read "(os error 0)".
+fn enumeration_failure(error: std::io::Error) -> String {
+    match error.raw_os_error() {
+        Some(0) | None => "EnumWindows failed without an error code".to_string(),
+        Some(_) => error.to_string(),
+    }
+}
+
+/// The visible top-level windows of this process, or why they cannot be listed.
+fn own_visible_windows() -> Result<Vec<HWND>, String> {
+    let mut handles = enumerate_windows().map_err(|error| format!("cannot list its windows: {error}"))?;
     let own = std::process::id() as i32;
     // SAFETY: plain queries on a window handle (a vanished window just reads as hidden).
     handles.retain(|&hwnd| window_pid(hwnd) == own && unsafe { IsWindowVisible(hwnd) } != 0);
@@ -672,16 +686,9 @@ fn app_pid(root: HWND) -> Option<i32> {
 }
 
 /// Every top-level window, front to back, with the app it belongs to.
-fn top_windows() -> Vec<(HWND, TopWindow)> {
-    unsafe extern "system" fn collect(hwnd: HWND, state: LPARAM) -> i32 {
-        // SAFETY: `state` is the vector passed below, alive for the whole enumeration.
-        unsafe { (*(state as *mut Vec<HWND>)).push(hwnd) };
-        1
-    }
-    let mut handles: Vec<HWND> = Vec::new();
-    // SAFETY: the callback only appends to `handles`, which outlives the call.
-    unsafe { EnumWindows(Some(collect), &mut handles as *mut Vec<HWND> as LPARAM) };
-    handles
+fn top_windows() -> Result<Vec<(HWND, TopWindow)>, String> {
+    let handles = enumerate_windows().map_err(|error| format!("cannot list the open windows: {error}"))?;
+    Ok(handles
         .into_iter()
         .map(|hwnd| {
             // SAFETY: plain queries on a window handle (a vanished window just reads as empty).
@@ -704,7 +711,7 @@ fn top_windows() -> Vec<(HWND, TopWindow)> {
             };
             (hwnd, window)
         })
-        .collect()
+        .collect())
 }
 
 /// The executable's full path, when the process lets itself be queried.
@@ -883,17 +890,18 @@ pub fn window_owner_at(at: Point) -> Option<AppIdentity> {
     (!root.is_null()).then(|| target_of(root))
 }
 
-/// The running apps, front to back.
-pub fn list_apps() -> Vec<AppInfo> {
+/// The running apps, front to back, or why they cannot be listed (a partial list would read as
+/// apps that are not running).
+pub fn list_apps() -> Result<Vec<AppInfo>, String> {
     let active = frontmost_app().map(|app| app.pid);
-    let windows: Vec<TopWindow> = top_windows().into_iter().map(|(_, window)| window).collect();
-    app_pids(&windows)
+    let windows: Vec<TopWindow> = top_windows()?.into_iter().map(|(_, window)| window).collect();
+    Ok(app_pids(&windows)
         .into_iter()
         .map(|pid| {
             let id = identity(pid);
             AppInfo { name: id.name, bundle_id: id.bundle_id, active: active == Some(pid) }
         })
-        .collect()
+        .collect())
 }
 
 /// Brings a window to the front. Windows lets only the process that received the last input
@@ -955,9 +963,9 @@ fn comes_to_front(hwnd: HWND) -> bool {
     in_front()
 }
 
-/// The frontmost app window of `pid`.
+/// The frontmost app window of `pid`; none when the windows cannot be listed.
 fn app_window_of(pid: i32) -> Option<HWND> {
-    top_windows().into_iter().find(|(_, window)| window.pid == pid && window.is_app()).map(|(hwnd, _)| hwnd)
+    top_windows().ok()?.into_iter().find(|(_, window)| window.pid == pid && window.is_app()).map(|(hwnd, _)| hwnd)
 }
 
 /// Brings an app back to the front (after a dialog took the focus).
@@ -1070,7 +1078,9 @@ pub fn open_app(name: &str) -> Result<(), String> {
     let request = request(name)?;
     let own = std::process::id() as i32;
     if let Request::Name(wanted) = &request {
-        for (hwnd, _) in top_windows().into_iter().filter(|(_, window)| window.is_app()) {
+        // Without the list, an app already open would be started again: refused instead.
+        let windows = top_windows().map_err(|error| format!("{wanted} was not opened: Gentle Dot {error}."))?;
+        for (hwnd, _) in windows.into_iter().filter(|(_, window)| window.is_app()) {
             // The same identity an action aimed at the window would get (hosted pages, Store apps).
             let id = target_of(hwnd);
             if answers_to(wanted, &id.name, id.bundle_id.as_deref()) {
@@ -1485,6 +1495,9 @@ pub fn focused_frame() -> Option<Frame> {
 /// Prevent activation and capture of the click-through glow. A glow that cannot be kept out of
 /// screenshots is not used: without it no call captures or acts (S5).
 pub fn prepare_overlay(hwnd: *mut c_void) -> Result<(), String> {
+    // These extended styles are written behind tao's back, so tao's cached flags do not have them:
+    // any later tao call that sets window flags on the glow would drop WS_EX_TOOLWINDOW. Nothing
+    // does today; keep it that way, or set them again after such a call.
     // SAFETY: calls on this process's window.
     unsafe {
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
@@ -1591,7 +1604,7 @@ impl super::Desktop for WinDesktop {
     }
 
     fn list_apps(&self) -> Result<Vec<AppInfo>, String> {
-        Ok(list_apps())
+        list_apps()
     }
 
     fn open_app(&self, name: &str) -> Result<(), String> {
@@ -1639,6 +1652,7 @@ mod tests {
         use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
         let notepads = || -> Vec<usize> {
             top_windows()
+                .expect("the windows are listed")
                 .into_iter()
                 .filter(|(hwnd, window)| {
                     window.is_app() && target_of(*hwnd).bundle_id.as_deref().is_some_and(|exe| exe.eq_ignore_ascii_case("Notepad.exe"))
@@ -1689,6 +1703,13 @@ mod tests {
     /// T48: a bare name never resolves through PATH, so shell tools in System32 are not opened by
     /// name (`cmd.exe` and `curl.exe` are in System32, which is in PATH, and neither is in App
     /// Paths). No shortcut is passed, so only App Paths could answer.
+    #[test]
+    fn a_window_listing_failure_without_an_error_code_says_so() {
+        assert_eq!(enumeration_failure(std::io::Error::from_raw_os_error(0)), "EnumWindows failed without an error code");
+        let denied = std::io::Error::from_raw_os_error(5);
+        assert_eq!(enumeration_failure(denied), std::io::Error::from_raw_os_error(5).to_string());
+    }
+
     #[test]
     fn a_bare_name_is_not_resolved_through_path() {
         for name in ["cmd", "curl", "certutil"] {
