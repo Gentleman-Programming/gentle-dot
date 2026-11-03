@@ -10,11 +10,18 @@ const HELPER = "http://127.0.0.1:51234/mcp";
 const KEY = "s3cr3t-Computer-Key-0123456789abcdef";
 const WINDOWS_2004_NOTE =
 	"Computer control needs Windows 10 version 2004 (build 19041) or newer for screenshots.";
+const YOLO_NOTE_WITHOUT_PANIC =
+	"Yolo mode lets the assistant send, pay, delete, and submit without asking you first. It turns itself off after 1 hour or when the app quits; Stop still works.";
 
 const h = vi.hoisted(() => ({
 	tauri: true,
 	endpoint: null as unknown,
-	permissions: { accessibility: false, screenRecording: true, screenshotsSupported: true },
+	permissions: {
+		accessibility: false,
+		screenRecording: true,
+		screenshotsSupported: true,
+		panicShortcut: true,
+	},
 	status: { active: false } as unknown,
 	invoke: vi.fn(),
 	send: vi.fn(),
@@ -94,7 +101,12 @@ async function emitState(payload: unknown) {
 beforeEach(() => {
 	h.tauri = true;
 	h.endpoint = { url: HELPER, token: KEY };
-	h.permissions = { accessibility: false, screenRecording: true, screenshotsSupported: true };
+	h.permissions = {
+		accessibility: false,
+		screenRecording: true,
+		screenshotsSupported: true,
+		panicShortcut: true,
+	};
 	h.status = { active: false };
 	h.listeners.clear();
 	h.send = vi.fn();
@@ -191,7 +203,12 @@ describe("the Computer entry in Connectors (S24.5)", () => {
 		expect(h.invoke).toHaveBeenCalledWith("computer_request_permission", { kind: "accessibility" });
 		await waitFor(() => expect(invoked("computer_permissions").length).toBe(checks + 1));
 
-		h.permissions = { accessibility: true, screenRecording: true, screenshotsSupported: true };
+		h.permissions = {
+			accessibility: true,
+			screenRecording: true,
+			screenshotsSupported: true,
+			panicShortcut: true,
+		};
 		await userEvent.click(within(entry).getByRole("button", { name: "Check again" }));
 		await waitFor(() => expect(accessibility).toHaveTextContent("Allowed"));
 		expect(accessibility).not.toHaveTextContent("Not allowed");
@@ -199,7 +216,12 @@ describe("the Computer entry in Connectors (S24.5)", () => {
 	});
 
 	it("asks for Screen Recording with its own kind", async () => {
-		h.permissions = { accessibility: true, screenRecording: false, screenshotsSupported: true };
+		h.permissions = {
+			accessibility: true,
+			screenRecording: false,
+			screenshotsSupported: true,
+			panicShortcut: true,
+		};
 		h.state = connectorsOpen([computerEntry()]);
 		await renderApp("?surface=panel");
 		const recording = await screen.findByRole("listitem", { name: "Screen Recording" });
@@ -289,7 +311,28 @@ describe("on Windows", () => {
 		expect(within(entry).queryByText("Screen Recording")).toBeNull();
 		expect(within(entry).queryByRole("button", { name: "Check again" })).toBeNull();
 		expect(within(entry).queryByText(DEBUG_NOTE)).toBeNull();
-		expect(within(entry).getByText(/Stop and Alt\+Shift\+Esc still work/)).toBeInTheDocument();
+		expect(await within(entry).findByText(/Stop and Alt\+Shift\+Esc still work/)).toBeInTheDocument();
+	});
+
+	it("names Alt+Shift+Esc in the yolo note only when the app registered it", async () => {
+		h.permissions.panicShortcut = false;
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		expect(await within(entry).findByText(YOLO_NOTE_WITHOUT_PANIC)).toBeInTheDocument();
+		expect(within(entry).queryByText(/Alt\+Shift\+Esc/)).toBeNull();
+	});
+
+	it("promises no shortcut in the yolo note while the app has not answered", async () => {
+		const answer = h.invoke.getMockImplementation();
+		h.invoke.mockImplementation((command: string, args?: unknown) =>
+			command === "computer_permissions" ? new Promise(() => {}) : answer?.(command, args),
+		);
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		expect(within(entry).getByText(YOLO_NOTE_WITHOUT_PANIC)).toBeInTheDocument();
+		expect(within(entry).queryByText(/Alt\+Shift\+Esc/)).toBeNull();
 	});
 
 	it("explains unsupported screenshots require Windows 10 version 2004 or newer", async () => {
@@ -331,7 +374,29 @@ describe("on macOS", () => {
 		expect(within(entry).queryByText("Windows asks for no permission for computer control.")).toBeNull();
 		expect(within(entry).queryByText(WINDOWS_2004_NOTE)).toBeNull();
 		expect(within(entry).queryByText(/Alt\+Shift\+Esc/)).toBeNull();
-		expect(within(entry).getByText(/Stop and ⌥⇧Esc still work/)).toBeInTheDocument();
+		expect(await within(entry).findByText(/Stop and ⌥⇧Esc still work/)).toBeInTheDocument();
+	});
+
+	it("names ⌥⇧Esc in the yolo note only when the app registered it", async () => {
+		h.permissions.panicShortcut = false;
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		await within(entry).findByText("Allowed");
+		expect(within(entry).getByText(YOLO_NOTE_WITHOUT_PANIC)).toBeInTheDocument();
+		expect(within(entry).queryByText(/⌥⇧Esc/)).toBeNull();
+	});
+
+	it("promises no shortcut in the yolo note when the permissions check fails", async () => {
+		const answer = h.invoke.getMockImplementation();
+		h.invoke.mockImplementation((command: string, args?: unknown) =>
+			command === "computer_permissions" ? Promise.reject(new Error("no answer")) : answer?.(command, args),
+		);
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		expect(within(entry).getByText(YOLO_NOTE_WITHOUT_PANIC)).toBeInTheDocument();
+		expect(within(entry).queryByText(/⌥⇧Esc/)).toBeNull();
 	});
 
 	it("names the Mac in the session banner", async () => {

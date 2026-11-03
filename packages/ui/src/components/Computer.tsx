@@ -31,8 +31,9 @@ const PERMISSIONS: [ComputerPermission, string][] = [
 
 export const DEBUG_BUILD_NOTE =
 	"Debug builds lose these permissions on every rebuild because macOS ties them to the app's signature; grant them again after updating.";
-const yoloNote = (windows: boolean) =>
-	`Yolo mode lets the assistant send, pay, delete, and submit without asking you first. It turns itself off after 1 hour or when the app quits; Stop and ${windows ? "Alt+Shift+Esc" : "⌥⇧Esc"} still work.`;
+/** Names the panic shortcut only when the app registered it; until it says so, only Stop is promised. */
+const yoloNote = (windows: boolean, panicShortcut: boolean) =>
+	`Yolo mode lets the assistant send, pay, delete, and submit without asking you first. It turns itself off after 1 hour or when the app quits; ${panicShortcut ? `Stop and ${windows ? "Alt+Shift+Esc" : "⌥⇧Esc"} still work` : "Stop still works"}.`;
 const NO_IMAGES_NOTE =
 	"The current model does not accept images, so the assistant cannot see your screen. Choose a model that does in Profiles.";
 
@@ -155,7 +156,7 @@ export function ComputerEntry({ info, controls }: ComputerEntryProps) {
 					<span className="switch-knob" aria-hidden="true" />
 				</button>
 			</div>
-			<p className="connector-note">{yoloNote(windows)}</p>
+			<p className="connector-note">{yoloNote(windows, granted?.panicShortcut === true)}</p>
 			{windows ? null : <p className="connector-note">{DEBUG_BUILD_NOTE}</p>}
 			{info?.noImages ? <p className="connector-note computer-warning">{NO_IMAGES_NOTE}</p> : null}
 		</li>

@@ -184,7 +184,7 @@ pub struct AppInfo {
     pub active: bool,
 }
 
-/// The `computer_permissions` reply (L60), plus `screenshotsSupported`: false before macOS 14,
+/// The permissions in the `computer_permissions` answer (L60), plus `screenshotsSupported`: false before macOS 14,
 /// where ScreenCaptureKit cannot take screenshots, and before Windows 10 version 2004, which
 /// cannot leave Gentle Dot's windows out of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
