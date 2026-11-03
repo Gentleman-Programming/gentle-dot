@@ -163,21 +163,17 @@ export class GentleShellSpawner extends EventEmitter {
   /**
    * Build command line arguments
    *
-   * The installed gentle-shell is a launcher: its own options come first
-   * (--home, --link, --isolated, --package-root) and everything after `--` is
-   * forwarded to pi, which accepts --mode rpc and --append-system-prompt.
-   * The legacy flags (--log-level, --no-auto-setup) are not pi options and the
-   * launcher rejects them.
+   * Matches the invocation the installed daemon uses (proven in production):
+   * the gentle-shell bin is the gentle-pi CLI, which accepts --home, --mode
+   * and --append-system-prompt natively. The legacy --log-level and
+   * --no-auto-setup flags are rejected by it and must not be passed.
    */
   private buildArgs(config: ShellConfig): string[] {
-    const args = [
+    return [
       '--home', config.home,
-      '--',
       '--mode', config.mode,
       '--append-system-prompt', IDENTITY_PROMPT,
     ];
-
-    return args;
   }
 
   /**
