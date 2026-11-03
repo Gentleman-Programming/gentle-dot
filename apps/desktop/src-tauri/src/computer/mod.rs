@@ -220,8 +220,9 @@ pub enum TypedError {
     /// The window in front has no keyboard focus, so where the keys would go is not the approved
     /// recipient's field.
     NoFocus,
-    /// Windows observed held modifiers before the post pressed any keys of its own.
-    HeldModifiers(String),
+    /// Windows reported modifiers down before the post pressed any keys of its own: the user's,
+    /// or one a failed post could not release.
+    HeldModifiers(Vec<&'static str>),
     /// Posting failed; part of the post may have been sent.
     Failed(String),
 }
@@ -238,9 +239,17 @@ impl TypedError {
             (TypedError::NoFocus, false) => "The window in front has no keyboard focus, so nothing was sent.".into(),
             (TypedError::NoFocus, true) => "The window in front has no keyboard focus, so the rest was not sent.".into(),
             (TypedError::HeldModifiers(keys), sent) => {
-                let verb = if keys.contains(" and ") { "are" } else { "is" };
                 let unsent = if sent { "the rest was not sent" } else { "nothing was sent" };
-                format!("{keys} {verb} held down, so {unsent}. Release {keys} and try again.")
+                match keys.as_slice() {
+                    [key] => format!(
+                        "{key} is pressed, so {unsent}. Release {key}, or press and release it once if no one is holding it, and try again."
+                    ),
+                    [rest @ .., last] => format!(
+                        "{} and {last} are pressed, so {unsent}. Release them, or press and release each once if no one is holding them, and try again.",
+                        rest.join(", ")
+                    ),
+                    [] => format!("A modifier is pressed, so {unsent}."),
+                }
             }
             (TypedError::Failed(error), _) => error.clone(),
         }

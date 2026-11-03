@@ -1683,7 +1683,7 @@ mod tests {
         *rig.desktop.held_keys_at.lock().unwrap() = Some((1, vec![0xa2]));
         let result = rig.call("key", json!({"combo": "return"}));
         assert!(is_error(&result), "{result}");
-        assert_eq!(first_text(&result), "Ctrl is held down, so nothing was sent. Release Ctrl and try again.");
+        assert_eq!(first_text(&result), "Ctrl is pressed, so nothing was sent. Release Ctrl, or press and release it once if no one is holding it, and try again.");
         assert!(rig.desktop.events().is_empty());
     }
 
@@ -1694,7 +1694,7 @@ mod tests {
         *rig.desktop.held_keys_at.lock().unwrap() = Some((2, vec![0xa1]));
         let result = rig.call("type", json!({"text": "hello\nworld"}));
         assert!(is_error(&result), "{result}");
-        assert_eq!(first_text(&result), "Shift is held down, so the rest was not sent. Release Shift and try again. Typing stopped after 5 of 11 characters.");
+        assert_eq!(first_text(&result), "Shift is pressed, so the rest was not sent. Release Shift, or press and release it once if no one is holding it, and try again. Typing stopped after 5 of 11 characters.");
         assert_eq!(rig.desktop.events(), vec![InputEvent::Text("hello".into())]);
     }
 

@@ -11,6 +11,8 @@ use super::{InputEvent, MouseButton, TypedError};
 
 /// Sample before the post presses its own modifiers, never between a combo's steps.
 /// GetAsyncKeyState's high bit means down; its low (pressed-since-query) bit is irrelevant.
+/// A down modifier may be the user's or one a failed post could not release, so the message
+/// names both ways out.
 /// Pointer actions do not check held modifiers yet.
 pub fn without_held_modifiers(
     mut key_state: impl FnMut(u16) -> i16,
@@ -28,7 +30,7 @@ pub fn without_held_modifiers(
     if held.is_empty() {
         post()
     } else {
-        Err(TypedError::HeldModifiers(held.join(" and ")))
+        Err(TypedError::HeldModifiers(held))
     }
 }
 
@@ -45,7 +47,7 @@ mod held_modifier_tests {
                 assert_eq!(without_held_modifiers(
                     |key| if key == held { i16::MIN } else { 0 },
                     || panic!("held modifier must prevent the post")),
-                    Err(TypedError::HeldModifiers(name.into())));
+                    Err(TypedError::HeldModifiers(vec![name])));
             }
         }
     }
@@ -55,7 +57,16 @@ mod held_modifier_tests {
         let error = without_held_modifiers(
             |key| if [0xa2, 0xa3, 0xa0].contains(&key) { i16::MIN } else { 0 },
             || panic!("must not post")).unwrap_err();
-        assert_eq!(error.message(false), "Ctrl and Shift are held down, so nothing was sent. Release Ctrl and Shift and try again.");
+        assert_eq!(error.message(false), "Ctrl and Shift are pressed, so nothing was sent. Release them, or press and release each once if no one is holding them, and try again.");
+    }
+
+    #[test]
+    fn three_modifiers_are_joined_with_commas_and_a_final_and() {
+        let error = without_held_modifiers(
+            |key| if [0xa3, 0xa4, 0xa0].contains(&key) { i16::MIN } else { 0 },
+            || panic!("must not post")).unwrap_err();
+        assert_eq!(error.message(false), "Ctrl, Alt and Shift are pressed, so nothing was sent. Release them, or press and release each once if no one is holding them, and try again.");
+        assert_eq!(error.message(true), "Ctrl, Alt and Shift are pressed, so the rest was not sent. Release them, or press and release each once if no one is holding them, and try again.");
     }
 
     #[test]
