@@ -200,3 +200,43 @@ sed -i 's|nan/|TU_PROVEEDOR/|g; s|glm-5.3-flash|ID_REAL|g' nan-profiles.json  # 
 - `packages/daemon/src/profiles.ts` — el store, el import y cómo se aplican.
 - `packages/protocol/src/index.ts` — `Profile`, `ProfileRoles`, `THINKING_LEVELS`.
 - Roles y etiquetas: `ROLE_LABELS` en `profiles.ts`.
+
+## Fallback entre proveedores (nan → NVIDIA)
+
+Las cadenas de `profile-fallbacks.json` son la salida cuando un modelo primario deja de servir. Hasta ahora todas apuntaban solo a `nan/*`: si nan se quedaba sin cuota, la sesión se cortaba sin alternativa.
+
+**Formato del store** (`gentle-pi.profile_model_fallbacks`, v1): por perfil, por rol (o `"*"` como cadena por defecto de los roles sin cadena propia), una lista ordenada de hasta **8** pasos `{ "model": "provider/model", "thinking"?: "<nivel>" }` (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`). Sin pasos repetidos.
+
+**Qué dispara el cambio** (dentro de la misma sesión, por rol — no hace falta cambiar de perfil):
+
+| Categoría | Origen | Enfriamiento |
+|---|---|---|
+| `quota` | la respuesta menciona quota/credit/billing/usage limit (la palabra gana antes que el status) | 30 min |
+| `auth` | 401 / 403 | 30 min |
+| `rate_limit` | 429 | 2 min |
+| `provider_unavailable` | 5xx | 2 min |
+| `timeout` / `network` | 408, 504, red | 2 min |
+
+No hay fallback para `invalid_request`, `context_length` ni abort manual: ahí el cambio no ayudaría. Ojo con el 402: si el cuerpo **no** trae ninguna de esas palabras, cae en `invalid_request` y **no** cambia de proveedor.
+
+**Regla práctica**: un id que no existe en el catálogo del provider quema el paso en vez de servir un turno — observado como 401 con `nan/glm5.3` (auth ⇒ enfriamiento 30 min). Por eso las cadenas se normalizan a ids vivos y la escalera NVIDIA se agrega al final:
+
+```
+nan/deepseek-v4-flash        → primario (vivo)
+nan/glm5.3-flash             → vivo, cae por cuota cuando se agota
+nvidia/z-ai/glm-5.3-flash    → misma familia, vía NVIDIA
+nvidia/deepseek-ai/deepseek-v4.1-flash
+nvidia/nvidia/nemotron-3-ultra-550b-a55b
+```
+
+Los ids `nvidia/*` deben existir en el catálogo instalado (`pi-ai/dist/providers/data/nvidia.json`) y el provider necesita su key en el `auth.json` del engine (`~/.gentle-dot/agent/auth.json` y `~/.gentle-shell/agent/auth.json` ya la tienen).
+
+**Aplicarlo**: la configuración de modelos es human-controlled — ninguna herramienta de agente puede escribirla. Se corre a mano:
+
+```bash
+node scripts/setup/profile-fallbacks-nvidia.mjs --check     # valida sin escribir
+node scripts/setup/profile-fallbacks-nvidia.mjs             # aplica (deja .bak)
+node scripts/setup/profile-fallbacks-nvidia.mjs --dry-run   # muestra qué cambiaría
+```
+
+Toca `~/.gentle-dot/gentle-ai/profile-fallbacks.json` (daemon y app de escritorio) y `~/.gentle-shell/config/gentle-ai/profile-fallbacks.json` (sesión TUI). Es idempotente y después hay que reiniciar el engine para que lea las cadenas.
