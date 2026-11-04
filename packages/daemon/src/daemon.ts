@@ -125,9 +125,9 @@ export class Daemon {
   /** Run activo: el conector que originó el prompt actual y su messageId. */
   private activeRun: { connectorId: string; messageId: string } | null = null;
 
-  /** Fija el modelo del engine (GENTLE_DOT_ENGINE_MODEL, default nan/glm5.3). */
+  /** Fija el modelo del engine (GENTLE_DOT_ENGINE_MODEL, default nan/glm5.3-flash). */
   private configureEngineModel(): void {
-    const model = process.env['GENTLE_DOT_ENGINE_MODEL'] ?? 'nan/glm5.3';
+    const model = process.env['GENTLE_DOT_ENGINE_MODEL'] ?? 'nan/glm5.3-flash';
     const slash = model.indexOf('/');
     if (slash <= 0) {
       console.warn(`[Daemon] GENTLE_DOT_ENGINE_MODEL inválido: ${model} (se espera provider/model)`);

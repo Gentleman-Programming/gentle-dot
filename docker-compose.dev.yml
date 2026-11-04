@@ -31,12 +31,28 @@ services:
         required: false
     environment:
       GENTLE_DOT_AGENT_HOME: /home/dot/.gentle-dot/agent
-      GENTLE_DOT_ENGINE_MODEL: ${GENTLE_DOT_ENGINE_MODEL:-nan/glm5.3}
+      # Modelo del engine. Acá va deepseek-v4-flash porque la cuota mensual de
+      # glm5.3-flash está agotada (402 insufficient_balance, renueva 2026-12-02);
+      # cuando se renueve o haya pack, exportá GENTLE_DOT_ENGINE_MODEL=nan/glm5.3-flash.
+      # Solo estos ids existen para la key nan: deepseek-v4-flash, glm5.3-flash,
+      # minimax-h3, flux-2-klein, qwen-image-2.1 (un id inexistente da 401).
+      GENTLE_DOT_ENGINE_MODEL: ${GENTLE_DOT_ENGINE_MODEL:-nan/deepseek-v4-flash}
       BRIDGE_AUTH_TOKEN: ${BRIDGE_AUTH_TOKEN:-gentle-dot-bridge-secret}
       GENTLE_DOT_NO_SHELL: "0"
+      # El primer arranque en un agent home nuevo instala los companion packages
+      # de gentle-ai y tarda minutos. 30s (default) mata el engine a mitad del
+      # provisioning y el daemon entra en loop: acá se da margen de sobra.
+      GENTLE_DOT_ENGINE_READY_TIMEOUT_MS: ${GENTLE_DOT_ENGINE_READY_TIMEOUT_MS:-900000}
     volumes:
       # Auth del engine (nan y los providers que tengas en el agent home)
       - ${HOME}/.gentle-dot/agent:/home/dot/.gentle-dot/agent
+      # El agent home del host trae una extensión que la app de producción
+      # reescribe en cada arranque con un import absoluto a SU instalación
+      # (/usr/lib/Gentle Dot/runtime/daemon/extensions/approval-guard.ts).
+      # Esa ruta no existe en el contenedor y el engine muere al cargarla
+      # (loop de reinicio). Un volumen propio aísla al contenedor de esas
+      # extensiones del host: portable, sin depender de la app instalada.
+      - gentle-dot-agent-extensions:/home/dot/.gentle-dot/agent/extensions
       # Sesiones y workspace del engine, persistentes entre pruebas
       - gentle-dot-sessions:/home/dot/.gentle-dot/sessions
       - gentle-dot-workspace:/home/dot/workspace
@@ -50,4 +66,5 @@ services:
 
 volumes:
   gentle-dot-sessions:
+  gentle-dot-agent-extensions:
   gentle-dot-workspace:

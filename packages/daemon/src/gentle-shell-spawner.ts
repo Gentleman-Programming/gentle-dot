@@ -12,6 +12,25 @@ import * as path from 'path';
 /** Id del comando get_state usado como sonda de readiness del engine (protocolo RPC de pi). */
 const RPC_PROBE_ID = 'gentle-shell-ready-probe';
 
+/**
+ * Cuánto se espera el ready del engine antes de darlo por muerto.
+ *
+ * Un agent home nuevo hace auto-aprovisionamiento de los companion packages de
+ * gentle-ai en el primer arranque, y eso tarda minutos. Con el timeout corto el
+ * daemon mata el engine a mitad del provisioning, el trabajo se pierde y el
+ * siguiente arranque vuelve a empezar: loop infinito de reinicio. Por eso es
+ * configurable (GENTLE_DOT_ENGINE_READY_TIMEOUT_MS) y el default sigue en 30s.
+ */
+const DEFAULT_READY_TIMEOUT_MS = 30_000;
+
+/** Timeout efectivo de readiness, en ms (env inválida o ausente → default). */
+export function readyTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env['GENTLE_DOT_ENGINE_READY_TIMEOUT_MS'];
+  if (raw === undefined || raw.trim() === '') return DEFAULT_READY_TIMEOUT_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_READY_TIMEOUT_MS;
+}
+
 /** Respuesta correlacionada del protocolo RPC de pi. */
 export interface RpcResponse {
   id: string;
@@ -181,14 +200,17 @@ export class GentleShellSpawner extends EventEmitter {
         }
       });
 
-      // Timeout for ready signal
+      // Timeout for ready signal (configurable: el primer arranque aprovisiona)
+      const readyTimeout = readyTimeoutMs();
       setTimeout(() => {
         if (!this.ready && this.startReject) {
-          this.startReject(new Error('Gentle Shell failed to become ready within 30 seconds'));
+          this.startReject(
+            new Error(`Gentle Shell failed to become ready within ${Math.round(readyTimeout / 1000)} seconds`),
+          );
           this.startReject = null;
           this.startResolve = null;
         }
-      }, 30000);
+      }, readyTimeout);
     });
   }
 
