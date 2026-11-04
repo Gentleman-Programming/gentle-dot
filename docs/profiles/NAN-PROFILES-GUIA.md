@@ -239,4 +239,24 @@ node scripts/setup/profile-fallbacks-nvidia.mjs             # aplica (deja .bak)
 node scripts/setup/profile-fallbacks-nvidia.mjs --dry-run   # muestra qué cambiaría
 ```
 
-Toca `~/.gentle-dot/gentle-ai/profile-fallbacks.json` (daemon y app de escritorio) y `~/.gentle-shell/config/gentle-ai/profile-fallbacks.json` (sesión TUI). Es idempotente y después hay que reiniciar el engine para que lea las cadenas.
+**Ojo con el HOME**: el engine no siempre corre con tu HOME. El daemon de escritorio lo
+reescribe a `<home>/.gentle-dot/home`, y los stores que el engine *lee de verdad* viven ahí
+(`<home>/.gentle-dot/home/.gentle-dot/gentle-ai/profile-fallbacks.json`). Por eso el script
+busca los stores en dos raíces: tu HOME y esa raíz anidada, y lista en voz alta cada ruta
+donde no encontró nada — un "no hay store acá" nunca es silencioso. Para apuntar a un lugar
+exacto:
+
+```bash
+node scripts/setup/profile-fallbacks-nvidia.mjs --dry-run --home=/home/<usuario>
+GENTLE_DOT_FALLBACK_HOMES=/otro/home:/otra/raiz node scripts/setup/profile-fallbacks-nvidia.mjs --check
+```
+
+Además de los ids `nan` muertos, el script **solo** descarta pasos `nan/*` fuera del catálogo
+vivo: un paso de otro proveedor (por ejemplo `openrouter/x:free`) es decisión del operador y
+se conserva tal cual, incluido el primario. Si una cadena queda vacía, la deja arrancando en
+`nan/deepseek-v4-flash`.
+
+Escribe en `~/.gentle-dot/gentle-ai/profile-fallbacks.json`, en
+`~/.gentle-shell/config/gentle-ai/profile-fallbacks.json` y en las copias anidadas bajo
+`.gentle-dot/home/` cuando existen. Es idempotente, no sobrescribe un backup anterior y
+después hay que reiniciar el engine para que lea las cadenas.

@@ -22,6 +22,9 @@ import { join } from "node:path";
 /** Ids the nan provider actually serves; anything else in a chain is dead weight. */
 const LIVE_NAN = new Set(["nan/deepseek-v4-flash", "nan/glm5.3-flash"]);
 
+/** Only nan ids are subject to the live-id filter: other providers are the operator's choice. */
+const isNanId = (model) => typeof model === "string" && model.startsWith("nan/");
+
 /** Ordered NVIDIA steps appended to every chain (provider `nvidia`, zero cost, big context). */
 export const NVIDIA_LADDER = [
 	{ model: "nvidia/z-ai/glm-5.3-flash" },
@@ -41,23 +44,57 @@ const PROFILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const AGENT_NAME = /^[A-Za-z0-9._:@/+%-]+$/;
 const RESERVED = new Set(["__proto__", "constructor", "prototype"]);
 
-/** Config homes that may hold a fallback store; missing ones are skipped. */
-export const CONFIG_HOMES = [
-	join(homedir(), ".gentle-dot", "gentle-ai"),
-	join(homedir(), ".gentle-shell", "config", "gentle-ai"),
-	join(homedir(), ".pi", "gentle-ai"),
+/** Config directories, relative to a HOME, that may hold a fallback store. */
+export const CONFIG_SUBDIRS = [
+	join(".gentle-dot", "gentle-ai"),
+	join(".gentle-shell", "config", "gentle-ai"),
+	join(".pi", "gentle-ai"),
 ];
+
+/**
+ * HOMEs to search. The engine does not always run with the operator's HOME: the desktop
+ * daemon overrides it to `<home>/.gentle-dot/home`, and the stores it actually reads live
+ * there. Searching only `homedir()` would report "nothing to do" and leave the live config
+ * untouched, so both roots are covered, and `--home=<dir>` (or GENTLE_DOT_FALLBACK_HOMES,
+ * colon separated) replaces the guess entirely.
+ */
+export function configHomes(argv = [], env = process.env, home = homedir()) {
+	const explicit = [
+		...argv.filter((a) => a.startsWith("--home=")).map((a) => a.slice("--home=".length)),
+		...(env.GENTLE_DOT_FALLBACK_HOMES ?? "").split(":").filter((v) => v !== ""),
+	];
+	const roots = explicit.length > 0 ? explicit : [home, join(home, ".gentle-dot", "home")];
+	const homes = [];
+	for (const root of roots)
+		for (const sub of CONFIG_SUBDIRS) {
+			const dir = join(root, sub);
+			if (!homes.includes(dir)) homes.push(dir);
+		}
+	return homes;
+}
 
 /**
  * Returns `doc` with every chain extended: live nan steps first, then the NVIDIA ladder,
  * dead ids removed, duplicates collapsed and the length cap respected. Idempotent.
  */
 export function extendChains(doc, ladder = NVIDIA_LADDER) {
+	if (typeof doc !== "object" || doc === null || typeof doc.profiles !== "object" || doc.profiles === null)
+		return doc;
 	const profiles = {};
 	for (const [profile, chains] of Object.entries(doc.profiles)) {
+		if (typeof chains !== "object" || chains === null) {
+			profiles[profile] = chains;
+			continue;
+		}
 		const next = {};
 		for (const [role, steps] of Object.entries(chains)) {
-			const kept = steps.filter((s) => LIVE_NAN.has(s.model));
+			if (!Array.isArray(steps)) {
+				next[role] = steps;
+				continue;
+			}
+			// Drop dead nan ids only. A step from another provider is a deliberate
+			// choice by the operator (the store accepts those ids) and must survive.
+			const kept = steps.filter((s) => !isNanId(s?.model) || LIVE_NAN.has(s.model));
 			const primary = kept.length > 0 ? kept : [{ model: "nan/deepseek-v4-flash" }];
 			const seen = new Set(primary.map((s) => s.model));
 			const out = [...primary.map((s) => ({ ...s }))];
@@ -164,9 +201,34 @@ function selftest() {
 	);
 	// And an id the store accepts must not be reported as invalid.
 	const oddId = structuredClone(out);
-	oddId.profiles.p["*"][0] = { model: "openrouter/x:free" };
+	oddId.profiles.p["*"] = [{ model: "openrouter/x:free" }];
 	assert(validate(oddId).length === 0, "acepta un id legal que el store permite");
-	console.log("selftest OK: transformación, idempotencia y validación");
+	// A step from another provider is the operator's choice: the transform must not eat it.
+	const keptForeign = extendChains(structuredClone(oddId)).profiles.p["*"];
+	assert(
+		keptForeign[0].model === "openrouter/x:free",
+		"conserva el primario de otro proveedor en vez de sustituirlo por nan",
+	);
+	assert(
+		keptForeign.filter((s) => s.model === "openrouter/x:free").length === 1,
+		"conserva exactamente una vez el paso de otro proveedor",
+	);
+	assert(
+		!keptForeign.some((s) => isNanId(s.model)),
+		"no inventa un primario nan cuando la cadena ya tiene uno",
+	);
+	assert(validate({ ...oddId, profiles: { p: { "*": keptForeign } } }).length === 0, "el resultado con proveedor ajeno valida");
+	// A malformed store must not crash: the caller reports it and writes nothing.
+	for (const broken of [null, {}, { kind: KIND, version: 1 }, { kind: KIND, version: 1, profiles: [] }, { kind: KIND, version: 1, profiles: { p: [] } }]) {
+		let threw = null;
+		try {
+			extendChains(broken);
+		} catch (error) {
+			threw = error;
+		}
+		assert(threw === null, `extendChains no debe lanzar con ${JSON.stringify(broken)}: ${threw?.message}`);
+	}
+	console.log("selftest OK: transformación, idempotencia, validación, proveedor ajeno y store malformado");
 }
 
 function main(argv) {
@@ -178,11 +240,22 @@ function main(argv) {
 	const checkOnly = argv.includes("--check");
 	let failures = 0;
 	let touched = 0;
-	for (const home of CONFIG_HOMES) {
+	const missing = [];
+	for (const home of configHomes(argv)) {
 		const file = join(home, "profile-fallbacks.json");
-		if (!existsSync(file)) continue;
+		if (!existsSync(file)) {
+			missing.push(file);
+			continue;
+		}
 		const doc = readStore(file);
 		const before = validate(doc);
+		if (before.length) {
+			// The store drops a file it rejects wholesale: never rewrite one we cannot read.
+			console.log(`\n${file}`);
+			console.log(`  inválido: ${before.join("; ")}`);
+			failures += before.length;
+			continue;
+		}
 		const next = extendChains(doc);
 		const after = validate(next);
 		const added = Object.values(next.profiles)
@@ -201,15 +274,26 @@ function main(argv) {
 			console.log(`  ${checkOnly ? "solo chequeo" : "dry-run"}: no se escribió nada`);
 			continue;
 		}
-		copyFileSync(file, `${file}.bak-${new Date().toISOString().slice(0, 10)}-nvidia-fallback`);
+		// Never overwrite an existing backup: a second run must not destroy the original.
+		const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+		let backup = `${file}.bak-${stamp}-nvidia-fallback`;
+		for (let n = 2; existsSync(backup); n++) backup = `${file}.bak-${stamp}-${n}-nvidia-fallback`;
+		copyFileSync(file, backup);
 		writeFileSync(file, `${JSON.stringify(next, null, 2)}\n`);
-		console.log(`  escrito (backup: ${file}.bak-${new Date().toISOString().slice(0, 10)}-nvidia-fallback)`);
+		console.log(`  escrito (backup: ${backup})`);
 		touched++;
+	}
+	if (missing.length > 0) {
+		// Loud on purpose: a store that is not there means this HOME is not the engine's.
+		console.log("\nsin store en estas rutas (no se tocaron):");
+		for (const file of missing) console.log(`  ${file}`);
 	}
 	if (failures) {
 		console.error(`\n${failures} problema(s) de validación: no se escribió nada`);
 		return 1;
 	}
+	if (touched === 0 && missing.length === configHomes(argv).length)
+		console.error("\nningún HOME con store: pasá --home=<home del engine> o GENTLE_DOT_FALLBACK_HOMES");
 	if (!dryRun && !checkOnly)
 		console.log(`\nlisto: ${touched} archivo(s) actualizados. Reiniciá el engine para que tome las cadenas.`);
 	return 0;
