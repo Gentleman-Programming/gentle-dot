@@ -19,13 +19,11 @@
     "grammy": "^1.46.0",
     "ws": "^8.18.0",
     "yaml": "^2.5.0",
-    "better-sqlite3": "^9.4.0",
     "@gentle-dot/bridges-base": "workspace:*",
     "@gentle-dot/protocol": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
-    "@types/better-sqlite3": "^7.6.0",
     "@types/ws": "^8.18.2",
     "typescript": "^5.5.0",
     "tsx": "^4.16.0",

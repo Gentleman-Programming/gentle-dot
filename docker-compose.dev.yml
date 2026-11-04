@@ -1,0 +1,49 @@
+# Gentle Dot — pruebas locales con la arquitectura nueva.
+# Funciona igual en Debian, Fedora, Arch y Omarchy: el host solo necesita Docker;
+# la imagen (Debian bookworm-slim + Node 24) estandariza todo lo demás.
+#
+# Requisitos en el host:
+#   1. Docker (y el grupo docker para tu usuario, o sudo)
+#   2. ~/.gentle-dot/agent/auth.json con tus providers (el engine usa nan)
+#   3. Un .env junto a este compose con las keys de conectores que quieras
+#      (LINEAR_API_KEY, DISCORD_BOT_TOKEN, TELEGRAM_BOT_TOKEN_ROSITA, ...)
+#
+# Uso:
+#   docker compose up -d --build     # construir y levantar
+#   docker compose logs -f daemon    # ver el daemon
+#   findmnt no aplica: el WS de bridges queda en ws://localhost:4318/ws
+#
+# NOTA de seguridad: en modo server real (S25.8) el engine corre como usuario
+# `dot` separado del daemon; para pruebas locales el engine corre como el
+# usuario del contenedor — endurecer antes de exponer puertos públicamente.
+
+services:
+  daemon:
+    build: .
+    image: gentle-dot:dev
+    container_name: gentle-dot-dev
+    ports:
+      - "4318:4317"           # host 4318 → no choca con el daemon local de producción
+    env_file:
+      - path: .env
+        required: false
+      - path: ${HOME}/.env
+        required: false
+    environment:
+      GENTLE_DOT_AGENT_HOME: /home/dot/.gentle-dot/agent
+      GENTLE_DOT_ENGINE_MODEL: ${GENTLE_DOT_ENGINE_MODEL:-nan/glm5.3}
+      BRIDGE_AUTH_TOKEN: ${BRIDGE_AUTH_TOKEN:-gentle-dot-bridge-secret}
+      GENTLE_DOT_NO_SHELL: "0"
+    volumes:
+      # Auth del engine (nan y los providers que tengas en el agent home)
+      - ${HOME}/.gentle-dot/agent:/home/dot/.gentle-dot/agent
+      # Sesiones y workspace del engine, persistentes entre pruebas
+      - gentle-dot-sessions:/home/dot/.gentle-dot/sessions
+      - gentle-dot-workspace:/home/dot/workspace
+      # Config de conectores del repo (opcional: quitá el mount y usá env vars)
+      - ./docker/connectors.docker.yaml:/app/packages/daemon/connectors.yaml:ro
+    restart: unless-stopped
+
+volumes:
+  gentle-dot-sessions:
+  gentle-dot-workspace:

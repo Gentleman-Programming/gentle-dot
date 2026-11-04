@@ -7,3 +7,4 @@ test-results
 playwright-report
 odd
 .atl
+**/*.tsbuildinfo
