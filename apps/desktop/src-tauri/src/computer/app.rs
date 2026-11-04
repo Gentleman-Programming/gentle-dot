@@ -64,6 +64,11 @@ pub fn set_panic_shortcut_registered(registered: bool) {
     PANIC_SHORTCUT_REGISTERED.store(registered, Ordering::SeqCst);
 }
 
+/// Whether the panic shortcut was registered at launch; false off macOS and Windows.
+pub fn panic_shortcut_registered() -> bool {
+    PANIC_SHORTCUT_REGISTERED.load(Ordering::SeqCst)
+}
+
 /// The yolo dialog's text, naming the panic shortcut only when it is registered.
 pub fn yolo_text(panic_registered: bool) -> &'static str {
     if panic_registered {
@@ -514,14 +519,25 @@ pub fn computer_endpoint(computer: State<'_, Computer>) -> Option<Endpoint> {
 }
 
 #[tauri::command]
-pub fn computer_permissions(computer: State<'_, Computer>) -> Permissions {
+pub fn computer_permissions(computer: State<'_, Computer>) -> PermissionsAnswer {
     #[cfg(any(target_os = "macos", windows))]
-    return computer.desktop.permissions();
+    let permissions = computer.desktop.permissions();
     #[cfg(not(any(target_os = "macos", windows)))]
-    {
+    let permissions = {
         let _ = computer;
         Permissions { accessibility: false, screen_recording: false, screenshots_supported: false, screenshots_unsupported: None }
-    }
+    };
+    PermissionsAnswer { permissions, panic_shortcut: panic_shortcut_registered() }
+}
+
+/// The `computer_permissions` answer: the permissions, plus `panicShortcut`, so Connectors names
+/// the panic shortcut only when it works.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionsAnswer {
+    #[serde(flatten)]
+    pub permissions: Permissions,
+    pub panic_shortcut: bool,
 }
 
 #[tauri::command]
@@ -617,7 +633,7 @@ impl super::Dialogs for NativeDialogs {
     }
 
     fn ask_yolo(&self) -> bool {
-        self.ask(yolo_text(PANIC_SHORTCUT_REGISTERED.load(Ordering::SeqCst)), YOLO_CHOICE)
+        self.ask(yolo_text(panic_shortcut_registered()), YOLO_CHOICE)
     }
 }
 
@@ -723,6 +739,20 @@ Use Stop in the panel or the tray menu instead."
         })
         .unwrap();
         assert_eq!(value, serde_json::json!({"accessibility": true, "screenRecording": false, "screenshotsSupported": true}));
+    }
+
+    #[test]
+    fn the_permissions_answer_says_whether_the_panic_shortcut_is_registered() {
+        let permissions = Permissions { accessibility: true, screen_recording: false, screenshots_supported: true, screenshots_unsupported: None };
+        let value = serde_json::to_value(PermissionsAnswer { permissions, panic_shortcut: false }).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"accessibility": true, "screenRecording": false, "screenshotsSupported": true, "panicShortcut": false})
+        );
+        set_panic_shortcut_registered(true);
+        assert!(panic_shortcut_registered());
+        set_panic_shortcut_registered(false);
+        assert!(!panic_shortcut_registered());
     }
 
     /// Why screenshots are unsupported rides next to the bool, which stays as it was for every consumer.

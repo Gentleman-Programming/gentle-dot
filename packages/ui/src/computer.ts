@@ -15,6 +15,8 @@ export interface ComputerPermissions {
 	accessibility: boolean;
 	screenRecording: boolean;
 	screenshotsSupported?: boolean;
+	/** The app registered the panic shortcut at launch, so it can stop computer control. */
+	panicShortcut?: boolean;
 	/** Why screenshots are unsupported, only when they are; an older app sends none. */
 	screenshotsUnsupported?: "tooOld" | "unknownVersion";
 }
