@@ -109,6 +109,17 @@ Open **Gentle Dot** from the Start menu. The first open needs the network once: 
 
 The app's install folder never changes after install; everything it writes goes to the folders above.
 
+### A connector secret that cannot be read
+
+Each connector secret is one `.bin` file in a subfolder of `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\`. If one of those files is damaged, or was put there by something other than Gentle Dot, that secret can no longer be read or saved again. The error says `The app's secure store refused it: the secret store failed: …` (in the app or in `%USERPROFILE%\.gentle-dot\daemon.log`), and setting the connector up again does not help. When the damaged file holds the key Gentle Dot checks your connectors with, Gentle Dot says it could not check your connectors on every start.
+
+Gentle Dot never repairs, replaces or deletes such a file, and it never keeps the secret unencrypted instead. That is on purpose. You have to remove it yourself. The file name is a hash and Gentle Dot does not show which file is broken, so remove the whole folder:
+
+1. Quit Gentle Dot from its tray icon (**Quit**), so it does not use the folder while you delete it.
+2. Delete `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\`. Only your Windows user (or an administrator) can.
+3. Open Gentle Dot again. This removes every connector secret, including the key that checks your connectors. On this start Gentle Dot makes a new key, so if you had connectors it moves `connectors.json` aside as `connectors.rejected-<time>.json` in `%USERPROFILE%\.gentle-dot\`, starts with no connectors, and says connectors were changed while it was closed.
+4. Add your connectors again in **Connectors** and sign in again.
+
 ### Uninstall
 
 1. Quit Gentle Dot from its tray icon (**Quit**), so the assistant and its processes stop in order.
