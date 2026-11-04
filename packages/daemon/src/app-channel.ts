@@ -22,7 +22,7 @@ export const APP_FD = 3;
 /** Longer than the app's own 120 s dialog timeout, which answers "declined" first. */
 export const APPROVAL_WAIT_MS = 130_000;
 /**
- * A frame longer than this closes the channel; nothing legitimate comes close. The app has the same
+ * A frame longer than this many UTF-8 bytes (excluding LF) closes the channel. The app has the same
  * rule, and a closed channel stops the daemon (S35.2), so neither side ever sends a longer one: an
  * oversized request fails (an approval is refused) and an oversized answer becomes an error.
  */
@@ -75,15 +75,15 @@ export class AppChannel implements AppLink {
 	private readonly options: AppChannelOptions;
 	private readonly pending = new Map<number, Pending>();
 	private readonly closeListeners = new Set<() => void>();
-	private buffer = "";
+	private buffer: Buffer[] = [];
+	private bufferBytes = 0;
 	private nextId = 0;
 	private open = true;
 
 	constructor(stream: Duplex, options: AppChannelOptions = {}) {
 		this.stream = stream;
 		this.options = options;
-		stream.setEncoding("utf8");
-		stream.on("data", (chunk: string) => this.receive(chunk));
+		stream.on("data", (chunk: Buffer) => this.receive(chunk));
 		stream.on("end", () => this.close());
 		stream.on("close", () => this.close());
 		stream.on("error", (error: Error) => {
@@ -139,6 +139,8 @@ export class AppChannel implements AppLink {
 	close(): void {
 		if (!this.open) return;
 		this.open = false;
+		this.buffer = [];
+		this.bufferBytes = 0;
 		this.stream.destroy();
 		for (const [id, waiting] of this.pending) {
 			clearTimeout(waiting.timer);
@@ -149,17 +151,27 @@ export class AppChannel implements AppLink {
 		this.closeListeners.clear();
 	}
 
-	private receive(chunk: string): void {
-		this.buffer += chunk;
-		for (let end = this.buffer.indexOf("\n"); end >= 0; end = this.buffer.indexOf("\n")) {
-			const line = this.buffer.slice(0, end);
-			this.buffer = this.buffer.slice(end + 1);
+	private receive(chunk: Buffer): void {
+		for (let start = 0; this.open && start < chunk.length;) {
+			const end = chunk.indexOf(10, start);
+			const part = chunk.subarray(start, end < 0 ? chunk.length : end);
+			// Bound raw bytes before copying, concatenating or decoding, including incomplete UTF-8.
+			if (this.bufferBytes + part.length > MAX_FRAME) {
+				this.log("the app's channel sent a frame that is too long; closing it");
+				this.close();
+				return;
+			}
+			if (end < 0) {
+				// Copy only the bounded fragment, not a view retaining a larger multi-frame chunk.
+				this.buffer.push(Buffer.from(part));
+				this.bufferBytes += part.length;
+				return;
+			}
+			const line = Buffer.concat([...this.buffer, part], this.bufferBytes + part.length).toString("utf8");
+			this.buffer = [];
+			this.bufferBytes = 0;
 			if (line.trim() !== "") this.onFrame(line);
-			if (!this.open) return;
-		}
-		if (this.buffer.length > MAX_FRAME) {
-			this.log("the app's channel sent a frame that is too long; closing it");
-			this.close();
+			start = end + 1;
 		}
 	}
 

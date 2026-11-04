@@ -3,20 +3,151 @@
 // register the computer helper; the app can, and confirms natively what widens access.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { Duplex } from "node:stream";
 import { APP_REQUIRED, type ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
+import { AppChannel } from "../src/app-channel.ts";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import { fakeApp } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { oauthOptions } from "./fake-oauth.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
+const FRAME_BYTES = 1024 * 1024;
+const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/** Raw input and captured output, without a filesystem or native helper. */
+function memoryChannel() {
+	const output: string[] = [];
+	const logs: string[] = [];
+	const stream = new Duplex({
+		read() {},
+		write(chunk, _encoding, callback) {
+			output.push(String(chunk));
+			callback();
+		},
+	});
+	const channel = new AppChannel(stream, { log: (line) => logs.push(line) });
+	channels.push(channel);
+	const send = async (chunk: Buffer) => {
+		stream.push(chunk);
+		await turn();
+	};
+	return { channel, stream, output, logs, send };
+}
+
+function sizedRequest(bytes: number): Buffer {
+	const empty = JSON.stringify({ kind: "request", id: 7, method: "command", params: "" });
+	const padding = bytes - Buffer.byteLength(empty);
+	return Buffer.from(empty.replace('"params":""', `"params":"${"é".repeat(Math.floor(padding / 2))}${"x".repeat(padding % 2)}"`));
+}
+
+describe("AppChannel UTF-8 frame bounds (S4)", () => {
+	it.each([
+		["complete UTF-8", () => [Buffer.concat([sizedRequest(FRAME_BYTES + 1), Buffer.from("\n")])]],
+		["complete ASCII", () => [Buffer.from(`${" ".repeat(FRAME_BYTES + 1)}\n`)]],
+		["fragmented UTF-8", () => {
+			const frame = sizedRequest(FRAME_BYTES + 1);
+			return [frame.subarray(0, FRAME_BYTES - 2), frame.subarray(FRAME_BYTES - 2)];
+		}],
+		["fragmented ASCII", () => [Buffer.from(" ".repeat(FRAME_BYTES)), Buffer.from(" ")]],
+		["decoder-held UTF-8 bytes", () => [Buffer.from(" ".repeat(FRAME_BYTES - 1)), Buffer.from([0xe2, 0x82])]],
+	] as const)("rejects over-limit %s before dispatch or state mutation", async (_name, chunks) => {
+		const { channel, output, logs, send } = memoryChannel();
+		const stored = new Map([["original", "retained"]]);
+		let calls = 0;
+		let closes = 0;
+		channel.handler = () => {
+			calls++;
+			stored.set("unexpected", "mutation");
+			return {};
+		};
+		channel.onClose(() => closes++);
+		const pending = channel.request("secret_get", { id: "original" }, 10_000).catch((error: Error) => error.message);
+		const approval = channel.approve({ connector: "Test", action: "read", preview: [] });
+		output.length = 0;
+		const parts = chunks();
+		for (let i = 0; i < parts.length; i++) {
+			await send(parts[i]!);
+			if (i < parts.length - 1) expect(channel.connected).toBe(true);
+		}
+		const connected = channel.connected;
+		// Settle queued handlers too; an invalid frame must not be dispatched asynchronously.
+		await turn();
+		expect(calls).toBe(0);
+		expect([...stored]).toEqual([["original", "retained"]]);
+		expect(output).toEqual([]);
+		expect(logs).toEqual(["the app's channel sent a frame that is too long; closing it"]);
+		expect(connected).toBe(false);
+		expect(closes).toBe(1);
+		expect(await pending).toBe("The Gentle Dot app closed its channel.");
+		expect(await approval).toBe(false);
+		channel.close();
+		expect(closes).toBe(1);
+	});
+
+	it("accepts the exact UTF-8 byte boundary, multiple frames, and split multibyte input", async () => {
+		const { channel, output, logs, send } = memoryChannel();
+		const calls: unknown[] = [];
+		channel.handler = (method, params) => {
+			calls.push([method, params]);
+			return { received: true };
+		};
+		const frame = sizedRequest(FRAME_BYTES);
+		expect(frame.byteLength).toBe(FRAME_BYTES);
+		const split = frame.indexOf(Buffer.from("é")) + 1;
+		await send(frame.subarray(0, split));
+		expect(calls).toEqual([]);
+		await send(frame.subarray(split));
+		expect(channel.connected).toBe(true);
+		expect(calls).toEqual([]);
+		const second = { kind: "request", id: 8, method: "computer_unregister", params: { text: "🙂漢字" } };
+		await send(Buffer.from(`\n \n${JSON.stringify(second)}\n`));
+		expect(calls).toEqual([["command", JSON.parse(frame.toString()).params], [second.method, second.params]]);
+		expect(output).toEqual([
+			'{"kind":"response","id":7,"result":{"received":true}}\n',
+			'{"kind":"response","id":8,"result":{"received":true}}\n',
+		]);
+		expect(logs).toEqual([]);
+		expect(channel.connected).toBe(true);
+	});
+
+	it("preserves request errors, approvals and peer close with valid Unicode responses", async () => {
+		const { channel, stream, output, logs, send } = memoryChannel();
+		const request = channel.request("secret_get", { id: "café" }, 10_000);
+		expect(output.shift()).toBe('{"kind":"request","id":1,"method":"secret_get","params":{"id":"café"}}\n');
+		const response = Buffer.from('{"kind":"response","id":1,"result":"🙂漢字"}\n');
+		const split = response.indexOf(Buffer.from("🙂")) + 2;
+		await send(response.subarray(0, split));
+		await send(response.subarray(split));
+		expect(await request).toBe("🙂漢字");
+		const failed = channel.request("secret_put", {}, 10_000).catch((error: Error) => error.message);
+		await send(Buffer.from('{"kind":"response","id":2,"error":"refused café"}\n'));
+		expect(await failed).toBe("refused café");
+		const approved = channel.approve({ connector: "Café", action: "read", preview: [] });
+		await send(Buffer.from('{"kind":"response","id":3,"result":{"approved":true}}\n'));
+		expect(await approved).toBe(true);
+		const waiting = channel.request("command", {}, 10_000).catch((error: Error) => error.message);
+		let closes = 0;
+		channel.onClose(() => closes++);
+		stream.push(null);
+		await turn();
+		expect(await waiting).toBe("The Gentle Dot app closed its channel.");
+		expect(channel.connected).toBe(false);
+		expect(closes).toBe(1);
+		expect(logs).toEqual([]);
+		await expect(channel.request("command", {}, 10_000)).rejects.toThrow("The Gentle Dot app is not connected.");
+	});
+});
+
 const HELPER = "http://127.0.0.1:51234/mcp";
 const KEY = "s3cr3t-Computer-Key-0123456789abcdef";
 
 const daemons: DotDaemon[] = [];
+const channels: AppChannel[] = [];
 afterEach(async () => {
+	for (const channel of channels.splice(0)) channel.close();
 	await Promise.all(daemons.splice(0).map((d) => d.close()));
 });
 
