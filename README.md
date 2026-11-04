@@ -163,6 +163,7 @@ What does not yet: the agent has a shell, and its shell commands (and its subage
 | :--- | :--- |
 | **[Install](docs/install.md)** | Installers, first open, permissions, data, uninstall |
 | **[Design](docs/design.md)** | Architecture, protocol, desktop shell, computer control, voice, attachments |
+| **[Distribution contracts](docs/distribution.md)** | Component ownership, private runtime compatibility, release evidence and project skill |
 | **[Linux testing](docs/linux-testing.md)** | GNOME and Hyprland setup and the tester checklist |
 | **[Deploy to a VPS](docs/deploy-vps.md)** | Docker and HTTPS on your own server |
 | **[Desktop app](apps/desktop/README.md)** | The Tauri shell and platform notes |
