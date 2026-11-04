@@ -125,6 +125,11 @@ export abstract class BaseBridge extends EventEmitter {
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(this.config.daemonUrl);
 
+      // The handshake promise resolves when the daemon accepts the hello
+      // (handleReady emits 'onReady') and rejects when the socket closes or
+      // errors before the handshake completed.
+      this.once('onReady', () => resolve());
+
       this.ws.on('open', () => {
         console.log(`[${this.config.connectorType}] WebSocket connected`);
         this.sendHello();
@@ -137,6 +142,9 @@ export abstract class BaseBridge extends EventEmitter {
 
       this.ws.on('close', (code: number, reason: Buffer) => {
         console.log(`[${this.config.connectorType}] Disconnected: ${code} ${reason.toString()}`);
+        if (this.status === 'connecting' || this.status === 'authenticating') {
+          reject(new Error(`Handshake rejected by the daemon: ${code} ${reason.toString()}`));
+        }
         this.handleDisconnect(code, reason.toString());
       });
 
