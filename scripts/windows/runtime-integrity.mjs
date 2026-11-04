@@ -18,24 +18,29 @@ export function inventory(root, relative = '', result = {}) {
   }
   return result;
 }
-export function seal(root) {
-  const files = inventory(root);
+function validatePayload(root, files) {
   for (const path of REQUIRED) if (!files[path]) throw new Error(`Missing runtime file: ${path}`);
   const native = Object.keys(files).filter(p => p.startsWith('daemon/node_modules/gentle-pi/.gentle-ai/') && p.endsWith('/gentle-ai.exe'));
   if (native.length !== 1) throw new Error('Expected exactly one packaged Gentle AI executable');
   for (const path of ['node/node.exe', 'bin/engram.exe', 'bin/pi.exe', 'bin/private-storage.exe', ...native]) {
     if (readFileSync(join(root,path)).subarray(0,2).toString() !== 'MZ') throw new Error(`Not a Windows executable: ${path}`);
   }
+}
+export function seal(root) {
+  const files = inventory(root);
+  validatePayload(root, files);
   const data = {schema:1, platform:'win32-x64', files};
   writeFileSync(join(root,MANIFEST),JSON.stringify(data,null,2)+'\n');
   return data;
 }
 export function verify(root, expected) {
   const actual=inventory(root);
-  if (expected.schema !== 1 || expected.platform !== 'win32-x64') throw new Error('Invalid Windows runtime manifest');
+  if (!expected || expected.schema !== 1 || expected.platform !== 'win32-x64' ||
+      !expected.files || typeof expected.files !== 'object' || Array.isArray(expected.files)) throw new Error('Invalid Windows runtime manifest');
   for (const key of new Set([...Object.keys(expected.files), ...Object.keys(actual)])) {
     if (actual[key] !== expected.files[key]) throw new Error(`Runtime integrity mismatch: ${key}`);
   }
+  validatePayload(root, actual);
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const [mode,root,reference]=process.argv.slice(2);
