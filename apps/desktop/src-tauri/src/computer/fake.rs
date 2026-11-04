@@ -61,7 +61,12 @@ impl Default for FakeDesktop {
         FakeDesktop {
             events: Mutex::new(Vec::new()),
             typed_posts: Mutex::new(Vec::new()),
-            permissions: Mutex::new(Permissions { accessibility: true, screen_recording: true, screenshots_supported: true }),
+            permissions: Mutex::new(Permissions {
+                accessibility: true,
+                screen_recording: true,
+                screenshots_supported: true,
+                screenshots_unsupported: None,
+            }),
             frontmost: Mutex::new(Some(safari)),
             focused_app: Mutex::new(None),
             front_after_posts: Mutex::new(None),

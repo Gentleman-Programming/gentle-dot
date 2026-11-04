@@ -33,6 +33,10 @@ export const DEBUG_BUILD_NOTE =
 	"Debug builds lose these permissions on every rebuild because macOS ties them to the app's signature; grant them again after updating.";
 const yoloNote = (windows: boolean) =>
 	`Yolo mode lets the assistant send, pay, delete, and submit without asking you first. It turns itself off after 1 hour or when the app quits; Stop and ${windows ? "Alt+Shift+Esc" : "⌥⇧Esc"} still work.`;
+const WINDOWS_TOO_OLD_NOTE =
+	"Computer control needs Windows 10 version 2004 (build 19041) or newer for screenshots.";
+const WINDOWS_UNKNOWN_VERSION_NOTE =
+	"Gentle Dot cannot tell which Windows version this is, so computer control is unavailable: screenshots need Windows 10 version 2004 (build 19041) or newer.";
 const NO_IMAGES_NOTE =
 	"The current model does not accept images, so the assistant cannot see your screen. Choose a model that does in Profiles.";
 
@@ -137,7 +141,9 @@ export function ComputerEntry({ info, controls }: ComputerEntryProps) {
 			)}
 			{windows && granted?.screenshotsSupported === false ? (
 				<p className="connector-note computer-warning">
-					Computer control needs Windows 10 version 2004 (build 19041) or newer for screenshots.
+					{granted.screenshotsUnsupported === "unknownVersion"
+						? WINDOWS_UNKNOWN_VERSION_NOTE
+						: WINDOWS_TOO_OLD_NOTE}
 				</p>
 			) : null}
 			<div className="computer-yolo">

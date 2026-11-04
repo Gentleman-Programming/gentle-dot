@@ -520,7 +520,7 @@ pub fn computer_permissions(computer: State<'_, Computer>) -> Permissions {
     #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = computer;
-        Permissions { accessibility: false, screen_recording: false, screenshots_supported: false }
+        Permissions { accessibility: false, screen_recording: false, screenshots_supported: false, screenshots_unsupported: None }
     }
 }
 
@@ -715,7 +715,32 @@ Use Stop in the panel or the tray menu instead."
 
     #[test]
     fn permissions_serialize_with_the_l60_field_names() {
-        let value = serde_json::to_value(Permissions { accessibility: true, screen_recording: false, screenshots_supported: true }).unwrap();
+        let value = serde_json::to_value(Permissions {
+            accessibility: true,
+            screen_recording: false,
+            screenshots_supported: true,
+            screenshots_unsupported: None,
+        })
+        .unwrap();
         assert_eq!(value, serde_json::json!({"accessibility": true, "screenRecording": false, "screenshotsSupported": true}));
+    }
+
+    /// Why screenshots are unsupported rides next to the bool, which stays as it was for every consumer.
+    #[test]
+    fn unsupported_screenshots_say_why() {
+        let unsupported = |reason| Permissions {
+            accessibility: true,
+            screen_recording: true,
+            screenshots_supported: false,
+            screenshots_unsupported: Some(reason),
+        };
+        assert_eq!(
+            serde_json::to_value(unsupported(super::super::ScreenshotsUnsupported::TooOld)).unwrap(),
+            serde_json::json!({"accessibility": true, "screenRecording": true, "screenshotsSupported": false, "screenshotsUnsupported": "tooOld"})
+        );
+        assert_eq!(
+            serde_json::to_value(unsupported(super::super::ScreenshotsUnsupported::UnknownVersion)).unwrap(),
+            serde_json::json!({"accessibility": true, "screenRecording": true, "screenshotsSupported": false, "screenshotsUnsupported": "unknownVersion"})
+        );
     }
 }

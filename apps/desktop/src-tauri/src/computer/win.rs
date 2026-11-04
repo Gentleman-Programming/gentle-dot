@@ -37,8 +37,8 @@ use super::winput::{
     VirtualScreen,
 };
 use super::{
-    runs_as_administrator, AppInfo, Capture, InputEvent, KeyboardRecipient, MouseButton, TypedError,
-    KEYS_CHANGED_WHILE_TYPING,
+    runs_as_administrator, AppInfo, Capture, InputEvent, KeyboardRecipient, MouseButton, ScreenshotsUnsupported,
+    TypedError, KEYS_CHANGED_WHILE_TYPING,
 };
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
@@ -1767,11 +1767,16 @@ fn windows_build() -> Option<u32> {
     String::from_utf16_lossy(units).trim_end_matches('\0').trim().parse().ok()
 }
 
-/// Whether screenshots can leave Gentle Dot's windows out. A build that cannot be read counts as
-/// unable: before Windows 10 version 2004 the exclusion does not fail, it just leaves a black box
-/// (`WDA_MONITOR`), so a failed exclusion cannot be relied on to say so.
-fn supports_capture_exclusion(build: Option<u32>) -> bool {
-    build.is_some_and(|build| build >= CAPTURE_EXCLUSION_BUILD)
+/// Why screenshots cannot leave Gentle Dot's windows out, or `None` when they can. A build that
+/// cannot be read counts as unable too: before Windows 10 version 2004 the exclusion does not
+/// fail, it just leaves a black box (`WDA_MONITOR`), so a failed exclusion cannot be relied on to
+/// say so.
+fn capture_exclusion_unsupported(build: Option<u32>) -> Option<ScreenshotsUnsupported> {
+    match build {
+        None => Some(ScreenshotsUnsupported::UnknownVersion),
+        Some(build) if build < CAPTURE_EXCLUSION_BUILD => Some(ScreenshotsUnsupported::TooOld),
+        Some(_) => None,
+    }
 }
 
 /// The Windows desktop the helper drives.
@@ -1785,10 +1790,12 @@ impl super::Desktop for WinDesktop {
     fn permissions(&self) -> super::Permissions {
         // Windows asks for no permission to send input or take screenshots; leaving Gentle Dot's
         // windows out of them needs a recent enough build.
+        let screenshots_unsupported = capture_exclusion_unsupported(windows_build());
         super::Permissions {
             accessibility: true,
             screen_recording: true,
-            screenshots_supported: supports_capture_exclusion(windows_build()),
+            screenshots_supported: screenshots_unsupported.is_none(),
+            screenshots_unsupported,
         }
     }
 
@@ -1988,19 +1995,27 @@ mod tests {
         assert_eq!(desktop.keyboard_refusal(&ghost), keyboard_refusal(&ghost));
         let permissions = desktop.permissions();
         assert!(permissions.accessibility && permissions.screen_recording);
-        assert_eq!(permissions.screenshots_supported, supports_capture_exclusion(windows_build()));
+        assert_eq!(permissions.screenshots_unsupported, capture_exclusion_unsupported(windows_build()));
+        assert_eq!(permissions.screenshots_supported, permissions.screenshots_unsupported.is_none());
     }
 
     /// The machine's own answer follows its build, so the test holds before 2004 too.
     #[test]
     fn screenshots_need_windows_10_2004() {
-        assert!(!supports_capture_exclusion(Some(19040)));
-        assert!(supports_capture_exclusion(Some(19041)));
-        assert!(supports_capture_exclusion(Some(26100)));
-        assert!(!supports_capture_exclusion(None), "an unreadable build is not trusted");
+        assert_eq!(capture_exclusion_unsupported(Some(19040)), Some(ScreenshotsUnsupported::TooOld));
+        assert_eq!(capture_exclusion_unsupported(Some(19041)), None);
+        assert_eq!(capture_exclusion_unsupported(Some(26100)), None);
+        assert_eq!(
+            capture_exclusion_unsupported(None),
+            Some(ScreenshotsUnsupported::UnknownVersion),
+            "an unreadable build is not trusted, nor called too old"
+        );
         let build = windows_build().expect("the build number is readable");
         use super::super::Desktop;
-        assert_eq!(WinDesktop.permissions().screenshots_supported, build >= CAPTURE_EXCLUSION_BUILD, "{build}");
+        let permissions = WinDesktop.permissions();
+        assert_eq!(permissions.screenshots_supported, build >= CAPTURE_EXCLUSION_BUILD, "{build}");
+        let too_old = (build < CAPTURE_EXCLUSION_BUILD).then_some(ScreenshotsUnsupported::TooOld);
+        assert_eq!(permissions.screenshots_unsupported, too_old, "{build}");
     }
 
     /// Windows that could not be listed may include ours: the capture is not clean. Nothing
