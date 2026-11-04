@@ -40,6 +40,10 @@ services:
       # Sesiones y workspace del engine, persistentes entre pruebas
       - gentle-dot-sessions:/home/dot/.gentle-dot/sessions
       - gentle-dot-workspace:/home/dot/workspace
+      # Extensiones del agent home: importan módulos del repo por ruta absoluta
+      # (packages/daemon/src/extensions/*.ts), así que el repo se monta en la
+      # misma ruta que en el host para que el import resuelva dentro del contenedor.
+      - /run/media/bladimir/Datos/Datos/proyectos/work/gentleman/gentle-dot:/run/media/bladimir/Datos/Datos/proyectos/work/gentleman/gentle-dot:ro
       # Config de conectores del repo (opcional: quitá el mount y usá env vars)
       - ./docker/connectors.docker.yaml:/app/packages/daemon/connectors.yaml:ro
     restart: unless-stopped
