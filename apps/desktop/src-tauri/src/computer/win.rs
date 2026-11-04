@@ -29,13 +29,16 @@ use super::risk::{AxElement, Focus};
 use super::glow::Frame;
 use super::winaccess::{element, is_default, known_chain, unreadable, UIA_BUTTON, UIA_WINDOW};
 use super::winapps::{
-    answers_to, app_pids, executable_target, fronts_same_app, hosted_page, request, shortcut_named, strip_ci, Request,
-    TopWindow,
+    active_entries, answers_to, distinct_names, executable_target, fronts_same_app, hosted_page, listed_name,
+    listed_windows, request, shortcut_named, strip_ci, Request, TopWindow,
 };
-use super::winput::{checks_typing_target, releases, send_batches, settles, steps, without_held_modifiers, Step, VirtualScreen};
+use super::winput::{
+    checks_held_modifiers, checks_typing_target, releases, send_batches, settles, steps, without_held_modifiers, Step,
+    VirtualScreen,
+};
 use super::{
-    runs_as_administrator, AppInfo, Capture, InputEvent, KeyboardRecipient, MouseButton, TypedError,
-    KEYS_CHANGED_WHILE_TYPING,
+    runs_as_administrator, AppInfo, Capture, InputEvent, KeyboardRecipient, MouseButton, ScreenshotsUnsupported,
+    TypedError, KEYS_CHANGED_WHILE_TYPING,
 };
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
@@ -281,10 +284,11 @@ fn post_input(event: &InputEvent, approved: Option<&KeyboardRecipient>) -> Resul
         }
     }
     let plan = steps(event, &virtual_screen()).map_err(TypedError::Failed)?;
-    // Sample after recipient queries and before any of this event's own modifiers go down.
+    // Sample after recipient queries and before any of this event's own modifiers or buttons go
+    // down (a refused drag presses nothing). Pointer refusals reach the agent through `post`.
     // Do not sample inside the step loop: ctrl+t would then observe its own injected Ctrl.
     // This is a snapshot, not an atomic fence against a user pressing a key during SendInput.
-    if matches!(event, InputEvent::Key(_) | InputEvent::Text(_)) {
+    if checks_held_modifiers(event) {
         without_held_modifiers(
             // SAFETY: plain key-state query using the Windows virtual-key codes in winput.
             |key| unsafe { GetAsyncKeyState(i32::from(key)) },
@@ -925,18 +929,80 @@ pub fn window_owner_at(at: Point) -> Option<AppIdentity> {
     (!root.is_null()).then(|| target_of(root))
 }
 
+/// The shell display name for the AppUserModelID stored on a frame (the name Start shows for the
+/// app), or none when the shell does not give one. Every interface is released and every
+/// PROPVARIANT and string the shell allocated is freed before the apartment is left.
+fn frame_app_name(hwnd: HWND) -> Option<String> {
+    use windows::core::{GUID, PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{HWND as ComHwnd, PROPERTYKEY};
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToStringAlloc};
+    use windows::Win32::System::Variant::VT_LPWSTR;
+    use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
+    use windows::Win32::UI::Shell::{IShellItem, SHCreateItemInKnownFolder, FOLDERID_AppsFolder, KF_FLAG_DEFAULT, SIGDN_NORMALDISPLAY};
+    /// `PKEY_AppUserModel_ID` (propkey.h): declared here rather than enabling the Enhanced
+    /// Storage bindings for one constant.
+    const AUMID: PROPERTYKEY = PROPERTYKEY { fmtid: GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3), pid: 5 };
+    /// A string the shell allocated, copied and then freed exactly once.
+    fn take(text: PWSTR) -> Option<String> {
+        // SAFETY: `text` is null or a terminated string from CoTaskMemAlloc, not used afterwards.
+        unsafe {
+            let copied = if text.is_null() { None } else { text.to_string().ok() };
+            CoTaskMemFree(Some(text.0 as *const c_void));
+            copied
+        }
+    }
+    // Declared first so every interface below is released before COM is left.
+    let _apartment = Apartment::join(Apartment::SHELL);
+    // SAFETY: typed shell calls on a window handle and on the interfaces they return; each
+    // HRESULT is checked by the binding, and the PROPVARIANT is cleared once it is read.
+    unsafe {
+        let store: IPropertyStore = SHGetPropertyStoreForWindow(ComHwnd(hwnd)).ok()?;
+        let mut value = store.GetValue(&AUMID).ok()?;
+        let aumid = if value.Anonymous.Anonymous.vt == VT_LPWSTR { PropVariantToStringAlloc(&value).ok() } else { None };
+        let _ = PropVariantClear(&mut value);
+        let aumid = take(aumid?)?;
+        if aumid.trim().is_empty() {
+            return None;
+        }
+        let path = wide(&aumid);
+        let item: IShellItem = SHCreateItemInKnownFolder(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, PCWSTR(path.as_ptr())).ok()?;
+        take(item.GetDisplayName(SIGDN_NORMALDISPLAY).ok()?).filter(|name| !name.trim().is_empty())
+    }
+}
+
 /// The running apps, front to back, or why they cannot be listed (a partial list would read as
 /// apps that are not running).
 pub fn list_apps() -> Result<Vec<AppInfo>, String> {
     let active = frontmost_app().map(|app| app.pid);
-    let windows: Vec<TopWindow> = top_windows()?.into_iter().map(|(_, window)| window).collect();
-    Ok(app_pids(&windows)
-        .into_iter()
-        .map(|pid| {
-            let id = identity(pid);
-            AppInfo { name: id.name, bundle_id: id.bundle_id, active: active == Some(pid) }
-        })
-        .collect())
+    // SAFETY: plain queries.
+    let front_root = unsafe { GetAncestor(GetForegroundWindow(), GA_ROOT) } as usize;
+    let windows = top_windows()?;
+    let listing: Vec<(TopWindow, bool)> = windows.iter().map(|(hwnd, window)| {
+        let detached = class_name(*hwnd).as_deref() == Some(FRAME_CLASS)
+            && app_pid(*hwnd).is_none() && is_frame_host(&identity(window.pid));
+        (window.clone(), detached)
+    }).collect();
+    let shown = listed_windows(&listing);
+    // A detached frame is only named for listing; it cannot be acted on until restored and
+    // identified. target_of and every blocklist/activation check keep their existing identity.
+    let ids: Vec<(AppIdentity, String)> = shown.iter().map(|&index| {
+        let ((hwnd, _), (window, detached)) = (&windows[index], &listing[index]);
+        let id = identity(window.pid);
+        let name = listed_name(*detached, if *detached { frame_app_name(*hwnd) } else { None },
+            if *detached { Some(window.title.clone()) } else { None }, id.name.clone());
+        (id, name)
+    }).collect();
+    // Frames share the frame host's process: the one in front is told by its window handle.
+    let actives = active_entries(
+        &shown.iter().map(|&index| (listing[index].0.pid, listing[index].1, windows[index].0 as usize)).collect::<Vec<_>>(),
+        active,
+        front_root,
+    );
+    let names = distinct_names(
+        shown.iter().zip(&ids).map(|(&index, (_, name))| (name.clone(), listing[index].1, listing[index].0.title.clone())).collect(),
+    );
+    Ok(ids.into_iter().zip(names).zip(actives).map(|(((id, _), name), active)| AppInfo { name, bundle_id: id.bundle_id, active }).collect())
 }
 
 /// Brings a window to the front. Windows lets only the process that received the last input
@@ -1701,11 +1767,16 @@ fn windows_build() -> Option<u32> {
     String::from_utf16_lossy(units).trim_end_matches('\0').trim().parse().ok()
 }
 
-/// Whether screenshots can leave Gentle Dot's windows out. A build that cannot be read counts as
-/// unable: before Windows 10 version 2004 the exclusion does not fail, it just leaves a black box
-/// (`WDA_MONITOR`), so a failed exclusion cannot be relied on to say so.
-fn supports_capture_exclusion(build: Option<u32>) -> bool {
-    build.is_some_and(|build| build >= CAPTURE_EXCLUSION_BUILD)
+/// Why screenshots cannot leave Gentle Dot's windows out, or `None` when they can. A build that
+/// cannot be read counts as unable too: before Windows 10 version 2004 the exclusion does not
+/// fail, it just leaves a black box (`WDA_MONITOR`), so a failed exclusion cannot be relied on to
+/// say so.
+fn capture_exclusion_unsupported(build: Option<u32>) -> Option<ScreenshotsUnsupported> {
+    match build {
+        None => Some(ScreenshotsUnsupported::UnknownVersion),
+        Some(build) if build < CAPTURE_EXCLUSION_BUILD => Some(ScreenshotsUnsupported::TooOld),
+        Some(_) => None,
+    }
 }
 
 /// The Windows desktop the helper drives.
@@ -1719,10 +1790,12 @@ impl super::Desktop for WinDesktop {
     fn permissions(&self) -> super::Permissions {
         // Windows asks for no permission to send input or take screenshots; leaving Gentle Dot's
         // windows out of them needs a recent enough build.
+        let screenshots_unsupported = capture_exclusion_unsupported(windows_build());
         super::Permissions {
             accessibility: true,
             screen_recording: true,
-            screenshots_supported: supports_capture_exclusion(windows_build()),
+            screenshots_supported: screenshots_unsupported.is_none(),
+            screenshots_unsupported,
         }
     }
 
@@ -1774,6 +1847,21 @@ impl super::Desktop for WinDesktop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "interactive Windows desktop: minimize Settings before running"]
+    fn detached_settings_is_still_an_unidentified_refused_target() {
+        let (hwnd, _) = top_windows().unwrap().into_iter().find(|(hwnd, window)| {
+            window.is_app() && class_name(*hwnd).as_deref() == Some(FRAME_CLASS)
+                && app_pid(*hwnd).is_none() && is_frame_host(&identity(window.pid))
+                && listed_name(true, frame_app_name(*hwnd), Some(window.title.clone()), String::new())
+                    .eq_ignore_ascii_case("Settings")
+        }).expect("minimize Settings in an English Windows session first");
+        let target = target_of(hwnd);
+        assert_eq!(target.name, UNIDENTIFIED);
+        assert!(target.bundle_id.is_none());
+        assert!(blocked_reason(&target, std::process::id() as i32).is_some());
+    }
 
     fn per_monitor_aware() {
         use windows_sys::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
@@ -1907,19 +1995,27 @@ mod tests {
         assert_eq!(desktop.keyboard_refusal(&ghost), keyboard_refusal(&ghost));
         let permissions = desktop.permissions();
         assert!(permissions.accessibility && permissions.screen_recording);
-        assert_eq!(permissions.screenshots_supported, supports_capture_exclusion(windows_build()));
+        assert_eq!(permissions.screenshots_unsupported, capture_exclusion_unsupported(windows_build()));
+        assert_eq!(permissions.screenshots_supported, permissions.screenshots_unsupported.is_none());
     }
 
     /// The machine's own answer follows its build, so the test holds before 2004 too.
     #[test]
     fn screenshots_need_windows_10_2004() {
-        assert!(!supports_capture_exclusion(Some(19040)));
-        assert!(supports_capture_exclusion(Some(19041)));
-        assert!(supports_capture_exclusion(Some(26100)));
-        assert!(!supports_capture_exclusion(None), "an unreadable build is not trusted");
+        assert_eq!(capture_exclusion_unsupported(Some(19040)), Some(ScreenshotsUnsupported::TooOld));
+        assert_eq!(capture_exclusion_unsupported(Some(19041)), None);
+        assert_eq!(capture_exclusion_unsupported(Some(26100)), None);
+        assert_eq!(
+            capture_exclusion_unsupported(None),
+            Some(ScreenshotsUnsupported::UnknownVersion),
+            "an unreadable build is not trusted, nor called too old"
+        );
         let build = windows_build().expect("the build number is readable");
         use super::super::Desktop;
-        assert_eq!(WinDesktop.permissions().screenshots_supported, build >= CAPTURE_EXCLUSION_BUILD, "{build}");
+        let permissions = WinDesktop.permissions();
+        assert_eq!(permissions.screenshots_supported, build >= CAPTURE_EXCLUSION_BUILD, "{build}");
+        let too_old = (build < CAPTURE_EXCLUSION_BUILD).then_some(ScreenshotsUnsupported::TooOld);
+        assert_eq!(permissions.screenshots_unsupported, too_old, "{build}");
     }
 
     /// Windows that could not be listed may include ours: the capture is not clean. Nothing

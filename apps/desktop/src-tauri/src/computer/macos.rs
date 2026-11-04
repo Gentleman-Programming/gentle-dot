@@ -10,7 +10,7 @@ use super::glow::Frame;
 use super::keys::KeyCombo;
 use super::risk::{AxElement, Focus};
 use super::windows::{hit_test_app, owner_row_at, WindowRow};
-use super::{AppInfo, Capture, Desktop, InputEvent, MouseButton, PermissionKind, Permissions};
+use super::{AppInfo, Capture, Desktop, InputEvent, MouseButton, PermissionKind, Permissions, ScreenshotsUnsupported};
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -460,11 +460,13 @@ fn window_rows() -> Vec<WindowRow> {
 
 impl Desktop for MacDesktop {
     fn permissions(&self) -> Permissions {
+        let screenshots_supported = available!(macos = 14.0);
         Permissions {
             // SAFETY: plain queries.
             accessibility: unsafe { AXIsProcessTrusted() },
             screen_recording: CGPreflightScreenCaptureAccess(),
-            screenshots_supported: available!(macos = 14.0),
+            screenshots_supported,
+            screenshots_unsupported: (!screenshots_supported).then_some(ScreenshotsUnsupported::TooOld),
         }
     }
 

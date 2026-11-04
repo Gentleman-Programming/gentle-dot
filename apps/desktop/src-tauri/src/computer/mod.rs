@@ -186,13 +186,26 @@ pub struct AppInfo {
 
 /// The permissions in the `computer_permissions` answer (L60), plus `screenshotsSupported`: false before macOS 14,
 /// where ScreenCaptureKit cannot take screenshots, and before Windows 10 version 2004, which
-/// cannot leave Gentle Dot's windows out of them.
+/// cannot leave Gentle Dot's windows out of them. `screenshotsUnsupported` says why, only when
+/// they are unsupported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Permissions {
     pub accessibility: bool,
     pub screen_recording: bool,
     pub screenshots_supported: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screenshots_unsupported: Option<ScreenshotsUnsupported>,
+}
+
+/// Why screenshots are unsupported. Either way there are none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ScreenshotsUnsupported {
+    /// Before macOS 14, or before Windows 10 version 2004.
+    TooOld,
+    /// Windows' build number could not be read, so it is not trusted to be recent enough.
+    UnknownVersion,
 }
 
 /// Which macOS permission the user is asked for (`computer_request_permission {kind}`, L60).

@@ -26,8 +26,8 @@ use super::rate::{RateLimiter, MAX_ACTIONS_PER_SECOND};
 use super::risk::{assess, Act};
 use super::working::{NoPreparation, Preparation};
 use super::{
-    Clock, Desktop, Dialogs, InputEvent, KeyboardRecipient, MouseButton, TypedError, KEYS_CHANGED_BEFORE_TYPING,
-    KEYS_CHANGED_WHILE_TYPING,
+    Clock, Desktop, Dialogs, InputEvent, KeyboardRecipient, MouseButton, ScreenshotsUnsupported, TypedError,
+    KEYS_CHANGED_BEFORE_TYPING, KEYS_CHANGED_WHILE_TYPING,
 };
 use base64::Engine as _;
 use serde_json::{json, Map, Value};
@@ -78,6 +78,23 @@ const SCREENSHOTS_UNSUPPORTED: &str = "Screenshots need macOS 14 or later, so co
 #[cfg(windows)]
 const SCREENSHOTS_UNSUPPORTED: &str =
     "Screenshots need Windows 10 version 2004 or later, so computer control is unavailable on this PC.";
+/// Why computer control is unavailable when Windows' build cannot be read.
+#[cfg(windows)]
+const SCREENSHOTS_UNKNOWN_VERSION: &str = "Gentle Dot cannot tell which Windows version this is, so it cannot \
+keep its own windows out of screenshots and computer control is unavailable on this PC.";
+
+/// The error for screenshots the system cannot take; one without a reason counts as too old.
+#[cfg(not(windows))]
+fn screenshots_unsupported(_: Option<ScreenshotsUnsupported>) -> &'static str {
+    SCREENSHOTS_UNSUPPORTED
+}
+#[cfg(windows)]
+fn screenshots_unsupported(reason: Option<ScreenshotsUnsupported>) -> &'static str {
+    match reason {
+        Some(ScreenshotsUnsupported::UnknownVersion) => SCREENSHOTS_UNKNOWN_VERSION,
+        Some(ScreenshotsUnsupported::TooOld) | None => SCREENSHOTS_UNSUPPORTED,
+    }
+}
 
 /// Why a key was not sent when the app receiving it changed after it was checked.
 const KEY_RECIPIENT_CHANGED: &str = "The app receiving the keys changed before the key was sent, so it was not sent.";
@@ -536,7 +553,7 @@ impl Helper {
                 | Tool::Key { .. }
         );
         if sees && !permissions.screenshots_supported {
-            return Err(SCREENSHOTS_UNSUPPORTED.into());
+            return Err(screenshots_unsupported(permissions.screenshots_unsupported).into());
         }
         if sees && !permissions.screen_recording {
             return Err(format!("{NEEDS_PERMISSION} Screen Recording permission. {GRANT_IT}"));
@@ -925,7 +942,7 @@ mod tests {
     use super::super::keys::parse_combo;
     use super::super::risk::{AxElement, Focus};
     use super::super::session::{Reason, StateEvent, SESSION_MS};
-    use super::super::{InputEvent, MouseButton};
+    use super::super::{InputEvent, MouseButton, ScreenshotsUnsupported};
     use super::*;
 
     // Blocked apps of the platform the tests run on (each has its own list): bundle id or
@@ -1380,6 +1397,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn screenshots_on_a_system_too_old_say_so() {
+        let rig = rig();
+        {
+            let mut permissions = rig.desktop.permissions.lock().unwrap();
+            permissions.screenshots_supported = false;
+            permissions.screenshots_unsupported = Some(ScreenshotsUnsupported::TooOld);
+        }
+        let result = rig.call("screenshot", json!({}));
+        assert!(is_error(&result));
+        #[cfg(not(windows))]
+        assert_eq!(first_text(&result), "Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.");
+        #[cfg(windows)]
+        assert_eq!(
+            first_text(&result),
+            "Screenshots need Windows 10 version 2004 or later, so computer control is unavailable on this PC."
+        );
+    }
+
+    /// An unreadable Windows build is not called too old; screenshots stay off all the same.
+    #[test]
+    fn screenshots_on_an_unknown_windows_version_say_so() {
+        let rig = rig();
+        {
+            let mut permissions = rig.desktop.permissions.lock().unwrap();
+            permissions.screenshots_supported = false;
+            permissions.screenshots_unsupported = Some(ScreenshotsUnsupported::UnknownVersion);
+        }
+        let result = rig.call("screenshot", json!({}));
+        assert!(is_error(&result));
+        #[cfg(not(windows))]
+        assert_eq!(first_text(&result), "Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.");
+        #[cfg(windows)]
+        assert_eq!(
+            first_text(&result),
+            "Gentle Dot cannot tell which Windows version this is, so it cannot keep its own windows out of \
+screenshots and computer control is unavailable on this PC."
+        );
+        assert_eq!(rig.desktop.captures.load(Ordering::SeqCst), 0);
+    }
+
     // --- Blocklist and rate limit (S24.4) ---
 
     #[test]
@@ -1706,6 +1764,74 @@ mod tests {
         let result = rig.call("key", json!({"combo": "ctrl+t"}));
         assert!(!is_error(&result), "{result}");
         assert_eq!(rig.desktop.events(), vec![InputEvent::Key(parse_combo("ctrl+t").unwrap())]);
+    }
+
+    const POINTER_ACTIONS: [(&str, fn() -> Value); 3] = [
+        ("click", || json!({"x": 10, "y": 10})),
+        ("drag", || json!({"fromX": 10, "fromY": 20, "toX": 30, "toY": 40})),
+        ("scroll", || json!({"x": 5, "y": 6, "dx": 0, "dy": 120})),
+    ];
+
+    #[test]
+    fn held_ctrl_refuses_click_drag_and_scroll_without_sending_anything() {
+        for (tool, args) in POINTER_ACTIONS {
+            let rig = rig();
+            rig.ready();
+            *rig.desktop.held_keys.lock().unwrap() = vec![0xa2];
+            let result = rig.call(tool, args());
+            assert!(is_error(&result), "{tool}: {result}");
+            assert_eq!(first_text(&result), "Ctrl is pressed, so nothing was sent. Release Ctrl, or press and release it once if no one is holding it, and try again.", "{tool}");
+            assert!(rig.desktop.events().is_empty(), "{tool}");
+        }
+    }
+
+    #[test]
+    fn either_side_of_each_modifier_refuses_a_click() {
+        for (name, keys) in [("Ctrl", [0xa2, 0xa3]), ("Alt", [0xa4, 0xa5]), ("Shift", [0xa0, 0xa1]), ("Win", [0x5b, 0x5c])] {
+            for key in keys {
+                let rig = rig();
+                rig.ready();
+                *rig.desktop.held_keys.lock().unwrap() = vec![key];
+                let result = rig.call("click", json!({"x": 10, "y": 10}));
+                assert_eq!(first_text(&result), format!("{name} is pressed, so nothing was sent. Release {name}, or press and release it once if no one is holding it, and try again."), "{key:#x}");
+                assert!(rig.desktop.events().is_empty(), "{key:#x}");
+            }
+        }
+    }
+
+    #[test]
+    fn several_held_modifiers_are_named_once_in_order_for_a_pointer_action() {
+        for (tool, args) in POINTER_ACTIONS {
+            let rig = rig();
+            rig.ready();
+            // Both Ctrls, out of order, still name Ctrl once and first.
+            *rig.desktop.held_keys.lock().unwrap() = vec![0x5c, 0xa1, 0xa4, 0xa3, 0xa2];
+            let result = rig.call(tool, args());
+            assert_eq!(first_text(&result), "Ctrl, Alt, Shift and Win are pressed, so nothing was sent. Release them, or press and release each once if no one is holding them, and try again.", "{tool}");
+            assert!(rig.desktop.events().is_empty(), "{tool}");
+        }
+    }
+
+    #[test]
+    fn no_held_modifiers_leaves_pointer_actions_unchanged_and_a_move_ignores_them() {
+        let rig = rig();
+        rig.ready();
+        for (tool, args) in POINTER_ACTIONS {
+            assert!(!is_error(&rig.call(tool, args())), "{tool}");
+        }
+        // A plain move presses no button: Ctrl held does not change it.
+        *rig.desktop.held_keys.lock().unwrap() = vec![0xa2];
+        assert!(!is_error(&rig.call("move", json!({"x": 1, "y": 2}))));
+        let p = |x, y| Point { x, y };
+        assert_eq!(
+            rig.desktop.events(),
+            vec![
+                InputEvent::Click { at: p(20.0, 20.0), button: MouseButton::Left, count: 1 },
+                InputEvent::Drag { from: p(20.0, 40.0), to: p(60.0, 80.0) },
+                InputEvent::Scroll { at: p(10.0, 12.0), dx: 0, dy: 120 },
+                InputEvent::Move(p(2.0, 4.0)),
+            ]
+        );
     }
 
     #[test]

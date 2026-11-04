@@ -26,6 +26,8 @@ pub struct FakeDesktop {
     pub typed_calls: Mutex<usize>,
     /// Windows key-state snapshot at a typed post (1-based); absent means all keys up.
     pub held_keys_at: Mutex<Option<(usize, Vec<u16>)>>,
+    /// Windows key-state snapshot at every plain post (pointer actions); empty means all keys up.
+    pub held_keys: Mutex<Vec<u16>>,
     /// Apps that run as administrator, refused for keyboard input.
     pub elevated: Mutex<Vec<i32>>,
     /// Marks an app as elevated after this many recorded posts; disabled by default.
@@ -59,13 +61,19 @@ impl Default for FakeDesktop {
         FakeDesktop {
             events: Mutex::new(Vec::new()),
             typed_posts: Mutex::new(Vec::new()),
-            permissions: Mutex::new(Permissions { accessibility: true, screen_recording: true, screenshots_supported: true }),
+            permissions: Mutex::new(Permissions {
+                accessibility: true,
+                screen_recording: true,
+                screenshots_supported: true,
+                screenshots_unsupported: None,
+            }),
             frontmost: Mutex::new(Some(safari)),
             focused_app: Mutex::new(None),
             front_after_posts: Mutex::new(None),
             refuse_typed_at: Mutex::new(None),
             typed_calls: Mutex::new(0),
             held_keys_at: Mutex::new(None),
+            held_keys: Mutex::new(Vec::new()),
             elevated: Mutex::new(Vec::new()),
             elevated_after_posts: Mutex::new(None),
             front_during_capture: Mutex::new(None),
@@ -110,6 +118,14 @@ impl Desktop for FakeDesktop {
     }
 
     fn post(&self, event: &InputEvent) -> Result<(), String> {
+        // Sampled before anything of the event is recorded, as the Windows backend does.
+        if super::winput::checks_held_modifiers(event) {
+            let held = self.held_keys.lock().unwrap().clone();
+            super::winput::without_held_modifiers(
+                |key| if held.contains(&key) { i16::MIN } else { 0 },
+                || Ok(()),
+            ).map_err(|error| error.message(false))?;
+        }
         let count = {
             let mut events = self.events.lock().unwrap();
             if let Some((post, error)) = self.fail_post.lock().unwrap().as_ref() {
