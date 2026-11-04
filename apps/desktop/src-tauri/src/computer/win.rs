@@ -1629,14 +1629,25 @@ pub fn show_overlay(hwnd: *mut c_void, visible: bool) {
 static CALL_AFFINITIES: std::sync::Mutex<Vec<(Option<u64>, (super::working::Part, u32))>> = std::sync::Mutex::new(Vec::new());
 // The Dot and panel are created once and live until process exit. Record their handles on
 // the main thread at creation; worker cleanup must never query Tauri while holding our lock.
-static CALL_WINDOWS: [std::sync::OnceLock<usize>; 2] = [std::sync::OnceLock::new(), std::sync::OnceLock::new()];
+static CALL_DOT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+static CALL_PANEL: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
+// An exhaustive match, so a new Part fails to compile here instead of indexing out of bounds.
+fn call_slot(part: super::working::Part) -> &'static std::sync::OnceLock<usize> {
+    match part {
+        super::working::Part::Dot => &CALL_DOT,
+        super::working::Part::Panel => &CALL_PANEL,
+    }
+}
+
+// Strict on purpose: ignoring a second creation would keep the old handle, so calls would hide
+// and exclude a window that no longer exists while the new one stays in screenshots.
 pub fn record_call_window(part: super::working::Part, hwnd: HWND) {
-    CALL_WINDOWS[part as usize].set(hwnd as usize).expect("call window is created only once");
+    call_slot(part).set(hwnd as usize).expect("call window is created only once");
 }
 
 fn call_window(part: super::working::Part) -> Option<usize> {
-    CALL_WINDOWS[part as usize].get().copied()
+    call_slot(part).get().copied()
 }
 
 fn call_handles() -> [Option<usize>; 2] {

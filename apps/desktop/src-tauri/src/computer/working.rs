@@ -255,6 +255,8 @@ impl Inner {
     }
 
     /// On the main thread: shows again what operations hid, as the user left things meanwhile.
+    /// The state lock stays held while showing; that is safe only because nothing `Windows`
+    /// does here re-enters `Working` or waits for another thread that takes this lock.
     fn restore(&self, operation: u64) {
         let mut state = self.lock();
         let mut hidden = Visibility::default();
