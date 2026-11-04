@@ -4,9 +4,9 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { ensurePrivateDir } from "../src/isolation.ts";
 import { FileSecretSource, NO_SECRETS_KEY, parseSecretsKey } from "../src/secret-file.ts";
 import { SecretsUnavailableError } from "../src/secret-source.ts";
-import { ensurePrivateDir } from "../src/isolation.ts";
 import { tempDir } from "./helpers.ts";
 import { inspectWindowsAcl } from "./windows-acl-oracle.ts";
 

@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, fchmodSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** Internal names that must never reach the user (docs/design.md §5). */
@@ -51,6 +51,18 @@ export const IDENTITY_SOURCE = new URL("./identity.md", import.meta.url);
 export function identityArgs(dataDir: string): string[] {
 	mkdirSync(dataDir, { recursive: true });
 	const path = join(dataDir, "identity.md");
-	writeFileSync(path, readFileSync(IDENTITY_SOURCE, "utf8"));
+	const identity = readFileSync(IDENTITY_SOURCE, "utf8");
+	if (process.platform === "win32") {
+		writeFileSync(path, identity);
+	} else {
+		const fd = openSync(path, "w", 0o644);
+		try {
+			writeFileSync(fd, identity);
+			// Public prompt: readable by the engine, regardless of umask or an older file's mode.
+			fchmodSync(fd, 0o644);
+		} finally {
+			closeSync(fd);
+		}
+	}
 	return ["--append-system-prompt", path];
 }

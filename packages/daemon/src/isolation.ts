@@ -5,10 +5,10 @@ import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { bundledGentleShell } from "./config.ts";
 import { directAccess, type EngineAccess } from "./engine-access.ts";
-import { resolveEngramBin, runtimeDir } from "./runtime.ts";
-import { windowsUserHome } from "./windows-runtime.ts";
-import { windowsPrivateStorage } from "./windows-private-storage.ts";
 import { writePrivateFile } from "./private-file.ts";
+import { resolveEngramBin, runtimeDir } from "./runtime.ts";
+import { windowsPrivateStorage } from "./windows-private-storage.ts";
+import { windowsUserHome } from "./windows-runtime.ts";
 
 /**
  * The folder with the `pi` executable bundled with the daemon. The engine's
