@@ -13,20 +13,26 @@ import { ConfigError, loadConfig } from "./config.js";
 const log = (message: string) => console.error(`[gentle-telegram] ${message}`);
 
 async function main(): Promise<void> {
-	let config;
+	let bridge: TelegramBridge;
 	try {
-		config = loadConfig(process.env, homedir());
+		let config;
+		try {
+			config = loadConfig(process.env, homedir());
+		} catch (error) {
+			if (!(error instanceof ConfigError)) throw error;
+			log(error.message);
+			process.exit(1);
+		}
+
+		process.on("unhandledRejection", (error) =>
+			log(`unexpected error: ${(error as Error)?.message ?? String(error)}`),
+		);
+
+		bridge = new TelegramBridge({ config, log });
 	} catch (error) {
-		if (!(error instanceof ConfigError)) throw error;
-		log(error.message);
+		log((error as Error).message);
 		process.exit(1);
 	}
-
-	process.on("unhandledRejection", (error) =>
-		log(`unexpected error: ${(error as Error)?.message ?? String(error)}`),
-	);
-
-	const bridge = new TelegramBridge({ config, log });
 
 	const shutdown = async () => {
 		log("shutting down...");

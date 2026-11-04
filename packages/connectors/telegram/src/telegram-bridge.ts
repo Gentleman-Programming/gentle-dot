@@ -4,6 +4,7 @@
  */
 
 import { Bot, Context, InlineKeyboard } from 'grammy';
+import { readFileSync } from 'node:fs';
 import { BaseBridge, type BridgeConfig, type BridgeStatus, type HelloPayload, type ReadyPayload, type ChannelNotifyPayload, type ConnectorEventPayload, type CommandPayload, type CommandResultPayload, type BridgeMessage } from '@gentle-dot/bridges-base';
 import { NicknameStore } from './storage/nickname-store.js';
 import { loadConfig, Config } from './config.js';
@@ -93,11 +94,23 @@ export class TelegramBridge extends BaseBridge {
   private uploadFn: UploadFn;
 
   constructor(options: TelegramBridgeOptions) {
+    // The daemon access key (GENTLE_DOT_TOKEN_FILE) authenticates the WS
+    // handshake; the Telegram bot token is never the daemon credential.
+    let daemonToken: string;
+    try {
+      daemonToken = readFileSync(options.config.tokenFile, 'utf8').trim();
+    } catch {
+      throw new Error(`Cannot read the daemon token file: ${options.config.tokenFile}`);
+    }
+    if (!daemonToken) {
+      throw new Error(`The daemon token file is empty: ${options.config.tokenFile}`);
+    }
+
     const bridgeConfig: BridgeConfig = {
       daemonUrl: options.config.daemonUrl,
       connectorId: (options.config as any).connectorId ?? 'telegram',
       connectorType: 'telegram',
-      token: options.config.botToken,
+      token: daemonToken,
       capabilities: [
         'channel_notify',
         'message_send',
