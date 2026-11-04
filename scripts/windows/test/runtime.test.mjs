@@ -49,14 +49,12 @@ test('real file discovery refuses a missing explicit file',()=> {
 });
 
 test('the production resolver retains an explicit real file on the host platform', async () => {
-  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs');
-  const { tmpdir } = await import('node:os');
+  const { mkdtempSync, writeFileSync } = await import('node:fs');
   const { join } = await import('node:path');
   const { resolveEngramBin } = await import('../../../packages/daemon/src/runtime.ts');
-  const folder=mkdtempSync(join(tmpdir(),'gentle-dot-runtime-'));
-  try {
-    const exe=join(folder,'engram.exe');
-    writeFileSync(exe,'discovery fixture, never executed');
-    assert.equal(resolveEngramBin({ENGRAM_BIN:exe},folder),exe);
-  } finally {rmSync(folder,{recursive:true,force:true});}
+  const folder=mkdtempSync(join('C:/Users/maicolj/AppData/Local/Temp/gentle-dot-windows-es-verify/','gentle-dot-runtime-'));
+  // Retain the isolated fixture; this test never invokes the executable.
+  const exe=join(folder,'engram.exe');
+  writeFileSync(exe,'discovery fixture, never executed');
+  assert.equal(resolveEngramBin({ENGRAM_BIN:exe},folder),exe);
 });

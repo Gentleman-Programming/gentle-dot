@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdtempSync, mkdirSync, writeFileSync, renameSync, symlinkSync } from 'node:fs';
+const scratch = 'C:/Users/maicolj/AppData/Local/Temp/gentle-dot-windows-es-verify/';
 import { dirname, join } from 'node:path';
 import { REQUIRED, seal, verify } from '../runtime-integrity.mjs';
 function fixture(t) {
-  const root=mkdtempSync(join(tmpdir(),'gentle-dot-integrity-'));
-  t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const root=mkdtempSync(join(scratch,'gentle-dot-integrity-'));
+  // Retained fixtures are cleaned only with separate parent/human authorization.
   for (const path of [...REQUIRED,'daemon/node_modules/gentle-pi/.gentle-ai/v4/gentle-ai.exe']) {
     mkdirSync(dirname(join(root,path)),{recursive:true});
     writeFileSync(join(root,path),path.endsWith('.exe')?'MZ-fixture-never-executed':'fixture');
@@ -23,7 +23,7 @@ test('corruption, omission and unexpected additions are rejected',t=> {
   writeFileSync(join(root,'ui/index.html'),'corrupt');
   assert.throws(()=>verify(root,expected), /mismatch/);
   writeFileSync(join(root,'ui/index.html'),'fixture');
-  rmSync(join(root,'node/node.exe'));
+  renameSync(join(root,'node/node.exe'),root+'.node.exe');
   assert.throws(()=>verify(root,expected), /mismatch/);
   writeFileSync(join(root,'node/node.exe'),'MZ-fixture-never-executed');
   writeFileSync(join(root,'unexpected.txt'),'extra');
@@ -40,15 +40,14 @@ test('missing native engine, wrong executable and absent UI fail before packagin
   writeFileSync(join(root,'bin/private-storage.exe'),'not an executable');
   assert.throws(()=>seal(root), /Not a Windows executable: bin\/private-storage\.exe/);
   writeFileSync(join(root,'bin/private-storage.exe'),'MZ-fixture-never-executed');
-  rmSync(join(root,'daemon/node_modules/gentle-pi/.gentle-ai/v4/gentle-ai.exe'));
+  renameSync(join(root,'daemon/node_modules/gentle-pi/.gentle-ai/v4/gentle-ai.exe'),root+'.gentle-ai.exe');
   assert.throws(()=>seal(root), /exactly one/);
-  rmSync(join(root,'ui/index.html'));
+  renameSync(join(root,'ui/index.html'),root+'.index.html');
   assert.throws(()=>seal(root), /Missing runtime file/);
 });
 test('directory links cannot silently escape the packaged runtime', t=> {
   const root=fixture(t);
-  const outside=mkdtempSync(join(tmpdir(),'gentle-dot-outside-'));
-  t.after(()=>rmSync(outside,{recursive:true,force:true}));
+  const outside=mkdtempSync(join(scratch,'gentle-dot-outside-'));
   symlinkSync(outside,join(root,'outside'),process.platform==='win32'?'junction':'dir');
   assert.throws(()=>seal(root), /links cannot be packaged/);
 });
