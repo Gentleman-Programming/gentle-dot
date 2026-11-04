@@ -75,7 +75,46 @@ directly instead of going through the correction route.
 Reporting `unrelated` with an empty candidate silently erases a live lineage from the
 caller's point of view, and the only remaining option becomes an `abandon`.
 
-## Reversible closing recipe (not executed)
+## Provider version gap (blocking, found after the candidate was reproduced)
+
+The recipe below was executed: a temporary commit on the recorded base tree plus the frozen
+candidate content for the five paths reproduced the snapshot exactly.
+
+```
+base_tree:              bf255dad…   ✓ matches the record
+initial_review_tree:    da997e0f…
+current_candidate_tree: da997e0f…   ✓ the frozen candidate
+paths:                  5           ✓
+requested_lineage_id:   review-4fe612023d7b30da   ✓ echoed back
+```
+
+The projection is no longer `unrelated`, but `STATUS` now refuses at a lower layer:
+
+```
+applicability: "corrupted"
+action: "repair_authority"
+next_transition: stop / corrupted_or_unverifiable_authority
+repair: status "unsupported", compact_lineages 4, unsupported_lineages 4,
+        eligible_candidates 0, conflicts 0
+```
+
+Every compact lineage in this clone is reported unsupported, not only the newest one, and
+all four records share the same shape (`{revision, schema, state}`, no integrity field), so
+the store is not malformed in any way we can observe. The decisive difference is the binary:
+
+| Who | Provider |
+| --- | --- |
+| The session that ran the review | `gentle-ai 4.3.1` (`.gentle-shell` runtime) |
+| The facade answering this session | `gentle-ai 4.0.0` (desktop runtime bundle) |
+
+A 4.0.0 provider cannot verify authority written by 4.3.1, so the terminal stop is a version
+gap rather than a corrupt store. Two stale zero-byte locks were moved aside during the
+investigation (`*.stale-*`); they were not the cause.
+
+**Consequence**: this cycle cannot be closed from a 4.0.0 session. Close it from a session
+running 4.3.1 or newer (or after the planned runtime upgrade), or record the residue.
+
+## Reversible closing recipe (executed; reuse after the upgrade)
 
 Prerequisites: no other session holds uncommitted work in the same worktree.
 
