@@ -4,17 +4,24 @@ import { APP_REQUIRED, type ConnectorInfo } from "@gentle-dot/protocol";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ComputerPermissions } from "../src/computer.ts";
 import { type DotState, initialState } from "../src/store.ts";
 
 const HELPER = "http://127.0.0.1:51234/mcp";
 const KEY = "s3cr3t-Computer-Key-0123456789abcdef";
 const WINDOWS_2004_NOTE =
 	"Computer control needs Windows 10 version 2004 (build 19041) or newer for screenshots.";
+const UNKNOWN_WINDOWS_NOTE =
+	"Gentle Dot cannot tell which Windows version this is, so computer control is unavailable: screenshots need Windows 10 version 2004 (build 19041) or newer.";
 
 const h = vi.hoisted(() => ({
 	tauri: true,
 	endpoint: null as unknown,
-	permissions: { accessibility: false, screenRecording: true, screenshotsSupported: true },
+	permissions: {
+		accessibility: false,
+		screenRecording: true,
+		screenshotsSupported: true,
+	} as ComputerPermissions,
 	status: { active: false } as unknown,
 	invoke: vi.fn(),
 	send: vi.fn(),
@@ -297,6 +304,25 @@ describe("on Windows", () => {
 		h.state = connectorsOpen([computerEntry()]);
 		await renderApp("?surface=panel");
 		expect(await screen.findByText(WINDOWS_2004_NOTE)).toBeInTheDocument();
+		expect(screen.queryByText(UNKNOWN_WINDOWS_NOTE)).toBeNull();
+	});
+
+	it("says this Windows is too old when the app says so", async () => {
+		h.permissions.screenshotsSupported = false;
+		h.permissions.screenshotsUnsupported = "tooOld";
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		expect(await screen.findByText(WINDOWS_2004_NOTE)).toBeInTheDocument();
+		expect(screen.queryByText(UNKNOWN_WINDOWS_NOTE)).toBeNull();
+	});
+
+	it("says the Windows version is unknown, not too old, when the app cannot tell it", async () => {
+		h.permissions.screenshotsSupported = false;
+		h.permissions.screenshotsUnsupported = "unknownVersion";
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		expect(await screen.findByText(UNKNOWN_WINDOWS_NOTE)).toBeInTheDocument();
+		expect(screen.queryByText(WINDOWS_2004_NOTE)).toBeNull();
 	});
 
 	it("says nothing about Windows 10 version 2004 when screenshots are supported", async () => {
@@ -305,6 +331,7 @@ describe("on Windows", () => {
 		const entry = await screen.findByRole("listitem", { name: "Computer" });
 		await within(entry).findByText("Windows asks for no permission for computer control.");
 		expect(within(entry).queryByText(WINDOWS_2004_NOTE)).toBeNull();
+		expect(within(entry).queryByText(UNKNOWN_WINDOWS_NOTE)).toBeNull();
 	});
 
 	it("names the PC in the session banner", async () => {
@@ -324,12 +351,14 @@ describe("on macOS", () => {
 
 	it("shows none of the Windows texts, even when screenshots are reported unsupported", async () => {
 		h.permissions.screenshotsSupported = false;
+		h.permissions.screenshotsUnsupported = "unknownVersion";
 		h.state = connectorsOpen([computerEntry()]);
 		await renderApp("?surface=panel");
 		const entry = await screen.findByRole("listitem", { name: "Computer" });
 		await within(entry).findByText("Accessibility");
 		expect(within(entry).queryByText("Windows asks for no permission for computer control.")).toBeNull();
 		expect(within(entry).queryByText(WINDOWS_2004_NOTE)).toBeNull();
+		expect(within(entry).queryByText(UNKNOWN_WINDOWS_NOTE)).toBeNull();
 		expect(within(entry).queryByText(/Alt\+Shift\+Esc/)).toBeNull();
 		expect(within(entry).getByText(/Stop and ⌥⇧Esc still work/)).toBeInTheDocument();
 	});

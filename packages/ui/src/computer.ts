@@ -15,6 +15,8 @@ export interface ComputerPermissions {
 	accessibility: boolean;
 	screenRecording: boolean;
 	screenshotsSupported?: boolean;
+	/** Why screenshots are unsupported, only when they are; an older app sends none. */
+	screenshotsUnsupported?: "tooOld" | "unknownVersion";
 }
 
 export type ComputerPermission = "accessibility" | "screenRecording";

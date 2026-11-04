@@ -26,8 +26,8 @@ use super::rate::{RateLimiter, MAX_ACTIONS_PER_SECOND};
 use super::risk::{assess, Act};
 use super::working::{NoPreparation, Preparation};
 use super::{
-    Clock, Desktop, Dialogs, InputEvent, KeyboardRecipient, MouseButton, TypedError, KEYS_CHANGED_BEFORE_TYPING,
-    KEYS_CHANGED_WHILE_TYPING,
+    Clock, Desktop, Dialogs, InputEvent, KeyboardRecipient, MouseButton, ScreenshotsUnsupported, TypedError,
+    KEYS_CHANGED_BEFORE_TYPING, KEYS_CHANGED_WHILE_TYPING,
 };
 use base64::Engine as _;
 use serde_json::{json, Map, Value};
@@ -78,6 +78,23 @@ const SCREENSHOTS_UNSUPPORTED: &str = "Screenshots need macOS 14 or later, so co
 #[cfg(windows)]
 const SCREENSHOTS_UNSUPPORTED: &str =
     "Screenshots need Windows 10 version 2004 or later, so computer control is unavailable on this PC.";
+/// Why computer control is unavailable when Windows' build cannot be read.
+#[cfg(windows)]
+const SCREENSHOTS_UNKNOWN_VERSION: &str = "Gentle Dot cannot tell which Windows version this is, so it cannot \
+keep its own windows out of screenshots and computer control is unavailable on this PC.";
+
+/// The error for screenshots the system cannot take; one without a reason counts as too old.
+#[cfg(not(windows))]
+fn screenshots_unsupported(_: Option<ScreenshotsUnsupported>) -> &'static str {
+    SCREENSHOTS_UNSUPPORTED
+}
+#[cfg(windows)]
+fn screenshots_unsupported(reason: Option<ScreenshotsUnsupported>) -> &'static str {
+    match reason {
+        Some(ScreenshotsUnsupported::UnknownVersion) => SCREENSHOTS_UNKNOWN_VERSION,
+        Some(ScreenshotsUnsupported::TooOld) | None => SCREENSHOTS_UNSUPPORTED,
+    }
+}
 
 /// Why a key was not sent when the app receiving it changed after it was checked.
 const KEY_RECIPIENT_CHANGED: &str = "The app receiving the keys changed before the key was sent, so it was not sent.";
@@ -536,7 +553,7 @@ impl Helper {
                 | Tool::Key { .. }
         );
         if sees && !permissions.screenshots_supported {
-            return Err(SCREENSHOTS_UNSUPPORTED.into());
+            return Err(screenshots_unsupported(permissions.screenshots_unsupported).into());
         }
         if sees && !permissions.screen_recording {
             return Err(format!("{NEEDS_PERMISSION} Screen Recording permission. {GRANT_IT}"));
@@ -925,7 +942,7 @@ mod tests {
     use super::super::keys::parse_combo;
     use super::super::risk::{AxElement, Focus};
     use super::super::session::{Reason, StateEvent, SESSION_MS};
-    use super::super::{InputEvent, MouseButton};
+    use super::super::{InputEvent, MouseButton, ScreenshotsUnsupported};
     use super::*;
 
     // Blocked apps of the platform the tests run on (each has its own list): bundle id or
@@ -1378,6 +1395,47 @@ mod tests {
             first_text(&result),
             "Screenshots need Windows 10 version 2004 or later, so computer control is unavailable on this PC."
         );
+    }
+
+    #[test]
+    fn screenshots_on_a_system_too_old_say_so() {
+        let rig = rig();
+        {
+            let mut permissions = rig.desktop.permissions.lock().unwrap();
+            permissions.screenshots_supported = false;
+            permissions.screenshots_unsupported = Some(ScreenshotsUnsupported::TooOld);
+        }
+        let result = rig.call("screenshot", json!({}));
+        assert!(is_error(&result));
+        #[cfg(not(windows))]
+        assert_eq!(first_text(&result), "Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.");
+        #[cfg(windows)]
+        assert_eq!(
+            first_text(&result),
+            "Screenshots need Windows 10 version 2004 or later, so computer control is unavailable on this PC."
+        );
+    }
+
+    /// An unreadable Windows build is not called too old; screenshots stay off all the same.
+    #[test]
+    fn screenshots_on_an_unknown_windows_version_say_so() {
+        let rig = rig();
+        {
+            let mut permissions = rig.desktop.permissions.lock().unwrap();
+            permissions.screenshots_supported = false;
+            permissions.screenshots_unsupported = Some(ScreenshotsUnsupported::UnknownVersion);
+        }
+        let result = rig.call("screenshot", json!({}));
+        assert!(is_error(&result));
+        #[cfg(not(windows))]
+        assert_eq!(first_text(&result), "Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.");
+        #[cfg(windows)]
+        assert_eq!(
+            first_text(&result),
+            "Gentle Dot cannot tell which Windows version this is, so it cannot keep its own windows out of \
+screenshots and computer control is unavailable on this PC."
+        );
+        assert_eq!(rig.desktop.captures.load(Ordering::SeqCst), 0);
     }
 
     // --- Blocklist and rate limit (S24.4) ---
