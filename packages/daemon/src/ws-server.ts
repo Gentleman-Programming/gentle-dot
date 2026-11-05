@@ -356,7 +356,11 @@ export class WsServer extends EventEmitter {
 
     const clientId = `app-${++this.appSeq}`;
     this.appClients.set(clientId, ws);
-    ws.on('close', () => this.appClients.delete(clientId));
+    ws.on('close', () => {
+      this.appClients.delete(clientId);
+      // Whoever was signed in from that window is gone: the daemon cancels what it owned.
+      this.emit('onAppDisconnect', clientId);
+    });
     this.sendApp(ws, 'ready', { protocol: PROTOCOL_VERSION, agentState: 'idle', clientId });
     console.log(`[WsServer] App client connected: ${clientId}`);
     return clientId;

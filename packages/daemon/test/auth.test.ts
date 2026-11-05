@@ -70,6 +70,8 @@ describe("sign-in", () => {
 			// A Claude subscription is not offered: Anthropic signs in with an API key only.
 			{ id: "anthropic", name: "Anthropic", methods: ["api_key"], configured: false },
 			{ id: "openai", name: "OpenAI", methods: ["api_key"], configured: false },
+			// NVIDIA is a first-class provider since the fallback work: its API key signs in here too.
+			{ id: "nvidia", name: "NVIDIA", methods: ["api_key"], configured: false },
 			{
 				id: "github-copilot",
 				name: "GitHub Copilot",

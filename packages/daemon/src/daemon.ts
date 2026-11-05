@@ -133,10 +133,16 @@ export class Daemon {
           break;
         }
         case 'auth_reply': {
-          this.authManager?.reply(this, String(message.flowId ?? ''), {
+          const answered = this.authManager?.reply(this.authOwner(clientId), String(message.flowId ?? ''), {
             value: message.value === undefined ? undefined : String(message.value),
             cancelled: message.cancelled === true,
           });
+          // Another window's flow is none of this one's business.
+          if (answered === false)
+            this.wsServer.deliver(clientId, 'error', {
+              code: 'auth_flow_not_found',
+              message: 'That sign-in is not available.',
+            });
           break;
         }
         case 'auth_logout': {
@@ -217,6 +223,14 @@ export class Daemon {
       void this.stop();
     });
 
+    // A window that disappears takes its sign-in with it.
+    this.wsServer.on('onAppDisconnect', (clientId: string) => {
+      const owner = this.authOwners.get(clientId);
+      if (!owner) return;
+      this.authManagersCancel(owner);
+      this.authOwners.delete(clientId);
+    });
+
     // App Channel events
     this.appChannel.on('onMessage', (clientId: string, message: AppMessage) => {
       this.handleAppMessage(clientId, message);
@@ -228,12 +242,27 @@ export class Daemon {
     return fileURLToPath(new URL('./extensions/approval-guard.ts', import.meta.url));
   }
 
+  /** Cancels what a window owned; the manager aborts its flow if it was that window's. */
+  private authManagersCancel(owner: object): void {
+    this.authManager?.cancelOwnedBy(owner);
+  }
+
+  /** The stable owner object for a window, so its flows cannot be answered from another one. */
+  private authOwner(clientId: string): object {
+    const existing = this.authOwners.get(clientId);
+    if (existing) return existing;
+    const owner = {};
+    this.authOwners.set(clientId, owner);
+    return owner;
+  }
+
   /** Answers `auth_list` with the providers the engine can sign into and their status. */
-  private async authList(clientId: string): Promise<void> {
+  private async authList(clientId: string, open = false): Promise<void> {
     if (!this.authManager) return;
     try {
       const providers = await this.authManager.providers();
-      this.wsServer.deliver(clientId, 'auth_providers', { providers, open: true });
+      // Only the /login command opens the screen; a plain list is just data.
+      this.wsServer.deliver(clientId, 'auth_providers', open ? { providers, open } : { providers });
     } catch (error) {
       this.wsServer.deliver(clientId, 'toast', {
         level: 'error',
@@ -246,7 +275,7 @@ export class Daemon {
   private async authLogin(clientId: string, message: { providerId?: string; method?: string }): Promise<void> {
     if (!this.authManager) return;
     const refusal = this.authManager.start(
-      this,
+      this.authOwner(clientId),
       String(message.providerId ?? ''),
       (message.method === 'oauth' ? 'oauth' : 'api_key'),
       (event) => {
@@ -255,7 +284,7 @@ export class Daemon {
         this.wsServer.deliver(clientId, type, payload);
       },
     );
-    if (refusal) this.wsServer.deliver(clientId, 'toast', { level: 'warning', message: refusal.message });
+    if (refusal) this.wsServer.deliver(clientId, 'error', { code: refusal.code, message: refusal.message });
   }
 
   /** Signs a provider out, reporting the outcome to the window that asked. */
@@ -263,7 +292,7 @@ export class Daemon {
     if (!this.authManager) return;
     try {
       const refusal = await this.authManager.logout(providerId);
-      if (refusal) this.wsServer.deliver(clientId, 'toast', { level: 'warning', message: refusal.message });
+      if (refusal) this.wsServer.deliver(clientId, 'error', { code: refusal.code, message: refusal.message });
       else await this.authList(clientId);
     } catch (error) {
       this.wsServer.deliver(clientId, 'toast', { level: 'error', message: (error as Error).message });
@@ -332,6 +361,9 @@ export class Daemon {
     );
     return true;
   }
+
+  /** One owner object per window, so a flow answers only to the window that started it. */
+  private authOwners = new Map<string, object>();
 
   /** Sign-in flows for the accounts screen. */
   private authManager: AuthManager | null = null;
@@ -547,6 +579,12 @@ export class Daemon {
    * origen original). El 'send' rechazado por ocupado lo resuelve el bridge.
    */
   private chatSend(connectorId: string, text: string): void {
+    // A command, not a prompt: the engine never sees it and the window gets the accounts screen.
+    if (text.trim() === '/login') {
+      void this.authList(connectorId, true);
+      return;
+    }
+
     if (!this.shellSpawner.isReady()) {
       this.wsServer.deliver(connectorId, 'error', {
         code: 'engine_unavailable',
@@ -569,13 +607,26 @@ export class Daemon {
       console.log(`[Daemon] prompt desde ${connectorId} (run ${this.activeRun.messageId})`);
     }
 
-    this.shellSpawner.rpc('prompt', params).catch((error) => {
+    this.shellSpawner
+      .rpc('prompt', params)
+      // The engine can refuse without throwing: a prompt with no account comes back as a failed
+      // response, so both paths lead to the same answer for the window.
+      .then((response) => {
+        const failure = response as { success?: boolean; error?: string } | null;
+        if (failure && failure.success === false) throw new Error(failure.error ?? 'prompt failed');
+      })
+      .catch((error) => {
       console.error(`[Daemon] prompt falló: ${(error as Error).message}`);
+      // The window gets a plain answer: no account means "connect one", anything else "try again".
+      const noAccount = /no api key|not signed in|no account/i.test((error as Error).message);
       this.activeRun = null;
-      this.wsServer.deliver(connectorId, 'error', {
-        code: 'prompt_failed',
-        message: (error as Error).message,
-      });
+      this.wsServer.deliver(
+        connectorId,
+        'error',
+        noAccount
+          ? { code: 'no_account', message: 'Connect an AI account first: open Accounts or type /login.' }
+          : { code: 'command_failed', message: 'That did not work. Please try again.' },
+      );
     });
   }
 
