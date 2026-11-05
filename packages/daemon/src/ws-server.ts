@@ -361,7 +361,13 @@ export class WsServer extends EventEmitter {
       // Whoever was signed in from that window is gone: the daemon cancels what it owned.
       this.emit('onAppDisconnect', clientId);
     });
-    this.sendApp(ws, 'ready', { protocol: PROTOCOL_VERSION, agentState: 'idle', clientId });
+    const model = this.modelName?.();
+    this.sendApp(ws, 'ready', {
+      protocol: PROTOCOL_VERSION,
+      agentState: 'idle',
+      clientId,
+      ...(model ? { model } : {}),
+    });
     console.log(`[WsServer] App client connected: ${clientId}`);
     return clientId;
   }
@@ -614,6 +620,9 @@ export class WsServer extends EventEmitter {
   /**
    * Get authentication token from config or env
    */
+  /** Names the model the assistant is running, for the window's ready frame. */
+  modelName: (() => string | undefined) | null = null;
+
   /** Windows connected over the client protocol (flat frames), by client id. */
   private appClients = new Map<string, WebSocket>();
   private appSeq = 0;

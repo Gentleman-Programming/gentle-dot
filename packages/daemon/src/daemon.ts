@@ -116,6 +116,8 @@ export class Daemon {
     });
 
     // WebSocket server events
+    this.wsServer.modelName = () => this.currentModel?.name;
+
     this.wsServer.on('onMessage', (connectorId: string, message: any) => {
       this.handleBridgeMessage(connectorId, message);
     });
@@ -127,6 +129,14 @@ export class Daemon {
         case 'send':
           this.chatSend(clientId, String(message.text ?? ''));
           break;
+        case 'models_list': {
+          void this.modelsScreen(clientId);
+          break;
+        }
+        case 'model_set': {
+          void this.modelSwitch(clientId, message);
+          break;
+        }
         case 'profiles_list': {
           void this.profilesScreen(clientId);
           break;
@@ -318,6 +328,168 @@ export class Daemon {
     );
   }
 
+  /**
+   * The models the picker shows: the engine's catalog grouped by account, what the assistant is
+   * running now, and the profiles as quick picks. Everything else the engine reports about a
+   * model (endpoints, headers, costs) stays here.
+   */
+  private async modelCatalog(): Promise<{
+    current?: { provider: string; id: string; name: string; thinking?: string };
+    groups: unknown[];
+  }> {
+    const state = (await this.shellSpawner.rpc('get_state', {}).catch(() => null)) as {
+      data?: { model?: { provider?: string; id?: string; name?: string }; thinkingLevel?: string };
+    } | null;
+    const running = state?.data?.model;
+    if (running?.provider && running.id) {
+      this.currentModel = {
+        provider: running.provider,
+        id: running.id,
+        name: running.name ?? running.id,
+        ...(state?.data?.thinkingLevel ? { thinking: state.data.thinkingLevel } : {}),
+      };
+    }
+
+    const answer = (await this.shellSpawner.rpc('get_available_models', {}).catch(() => null)) as {
+      data?: { models?: unknown };
+      models?: unknown;
+    } | null;
+    const raw = answer?.data?.models ?? answer?.models;
+    const models = Array.isArray(raw) ? raw : [];
+
+    const byProvider = new Map<string, { provider: string; name: string; models: unknown[] }>();
+    for (const entry of models) {
+      if (typeof entry !== 'object' || entry === null) continue;
+      const model = entry as {
+        provider?: unknown;
+        id?: unknown;
+        name?: unknown;
+        reasoning?: unknown;
+        input?: unknown;
+      };
+      if (typeof model.provider !== 'string' || typeof model.id !== 'string') continue;
+      const group = byProvider.get(model.provider) ?? {
+        provider: model.provider,
+        name: model.provider,
+        models: [],
+      };
+      group.models.push({
+        provider: model.provider,
+        id: model.id,
+        name: typeof model.name === 'string' ? model.name : model.id,
+        images: Array.isArray(model.input) && model.input.includes('image'),
+        // Only a reasoning model offers thinking levels.
+        ...(model.reasoning === true
+          ? { thinkingLevels: ['off', 'minimal', 'low', 'medium', 'high'] }
+          : {}),
+      });
+      byProvider.set(model.provider, group);
+    }
+
+    return {
+      ...(this.currentModel ? { current: this.currentModel } : {}),
+      groups: [...byProvider.values()],
+    };
+  }
+
+  /** The profiles as quick picks: the orchestrator's model of each saved profile. */
+  private quickPicks(): { name: string; model: string }[] {
+    const { profiles } = this.profileStore?.list() ?? { profiles: [] };
+    return profiles.flatMap((profile) => {
+      const model = profile.roles?.orchestrator?.model;
+      return typeof model === 'string' ? [{ name: profile.name, model }] : [];
+    });
+  }
+
+  /** Answers `models_list` with the picker's view, and tells every window after a switch. */
+  private async modelsScreen(clientId?: string): Promise<void> {
+    try {
+      const { current, groups } = await this.modelCatalog();
+      const frame: Record<string, unknown> = {
+        ...(current ? { current } : {}),
+        groups,
+        profiles: this.quickPicks(),
+      };
+      if (this.pendingModel) frame['next'] = this.pendingModel;
+      const activeProfile = this.profileStore?.list().active;
+      if (activeProfile) frame['activeProfile'] = activeProfile;
+      if (clientId) this.wsServer.deliver(clientId, 'models', frame);
+      else this.wsServer.broadcastApps('models', frame);
+    } catch (error) {
+      if (clientId)
+        this.wsServer.deliver(clientId, 'error', {
+          code: 'models_unavailable',
+          message: `No se pudieron leer los modelos: ${(error as Error).message}`,
+        });
+    }
+  }
+
+  /**
+   * Switches the running model (and thinking level), keeps the choice and tells every window.
+   * What the engine cannot do is answered here, before anything is sent: an unavailable model or a
+   * thinking level the model does not offer leaves the assistant exactly as it was.
+   */
+  private async modelSwitch(
+    clientId: string,
+    message: { provider?: string; id?: string; thinking?: string },
+  ): Promise<void> {
+    const provider = String(message.provider ?? '');
+    const id = String(message.id ?? '');
+    if (!provider || !id) return;
+
+    const { current, groups } = await this.modelCatalog();
+    const models = (groups as { models: { provider: string; id: string; thinkingLevels?: string[] }[] }[]).flatMap(
+      (group) => group.models,
+    );
+    const chosen = models.find((model) => model.provider === provider && model.id === id);
+    if (!chosen) {
+      this.wsServer.deliver(clientId, 'error', {
+        code: 'model_unavailable',
+        message: 'That model is not available. Connect its account in Accounts first.',
+      });
+      return;
+    }
+    const thinking = message.thinking;
+    if (thinking && !(chosen.thinkingLevels ?? []).includes(thinking)) {
+      this.wsServer.deliver(clientId, 'error', {
+        code: 'thinking_unavailable',
+        message: 'That model does not support that thinking level.',
+      });
+      return;
+    }
+
+    // An answer in flight keeps the model it started with: the choice waits for the next message.
+    if (this.activeRun) {
+      const name = (chosen as { name?: string }).name ?? id;
+      this.pendingModel = { provider, id, name };
+      this.pendingRoute = { model: `${provider}/${id}`, ...(thinking ? { thinking } : {}) };
+      await this.modelsScreen();
+      return;
+    }
+
+    const answer = (await this.shellSpawner
+      .rpc('set_model', { provider, modelId: id, busy: false })
+      .catch(() => null)) as { success?: boolean; error?: string } | null;
+    if (answer && answer.success === false) {
+      this.wsServer.deliver(clientId, 'error', {
+        code: 'model_unavailable',
+        message: 'That model is not available. Connect its account in Accounts first.',
+      });
+      return;
+    }
+    if (thinking) {
+      await this.shellSpawner
+        .rpc('set_thinking_level', { level: thinking, busy: false })
+        .catch(() => null);
+    }
+    // The choice outlasts a restart: it becomes the assistant's saved default.
+    const route: { model: string; thinking?: string } = { model: `${provider}/${id}` };
+    if (thinking) route.thinking = thinking;
+    else if (current?.thinking) route.thinking = current.thinking;
+    await this.profileStore?.setDefaultModel(route as never).catch(() => undefined);
+    await this.modelsScreen();
+  }
+
   /** Sends the profiles screen: the store's view plus the models a role can point at. */
   private async profilesScreen(clientId: string | undefined, open = false): Promise<void> {
     if (!this.profileStore) return;
@@ -362,6 +534,7 @@ export class Daemon {
     // model it names is already the one running.
     const switched = route?.model ? await this.switchModel(route) : true;
     await this.profilesScreen(undefined);
+    await this.modelsScreen();
     if (!switched && clientId)
       this.wsServer.deliver(clientId, 'toast', {
         level: 'warning',
@@ -615,6 +788,12 @@ export class Daemon {
   private restarting = false;
   private restartPending = false;
 
+  /** A model chosen during a reply: it applies to the next message, not this one. */
+  private pendingModel: { provider: string; id: string; name: string } | null = null;
+
+  /** The model the assistant is running, as the last catalog read saw it. */
+  private currentModel: { provider: string; id: string; name: string; thinking?: string } | null = null;
+
   /** A model switch waiting for the running turn to finish. */
   private pendingRoute: { model?: string; thinking?: string } | null = null;
 
@@ -748,7 +927,8 @@ export class Daemon {
           if (this.pendingRoute) {
             const route = this.pendingRoute;
             this.pendingRoute = null;
-            void this.switchModel(route);
+            this.pendingModel = null;
+            void this.switchModel(route).then(() => this.modelsScreen());
           }
           if (deferred) void this.restartEngine();
           break;
@@ -853,6 +1033,10 @@ export class Daemon {
     // A command, not a prompt: the engine never sees it and the window gets the accounts screen.
     if (text.trim() === '/login') {
       void this.authList(connectorId, true);
+      return;
+    }
+    if (text.trim() === '/models') {
+      void this.modelsScreen(connectorId);
       return;
     }
     if (text.trim() === '/profiles') {
@@ -1013,8 +1197,16 @@ export class Daemon {
   }
 
   /** The engine process this daemon supervises: its pid and whether it is still running. */
-  get supervisor(): { pid: number | undefined; state: 'ready' | 'stopped' } {
-    return { pid: this.shellSpawner.pid, state: this.stopped ? 'stopped' : 'ready' };
+  get supervisor(): {
+    pid: number | undefined;
+    state: 'ready' | 'stopped';
+    restart(): Promise<void>;
+  } {
+    return {
+      pid: this.shellSpawner.pid,
+      state: this.stopped ? 'stopped' : 'ready',
+      restart: () => this.restartEngine(),
+    };
   }
 
   /** Same as stop(), for callers that think in terms of closing: idempotent. */
@@ -1212,6 +1404,8 @@ export class Daemon {
         console.log('[Daemon] Gentle Shell RPC ready');
         this.configureEngineModel();
         this.wireEngineEvents();
+        // A window that is already open hears which model is running, without asking.
+        void this.modelsScreen();
       },
       onError: (error) => console.error('[Daemon] Gentle Shell error:', error),
       onExit: (code, signal) => console.log('[Daemon] Gentle Shell exited:', code, signal),
