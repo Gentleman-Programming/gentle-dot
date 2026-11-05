@@ -271,8 +271,15 @@ el protocolo de cliente: `auth_list` → `auth_providers`, `auth_login` → arra
 prompt, `auth_logout` cierra sesión y refresca la lista; un rechazo del manager se convierte en un
 `toast` claro.
 
-`auth.test.ts` migrado al harness: **8 de 18**. Lo que falta:
-1. La expectativa de proveedores quedó vieja: el runtime falso ahora incluye `nvidia`.
-2. Dos casos esperan que el **engine se reinicie** cuando cambian las credenciales; nadie lo hace
-   todavía (`onCredentialsChanged` está sin cablear).
-3. El comando `/login` de la UI y el resto de la pantalla de cuentas.
+Corregido después (`105dbad`): los rechazos viajan como frames de **error** con el código del
+manager (`auth_unsupported`, `auth_busy`, `unknown_provider`); `auth_list` devuelve sólo datos y
+el comando **`/login`** abre la pantalla (`open:true`) sin llegar al engine; responder el flujo de
+otra ventana da `auth_flow_not_found`; una ventana que se desconecta **cancela** su flujo
+(`cancelOwnedBy`); y un prompt que vuelve como **respuesta fallida** (no sólo rechazada) llega como
+`no_account` o `command_failed`.
+
+`auth.test.ts`: **15 de 18**. Los 3 que quedan:
+1. y 2. El **engine debe reiniciarse** al cambiar credenciales, esperando a que termine el turno
+   en curso (`onCredentialsChanged` sigue sin cablear).
+3. El caso sin cuenta donde el engine se reporta **no listo** antes de mandar el prompt: hoy sale
+   `engine_unavailable` y el test espera `no_account`.
