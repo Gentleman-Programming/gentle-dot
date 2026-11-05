@@ -139,11 +139,19 @@ Falta:
 - **Subagentes** (`8aaf543`): el engine recibe `GENTLE_PI_AGENTS=1` salvo
   `GENTLE_DOT_SUBAGENTS=off`, para que el interruptor y el child guard viajen juntos.
 
-Falta de la supervisión del child guard (lo que dejan en rojo los 7 tests restantes de
-`test/child-guard.test.ts`, ya migrado al harness con 2/9 en verde): proteger el archivo del
-guard, reponerlo cuando cambia o desaparece mientras corre, reemplazar una carpeta
-`extensions/` que pasó a ser un link sin tocar su destino, y apagarse a subagentes off cuando el
-guard no se puede instalar.
+**Supervisión del child guard HECHA** (`e0da0bf`): `installChildGuardFile` escribe un archivo
+real con modo `0600`, reemplaza una carpeta `extensions/` que pasó a ser un symlink sin escribir
+nunca a través del link, y `watchChildGuard` lo repone cuando cambia o desaparece mientras el
+engine corre, logueando cada reposición. Si no se puede instalar (no es carpeta, o no se puede
+escribir), el engine arranca con subagentes off y el motivo se loguea una sola vez.
+De paso: cada `Daemon` tiene su propio `GentleShellSpawner` (el singleton compartido hacía fallar
+un segundo daemon en el mismo proceso con "Gentle Shell already running") y el watcher se detiene
+en `stop()`.
+
+`test/child-guard.test.ts`: **7 de 9** en verde. Los 2 restantes necesitan piezas propias:
+1. La **política de conectores** (`POLICY_ENV`) con `protectedPaths` que incluya el child guard y
+   el guard: el daemon nuevo todavía no arma esa política.
+2. La limpieza del `.pi/mcp.json` plantado cuando el guard no se puede reponer (y avisar una vez).
 
 - Prompts con historial de sesión, asks de aprobación, steering/followUp,
   abort, rotación, Compaction.
