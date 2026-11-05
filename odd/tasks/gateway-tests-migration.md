@@ -235,13 +235,22 @@ Siguen fallando tres casos que piden **comportamiento que `cli.ts` no implementa
 espera, y su salida difiere (9 externals vs 7 esperados). Hay que decidir si se restaura el
 contrato del script o se reescribe el test; no es migración de harness.
 
-### `lifecycle.test.ts` — PARK (8)
+### `lifecycle.test.ts` — HECHO (8/8)
 
-No es migrable con el harness: los primeros tres casos prueban el **ciclo de vida del canal
-duplex fd 3** del app ("se detiene cuando su canal se cierra", "sin canal sigue corriendo",
-"cerrar dos veces para una sola vez") y el cuarto grupo prueba que **no se envían frames que la
-app rechazaría** (límite de tamaño, S35.2). El daemon nuevo habla por socket unix con frames
-JSON por línea y no tiene ese canal ni esos límites.
+Se implementó lo que faltaba y se migró el archivo:
+
+- **Canal por pipe** (`e907675`): `AppChannel` acepta un `Duplex` además de una config — mismos
+  frames JSON por línea, requests correlacionados por id, requests entrantes respondidos por los
+  handlers registrados, `connected`/`close()`. `approve()` pregunta a la app y trata canal
+  cerrado, timeout o aborto como "sin consentimiento". Un frame mayor que `MAX_FRAME_BYTES`
+  **nunca se escribe**: la app cerraría el canal, así que rechazarlo acá lo mantiene abierto.
+- **Lifetime** (`1face29`): con el pipe como canal, el daemon se detiene cuando el pipe se cierra
+  (una sola vez, logueando el motivo); sin pipe sigue corriendo. `stop()` es idempotente y todos
+  los llamadores esperan la misma promesa. El daemon expone `closed`, `close()`, `port` y
+  `supervisor` (pid del engine y si sigue vivo).
+- **Engine home** (S35.3, #13): un home por defecto fresco se marca como del engine antes del
+  primer spawn, con el mismo registro que escribe el engine; un home sobreescrito no se marca. El
+  home por defecto pasó a ser `<data dir>/agent`.
 
 ### Veredicto de los 4 "MIGRABLES"
 
