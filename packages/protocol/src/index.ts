@@ -229,6 +229,38 @@ export interface ImportCandidate {
 	duplicateOf?: string;
 }
 
+/** States of an external channel bridge (WhatsApp first; §8 of the dot-whatsapp study). */
+export type ChannelState = "off" | "pairing" | "connected" | "error";
+
+/** Providers a channel bridge can use; phase 1 ships Baileys only. */
+export type ChannelProvider = "baileys" | "meta-cloud";
+
+/**
+ * One channel the user talks to the assistant through: a bridge process the daemon does not own
+ * (§8/S9). The daemon only proxies its local admin API; the full phone number never crosses it.
+ */
+export interface ChannelInfo {
+	id: string;
+	name: string;
+	provider: ChannelProvider;
+	status: ChannelState;
+	/** Last 4 digits of the bridge's own number (S7). */
+	maskedNumber?: string;
+	/** ISO timestamp of the last activity the bridge reported. */
+	lastActivityAt?: string;
+	/** Plain words for a failed pairing or a logged-out session. */
+	errorReason?: string;
+	/** False when the bridge did not answer the last probe: the UI shows "not running". */
+	reachable: boolean;
+}
+
+/** The pairing step of a channel: a QR payload the UI renders client-side with a countdown. */
+export interface ChannelPairStatus {
+	qr: string;
+	expiresInSec: number;
+	attempts: number;
+}
+
 /** Reasoning effort levels the engine accepts. */
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
@@ -388,7 +420,17 @@ export type ClientMessage =
 	/** One connector change from the web page on a server, with the PIN ({@link isPinCommand}). */
 	| { type: "pin_command"; pin: string; command: ClientMessage }
 	/** Allows a `pin` ask with the PIN. */
-	| { type: "pin_approve"; requestId: string; pin: string };
+	| { type: "pin_approve"; requestId: string; pin: string }
+	/** Channels (WhatsApp, phase 1): reads any window may send; changes are app/PIN commands. */
+	| { type: "channel_list" }
+	| { type: "channel_allowlist" }
+	| { type: "channel_pair_status" }
+	| { type: "channel_allowlist_change"; action: "add" | "remove"; number: string }
+	| { type: "channel_pair_start" }
+	| { type: "channel_pair_regenerate" }
+	| { type: "channel_pair_cancel" }
+	| { type: "channel_verify" }
+	| { type: "channel_unpair" };
 
 export type ServerPayload =
 	| {
@@ -467,6 +509,11 @@ export type ServerPayload =
 	| { type: "connector_draft_resolved"; draftId: string; approved: boolean }
 	| { type: "connector_imports"; found: ImportCandidate[] }
 	| { type: "connector_imported"; names: string[] }
+	/** Channels (WhatsApp, phase 1): the bridge's live state, masked allowlist and pairing QR. */
+	| { type: "channels"; channels: ChannelInfo[]; open?: boolean }
+	| { type: "channel_allowlist"; numbers: string[] }
+	| { type: "channel_pair"; status: ChannelPairStatus | null }
+	| { type: "channel_verify_result"; results: { masked: string; ok: boolean }[] }
 	| { type: "voice_transcript"; requestId: string; text: string }
 	/** Speech for a `voice_speak` request, in base64. */
 	| { type: "voice_speech"; requestId: string; mime: string; data: string }
@@ -490,6 +537,12 @@ export const APP_COMMANDS = [
 	"connector_mode",
 	"connector_draft_reply",
 	"connector_import",
+	"channel_allowlist_change",
+	"channel_pair_start",
+	"channel_pair_regenerate",
+	"channel_pair_cancel",
+	"channel_verify",
+	"channel_unpair",
 	"computer_register",
 	"computer_unregister",
 ] as const satisfies readonly ClientMessage["type"][];
@@ -520,6 +573,9 @@ const isOptional = (value: unknown, check: (v: unknown) => boolean) => value ===
 const MAX_TEXT = 100_000;
 const CONNECTOR_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const isConnectorId = (value: unknown): value is string => isString(value) && CONNECTOR_ID.test(value);
+
+/** E.164 digits only, no leading +: the same shape the bridge's allowlist stores. */
+const CHANNEL_NUMBER = /^[1-9][0-9]{6,14}$/;
 const isShortString = (value: unknown): value is string => isString(value) && value.length <= 200;
 const isPin = (value: unknown): value is string => isString(value) && PIN_PATTERN.test(value);
 const MAX_IMPORTS = 200;
@@ -674,6 +730,12 @@ export function parseClientMessage(raw: string): ClientMessage | undefined {
 			return Array.isArray(m.ids) && m.ids.length <= MAX_IMPORTS && m.ids.every(isShortString)
 				? { type: "connector_import", ids: m.ids }
 				: undefined;
+		case "channel_allowlist_change":
+			return (m.action === "add" || m.action === "remove") &&
+				isString(m.number) &&
+				CHANNEL_NUMBER.test(m.number)
+				? { type: "channel_allowlist_change", action: m.action, number: m.number }
+				: undefined;
 		case "computer_register":
 			return isComputerUrl(m.url) && isString(m.token) && COMPUTER_TOKEN.test(m.token)
 				? { type: "computer_register", url: m.url, token: m.token }
@@ -703,6 +765,14 @@ export function parseClientMessage(raw: string): ClientMessage | undefined {
 		case "computer_unregister":
 		case "connectors_list":
 		case "connectors_scan":
+		case "channel_list":
+		case "channel_allowlist":
+		case "channel_pair_status":
+		case "channel_pair_start":
+		case "channel_pair_regenerate":
+		case "channel_pair_cancel":
+		case "channel_verify":
+		case "channel_unpair":
 		case "profiles_list":
 		case "models_list":
 		case "profile_import":
