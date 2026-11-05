@@ -53,6 +53,42 @@ validar con un bot de prueba y tocar Rosita recién en el cutover de T5.
   nuevo: `message_delta`, `message_done`, `ask`, `agent_state` hacia las ventanas.
 - **Criterio**: la app de escritorio muestra la conversación en vivo.
 
+#### Hallazgos (2026-11-04)
+
+El daemon nuevo ya espeja al `appChannel` (socket unix): `agent_state`,
+`message_done`, `engine_event`, `approval_requested` y los eventos de conectores.
+El hueco concreto:
+
+- `message_delta` **no** se espeja: va solo al conector de origen
+  (`daemon.ts:164`), así que una ventana conectada no puede mostrar el texto
+  llegando en vivo.
+- `AppChannel` es el canal privado por socket; la app de escritorio habla el
+  protocolo WS de `packages/protocol` (`hello {token, protocol}`, `send`,
+  `message_delta`, `message_done`, `ask`). Falta el gateway de app del lado del
+  daemon nuevo: hoy su `ws-server` valida `connectorType` y rechaza un cliente
+  que no es conector.
+
+#### Tareas
+
+- **T2.1** Espejar `message_delta` al `appChannel` con `clientId`/`messageId`,
+  sin alterar el ruteo al conector de origen. Test: un run produce deltas en
+  ambos destinos y conserva el orden.
+  **HECHO** (`c532cb7`), verificado E2E contra la imagen dev: el conector recibió
+  la respuesta y un cliente crudo en el socket de la app recibió los mismos 4
+  deltas (`DEL`, `TA`, `-`, `OK`) más `message_done` con el mismo `messageId`.
+  **Deuda**: el test automático no se pudo escribir porque la familia de tests
+  de gateway llama `startDaemon`, que el daemon refactorizado ya no exporta, y
+  `createDaemon` ya no acepta un comando de agente: hay que reconstruir el
+  harness con motor falso antes de T2.2 (tarea propia).
+- **T2.2** Gateway WS de app en el daemon nuevo: aceptar el `hello` del
+  protocolo v1 (token del daemon, sin `connectorType`), responder `ready`,
+  aceptar `send`/`abort`/`ui_response`, emitir `message_delta`, `message_done`,
+  `agent_state` y `ask`. Test de contrato con un cliente sintético.
+- **T2.3** Coexistencia de los dos WS (conectores y app) sin confundir
+  handshakes: cada uno valida su propia forma de `hello`.
+- **T2.4** Verificación E2E: cliente de app sintético → respuesta visible con
+  deltas en vivo.
+
 ### T3 — Portar el supervisor (lifecycle del agente)
 - Prompts con historial de sesión, asks de aprobación, steering/followUp,
   abort, rotación, Compaction.
