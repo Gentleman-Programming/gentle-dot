@@ -94,8 +94,16 @@ El hueco concreto:
   conectores; `deliver()` entrega los eventos del engine a quien originó el run:
   plano para una ventana, con sobre para un conector. Cubierto por
   `test/app-ws-gateway.test.ts` (ready + deltas planos + done).
-  **Falta**: `ask`/aprobalaciones por WS, `ui_response`, historial y el resto
-  del protocolo de cliente (hoy sólo chat: `send`/`abort`).
+  **Asks HECHO** (`41d879a`): `extension_ui_request` del engine ya no se
+  ignora. Sólo viajan las preguntas reales (`select`, `confirm`, `input`,
+  `editor`) como frame `ask` al origen del run; la respuesta entra por
+  `ui_response` desde la ventana o desde un conector y el spawner la escribe
+  directamente en stdin (`extension_ui_response`, correlacionado por el id de la
+  petición, sin esperar respuesta); `ask_resolved` vuelve a quien respondió.
+  Test: la ventana recibe el `ask` con sus opciones, contesta "Blue" y el motor
+  sigue con "You chose Blue".
+  **Falta**: historial (`get_history`/`get_earlier`), conversaciones múltiples,
+  perfiles y el resto del protocolo de cliente.
 - **T2.3** Coexistencia de los dos WS (conectores y app) sin confundir
   handshakes: cada uno valida su propia forma de `hello`.
 - **T2.4** Verificación E2E: cliente de app sintético → respuesta visible con
