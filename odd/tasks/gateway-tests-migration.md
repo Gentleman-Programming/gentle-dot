@@ -452,3 +452,38 @@ reiniciar, cancelar y rechazar desconocidos, restaurar `mcp.json`, y las dos de 
 ### Estado al cerrar
 `connectors-gateway`: **2 de 8**. Suite: **362 pasan / 121 fallan** (496). Lo demás ya está:
 store + manager, pantalla, acciones, política desde el store y fuente de secretos de la app.
+
+## Estado de connectors tras el transporte dual (2026-11-05, sesión 3)
+
+`ad618c7` dejó el transporte arreglado: el panel manda los comandos de ventana por **su canal**
+(request `command` con el `clientId`), y el daemon ahora los enruta al mismo `handleAppFrame` que
+el WebSocket. Los eventos siguen saliendo por el WebSocket de esa ventana.
+
+Con eso, el sign-in de un conector ya corre **de punta a punta** por el canal:
+`auth_event(auth_url)` → `auth_prompt(manual_code)` → `auth_done`, y todas las ventanas reciben el
+frame `connectors` refrescado.
+
+También se corrigió el orden: un sign-in **termina mucho después de empezar**, así que el refresh y
+el reinicio del engine se hacen al cerrarse el flujo (`auth_done`) y no al iniciar la acción
+(reiniciar antes le daba al engine nuevo la política vieja).
+
+### Lo único que falta para ese caso
+
+`restartEngine()` se cuelga en su segunda vuelta: las trazas muestran
+`restartEngine → stopping engine → engine stopped` y después **nunca** vuelve de `startEngine()` (ni
+error, ni "restart failed"). El `waitFor` del test vence a los 5 s.
+
+Pistas para retomarlo:
+1. `stop()` del spawner completa; el cuelgue está en el `start()` del **spawner nuevo**.
+2. Sospechas: el `--session-dir` compartido con la sesión anterior; el probe de readiness que no
+   recibe respuesta del agente falso en el segundo arranque; o el timeout configurable
+   (`GENTLE_DOT_ENGINE_READY_TIMEOUT_MS`) que es mayor que la ventana del test.
+3. La condición del test es sólo `pid distinto && state === 'ready'`, y `supervisor.state` hoy es
+   `'ready'` salvo que el daemon esté detenido: si el `pid` del hijo nuevo existe apenas se hace
+   `spawn`, conviene exponerlo antes de esperar el ready (o marcar `'restarting'` mientras dura).
+4. Instrumentar `GentleShellSpawner.start()` en la segunda vuelta (spawn, probe enviado, respuesta
+   recibida) es el paso siguiente, no tocar el daemon a ciegas.
+
+Con eso deberían caer el resto: esperar al turno antes de reiniciar, cancelación y rechazos,
+restaurar `mcp.json` y las dos de reposición B1 (los códigos del manager y su cancelación ya están
+cableados por el mismo `handleAppFrame`).
