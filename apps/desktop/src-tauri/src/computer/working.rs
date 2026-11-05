@@ -394,17 +394,14 @@ mod tests {
     }
 
     impl FakeWindows {
-        fn handle(&self, part: Part) -> Option<usize> {
+        fn handles(&self) -> super::super::capture_order::CallHandles {
             let [dot, panel] = *self.handles.lock().unwrap();
-            match part {
-                Part::Dot => dot,
-                Part::Panel => panel,
-            }
+            super::super::capture_order::CallHandles { dot, panel }
         }
 
         fn restore_unrelated_capture(&self, hwnd: usize, previous: u32) {
             let mut saved = self.call_affinities.lock().unwrap();
-            if let Some(index) = super::super::capture_order::current_window(&saved, hwnd, |part| self.handle(part)) {
+            if let Some(index) = super::super::capture_order::current_window(&saved, hwnd, self.handles()) {
                 saved[index].1.1 = previous;
                 return;
             }
