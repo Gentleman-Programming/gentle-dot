@@ -235,6 +235,18 @@ Siguen fallando tres casos que piden **comportamiento que `cli.ts` no implementa
 espera, y su salida difiere (9 externals vs 7 esperados). Hay que decidir si se restaura el
 contrato del script o se reescribe el test; no es migración de harness.
 
-### `lifecycle.test.ts` — pendiente (8)
+### `lifecycle.test.ts` — PARK (8)
 
-Siguiente candidato real.
+No es migrable con el harness: los primeros tres casos prueban el **ciclo de vida del canal
+duplex fd 3** del app ("se detiene cuando su canal se cierra", "sin canal sigue corriendo",
+"cerrar dos veces para una sola vez") y el cuarto grupo prueba que **no se envían frames que la
+app rechazaría** (límite de tamaño, S35.2). El daemon nuevo habla por socket unix con frames
+JSON por línea y no tiene ese canal ni esos límites.
+
+### Veredicto de los 4 "MIGRABLES"
+
+Sólo `engine-access` era realmente migrable, y quedó 7/7. Los otros tres revelan otra cosa:
+`cli` necesitaba arreglos reales (hecho: corre desde fuente), `runtime-build` es un script
+desalineado con su test, y `lifecycle` pide una feature (el canal duplex de la app con su
+lifetime). La lista de "migrables" era optimista: el camino real es **implementar features**, no
+migrar tests.
