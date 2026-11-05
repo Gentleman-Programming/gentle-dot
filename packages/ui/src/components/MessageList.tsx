@@ -37,17 +37,28 @@ function formatWait(seconds: number): string {
 /** What the chat shows between sending a message and the answer's first words. */
 function WaitingIndicator({ label }: { label: string }) {
 	const [seconds, setSeconds] = useState(0);
+	const hint = useRef<HTMLParagraphElement>(null);
+	// Read from the clock: a hidden page's timers are held back, so ticks undercount.
 	useEffect(() => {
-		const timer = setInterval(() => setSeconds((value) => value + 1), 1000);
+		const startedAt = Date.now();
+		const timer = setInterval(() => setSeconds(Math.floor((Date.now() - startedAt) / 1000)), 1000);
 		return () => clearInterval(timer);
 	}, []);
+	const longWait = seconds >= LONG_WAIT_SECONDS;
+	useEffect(() => {
+		if (longWait) hint.current?.scrollIntoView?.({ block: "end" });
+	}, [longWait]);
 	return (
 		<div className="waiting" role="status">
 			<span className="state-dot state-thinking" aria-hidden="true" />
 			<span>{label}</span>
-			<span className="waiting-time">{formatWait(seconds)}</span>
-			{seconds >= LONG_WAIT_SECONDS ? (
-				<p className="waiting-hint">Still waiting on the model. You can stop and pick another one.</p>
+			<span className="waiting-time" aria-hidden="true">
+				{formatWait(seconds)}
+			</span>
+			{longWait ? (
+				<p ref={hint} className="waiting-hint">
+					Still waiting on the model. You can stop and pick another one.
+				</p>
 			) : null}
 		</div>
 	);

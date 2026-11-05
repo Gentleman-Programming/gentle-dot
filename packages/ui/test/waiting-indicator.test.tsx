@@ -48,6 +48,37 @@ describe("waiting for the model", () => {
 		expect(screen.queryByRole("status")).not.toBeInTheDocument();
 	});
 
+	it("stays until the first words of the answer, even with an empty answer already open", () => {
+		const empty = { ...streaming, text: "" };
+		const { rerender } = render(<MessageList messages={[user, empty]} agentState="thinking" />);
+		expect(screen.getByRole("status")).toHaveTextContent("Thinking…");
+		rerender(<MessageList messages={[user, streaming]} agentState="thinking" />);
+		expect(screen.queryByRole("status")).not.toBeInTheDocument();
+	});
+
+	it("keeps the true time when the page's timers were held back", () => {
+		render(<MessageList messages={[user]} agentState="thinking" />);
+		vi.setSystemTime(Date.now() + 120_000);
+		act(() => vi.advanceTimersByTime(1000));
+		expect(screen.getByRole("status")).toHaveTextContent("2:01");
+		expect(screen.getByRole("status")).toHaveTextContent("Still waiting on the model.");
+	});
+
+	it("keeps the ticking time out of what screen readers announce", () => {
+		render(<MessageList messages={[user]} agentState="thinking" />);
+		expect(screen.getByText("0:00")).toHaveAttribute("aria-hidden", "true");
+	});
+
+	it("scrolls the long-wait hint into view", () => {
+		const scroll = vi.fn();
+		Element.prototype.scrollIntoView = scroll;
+		render(<MessageList messages={[user]} agentState="thinking" />);
+		scroll.mockClear();
+		act(() => vi.advanceTimersByTime(60_000));
+		expect(scroll).toHaveBeenCalledTimes(1);
+		Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+	});
+
 	it("does not show while idle or waiting on you", () => {
 		const { rerender } = render(<MessageList messages={[user]} agentState="idle" />);
 		expect(screen.queryByRole("status")).not.toBeInTheDocument();
