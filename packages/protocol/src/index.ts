@@ -11,11 +11,34 @@ export type AgentState = "starting" | "idle" | "thinking" | "working" | "needs_y
 
 export type ActivityKind = "read" | "edit" | "run" | "search" | "memory" | "delegate" | "other";
 
+export type ActivitySource =
+	| "engram"
+	| "slack"
+	| "linear"
+	| "gmail"
+	| "notion"
+	| "atlassian"
+	| "discord"
+	| "rdd"
+	| "web"
+	| "files"
+	| "shell"
+	| "subagent"
+	| "mcp"
+	| "other";
+
 export interface Activity {
 	id: string;
 	kind: ActivityKind;
 	title: string;
 	status: "running" | "done" | "failed";
+	/** Raw tool name, for clients that render integration-specific activities. */
+	tool?: string;
+	source?: ActivitySource;
+	/** Redacted argument preview, at most 200 characters. Never raw arguments. */
+	detail?: string;
+	/** Redacted text result preview, at most 2000 characters; only when done/failed. */
+	output?: string;
 }
 
 export interface Ask {
@@ -39,6 +62,11 @@ export interface AttachmentInfo {
 	name: string;
 	size: number;
 	mime: string;
+	/**
+	 * The message folder the file is stored in, when the daemon knows it; with `name` it makes the
+	 * address the file is fetched from, `GET /upload/<uploadId>/<name>` (S14.7).
+	 */
+	uploadId?: string;
 }
 
 /** A file uploaded with `POST /upload`, waiting to be sent with a message. */
@@ -51,6 +79,7 @@ export interface AttachmentRef {
 
 /** The daemon's answer to `POST /upload`. */
 export interface UploadedFile extends AttachmentRef, AttachmentInfo {
+	uploadId: string;
 	/** Where the file is, relative to the assistant's workspace: `uploads/<uploadId>/<name>`. */
 	path: string;
 }
@@ -69,8 +98,12 @@ export interface HistoryMessage {
 	role: "user" | "assistant";
 	text: string;
 	activities: Activity[];
+	/** Presented thinking content, when the engine exposes it. */
+	reasoning?: string;
 	/** Files the user sent with the message. */
 	attachments?: AttachmentInfo[];
+	/** When the message was written (epoch ms); for an answer, when its last part ended. Omitted when unknown. */
+	at?: number;
 	/** From an earlier session of the same chat, before the daemon last rotated it. */
 	earlier?: true;
 }
@@ -335,7 +368,7 @@ export function parseProfileRoles(value: unknown): ProfileRoles | undefined {
 }
 
 export type ClientMessage =
-	| { type: "hello"; token: string; protocol: number }
+	| { type: "hello"; token: string; protocol: number; capabilities?: string[] }
 	/** `text` may be empty when files are attached. */
 	| { type: "send"; text: string; requestId?: string; attachments?: AttachmentRef[] }
 	| { type: "steer"; text: string }
@@ -408,16 +441,27 @@ export type ServerPayload =
 	  }
 	| { type: "pin_status"; pin: PinStatus }
 	| { type: "agent_state"; state: AgentState }
-	| { type: "user_message"; messageId: string; text: string; attachments?: AttachmentInfo[] }
+	| {
+			type: "user_message";
+			messageId: string;
+			text: string;
+			attachments?: AttachmentInfo[];
+			/** When the daemon took the message (epoch ms). */
+			at?: number;
+	  }
 	| { type: "message_delta"; messageId: string; delta: string }
+	| { type: "reasoning_delta"; messageId: string; delta: string }
 	| {
 			type: "message_done";
 			messageId: string;
 			text: string;
+			reasoning?: string;
 			/** The answer was stopped on purpose (Stop, or switching conversations). */
 			stopped?: true;
 			/** The answer failed; a plain-language explanation for the chat. */
 			error?: string;
+			/** When the answer ended (epoch ms). */
+			at?: number;
 	  }
 	| { type: "activity"; messageId: string; activity: Activity }
 	| { type: "ask"; ask: Ask }
@@ -579,10 +623,17 @@ export function parseClientMessage(raw: string): ClientMessage | undefined {
 	if (typeof value !== "object" || value === null) return undefined;
 	const m = value as Record<string, unknown>;
 	switch (m.type) {
-		case "hello":
-			return isString(m.token) && typeof m.protocol === "number"
-				? { type: "hello", token: m.token, protocol: m.protocol }
-				: undefined;
+		case "hello": {
+			if (!isString(m.token) || typeof m.protocol !== "number") return undefined;
+			const capabilities =
+				Array.isArray(m.capabilities) && m.capabilities.every(isString) ? m.capabilities : undefined;
+			return {
+				type: "hello",
+				token: m.token,
+				protocol: m.protocol,
+				...(capabilities !== undefined ? { capabilities } : {}),
+			};
+		}
 		case "send": {
 			const attachments = m.attachments === undefined ? undefined : parseAttachments(m.attachments);
 			if (m.attachments !== undefined && !attachments) return undefined;

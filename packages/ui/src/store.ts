@@ -263,6 +263,9 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 					},
 				],
 			};
+		// The web UI does not show model reasoning yet; native clients may.
+		case "reasoning_delta":
+			return state;
 		case "message_delta":
 			return updateAssistant(state, message.messageId, (m) => ({
 				...m,

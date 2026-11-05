@@ -341,6 +341,54 @@ async function runPrompt(text: string, images?: Rec[]) {
 		assistantText("Changed the files.");
 		return endRun();
 	}
+	if (text.startsWith("rich:")) {
+		const credential = text.slice(5);
+		const thinking = "Engram follows ODD";
+		const answer = "Gentle Shell says:\n```ts\n    const name = 'Engram';\n      // ODD\n```";
+		const calls = ["mcp__slack__slack_search_public", "mem_save"].map((name, i) => ({
+			type: "toolCall",
+			id: `rich-${i}`,
+			name,
+			arguments: { token: "fixture-token", content: credential },
+		}));
+		const message = {
+			role: "assistant",
+			content: [{ type: "thinking", thinking }, ...calls, { type: "text", text: answer }],
+		};
+		out({ type: "message_start", message: { role: "assistant", content: [] } });
+		out({
+			type: "message_update",
+			assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: thinking },
+		});
+		for (const call of calls) {
+			out({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args: call.arguments });
+			const result = {
+				content: [{ type: "text", text: JSON.stringify({ password: "fixture-password", data: credential }) }],
+			};
+			out({
+				type: "tool_execution_end",
+				toolCallId: call.id,
+				toolName: call.name,
+				result,
+				isError: call.name === "mem_save",
+			});
+		}
+		out({ type: "message_end", message });
+		appendEntry({ type: "message", message });
+		for (const call of calls)
+			appendEntry({
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolCallId: call.id,
+					isError: call.name === "mem_save",
+					content: [
+						{ type: "text", text: JSON.stringify({ password: "fixture-password", data: credential }) },
+					],
+				},
+			});
+		return endRun();
+	}
 	if (text.startsWith("tool:")) {
 		const toolName = text.slice(5);
 		const toolCallId = randomUUID();

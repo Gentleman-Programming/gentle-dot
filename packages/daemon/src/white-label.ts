@@ -30,9 +30,39 @@ const REWRITES: [RegExp, string][] = [
 
 /** Rewrites internal names in harness-generated text shown to the user. */
 export function presentText(text: string): string {
-	let shown = text;
-	for (const [pattern, replacement] of REWRITES) shown = shown.replace(pattern, replacement);
-	return shown.replace(/ {2,}/g, " ").replace(/ +([.,;:!?])/g, "$1");
+	const prose = (part: string) => {
+		let shown = part;
+		for (const [pattern, replacement] of REWRITES) shown = shown.replace(pattern, replacement);
+		return shown.replace(/ {2,}/g, " ").replace(/ +([.,;:!?])/g, "$1");
+	};
+	// Walk Markdown code regions instead of rewriting their contents. A closing fence
+	// must use the same character and be at least as long as its opening fence.
+	const prefix = "(?:[ \\t]*>[ \\t]?)*(?:[ \\t]*(?:[-+*]|\\d+[.)])[ \\t]+)?[ \\t]*";
+	const markers = new RegExp(`^${prefix}(\u0060{3,}|~{3,})[^\\n]*(?:\\n|$)|\u0060+`, "gm");
+	let shown = "";
+	let cursor = 0;
+	for (let match = markers.exec(text); match; match = markers.exec(text)) {
+		const start = match.index;
+		let end: number;
+		if (match[1]) {
+			const fence = match[1];
+			const close = new RegExp(`^${prefix}${fence[0]}{${fence.length},}[ \\t]*(?:\\n|$)`, "gm");
+			close.lastIndex = markers.lastIndex;
+			const closing = close.exec(text);
+			end = closing ? close.lastIndex : text.length;
+		} else {
+			const runs = /`+/g;
+			runs.lastIndex = markers.lastIndex;
+			let closing = runs.exec(text);
+			while (closing && closing[0].length !== match[0].length) closing = runs.exec(text);
+			if (!closing) continue;
+			end = runs.lastIndex;
+		}
+		shown += prose(text.slice(cursor, start)) + text.slice(start, end);
+		cursor = end;
+		markers.lastIndex = end;
+	}
+	return shown + prose(text.slice(cursor));
 }
 
 /** Informational notifications are harness chatter; warnings and errors still reach the user. */
