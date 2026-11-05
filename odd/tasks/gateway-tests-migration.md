@@ -259,3 +259,20 @@ Sólo `engine-access` era realmente migrable, y quedó 7/7. Los otros tres revel
 desalineado con su test, y `lifecycle` pide una feature (el canal duplex de la app con su
 lifetime). La lista de "migrables" era optimista: el camino real es **implementar features**, no
 migrar tests.
+
+## Auth cableado (2026-11-05, sesión 2)
+
+`AuthManager` estaba completo y era inalcanzable: una ventana pidiendo sus cuentas no recibía
+nada, así que no se podía iniciar sesión en el daemon nuevo (`f71e16c`).
+
+Ahora el daemon lo construye con el runtime del engine (o uno inyectado en tests) y responde por
+el protocolo de cliente: `auth_list` → `auth_providers`, `auth_login` → arranca el flujo y manda
+`auth_prompt`/`auth_event`/`auth_done` planos a la ventana que lo pidió, `auth_reply` contesta el
+prompt, `auth_logout` cierra sesión y refresca la lista; un rechazo del manager se convierte en un
+`toast` claro.
+
+`auth.test.ts` migrado al harness: **8 de 18**. Lo que falta:
+1. La expectativa de proveedores quedó vieja: el runtime falso ahora incluye `nvidia`.
+2. Dos casos esperan que el **engine se reinicie** cuando cambian las credenciales; nadie lo hace
+   todavía (`onCredentialsChanged` está sin cablear).
+3. El comando `/login` de la UI y el resto de la pantalla de cuentas.
