@@ -84,9 +84,18 @@ El hueco concreto:
   **Sigue pendiente**: migrar los 25 archivos de gateway que todavía llaman
   `startDaemon` (fuente de la mayoría de los 181 fallos).
 - **T2.2** Gateway WS de app en el daemon nuevo: aceptar el `hello` del
-  protocolo v1 (token del daemon, sin `connectorType`), responder `ready`,
+  protocolo v1 (clave del daemon, sin `connectorType`), responder `ready`,
   aceptar `send`/`abort`/`ui_response`, emitir `message_delta`, `message_done`,
   `agent_state` y `ask`. Test de contrato con un cliente sintético.
+  **HECHO** (`3ae402d` + test `85fed4d`): un `hello` sin el sobre del bridge se
+  reconoce como ventana (misma clave, sin tipo de conector) y se responde con
+  `ready` plano con `protocol` y `clientId`. Sus frames entran por
+  `onAppMessage` y el daemon los rutea al mismo camino de chat que los
+  conectores; `deliver()` entrega los eventos del engine a quien originó el run:
+  plano para una ventana, con sobre para un conector. Cubierto por
+  `test/app-ws-gateway.test.ts` (ready + deltas planos + done).
+  **Falta**: `ask`/aprobalaciones por WS, `ui_response`, historial y el resto
+  del protocolo de cliente (hoy sólo chat: `send`/`abort`).
 - **T2.3** Coexistencia de los dos WS (conectores y app) sin confundir
   handshakes: cada uno valida su propia forma de `hello`.
 - **T2.4** Verificación E2E: cliente de app sintético → respuesta visible con
