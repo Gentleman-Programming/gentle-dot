@@ -14,6 +14,7 @@ import { Transcript } from './transcript.ts';
 import { AuthManager, createModelAuthRuntime, type AuthRuntime } from './auth.ts';
 import { ProfileError, ProfileStore, defaultImportPath, splitModel, toModelOptions } from './profiles.ts';
 import { UploadStore, composePrompt } from './uploads.ts';
+import { ConnectorManager, ConnectorStore } from './connectors.ts';
 import type { AttachmentRef } from '@gentle-dot/protocol';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -45,6 +46,10 @@ export interface DaemonOptions {
   authRuntime?: () => Promise<AuthRuntime>;
   /** Another setup's profiles.json, only ever read, for the one-time import. */
   profilesImportPath?: string;
+  /** OAuth runner for the connectors' own sign-in; tests inject one. */
+  connectorOAuth?: NonNullable<ConstructorParameters<typeof ConnectorManager>[0]['oauth']>;
+  /** The home folder "Import my MCP servers" scans; default the user's. */
+  importHome?: string;
   /** Upload limits for the desktop app's files; the store's defaults apply when absent. */
   uploadLimits?: { fileBytes: number; messageBytes: number; files: number };
 }
@@ -138,6 +143,22 @@ export class Daemon {
         case 'send':
           this.chatSend(clientId, String(message.text ?? ''), message.attachments as AttachmentRef[] | undefined);
           break;
+        case 'connector_connect': {
+          void this.connectorAction(clientId, 'connect', String(message.connectorId ?? ''));
+          break;
+        }
+        case 'connector_sign_in': {
+          void this.connectorAction(clientId, 'signIn', String(message.connectorId ?? ''));
+          break;
+        }
+        case 'connector_disconnect': {
+          void this.connectorAction(clientId, 'disconnect', String(message.connectorId ?? ''));
+          break;
+        }
+        case 'connectors_list': {
+          void this.connectorsScreen(clientId);
+          break;
+        }
         case 'models_list': {
           void this.modelsScreen(clientId);
           break;
@@ -193,10 +214,15 @@ export class Daemon {
           break;
         }
         case 'auth_reply': {
-          const answered = this.authManager?.reply(this.authOwner(clientId), String(message.flowId ?? ''), {
+          const answer = {
             value: message.value === undefined ? undefined : String(message.value),
             cancelled: message.cancelled === true,
-          });
+          };
+          const owner = this.authOwner(clientId);
+          const answeredByAccount = this.authManager?.reply(owner, String(message.flowId ?? ''), answer) === true;
+          const answered =
+            answeredByAccount ||
+            this.connectorManager?.reply(owner, String(message.flowId ?? ''), answer) === true;
           // Another window's flow is none of this one's business.
           if (answered === false)
             this.wsServer.deliver(clientId, 'error', {
@@ -288,6 +314,7 @@ export class Daemon {
       const owner = this.authOwners.get(clientId);
       if (!owner) return;
       this.authManagersCancel(owner);
+      this.connectorManager?.cancelOwnedBy(owner);
       this.authOwners.delete(clientId);
     });
 
@@ -338,7 +365,57 @@ export class Daemon {
   }
 
   /**
-   * The models the picker shows: the engine's catalog grouped by account, what the assistant is
+   * Runs one connector action for the window that asked. The sign-in steps travel to that window
+   * only (the others just see the screen refreshed), and a change of connectors restarts the
+   * engine so its policy matches — never in the middle of an answer.
+   */
+  private async connectorAction(
+    clientId: string,
+    action: 'connect' | 'signIn' | 'disconnect',
+    connectorId: string,
+  ): Promise<void> {
+    const manager = this.connectorManager;
+    if (!manager || connectorId === '') return;
+    const owner = this.authOwner(clientId);
+    const emit = (event: { type: string } & Record<string, unknown>) => {
+      const { type, ...payload } = event;
+      this.wsServer.deliver(clientId, type, payload);
+    };
+    const refusal =
+      action === 'disconnect'
+        ? manager.disconnect(connectorId)
+        : action === 'signIn'
+          ? manager.signIn(owner, connectorId, emit as never)
+          : manager.connect(owner, connectorId, emit as never);
+    if (refusal) {
+      this.wsServer.deliver(clientId, 'error', { code: refusal.code, message: refusal.message });
+      return;
+    }
+
+    // The action either started a flow (it finishes later through auth_reply) or already changed
+    // the files: either way the screen is stale, so every window gets it and the engine restarts.
+    await this.connectorsScreen();
+    if (action !== 'signIn') void this.restartEngine();
+  }
+
+  /** Answers `connectors_list` and the /connectors command with what the screen shows. */
+  private async connectorsScreen(clientId?: string, open = false): Promise<void> {
+    try {
+      const connectors = this.connectorManager?.list() ?? [];
+      const frame: Record<string, unknown> = { connectors };
+      if (open) frame['open'] = true;
+      if (clientId) this.wsServer.deliver(clientId, 'connectors', frame);
+      else this.wsServer.broadcastApps('connectors', frame);
+    } catch (error) {
+      if (clientId)
+        this.wsServer.deliver(clientId, 'error', {
+          code: 'connectors_unavailable',
+          message: `No se pudieron leer los conectores: ${(error as Error).message}`,
+        });
+    }
+  }
+
+  /** The models the picker shows: the engine's catalog grouped by account, what the assistant is
    * running now, and the profiles as quick picks. Everything else the engine reports about a
    * model (endpoints, headers, costs) stays here.
    */
@@ -814,6 +891,10 @@ export class Daemon {
   private restarting = false;
   private restartPending = false;
 
+  /** The connectors the user has added: the file the engine reads and the manager over it. */
+  private connectorStore: ConnectorStore | null = null;
+  private connectorManager: ConnectorManager | null = null;
+
   /** Files the user dropped on a window, and the prompt they belong to. */
   private uploads: UploadStore | null = null;
 
@@ -1068,6 +1149,10 @@ export class Daemon {
     // A command, not a prompt: the engine never sees it and the window gets the accounts screen.
     if (text.trim() === '/login') {
       void this.authList(connectorId, true);
+      return;
+    }
+    if (text.trim() === '/connectors') {
+      void this.connectorsScreen(connectorId, true);
       return;
     }
     if (text.trim() === '/models') {
@@ -1421,6 +1506,24 @@ export class Daemon {
     this.engineHome = chosenHome ?? path.join(this.config.daemon.data_dir, 'agent');
     if (!chosenHome) this.markEngineHome(this.engineHome);
 
+    // The connectors live next to the engine's files: the store owns `mcp.json` and the guard,
+    // the manager runs the sign-in and the mode changes on top of it. The daemon already
+    // supervises the child guard, so the store is told not to write a second one.
+    this.connectorStore ??= new ConnectorStore({
+      dataDir: this.config.daemon.data_dir,
+      agentHome: this.engineHome as string,
+      workspace: this.config.daemon.workspace,
+      guardPath: this.approvalGuardPath(),
+      childGuard: false,
+      log: (line) => console.log(line),
+    });
+    this.connectorManager ??= new ConnectorManager({
+      store: this.connectorStore,
+      ...(this.options.connectorOAuth ? { oauth: this.options.connectorOAuth } : {}),
+      ...(this.options.importHome ? { importHome: this.options.importHome } : {}),
+      log: (line) => console.log(line),
+    });
+
     this.profileStore ??= new ProfileStore({
       configHome: path.join(this.config.daemon.data_dir, 'gentle-ai'),
       agentHome: this.engineHome as string,
@@ -1440,7 +1543,11 @@ export class Daemon {
       sessionDir: path.join(this.config.daemon.data_dir, 'sessions'),
       extensions: [this.approvalGuardPath()],
     };
-    shellConfig.policy = this.connectorPolicy(shellConfig.agentHome);
+    // The connectors' store knows what is approved and in which mode; that is the policy.
+    const storePolicy = this.connectorStore?.policy();
+    shellConfig.policy = storePolicy
+      ? (storePolicy as unknown as Record<string, unknown>)
+      : this.connectorPolicy(shellConfig.agentHome);
 
     // The subagents of the assistant's engine load the guard from its extensions folder. If it
     // cannot be put there (or kept there), the engine runs with subagents off rather than

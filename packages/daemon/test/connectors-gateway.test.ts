@@ -2,22 +2,27 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ServerMessage } from "@gentle-dot/protocol";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
-import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { BRIDGE_KEY, bootDaemon } from "./harness.ts";
 import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { oauthOptions } from "./fake-oauth.ts";
-import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { tempDir, waitFor } from "./helpers.ts";
+
+// Every case boots a daemon and waits for the engine.
+vi.setConfig({ testTimeout: 180_000 });
 
 const GUARD = fileURLToPath(new URL("../src/extensions/approval-guard.ts", import.meta.url));
 
 /** The engine's mcp.json without the proxy key, which changes with every engine launch. */
 const withoutKey = (text: string) => text.replace(/Bearer [^"]+/g, "Bearer <key>");
 
-const daemons: DotDaemon[] = [];
+const daemons: { stop(): Promise<void> }[] = [];
+const spies: { mockRestore(): void }[] = [];
 afterEach(async () => {
-	await Promise.all(daemons.splice(0).map((d) => d.close()));
+	await Promise.all(daemons.splice(0).map((d) => d.stop()));
+	for (const spy of spies.splice(0)) spy.mockRestore();
 });
 
 async function setup(options: { home?: boolean; browser?: "auto" } = {}) {
@@ -29,27 +34,26 @@ async function setup(options: { home?: boolean; browser?: "auto" } = {}) {
 	const fake = fakeAuthRuntime();
 	// Connector changes come from the desktop app (S25.2); it allows the ones it confirms.
 	const app = fakeApp([], "allow");
-	const d = await startDaemon({
-		port: 0,
-		host: "127.0.0.1",
+	// The daemon logs through console.log; capture those lines without a host seam.
+	const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+		logs.push(args.map(String).join(" "));
+	});
+	spies.push(spy);
+
+	const booted = await bootDaemon({
 		dataDir,
 		workspace: join(dataDir, "workspace"),
-		uiDir: dataDir,
-		agentCommand: process.execPath,
-		agentArgs: [FAKE_AGENT],
-		backoffMs: [50],
-		agentEnv: {
-			...process.env,
+		env: {
 			FAKE_AGENT_ENV_FILE: envFile,
 			FAKE_AGENT_ARGS_FILE: argsFile,
+			...(options.home ? { GENTLE_DOT_AGENT_HOME: agentHome } : {}),
 		},
-		...(options.home ? { agentHome } : {}),
 		authRuntime: async () => fake.runtime,
 		connectorOAuth: oauthOptions(options.browser === "auto"),
 		appChannel: app.daemonEnd,
-		log: (line) => logs.push(line),
 	});
-	daemons.push(d);
+	daemons.push(booted);
+	const d = booted.daemon;
 	const agentEnv = () => JSON.parse(readFileSync(envFile, "utf8")) as Record<string, string | undefined>;
 	const agentArgs = () => JSON.parse(readFileSync(argsFile, "utf8")) as string[];
 	return {
@@ -69,7 +73,7 @@ async function connect(d: DotDaemon, app: ReturnType<typeof fakeApp>) {
 	const messages: ServerMessage[] = [];
 	ws.on("message", (data) => messages.push(JSON.parse(String(data)) as ServerMessage));
 	await new Promise((resolve) => ws.on("open", resolve));
-	ws.send(JSON.stringify({ type: "hello", token: d.token, protocol: 1 }));
+	ws.send(JSON.stringify({ type: "hello", token: BRIDGE_KEY, protocol: 1 }));
 	const ready = await waitFor(() => messages.find((m) => m.type === "ready"));
 	const clientId = ready.type === "ready" ? (ready.clientId ?? "") : "";
 	const send = sendLikeThePanel(
