@@ -55,6 +55,34 @@ describe("connectors catalog", () => {
 		expect(isReadOnlyCall("linear", "mcp__linear__list_issues", true, linear)).toBe(true);
 		expect(isReadOnlyCall("linear", "mcp__linear__create_issue", true, linear)).toBe(false);
 	});
+
+	it("lets Notion's page listings and queries read without asking, but not calendar, files, sessions, or skills", () => {
+		const notion = CATALOG.find((entry) => entry.id === "notion")?.readOnlyTools ?? [];
+		for (const tool of [
+			"notion-list-private-pages",
+			"notion-list-shared-pages",
+			"notion-list-favorite-pages",
+			"notion-list-recent-pages",
+			"notion-list-page-backlinks",
+			"notion-query-multiple-data-sources",
+			"notion-memory-search",
+			"notion-get-self",
+			"notion-get-groups",
+			"notion-get-async-task",
+			"notion-get-tool-access",
+		])
+			expect(notion, tool).toContain(tool);
+		for (const tool of [
+			"notion-calendar-list-events",
+			"notion-calendar-list-contacts",
+			"notion-download-attachment",
+			"notion-get-file-download-urls",
+			"notion-search-sessions",
+			"notion-read-session-event",
+			"notion-download-skill",
+		])
+			expect(notion, tool).not.toContain(tool);
+	});
 });
 
 describe("mcp.json rendering", () => {
