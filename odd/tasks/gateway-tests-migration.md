@@ -278,11 +278,18 @@ otra ventana da `auth_flow_not_found`; una ventana que se desconecta **cancela**
 (`cancelOwnedBy`); y un prompt que vuelve como **respuesta fallida** (no sólo rechazada) llega como
 `no_account` o `command_failed`.
 
-`auth.test.ts`: **15 de 18**. Los 3 que quedan:
-1. y 2. El **engine debe reiniciarse** al cambiar credenciales, esperando a que termine el turno
-   en curso (`onCredentialsChanged` sigue sin cablear).
-3. El caso sin cuenta donde el engine se reporta **no listo** antes de mandar el prompt: hoy sale
-   `engine_unavailable` y el test espera `no_account`.
+**HECHO: `auth.test.ts` 18 de 18** (`68a14fd`). Lo que faltaba y cómo se resolvió:
+
+1. **Reinicio del engine al cambiar credenciales**: el arranque se extrajo a `startEngine()` (con
+   `engineHome` como campo) y `restartEngine()` detiene el spawner, crea uno nuevo (los listeners
+   de eventos no se apilan) y vuelve a arrancar.
+2. **Reinicio diferido**: con un turno en curso se marca `restartPending` y se reinicia al
+   `agent_settled`. **Trampa real**: el handler llamaba al reinicio *antes* de limpiar
+   `activeRun`, así que el reinicio se difería a sí mismo para siempre. Se limpia primero.
+3. **Mensajes al window**: lista de cuentas refrescada tras `auth_done`; un prompt fallido ahora
+   distingue `no_account` (si **no hay ninguna** cuenta conectada) de `command_failed`; y el
+   vocabulario de estado dice `thinking` al arrancar el turno y `working` cuando corre una
+   herramienta.
 
 ## Verificación de módulos (2026-11-05, sesión 2)
 
