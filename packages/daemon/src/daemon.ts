@@ -256,6 +256,27 @@ export class Daemon {
     return owner;
   }
 
+  /**
+   * Tells the window why a prompt failed. "Connect an account" only when nothing is connected:
+   * with an account in place the same engine message means something else went wrong.
+   */
+  private async reportPromptFailure(connectorId: string, message: string): Promise<void> {
+    let configured = false;
+    try {
+      configured = ((await this.authManager?.providers()) ?? []).some((provider) => provider.configured);
+    } catch {
+      // Treat an unreadable list as "nothing connected": the advice is still the useful one.
+    }
+    const noAccount = !configured && /no (api key|model|account)|not signed in/i.test(message);
+    this.wsServer.deliver(
+      connectorId,
+      'error',
+      noAccount
+        ? { code: 'no_account', message: 'Connect an AI account first: open Accounts or type /login.' }
+        : { code: 'command_failed', message: 'That did not work. Please try again.' },
+    );
+  }
+
   /** Answers `auth_list` with the providers the engine can sign into and their status. */
   private async authList(clientId: string, open = false): Promise<void> {
     if (!this.authManager) return;
@@ -282,6 +303,8 @@ export class Daemon {
         // The manager already speaks the client protocol's frames; the window gets them flat.
         const { type, ...payload } = event as { type: string } & Record<string, unknown>;
         this.wsServer.deliver(clientId, type, payload);
+        // A finished sign-in changes the accounts list, so the window sees it refreshed.
+        if (type === 'auth_done') void this.authList(clientId);
       },
     );
     if (refusal) this.wsServer.deliver(clientId, 'error', { code: refusal.code, message: refusal.message });
@@ -365,6 +388,11 @@ export class Daemon {
   /** One owner object per window, so a flow answers only to the window that started it. */
   private authOwners = new Map<string, object>();
 
+  /** The engine's home, kept so a restart can reuse it. */
+  private engineHome: string | null = null;
+  private restarting = false;
+  private restartPending = false;
+
   /** Sign-in flows for the accounts screen. */
   private authManager: AuthManager | null = null;
 
@@ -412,8 +440,9 @@ export class Daemon {
 
       switch (type) {
         case 'agent_start':
-          if (origin) this.wsServer.deliver(origin, 'agent_state', { state: 'working' });
-          this.appChannel.broadcast('agent_state', { state: 'working' });
+          // The engine is thinking until a tool runs; the window shows the difference.
+          if (origin) this.wsServer.deliver(origin, 'agent_state', { state: 'thinking' });
+          this.appChannel.broadcast('agent_state', { state: 'thinking' });
           break;
 
         case 'message_update': {
@@ -465,6 +494,8 @@ export class Daemon {
         }
 
         case 'tool_execution_start': {
+          if (origin) this.wsServer.deliver(origin, 'agent_state', { state: 'working' });
+          this.appChannel.broadcast('agent_state', { state: 'working' });
           const toolName = event['toolName'] as string | undefined;
           const toolCallId = event['toolCallId'] as string | undefined;
           if (toolName && origin && this.activeRun) {
@@ -477,9 +508,13 @@ export class Daemon {
         }
 
         case 'agent_settled': {
+          // Clear the run first: a deferred restart must not defer itself again.
+          const deferred = this.restartPending;
+          this.activeRun = null;
+          this.restartPending = false;
           if (origin) this.wsServer.deliver(origin, 'agent_state', { state: 'idle' });
           this.appChannel.broadcast('agent_state', { state: 'idle' });
-          this.activeRun = null;
+          if (deferred) void this.restartEngine();
           break;
         }
 
@@ -618,15 +653,9 @@ export class Daemon {
       .catch((error) => {
       console.error(`[Daemon] prompt falló: ${(error as Error).message}`);
       // The window gets a plain answer: no account means "connect one", anything else "try again".
-      const noAccount = /no api key|not signed in|no account/i.test((error as Error).message);
       this.activeRun = null;
-      this.wsServer.deliver(
-        connectorId,
-        'error',
-        noAccount
-          ? { code: 'no_account', message: 'Connect an AI account first: open Accounts or type /login.' }
-          : { code: 'command_failed', message: 'That did not work. Please try again.' },
-      );
+      void this.reportPromptFailure(connectorId, (error as Error).message);
+
     });
   }
 
@@ -776,51 +805,8 @@ export class Daemon {
     if (process.env['GENTLE_DOT_NO_SHELL'] === '1') {
       console.log('[Daemon] GENTLE_DOT_NO_SHELL=1 — skipping Gentle Shell spawn');
     } else {
-    // Sign-in goes through the engine's own runtime: the accounts screen never sees a key it
-    // cannot reach, and tests inject a fake one.
-    this.authManager ??= new AuthManager({
-      runtime: this.options.authRuntime ?? (() => createModelAuthRuntime(engineHome, process.cwd())),
-      log: (line) => console.log(line),
-    });
-
-    // The engine's own home: the operator's choice when named, <data_dir>/agent otherwise. Only
-    // the default is claimed for the engine (S35.3) — an overridden home is not ours to mark.
-    const chosenHome = process.env['GENTLE_DOT_AGENT_HOME'];
-    const engineHome = chosenHome ?? path.join(this.config.daemon.data_dir, 'agent');
-    if (!chosenHome) this.markEngineHome(engineHome);
-
-    const shellConfig: ShellConfig = {
-      home: this.config.daemon.workspace,
-      agentHome: engineHome,
-      engramProject: 'gentle-dot',
-      mode: 'rpc',
-      logLevel: this.config.daemon.log_level as any,
-      noAutoSetup: this.options.noAutoSetup,
-      engineCommand: this.options.engineCommand,
-      // Sessions live next to the daemon's data so history survives an engine restart.
-      sessionDir: path.join(this.config.daemon.data_dir, 'sessions'),
-      extensions: [this.approvalGuardPath()],
-    };
-    shellConfig.policy = this.connectorPolicy(shellConfig.agentHome);
-
-    // The subagents of the assistant's engine load the guard from its extensions folder. If it
-    // cannot be put there (or kept there), the engine runs with subagents off rather than
-    // unprotected.
-    const guardPath = shellConfig.extensions?.[0] ?? this.approvalGuardPath();
-    if (!this.superviseChildGuard(shellConfig.agentHome, guardPath)) shellConfig.subagentsOn = false;
-
-    await this.shellSpawner.start({
-      config: shellConfig,
-      onReady: () => {
-        console.log('[Daemon] Gentle Shell RPC ready');
-        this.configureEngineModel();
-        this.wireEngineEvents();
-      },
-      onError: (error) => console.error('[Daemon] Gentle Shell error:', error),
-      onExit: (code, signal) => console.log('[Daemon] Gentle Shell exited:', code, signal),
-    });
-
-    } // end GENTLE_DOT_NO_SHELL skip
+      await this.startEngine();
+    }
 
     // Register MCP servers based on config
     await this.registerMcpServers();
@@ -932,6 +918,85 @@ export class Daemon {
   /**
    * Stop the daemon
    */
+  /**
+   * Starts the engine: assembles what it needs (home, sessions, guard, policy, sign-in) and spawns
+   * it. Called at boot and again whenever credentials change.
+   */
+  private async startEngine(): Promise<void> {
+    // Sign-in goes through the engine's own runtime: the accounts screen never sees a key it
+    // cannot reach, and tests inject a fake one.
+    this.authManager ??= new AuthManager({
+      runtime: this.options.authRuntime ?? (() => createModelAuthRuntime(this.engineHome as string, process.cwd())),
+      log: (line) => console.log(line),
+    });
+
+    // New credentials only take effect in a new engine, and a running turn finishes first.
+    this.authManager.onCredentialsChanged = () => void this.restartEngine();
+
+    // The engine's own home: the operator's choice when named, <data_dir>/agent otherwise. Only
+    // the default is claimed for the engine (S35.3) — an overridden home is not ours to mark.
+    const chosenHome = process.env['GENTLE_DOT_AGENT_HOME'];
+    this.engineHome = chosenHome ?? path.join(this.config.daemon.data_dir, 'agent');
+    if (!chosenHome) this.markEngineHome(this.engineHome);
+
+    const shellConfig: ShellConfig = {
+      home: this.config.daemon.workspace,
+      agentHome: this.engineHome,
+      engramProject: 'gentle-dot',
+      mode: 'rpc',
+      logLevel: this.config.daemon.log_level as any,
+      noAutoSetup: this.options.noAutoSetup,
+      engineCommand: this.options.engineCommand,
+      // Sessions live next to the daemon's data so history survives an engine restart.
+      sessionDir: path.join(this.config.daemon.data_dir, 'sessions'),
+      extensions: [this.approvalGuardPath()],
+    };
+    shellConfig.policy = this.connectorPolicy(shellConfig.agentHome);
+
+    // The subagents of the assistant's engine load the guard from its extensions folder. If it
+    // cannot be put there (or kept there), the engine runs with subagents off rather than
+    // unprotected.
+    const guardPath = shellConfig.extensions?.[0] ?? this.approvalGuardPath();
+    if (!this.superviseChildGuard(shellConfig.agentHome, guardPath)) shellConfig.subagentsOn = false;
+
+    await this.shellSpawner.start({
+      config: shellConfig,
+      onReady: () => {
+        console.log('[Daemon] Gentle Shell RPC ready');
+        this.configureEngineModel();
+        this.wireEngineEvents();
+      },
+      onError: (error) => console.error('[Daemon] Gentle Shell error:', error),
+      onExit: (code, signal) => console.log('[Daemon] Gentle Shell exited:', code, signal),
+    });
+
+  }
+
+  /**
+   * Restarts the engine so it picks up new credentials. An answer in flight is not thrown away:
+   * the restart waits for the turn to settle.
+   */
+  private async restartEngine(): Promise<void> {
+    if (!this.engineHome || this.restarting) return;
+    if (this.activeRun) {
+      this.restartPending = true;
+      return;
+    }
+    this.restarting = true;
+    this.restartPending = false;
+    try {
+      console.log('[Daemon] Restarting the engine to use the new credentials');
+      await this.shellSpawner.stop();
+      // A fresh spawner: the engine-event listeners must not stack on the old one.
+      this.shellSpawner = new GentleShellSpawner();
+      await this.startEngine();
+    } catch (error) {
+      console.error('[Daemon] Engine restart failed:', error);
+    } finally {
+      this.restarting = false;
+    }
+  }
+
   /**
    * Stops the daemon. Idempotent: closing twice, or closing while the app quits, stops it once
    * and every caller waits for the same promise.
