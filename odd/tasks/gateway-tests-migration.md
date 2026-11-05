@@ -412,3 +412,43 @@ prueba construye `ConnectorStore` con un `dataDir` relativo, asi que escribe en 
 proceso en vez de un temporal. Arreglo: que cada test pase un `dataDir` absoluto y, si hace falta,
 que `ConnectorStoreOptions.dataDir` se resuelva contra un directorio explicito. Borrar el archivo
 a mano y sumar la ruta al `.gitignore` como red de seguridad.
+
+## El bloqueo real de connectors-gateway: dos transportes (2026-11-05, sesión 3)
+
+Diagnóstico completo (`fe28966` dejó la fuente de secretos cableada; esto es lo que falta):
+
+El test **no manda todo por el WebSocket**. Su helper `sendLikeThePanel(app, clientId, overWebSocket)`
+decide por mensaje:
+
+- si `parseClientMessage` + `isAppCommand(...)` dicen que es un **comando de la app** →
+  `app.command(clientId, message)`, es decir viaja por el **canal duplex** (fd 3);
+- si no, va por el **WebSocket**.
+
+Y las respuestas/eventos que el test espera (`connectors`, `auth_event`, `auth_done`, `profiles`,
+`models`) se leen de los mensajes del **WebSocket** (`messages.push` en el `ws.on("message")`).
+
+Cómo se verificó: las trazas (`console.error`) dentro de `connectorAction` **nunca aparecieron**, y
+`connector_connect` sí está en el switch de `onAppMessage`. Es decir: el frame no llegaba por ahí.
+
+### Qué hay que hacer
+
+1. **Registrar los handlers del canal** en el daemon, junto a los del WS:
+   `this.appChannel.registerHandler(tipo, async (params) => ...)` para los comandos de app
+   (`connectors_list`, `connector_connect`, `connector_sign_in`, `connector_disconnect`,
+   `profiles_*`, `models_*`, `auth_*`). El `AppChannel` ya sabe responder al frame
+   (`answerFrame` escribe `{kind:'response', id, result}`) y ya tiene `send(clientId, type, payload)`.
+2. **Reusar los mismos métodos** que hoy sirven al WS (`connectorsScreen`, `connectorAction`,
+   `profilesScreen`, `modelsScreen`, `authList`…), en vez de duplicar lógica: el transporte cambia,
+   la acción no.
+3. **Empujar los eventos por el WebSocket** al `clientId` que llegó en el request
+   (`wsServer.deliver(clientId, …)`), porque es de ahí de donde el test los lee. Los eventos del
+   sign-in van sólo a esa ventana; el refresh de `connectors`/`profiles`/`models` va a todas
+   (`broadcastApps`).
+4. **Cancelación**: con el `clientId` del canal, `cancelOwnedBy` debe alcanzar también esos flujos.
+
+Con eso deberían caer los 6 casos restantes: conectar con sign-in, esperar al turno antes de
+reiniciar, cancelar y rechazar desconocidos, restaurar `mcp.json`, y las dos de reposición B1.
+
+### Estado al cerrar
+`connectors-gateway`: **2 de 8**. Suite: **362 pasan / 121 fallan** (496). Lo demás ya está:
+store + manager, pantalla, acciones, política desde el store y fuente de secretos de la app.
