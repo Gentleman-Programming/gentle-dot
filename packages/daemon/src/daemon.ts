@@ -12,7 +12,7 @@ import { AppChannel, type AppMessage } from './app-channel.ts';
 import { childGuardFile, installChildGuardFile, watchChildGuard } from './child-guard.ts';
 import { Transcript } from './transcript.ts';
 import { AuthManager, createModelAuthRuntime, type AuthRuntime } from './auth.ts';
-import { ProfileStore, defaultImportPath, splitModel, toModelOptions } from './profiles.ts';
+import { ProfileError, ProfileStore, defaultImportPath, splitModel, toModelOptions } from './profiles.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createRequire } from 'node:module';
@@ -147,6 +147,14 @@ export class Daemon {
           void this.profileWrite(clientId, () =>
             this.profileStore?.duplicate(String(message.from ?? ''), String(message.to ?? '')),
           );
+          break;
+        }
+        case 'profile_save_current': {
+          void this.profileSaveCurrent(String(message.name ?? ''), clientId);
+          break;
+        }
+        case 'profile_import': {
+          void this.profileImport(clientId);
           break;
         }
         case 'profile_apply': {
@@ -350,15 +358,58 @@ export class Daemon {
         this.wsServer.deliver(clientId, 'toast', { level: 'warning', message: (error as Error).message });
       return;
     }
+    // The engine switches first: by the time a window hears about the new active profile, the
+    // model it names is already the one running.
+    const switched = route?.model ? await this.switchModel(route) : true;
     await this.profilesScreen(undefined);
-    if (!route?.model) return;
-    const switched = await this.switchModel(route);
     if (!switched && clientId)
       this.wsServer.deliver(clientId, 'toast', {
         level: 'warning',
         message:
           "Profile applied. The main assistant keeps its current model until that model's account is connected.",
       });
+  }
+
+  /**
+   * Saves the setup in use: the engine's current model and thinking level become the
+   * orchestrator's route, and the subagents keep theirs.
+   */
+  private async profileSaveCurrent(name: string, clientId?: string): Promise<void> {
+    if (!this.profileStore) return;
+    try {
+      const answer = (await this.shellSpawner.rpc('get_state', {})) as {
+        data?: { model?: { provider?: string; id?: string }; thinkingLevel?: string };
+      } | null;
+      const state = answer?.data ?? {};
+      const provider = state.model?.provider;
+      const id = state.model?.id;
+      // The engine reports the level as a string; the store validates it as its own union.
+      const route =
+        provider && id
+          ? { model: `${provider}/${id}`, thinking: state.thinkingLevel as never }
+          : undefined;
+      await this.profileStore.saveCurrent(name, route);
+      await this.profilesScreen(undefined);
+    } catch (error) {
+      if (clientId) this.wsServer.deliver(clientId, 'error', this.profileFailure(error));
+    }
+  }
+
+  /** Imports another setup's profiles once, saying what was renamed and what still needs an account. */
+  private async profileImport(clientId?: string): Promise<void> {
+    if (!this.profileStore) return;
+    try {
+      const providers = (await this.authManager?.providers()) ?? [];
+      const result = await this.profileStore.import(providers);
+      if (clientId)
+        this.wsServer.deliver(clientId, 'profiles_imported', {
+          imported: result.imported,
+          missingProviders: result.missingProviders,
+        });
+      await this.profilesScreen(undefined);
+    } catch (error) {
+      if (clientId) this.wsServer.deliver(clientId, 'error', this.profileFailure(error));
+    }
   }
 
   /** Switches the engine's model, or parks the switch until the running turn settles. */
@@ -398,8 +449,14 @@ export class Daemon {
         if (saved) await this.profileApply(active, clientId);
       }
     } catch (error) {
-      this.wsServer.deliver(clientId, 'toast', { level: 'warning', message: (error as Error).message });
+      this.wsServer.deliver(clientId, 'error', this.profileFailure(error));
     }
+  }
+
+  /** A refused profile action: the store's own code and its plain-language sentence. */
+  private profileFailure(error: unknown): { code: string; message: string } {
+    if (error instanceof ProfileError) return { code: error.code, message: error.message };
+    return { code: 'profile_failed', message: (error as Error)?.message ?? 'That did not work.' };
   }
 
   /**
