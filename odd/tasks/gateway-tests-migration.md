@@ -68,3 +68,37 @@ Estado por archivo (a confirmar al abrirlo, no de memoria):
 
 Regla: si al abrir un archivo la feature no aparece en `src/`, se marca PARK o BORRAR con una
 línea de justificación, no se migra a ciegas.
+
+## Medición (2026-11-05)
+
+Conteo por archivo de las opciones que `DaemonOptions` **no** acepta
+(`uiDir`, `authRuntime`, `connectorOAuth`, `importHome`, `backoffMs`, `appChannel`):
+
+| Bloqueantes | Archivos |
+| --- | --- |
+| 0 | `delta-mirror` (hecho) |
+| 1 — solo `uiDir` | `child-guard`, `isolation`, `private-memory`, `real-agent` |
+| 2 — `uiDir` + `backoffMs` | `attachments-gateway`, `gateway`, `uploads` |
+| 3+ — inyectan runtime/OAuth/import home/canal duplex | `auth`, `models-gateway`, `profiles-gateway`, `voice`, `connector-integrity`, `lifecycle`, `subagent-probe`, `connector-secrets`, `connectors-gateway`, `connectors-proxy-gateway`, `vps-gateway`, `app-channel`, `computer`, `connector-drafts` |
+
+Conclusión medida: **la migración no es mecánica**. `uiDir` se descarta, pero el resto pide
+costuras que el daemon nuevo no tiene, y esas costuras son features del host, no inventos de
+test:
+
+- `log: (line) => void` — capturar las líneas del daemon. `child-guard` lo usa en dos asserts
+  reales ("put back", "subagents are off"). Es observabilidad legítima del host.
+- `backoffMs` — backoff de reinicio del engine, para que los tests no esperen segundos.
+- `authRuntime` / `connectorOAuth` / `importHome` / `appChannel` (duplex fd 3) — sólo tienen
+  sentido cuando esas superficies existan en el daemon nuevo (auth de proveedores, OAuth de
+  conectores, import de configuración ajena y el canal de la app por fd 3). Hoy el canal de la
+  app es un socket unix, así que los tests que inyectan un duplex no se pueden migrar: se
+  reescriben contra el socket o esperan.
+
+Orden de trabajo recomendado:
+
+1. Agregar `log` y `backoffMs` a `DaemonOptions` (con su test) — destraba `child-guard`,
+   `isolation`, y deja `attachments-gateway`/`gateway`/`uploads` a un paso.
+2. Migrar `child-guard` e `isolation` con esas costuras.
+3. `private-memory` → BORRAR (feature ausente). `real-agent` → PARK (red + clave).
+4. Todo lo de 3+ bloqueantes queda PARK hasta que la superficie exista (T4 perfiles/voice/
+   uploads, T6 VPS), y se migra cuando se implemente esa feature — no antes.
