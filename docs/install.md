@@ -94,7 +94,15 @@ If Gentle Dot is running, the installer says **Gentle Dot is running! Click OK t
 
 ### First open
 
-Open **Gentle Dot** from the Start menu. The first open needs the network once: the engine installs its companion packages. The computer-control emergency stop is **Alt+Shift+Esc**. Voice input is not available on Windows yet.
+Open **Gentle Dot** from the Start menu. The installed app turns off the engine's first-run setup, so unlike on Linux the first open does not install companion packages. The shortcut that opens the chat is **Ctrl+Alt+Space**, because Windows keeps Alt+Space for each window's menu; change it in the panel's **Settings**. The computer-control emergency stop is **Alt+Shift+Esc**.
+
+Without an OpenAI API key, voice input needs the local voice model. Open **Connectors → Voice** and click **Download local voice model** once; your voice then never leaves your PC. Windows does not ask each desktop app for the microphone. If it is blocked, Gentle Dot says so: turn on **Settings → Privacy & security → Microphone → Let desktop apps access your microphone**.
+
+The Discord connector needs one extra step on Windows. The first time you set it up, Gentle Dot downloads its server (`@pasympa/discord-mcp` 2.2.0) from npm, which needs the internet and can take a few minutes; the setup shows **Preparing Discord…**. If preparing fails, the setup says **Could not prepare Discord. Try connecting again.** Until it has finished once, the assistant says Discord needs preparation: open **Connectors** and set up Discord again.
+
+### GlazeWM
+
+Gentle Dot places its own windows. The GlazeWM tiling window manager would move, resize and refocus them: the rose, the panel, the computer-control glow and the dialogs. To make it leave them alone, paste the rule in `scripts/windows/glazewm/gentle-dot.yaml` under `window_rules:` in `%USERPROFILE%\.glzr\glazewm\config.yaml`, then reload GlazeWM's configuration.
 
 ### Where data lives
 
@@ -102,8 +110,10 @@ Open **Gentle Dot** from the Start menu. The first open needs the network once: 
 |---|---|
 | The app and its bundled runtime | the install folder, with the runtime in `runtime\` |
 | Settings, conversations, logs (`daemon.log`), the engine's own files | `%USERPROFILE%\.gentle-dot\` |
+| The Discord connector's server, once prepared | `%USERPROFILE%\.gentle-dot\connector-packages\` |
 | Connector secrets, encrypted for your Windows user (DPAPI) | `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\` |
 | The window's own data (WebView2) | `%LOCALAPPDATA%\dev.gentleman.gentle-dot\` and `%APPDATA%\dev.gentleman.gentle-dot\` |
+| The local voice model, when downloaded | `%APPDATA%\dev.gentleman.gentle-dot\models\` |
 | Memory (Engram, project `gentle-dot`) | `%USERPROFILE%\.engram\`, shared with any other Engram user on this PC |
 | Launch at login (when turned on) | a `Gentle Dot` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` |
 
@@ -126,7 +136,7 @@ Gentle Dot never repairs, replaces or deletes such a file, and it never keeps th
 
 1. Quit Gentle Dot from its tray icon (**Quit**), so the assistant and its processes stop in order.
 2. Open **Settings → Apps → Installed apps**, find **Gentle Dot**, and choose **Uninstall**, or run `uninstall.exe` in the install folder. It removes the app, its Start menu and desktop shortcuts, its launch at login, and its registry entries. Like the installer, it asks to close Gentle Dot if it is still running.
-3. Optional: tick **Delete the application data** in the uninstaller to remove the window's data (`%APPDATA%\dev.gentleman.gentle-dot\` and `%LOCALAPPDATA%\dev.gentleman.gentle-dot\`).
+3. Optional: tick **Delete the application data** in the uninstaller to remove the window's data and the local voice model (`%APPDATA%\dev.gentleman.gentle-dot\` and `%LOCALAPPDATA%\dev.gentleman.gentle-dot\`).
 4. Optional: remove `%USERPROFILE%\.gentle-dot\` to delete settings and conversations, and `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\` to delete connector secrets. The uninstaller never touches these.
 
 `%USERPROFILE%\.gentle-dot\daemon.owner` stays behind after a normal quit. It records the last launch without any authority over it. Stale records are not replaced today ([#216](https://github.com/Gentleman-Programming/gentle-dot/issues/216)), so if Gentle Dot refuses to start after a crash or a forced stop, quit it, then rename `daemon.owner`, `daemon.pid` and `.gentle-dot-daemon.lock` in `%USERPROFILE%\.gentle-dot\` aside and start it again.
@@ -146,7 +156,7 @@ Keep the `./` with `apt`. The package manager adds WebKitGTK and tray support. T
 
 - The app is `/usr/bin/gentle-dot`; its bundled runtime is in `/usr/lib/Gentle Dot/runtime`. Your data lives in `~/.gentle-dot`.
 - First launch needs the network once: the engine installs its companion packages (about 20 seconds).
-- Computer control is macOS only.
+- Computer control is not available on Linux.
 - Connector secrets (tokens and sign-ins) are kept in your desktop keyring through the Secret Service (GNOME Keyring or KWallet), encrypted on disk, never in `~/.gentle-dot`. In Passwords and Keys (Seahorse) they show as "Gentle Dot connector: …" in the login keyring. Connector approvals and connector changes go through the app's own dialogs, which the assistant cannot answer.
 - **Limit on Linux:** while the keyring is unlocked (usually your whole session), any program running as your user can read those items, including commands the assistant runs in its shell (for example `secret-tool lookup service dev.gentleman.gentle-dot.connectors account <id>`). The Secret Service has no way to restrict which program reads an item. On macOS the Keychain lets only the signed app read them without asking; on Linux, protect the secrets by keeping the keyring locked when you are away and by connecting only the accounts you want the assistant to use.
 - Without a keyring (no Secret Service in the session, common on minimal window-manager setups), connectors that need a secret do not run, and nothing is written to disk instead. `~/.gentle-dot/daemon.log` then says `no Secret Service in this desktop session (…); install and unlock a keyring such as GNOME Keyring or KWallet`. Install `gnome-keyring` (or KWallet), make sure it runs and is unlocked in your session, then quit Gentle Dot from the tray and open it again. Gentle Dot checks its connectors with a key kept in the keyring when it starts, so a keyring that was missing then keeps those connectors locked, and the assistant says to restart, until the next start. If the keyring goes away while Gentle Dot runs, the assistant says the keyring is missing. A locked keyring shows its unlock prompt when Gentle Dot starts or a connector needs a secret; dismissing it, or no answer within two minutes, refuses (dismissed at start, connectors that need a secret stay locked until Gentle Dot restarts).

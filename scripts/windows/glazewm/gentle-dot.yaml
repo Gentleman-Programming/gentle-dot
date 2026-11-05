@@ -1,0 +1,10 @@
+# Gentle Dot with GlazeWM (a tiling window manager for Windows).
+# GlazeWM tiles every window it manages, so it can resize, move, or refocus the rose, its panel,
+# the computer-control glow, and Gentle Dot's dialogs. Gentle Dot places its own windows: tell
+# GlazeWM to leave them alone.
+# Paste the rule below under `window_rules:` in %USERPROFILE%\.glzr\glazewm\config.yaml (keep
+# the two-space indent), then reload the configuration (Alt+Shift+R with the default bindings).
+
+  - commands: [ignore]
+    match:
+      - window_process: { equals: gentle-dot }

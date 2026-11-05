@@ -18,5 +18,6 @@ The compiler emits `native/windows-stop.node` and local compiler/linker artifact
 It must not be cross-built with mismatched Node/import-library architecture.
 Source execution loads `packages/daemon/native/windows-stop.node`.
 The addon exports the app channel (`adoptAppChannelFd3`) and the stop listener
-(`createStopListener`); runtime staging is not included yet. Windows CI provisions
+(`createStopListener`). The runtime build (`pnpm package:runtime --target windows-x64`)
+copies it into the staged daemon and refuses to stage without it. Windows CI provisions
 matching build inputs explicitly.
