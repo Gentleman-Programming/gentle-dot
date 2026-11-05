@@ -4,6 +4,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage } from "../store.ts";
 import { formatSize } from "../uploads.ts";
+import { CheckIcon, CopyIcon, CrossIcon } from "./icons.tsx";
 
 const VERBS: Record<ActivityKind, [string, string, string]> = {
 	read: ["Read", "file", "files"],
@@ -49,9 +50,16 @@ function CopyMessage({ text, label }: { text: string; label: string }) {
 			show("failed");
 		}
 	};
+	const name = result ? COPY_RESULTS[result] : label;
 	return (
-		<button type="button" className="message-copy" onClick={copy}>
-			{result ? COPY_RESULTS[result] : label}
+		<button
+			type="button"
+			className={`message-copy${result ? " message-copy-result" : ""}`}
+			aria-label={name}
+			title={name}
+			onClick={copy}
+		>
+			{result === "copied" ? <CheckIcon /> : result === "failed" ? <CrossIcon /> : <CopyIcon />}
 		</button>
 	);
 }

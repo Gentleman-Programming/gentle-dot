@@ -92,6 +92,38 @@ describe("copying an answer", () => {
 		expect(screen.queryByRole("button", { name: "Copy answer" })).not.toBeInTheDocument();
 	});
 
+	it("shows an icon with no visible text, named for screen readers", () => {
+		render(list([message({ id: "u1", role: "user", text: "hello" }), message({ id: "a1" })]));
+		for (const name of ["Copy prompt", "Copy answer"]) {
+			const button = screen.getByRole("button", { name });
+			expect(button).toHaveTextContent("");
+			expect(button.querySelector("svg")).toBeInTheDocument();
+			expect(button).toHaveAttribute("title", name);
+		}
+	});
+
+	it("swaps the icon to show the copy worked", async () => {
+		const user = mockClipboard(vi.fn(async () => {}));
+		render(list([message({})]));
+		const before = screen.getByRole("button", { name: "Copy answer" }).innerHTML;
+		await user.click(screen.getByRole("button", { name: "Copy answer" }));
+		const copied = await screen.findByRole("button", { name: "Copied" });
+		expect(copied).toHaveTextContent("");
+		expect(copied.innerHTML).not.toBe(before);
+	});
+
+	it("swaps to a different icon when the copy fails", async () => {
+		const user = mockClipboard(vi.fn(async () => {}));
+		const { unmount } = render(list([message({})]));
+		await user.click(screen.getByRole("button", { name: "Copy answer" }));
+		const copied = (await screen.findByRole("button", { name: "Copied" })).innerHTML;
+		unmount();
+		setClipboard(undefined);
+		render(list([message({})]));
+		await clickCopy("Copy answer");
+		expect(screen.getByRole("button", { name: "Could not copy" }).innerHTML).not.toBe(copied);
+	});
+
 	it("copies a prompt you sent", async () => {
 		const writeText = vi.fn(async () => {});
 		const user = mockClipboard(writeText);
