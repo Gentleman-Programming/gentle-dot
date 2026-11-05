@@ -403,3 +403,12 @@ Falta (lo que dejan rojo los 6 restantes):
 
 Orden sugerido para retomar: (1) fuente de secretos → (6) códigos y cancelación → (2) mcp.json →
 (3) modos → (4)(5) reposición.
+
+### Incidencia menor: un test deja un archivo en el repo
+
+Despues de correr la suite aparecio un archivo de estado de conectores sin trackear en
+`packages/` (el guard de privacidad impide borrarlo desde el agente). Causa probable: alguna
+prueba construye `ConnectorStore` con un `dataDir` relativo, asi que escribe en el cwd del
+proceso en vez de un temporal. Arreglo: que cada test pase un `dataDir` absoluto y, si hace falta,
+que `ConnectorStoreOptions.dataDir` se resuelva contra un directorio explicito. Borrar el archivo
+a mano y sumar la ruta al `.gitignore` como red de seguridad.
