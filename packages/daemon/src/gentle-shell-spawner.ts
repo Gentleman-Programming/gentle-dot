@@ -46,6 +46,8 @@ export interface ShellConfig {
   mode: 'rpc';            // siempre RPC
   logLevel?: 'debug' | 'info' | 'warn' | 'error';
   noAutoSetup?: boolean;  // GENTLE_SHELL_NO_AUTO_SETUP=1
+  /** Engine argv override: `[bin, ...args]`. Defaults to `gentle-shell` from PATH. */
+  engineCommand?: string[];
   /** Agent home for the engine's own state (auth, settings). Defaults to config.home. */
   agentHome?: string;
 }
@@ -106,17 +108,25 @@ export class GentleShellSpawner extends EventEmitter {
         windowsHide: true,
       };
 
+      // An explicit engine argv lets a test (or an operator) run a specific engine build
+      // without depending on what `gentle-shell` resolves to on PATH.
+      const engineCommand = options.config.engineCommand ?? ['gentle-shell'];
+      const engineBin = engineCommand[0] ?? 'gentle-shell';
+      const fullArgs = [...engineCommand.slice(1), ...args];
+
+      let child: ChildProcess;
       try {
-        this.shellProcess = spawn('gentle-shell', args, spawnOptions);
+        child = spawn(engineBin, fullArgs, spawnOptions);
       } catch (error) {
         this.cleanup();
         reject(new Error(`Failed to spawn gentle-shell: ${error}`));
         return;
       }
+      this.shellProcess = child;
 
       // Readiness probe: pi's RPC mode has no startup banner; a get_state
       // command queued on stdin is answered once the RPC loop is up.
-      this.shellProcess.stdin?.write(
+      child.stdin?.write(
         JSON.stringify({ id: RPC_PROBE_ID, type: 'get_state' }) + '\n',
       );
 

@@ -19,6 +19,12 @@ export interface DaemonOptions {
   workspace?: string;
   logLevel?: 'debug' | 'info' | 'warn' | 'error';
   noAutoSetup?: boolean;
+  /**
+   * Engine argv override (`[bin, ...args]`), for tests and for pointing the daemon at a
+   * specific engine build. Defaults to `gentle-shell` resolved from PATH, with the usual
+   * rpc arguments appended.
+   */
+  engineCommand?: string[];
 }
 
 export class Daemon {
@@ -435,6 +441,7 @@ export class Daemon {
       mode: 'rpc',
       logLevel: this.config.daemon.log_level as any,
       noAutoSetup: this.options.noAutoSetup,
+      engineCommand: this.options.engineCommand,
     };
 
     await this.shellSpawner.start({
@@ -589,7 +596,8 @@ export class Daemon {
     console.log('[Daemon] Registry cleared');
 
     console.log('[Daemon] Daemon stopped');
-    process.exit(0);
+    // The caller owns the process: exiting here made stop() unusable in tests (and in any
+    // host that embeds the daemon) because it killed the whole process group.
   }
 
   /**
