@@ -27,6 +27,9 @@ export interface DaemonOptions {
   engineCommand?: string[];
 }
 
+/** Las peticiones de UI que son preguntas para el usuario; `setStatus`/`notify` no lo son. */
+const ASK_METHODS = new Set(['select', 'confirm', 'input', 'editor']);
+
 export class Daemon {
   private config: AppConfig;
   private wsServer: WsServer;
@@ -98,6 +101,17 @@ export class Daemon {
         case 'send':
           this.chatSend(clientId, String(message.text ?? ''));
           break;
+        case 'ui_response': {
+          const requestId = String(message.requestId ?? '');
+          if (!requestId) break;
+          const sent = this.shellSpawner.uiRespond(requestId, {
+            value: message.value,
+            confirmed: message.confirmed,
+            cancelled: message.cancelled,
+          });
+          if (sent) this.wsServer.deliver(clientId, 'ask_resolved', { requestId });
+          break;
+        }
         case 'abort':
           this.shellSpawner.rpc('abort', {}, 60_000).catch((error) =>
             console.error(`[Daemon] abort falló: ${(error as Error).message}`),
@@ -210,6 +224,24 @@ export class Daemon {
           break;
         }
 
+        case 'extension_ui_request': {
+          const requestId = event['id'] as string | undefined;
+          const method = event['method'] as string | undefined;
+          // Only real questions travel; a status line or a toast has nothing to answer.
+          if (!requestId || !method || !origin || !ASK_METHODS.has(method)) break;
+          const ask = {
+            requestId,
+            method,
+            title: String(event['title'] ?? ''),
+            ...(event['message'] !== undefined ? { message: String(event['message']) } : {}),
+            ...(Array.isArray(event['options']) ? { options: event['options'] as string[] } : {}),
+            ...(event['placeholder'] !== undefined ? { placeholder: String(event['placeholder']) } : {}),
+            ...(event['prefill'] !== undefined ? { prefill: String(event['prefill']) } : {}),
+          };
+          this.wsServer.deliver(origin, 'ask', ask);
+          break;
+        }
+
         case 'tool_execution_start': {
           const toolName = event['toolName'] as string | undefined;
           const toolCallId = event['toolCallId'] as string | undefined;
@@ -265,6 +297,19 @@ export class Daemon {
       case 'abort': {
         this.shellSpawner.rpc('abort', {}, 60_000).catch((error) =>
           console.error(`[Daemon] abort falló: ${(error as Error).message}`));
+        break;
+      }
+
+      case 'ui_response': {
+        const payload = message.payload as { requestId?: string; value?: string; confirmed?: boolean; cancelled?: boolean };
+        const requestId = payload?.requestId;
+        if (!requestId) return;
+        const sent = this.shellSpawner.uiRespond(requestId, {
+          value: payload.value,
+          confirmed: payload.confirmed,
+          cancelled: payload.cancelled,
+        });
+        if (sent) this.wsServer.deliver(connectorId, 'ask_resolved', { requestId });
         break;
       }
 

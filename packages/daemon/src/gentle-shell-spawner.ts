@@ -225,6 +225,26 @@ export class GentleShellSpawner extends EventEmitter {
   }
 
   /**
+   * Answers an `extension_ui_request`. The engine correlates by that request's own id and does
+   * not reply, so this writes straight to stdin instead of going through rpc().
+   */
+  uiRespond(requestId: string, response: { value?: string; confirmed?: boolean; cancelled?: boolean }): boolean {
+    const stdin = this.shellProcess?.stdin;
+    if (!stdin?.writable) return false;
+    const record: Record<string, unknown> = { type: 'extension_ui_response', id: requestId };
+    if (response.value !== undefined) record['value'] = response.value;
+    if (response.confirmed !== undefined) record['confirmed'] = response.confirmed;
+    if (response.cancelled !== undefined) record['cancelled'] = response.cancelled;
+    try {
+      stdin.write(JSON.stringify(record) + '\n');
+      return true;
+    } catch (error) {
+      console.error('[GentleShellSpawner] ui response failed:', error);
+      return false;
+    }
+  }
+
+  /**
    * Sends one RPC command to the engine and resolves with its correlated
    * response (pi protocol: strict JSONL, responses repeat the command id).
    * Events arrive separately through 'engine-event'.

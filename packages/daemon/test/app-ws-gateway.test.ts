@@ -56,4 +56,37 @@ describe("the app WebSocket gateway (T2.2)", () => {
 		ws.close();
 		await booted.stop();
 	});
+
+	it("asks the window and takes its answer back to the engine", async () => {
+		const booted = await bootDaemon();
+		const frames: Frame[] = [];
+
+		const ws = new WebSocket(`ws://127.0.0.1:${booted.port}/ws`);
+		await new Promise<void>((resolve, reject) => {
+			ws.once("open", () => resolve());
+			ws.once("error", reject);
+		});
+		collect(ws, frames);
+
+		ws.send(JSON.stringify({ type: "hello", token: "gentle-dot-bridge-secret", protocol: 1 }));
+		await waitFor(() => frames.some((f) => f.type === "ready"), 60_000);
+
+		// The fake engine answers "ask:select" by asking the user to pick a colour.
+		ws.send(JSON.stringify({ type: "send", text: "ask:select" }));
+
+		await waitFor(() => frames.some((f) => f.type === "ask"), 120_000);
+		const ask = frames.find((f) => f.type === "ask");
+		expect(ask?.["method"]).toBe("select");
+		expect(ask?.["title"]).toBe("Pick a color");
+		expect(ask?.["options"]).toContain("Blue");
+
+		ws.send(JSON.stringify({ type: "ui_response", requestId: ask?.["requestId"], value: "Blue" }));
+
+		await waitFor(() => frames.some((f) => f.type === "message_done"), 120_000);
+		const done = frames.find((f) => f.type === "message_done");
+		expect(String(done?.["text"])).toContain("You chose Blue");
+
+		ws.close();
+		await booted.stop();
+	});
 });
