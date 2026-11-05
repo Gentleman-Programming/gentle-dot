@@ -204,3 +204,37 @@ proxying y el filtrado por modo ya funcionan en el daemon nuevo. Lo que queda en
 
 Siguiente candidato recomendado: `lifecycle.test.ts` (8), `runtime-build.test.ts` (3),
 `cli.test.ts` (3) y `engine-access.test.ts` (1) — son superficies que el daemon nuevo sí tiene.
+
+## Migración de los MIGRABLES (2026-11-05, sesión 2)
+
+### `engine-access.test.ts` — HECHO (7/7)
+
+No fallaba por el harness: un test arquitectónico detectó que `voice.ts` importaba
+`copyFile/mkdir/rm/writeFile` de `node:fs/promises`, y S25.8 mantiene el trabajo asíncrono de
+archivos fuera del thread pool de libuv (`68bcf03`). Pasó a las llamadas síncronas de `node:fs`
+conservando los *yields* de microtask donde el original tenía `await`, porque el instalador
+inyectado corre después y espera esos pasos hechos (quitarlos rompía el caso de provisioning).
+
+### `cli.test.ts` — CLI ARREGLADO, 3 comportamientos faltantes (4/7)
+
+El CLI **no arrancaba desde fuente** por tres defectos que el typecheck no veía (`5f97cd6`):
+24 imports relativos con `.js` cuando la fuente es `.ts`; una *parameter property* en
+`transcript.ts` que el strip-only de node rechaza; y nombres de tipo importados como valores
+(`AppConfig`, `ShellConfig`, `ConnectorInfo`, `ConnectorType`, `DaemonOptions`,
+`McpServerConfig`, `McpMode`, `ApprovalRequest`, `ApprovalResponse`, `AppMessage`).
+Ahora `tsc --verbatimModuleSyntax` da 0 errores y `node src/cli.ts --help` imprime su uso.
+
+Siguen fallando tres casos que piden **comportamiento que `cli.ts` no implementa**:
+1. negarse a arrancar en server mode (GENTLE_DOT_VPS) como usuario no root (es T6);
+2. el archivo de la clave de acceso en la salida redirigida;
+3. salir cuando el canal de la app desaparece (S35.2, #22).
+
+### `runtime-build.test.ts` — script desalineado (0/3)
+
+`scripts/build-runtime.ts` ya no tiene `--self-check` ni la lista de externals que el test
+espera, y su salida difiere (9 externals vs 7 esperados). Hay que decidir si se restaura el
+contrato del script o se reescribe el test; no es migración de harness.
+
+### `lifecycle.test.ts` — pendiente (8)
+
+Siguiente candidato real.
