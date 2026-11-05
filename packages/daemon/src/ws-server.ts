@@ -241,9 +241,32 @@ export class WsServer extends EventEmitter {
 
     console.log('[WsServer] New connection from', req.socket.remoteAddress);
 
+    /** Set once the socket identifies itself as a window rather than a connector. */
+    let appClientId: string | null = null;
+
     const onMessage = (data: Buffer) => {
       try {
-        const message = JSON.parse(data.toString()) as BridgeMessage;
+        const message = JSON.parse(data.toString()) as BridgeMessage & {
+          token?: string;
+          protocol?: number;
+          payload?: unknown;
+          text?: string;
+        };
+
+        // The windows speak the client protocol: flat frames, no envelope and no timestamp.
+        // A bridge hello always carries `payload`, so the two handshakes cannot be confused.
+        if (appClientId) {
+          if (message.type === 'ping') {
+            this.sendApp(ws, 'pong', {});
+            return;
+          }
+          this.emit('onAppMessage', appClientId, message);
+          return;
+        }
+        if (message.type === 'hello' && message.payload === undefined && typeof message.token === 'string') {
+          appClientId = this.handleAppHello(ws, message);
+          return;
+        }
 
         // Validate message structure
         if (!message.type || typeof message.timestamp !== 'number') {
@@ -315,6 +338,56 @@ export class WsServer extends EventEmitter {
   /**
    * Handle hello message (authentication handshake)
    */
+  /**
+   * The client protocol's handshake: same daemon token, no connector type. A window gets the
+   * flat `ready` the protocol expects, and from then on its frames go to `onAppMessage`.
+   */
+  private handleAppHello(ws: WebSocket, message: { token?: string; protocol?: number }): string | null {
+    if (message.protocol !== PROTOCOL_VERSION) {
+      this.sendAppError(ws, 'PROTOCOL_MISMATCH', `Expected protocol v${PROTOCOL_VERSION}, got v${message.protocol}`);
+      ws.close(1002, 'Protocol mismatch');
+      return null;
+    }
+    if (!message.token || message.token !== this.getAuthToken()) {
+      this.sendAppError(ws, 'INVALID_TOKEN', 'Invalid authentication token');
+      ws.close(1008, 'Invalid token');
+      return null;
+    }
+
+    const clientId = `app-${++this.appSeq}`;
+    this.appClients.set(clientId, ws);
+    ws.on('close', () => this.appClients.delete(clientId));
+    this.sendApp(ws, 'ready', { protocol: PROTOCOL_VERSION, agentState: 'idle', clientId });
+    console.log(`[WsServer] App client connected: ${clientId}`);
+    return clientId;
+  }
+
+  /** One flat client-protocol frame to a window. */
+  private sendApp(ws: WebSocket, type: string, payload: unknown): boolean {
+    if (ws.readyState !== WebSocket.OPEN) return false;
+    try {
+      ws.send(JSON.stringify({ type, ...(payload as Record<string, unknown>) }));
+      return true;
+    } catch (error) {
+      console.error('[WsServer] send to app failed:', error);
+      return false;
+    }
+  }
+
+  private sendAppError(ws: WebSocket, code: string, message: string): void {
+    this.sendApp(ws, 'error', { code, message });
+  }
+
+  /**
+   * Deliver to whoever the id names: a window (flat client protocol) or a connector (bridge
+   * envelope). The daemon routes engine events through this so one code path serves both.
+   */
+  deliver(target: string, type: BridgeMessageType | string, payload: unknown): boolean {
+    const app = this.appClients.get(target);
+    if (app) return this.sendApp(app, type, payload);
+    return this.sendToConnector(target, type as BridgeMessageType, payload);
+  }
+
   private handleHello(ws: WebSocket, message: BridgeMessage, state: ConnectionState): void {
     const payload = message.payload as HelloPayload;
 
@@ -528,6 +601,10 @@ export class WsServer extends EventEmitter {
   /**
    * Get authentication token from config or env
    */
+  /** Windows connected over the client protocol (flat frames), by client id. */
+  private appClients = new Map<string, WebSocket>();
+  private appSeq = 0;
+
   private getAuthToken(): string {
     // In production, this should come from a secure config
     // For now, use a simple shared secret from env or default

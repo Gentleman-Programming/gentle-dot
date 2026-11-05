@@ -91,6 +91,23 @@ export class Daemon {
       this.handleBridgeMessage(connectorId, message);
     });
 
+    // Windows speak the client protocol: their frames are flat, so they get their own switch
+    // instead of the bridge envelope one.
+    this.wsServer.on('onAppMessage', (clientId: string, message: any) => {
+      switch (message?.type) {
+        case 'send':
+          this.chatSend(clientId, String(message.text ?? ''));
+          break;
+        case 'abort':
+          this.shellSpawner.rpc('abort', {}, 60_000).catch((error) =>
+            console.error(`[Daemon] abort falló: ${(error as Error).message}`),
+          );
+          break;
+        default:
+          break;
+      }
+    });
+
     this.wsServer.on('onConnection', (ws, connectorId) => {
       console.log(`[Daemon] Bridge connected: ${connectorId}`);
     });
@@ -160,7 +177,7 @@ export class Daemon {
 
       switch (type) {
         case 'agent_start':
-          if (origin) this.wsServer.sendToConnector(origin, 'agent_state', { state: 'working' });
+          if (origin) this.wsServer.deliver(origin, 'agent_state', { state: 'working' });
           this.appChannel.broadcast('agent_state', { state: 'working' });
           break;
 
@@ -168,7 +185,7 @@ export class Daemon {
           const nested = event['assistantMessageEvent'] as { type?: string; delta?: string } | undefined;
           if (nested?.type === 'text_delta' && nested.delta && origin && this.activeRun) {
             const payload = { messageId: this.activeRun.messageId, delta: nested.delta };
-            this.wsServer.sendToConnector(origin, 'message_delta', payload);
+            this.wsServer.deliver(origin, 'message_delta', payload);
             // Las ventanas necesitan el texto en vivo, no solo el mensaje final.
             this.appChannel.broadcast('message_delta', { ...payload, connectorId: origin });
           }
@@ -180,7 +197,7 @@ export class Daemon {
           if (message?.role !== 'assistant' || !origin || !this.activeRun) break;
           const text = this.extractText(message.content);
           if (text.trim() !== '') {
-            this.wsServer.sendToConnector(origin, 'message_done', {
+            this.wsServer.deliver(origin, 'message_done', {
               messageId: this.activeRun.messageId,
               text,
             });
@@ -197,7 +214,7 @@ export class Daemon {
           const toolName = event['toolName'] as string | undefined;
           const toolCallId = event['toolCallId'] as string | undefined;
           if (toolName && origin && this.activeRun) {
-            this.wsServer.sendToConnector(origin, 'activity', {
+            this.wsServer.deliver(origin, 'activity', {
               messageId: this.activeRun.messageId,
               activity: { id: toolCallId, kind: 'run', title: toolName, status: 'running' },
             });
@@ -206,7 +223,7 @@ export class Daemon {
         }
 
         case 'agent_settled': {
-          if (origin) this.wsServer.sendToConnector(origin, 'agent_state', { state: 'idle' });
+          if (origin) this.wsServer.deliver(origin, 'agent_state', { state: 'idle' });
           this.appChannel.broadcast('agent_state', { state: 'idle' });
           this.activeRun = null;
           break;
@@ -296,7 +313,7 @@ export class Daemon {
    */
   private chatSend(connectorId: string, text: string): void {
     if (!this.shellSpawner.isReady()) {
-      this.wsServer.sendToConnector(connectorId, 'error', {
+      this.wsServer.deliver(connectorId, 'error', {
         code: 'engine_unavailable',
         message: 'El asistente no está disponible ahora.',
       });
@@ -318,7 +335,7 @@ export class Daemon {
     this.shellSpawner.rpc('prompt', params).catch((error) => {
       console.error(`[Daemon] prompt falló: ${(error as Error).message}`);
       this.activeRun = null;
-      this.wsServer.sendToConnector(connectorId, 'error', {
+      this.wsServer.deliver(connectorId, 'error', {
         code: 'prompt_failed',
         message: (error as Error).message,
       });
