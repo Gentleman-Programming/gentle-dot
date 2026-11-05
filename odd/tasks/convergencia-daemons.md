@@ -102,8 +102,14 @@ El hueco concreto:
   petición, sin esperar respuesta); `ask_resolved` vuelve a quien respondió.
   Test: la ventana recibe el `ask` con sus opciones, contesta "Blue" y el motor
   sigue con "You chose Blue".
-  **Falta**: historial (`get_history`/`get_earlier`), conversaciones múltiples,
-  perfiles y el resto del protocolo de cliente.
+  **Historial HECHO** (`19a68bd`): el daemon guarda su propio transcript de lo que ruteó (prompts
+  enviados y respuestas entregadas) en `<data_dir>/transcript.jsonl`, lo carga al arrancar y sirve
+  páginas por `get_history`/`get_earlier` (con `hasEarlier`). Los archivos de sesión del engine
+  llevan el transcript completo del agente y su formato es del engine; una ventana sólo necesita
+  el chat. Tests: una segunda ventana recibe los mensajes previos, y la conversación sigue ahí
+  después de reiniciar el daemon sobre el mismo data dir.
+  **Falta**: conversaciones múltiples (varias sesiones en paralelo), perfiles y el resto del
+  protocolo de cliente.
 - **T2.3** Coexistencia de los dos WS (conectores y app) sin confundir
   handshakes: cada uno valida su propia forma de `hello`.
 - **T2.4** Verificación E2E: cliente de app sintético → respuesta visible con
