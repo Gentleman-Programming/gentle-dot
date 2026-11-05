@@ -8,18 +8,26 @@
 //!   the items' access list follows the app's code signature.
 //! - Linux (`SecretServiceStore`): the Secret Service over D-Bus (GNOME Keyring, KWallet).
 //!   Items are encrypted at rest, but any same-user process can read unlocked items (S25.7).
-//! - `MemoryStore`: an in-memory store for tests.
+//! - Windows (`WindowsDpapiStore`): current-user DPAPI ciphertext in a private,
+//!   user-wide Local AppData namespace on local NTFS. Same-user processes are trusted.
+//! - `MemoryStore`: an in-memory store for tests and unsupported platforms.
 //!
 //! Secrets are never logged: [`Secret`] and every store redact themselves in `Debug`, have no
 //! `Display`, and errors never carry a secret.
 
 mod memory;
+#[cfg(any(windows, test))]
+mod windows_codec;
+#[cfg(windows)]
+mod windows;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 
 pub use memory::MemoryStore;
+#[cfg(windows)]
+pub use windows::WindowsDpapiStore;
 #[cfg(target_os = "linux")]
 pub use linux::SecretServiceStore;
 #[cfg(target_os = "macos")]
@@ -108,13 +116,15 @@ pub trait SecretStore: Send + Sync {
 }
 
 /// The store the app serves connector secrets from: the login keychain on macOS, the Secret
-/// Service on Linux. Nothing is touched until the first request.
+/// Service on Linux, and current-user DPAPI on Windows. Nothing is touched until the first request.
 pub fn connector_store() -> Box<dyn SecretStore> {
     #[cfg(target_os = "macos")]
     return Box::new(Keychain::new());
     #[cfg(target_os = "linux")]
     return Box::new(SecretServiceStore::new());
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    return Box::new(WindowsDpapiStore::new());
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     return Box::new(MemoryStore::new());
 }
 

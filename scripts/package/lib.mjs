@@ -1,7 +1,8 @@
 // Pure helpers for staging the installed app's runtime (`stage-runtime.mjs`).
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, lstatSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { createReadStream, existsSync, lstatSync, readdirSync, renameSync } from "node:fs";
+import { join, posix, win32 } from "node:path";
 
 /**
  * The targets a runtime can be staged for, with the names Node's and Engram's
@@ -11,13 +12,14 @@ export const TARGETS = Object.freeze({
 	"darwin-arm64": { platform: "darwin", arch: "arm64", node: "darwin-arm64", engram: "darwin_arm64" },
 	"linux-arm64": { platform: "linux", arch: "arm64", node: "linux-arm64", engram: "linux_arm64" },
 	"linux-x64": { platform: "linux", arch: "x64", node: "linux-x64", engram: "linux_amd64" },
+	"windows-x64": { platform: "win32", arch: "x64", node: "win-x64", engram: "windows_amd64" },
 });
 
 /** The Node release staged when `.nvmrc` names only a major version; it must stay on that major. */
 export const PINNED_NODE_VERSION = "24.14.1";
 
 export const USAGE =
-	"usage: stage-runtime --target <darwin-arm64|linux-arm64|linux-x64> [--out <dir>] [--engram-version <x.y.z>]";
+	"usage: stage-runtime --target <darwin-arm64|linux-arm64|linux-x64|windows-x64> [--out <dir>] [--engram-version <x.y.z>]";
 
 /** Parses the command line; throws with the usage on anything unexpected. */
 export function parseArgs(argv) {
@@ -68,11 +70,150 @@ export function nodeVersion(nvmrc, pinned = PINNED_NODE_VERSION) {
 }
 
 export function nodeArchiveName(version, target) {
-	return `node-v${version}-${TARGETS[target].node}.tar.gz`;
+	return `node-v${version}-${TARGETS[target].node}.${target === "windows-x64" ? "zip" : "tar.gz"}`;
 }
 
-export function engramArchiveName(version, target) {
-	return `engram_${version}_${TARGETS[target].engram}.tar.gz`;
+export function engramArchiveName(version, target, listing = "") {
+	const base = `engram_${version}_${TARGETS[target].engram}`;
+	if (target !== "windows-x64") return `${base}.tar.gz`;
+	const candidates = ["zip", "tar.gz"]
+		.map((ext) => `${base}.${ext}`)
+		.filter((name) => {
+			try {
+				checksumFor(listing, name);
+				return true;
+			} catch {
+				return false;
+			}
+		});
+	if (candidates.length !== 1)
+		throw new Error(
+			"Windows Engram needs exactly one supported archive in the release checksum list (ZIP or tar.gz).",
+		);
+	return candidates[0];
+}
+
+/** Members extracted by system tar; Windows' ZIP layout is normalized afterwards. */
+export function nodeExtractionPlan(version, target) {
+	const windows = target === "windows-x64";
+	const root = nodeArchiveName(version, target).replace(/\.(tar\.gz|zip)$/, "");
+	return {
+		flag: windows ? "-xf" : "-xzf",
+		members: (windows
+			? ["node.exe", "node_modules/npm", "LICENSE"]
+			: ["bin/node", "lib/node_modules/npm", "LICENSE"]
+		).map((path) => `${root}/${path}`),
+		moves: windows
+			? [
+					["node.exe", "bin/node.exe"],
+					["node_modules", "lib/node_modules"],
+				]
+			: [],
+	};
+}
+
+/** Errors Windows reports while another process (its real-time scanner) still holds files inside the folder. */
+const HELD = new Set(["EPERM", "EACCES", "EBUSY"]);
+
+function sleepSync(ms) {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Renames a folder that was just extracted. Windows' real-time scanner briefly holds the new files,
+ * and renaming their folder is refused until it lets go (observed: refused at 0 and 5 s, allowed at
+ * 20 s). Only those errors are retried, until `timeoutMs`; any other error, or the same one after
+ * the limit, is thrown as it is.
+ */
+export function renameWhenReleased(
+	from,
+	to,
+	{ rename = renameSync, sleep = sleepSync, now = Date.now, timeoutMs = 60_000, intervalMs = 500 } = {},
+) {
+	const deadline = now() + timeoutMs;
+	for (;;) {
+		try {
+			return rename(from, to);
+		} catch (error) {
+			if (!HELD.has(error?.code) || now() >= deadline) throw error;
+			sleep(intervalMs);
+		}
+	}
+}
+
+/** Explicit build prerequisite only; never search or inherit the user's entire PATH. */
+export function windowsBuildGo(source, isFile) {
+	const exe = source.GENTLE_DOT_BUILD_GO;
+	if (
+		!exe ||
+		!win32.isAbsolute(exe) ||
+		win32.basename(exe).toLowerCase() !== "go.exe" ||
+		/[;\r\n"]/.test(exe)
+	)
+		throw new Error(
+			"GENTLE_DOT_BUILD_GO must be the full path of the real go.exe in GOROOT\\bin (not a Scoop or Chocolatey shim), such as C:\\Program Files\\Go\\bin\\go.exe.",
+		);
+	if (!isFile(exe)) throw new Error(`GENTLE_DOT_BUILD_GO names ${exe}, which is not an existing file.`);
+	return exe;
+}
+
+/** Windows builds have module/binary provenance, not a downloaded archive checksum. */
+export function gentleAiIntegritySummary(info) {
+	if (info.method === "go-sumdb-source-build")
+		return `gentle-ai ${info.version} via ${info.method} ${info.package}@${info.tag} (module checksum ${info.moduleChecksum}; binary sha256 ${info.binarySha256}; Go ${info.goVersion})`;
+	return `gentle-ai ${info.version} from ${info.asset} (sha256 ${info.assetSha256})`;
+}
+
+/** Child-only environment: installers do not inherit the user's home or credentials. */
+export function installerEnv(out, cache, target, source = process.env, goExecutable) {
+	const windows = target === "windows-x64";
+	const path = windows ? win32.join : posix.join;
+	const home = path(cache, "npm-home");
+	const env = {
+		HOME: home,
+		PATH: `${path(out, "node", "bin")}:/usr/bin:/bin:/usr/sbin:/sbin`,
+		TMPDIR: source.TMPDIR ?? "/tmp",
+		npm_config_userconfig: path(cache, "npmrc"),
+		npm_config_cache: path(cache, "npm-cache"),
+		npm_config_registry: "https://registry.npmjs.org/",
+		npm_config_update_notifier: "false",
+	};
+	if (windows) {
+		const get = (key) =>
+			Object.entries(source).find(([name]) => name.toLowerCase() === key.toLowerCase())?.[1];
+		const root = get("SystemRoot");
+		if (!root) throw new Error("Windows installers require SystemRoot.");
+		delete env.TMPDIR;
+		Object.assign(env, {
+			USERPROFILE: home,
+			LOCALAPPDATA: path(home, "AppData", "Local"),
+			APPDATA: path(home, "AppData", "Roaming"),
+			SystemRoot: root,
+			ComSpec: path(root, "System32", "cmd.exe"),
+			PATH: [
+				path(out, "node", "bin"),
+				path(root, "System32"),
+				root,
+				...(goExecutable ? [win32.dirname(goExecutable)] : []),
+			].join(";"),
+			TEMP: get("TEMP") ?? get("TMP") ?? path(home, "Temp"),
+			TMP: get("TMP") ?? get("TEMP") ?? path(home, "Temp"),
+		});
+	}
+	return env;
+}
+
+/** No shell quoting or direct .cmd spawn: pnpm supplies its JS entry via npm_execpath. */
+export function pnpmInvocation(
+	args,
+	platform = process.platform,
+	env = process.env,
+	node = process.execPath,
+) {
+	if (platform !== "win32") return { command: "pnpm", args };
+	if (!/pnpm\.(?:c?js|mjs)$/i.test(env.npm_execpath ?? ""))
+		throw new Error("Run Windows staging through pnpm so npm_execpath names pnpm's JavaScript entry.");
+	return { command: node, args: [env.npm_execpath, ...args] };
 }
 
 /** The SHA-256 a `SHASUMS256.txt` / `checksums.txt` listing gives `fileName`; throws when it is absent. */
@@ -141,6 +282,29 @@ export function formatSize(bytes) {
 	return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+/**
+ * A copied Windows source tree has no Git revision; never manufacture one. That label is for a
+ * local copy only: CI stages release candidates, which must name their daemon commit.
+ */
+export function daemonSourceRevision(
+	repo,
+	platform = process.platform,
+	present = existsSync,
+	git = execFileSync,
+	ci = process.env.CI,
+) {
+	if (platform === "win32" && !present(join(repo, ".git"))) {
+		if (ci)
+			throw new Error(
+				`CI must stage from a Git checkout: ${repo} has no .git, so the runtime would have no daemon commit.`,
+			);
+		return "snapshot-unversioned";
+	}
+	const commit = git("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+	const dirty = git("git", ["status", "--porcelain", "--", "packages"], { cwd: repo, encoding: "utf8" });
+	return dirty.trim() ? `${commit}-dirty` : commit;
+}
+
 /** The runtime's `MANIFEST.json` content. */
 export function buildManifest({ target, versions, daemonCommit, sizeBytes, stagedAt }) {
 	for (const key of ["node", "engram", "gentlePi"])
@@ -158,7 +322,9 @@ export function buildManifest({ target, versions, daemonCommit, sizeBytes, stage
 }
 
 /** A `bin/npm` or `bin/npx` that runs the staged Node's own npm, wherever the folder is copied. */
-export function npmWrapper(cli) {
+export function npmWrapper(cli, platform = "unix") {
+	if (platform === "win32")
+		return `@echo off\r\n"%~dp0node.exe" "%~dp0..\\lib\\node_modules\\npm\\bin\\${cli}" %*\r\n`;
 	return `#!/bin/sh
 # Runs the npm bundled with this Node; a script rather than Node's symlink, so copies that follow links work.
 self=$0

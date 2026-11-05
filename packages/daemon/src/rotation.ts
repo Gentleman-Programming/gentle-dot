@@ -17,7 +17,7 @@ export const DEFAULT_ROTATION: RotationLimits = { bytes: 20 * 1024 * 1024, compa
 /** `customType` of the hidden message that carries the earlier session into the new one. */
 export const HANDOFF_TYPE = "gentle-dot.handoff";
 
-/** The engine's session format (`CURRENT_SESSION_VERSION` in pi-coding-agent 1.0.4). */
+/** The engine's session format (`CURRENT_SESSION_VERSION` in pi-coding-agent 1.0.4 through 1.4.0). */
 const SESSION_VERSION = 3;
 const RECENT_MESSAGES = 12;
 const MESSAGE_CHARS = 2000;

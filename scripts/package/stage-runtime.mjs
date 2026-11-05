@@ -26,23 +26,29 @@ import {
 	assertHostTarget,
 	buildManifest,
 	checksumFor,
+	daemonSourceRevision,
 	engramArchiveName,
 	engramReleaseVersion,
 	formatSize,
+	gentleAiIntegritySummary,
+	installerEnv,
 	nodeArchiveName,
+	nodeExtractionPlan,
 	nodeVersion,
 	npmWrapper,
 	parseArgs,
+	pnpmInvocation,
+	renameWhenReleased,
 	symlinksIn,
 	treeSize,
 	verifyChecksum,
 	versionFromReleaseUrl,
+	windowsBuildGo,
 } from "./lib.mjs";
 
 const REPO = fileURLToPath(new URL("../..", import.meta.url));
 const CACHE = join(REPO, ".cache", "package");
 const ENGRAM_RELEASES = "https://github.com/Gentleman-Programming/engram/releases";
-const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 
 const say = (line) => process.stdout.write(`${line}\n`);
 
@@ -117,20 +123,20 @@ async function stageNode(out, target) {
 	);
 	const node = join(out, "node");
 	mkdirSync(join(node, "bin"), { recursive: true });
-	const root = archiveName.replace(/\.tar\.gz$/, "");
+	const plan = nodeExtractionPlan(version, target);
 	// Only the binary, npm, and the license: headers, docs, and corepack are left out.
-	run("tar", [
-		"-xzf",
-		archive,
-		"-C",
-		node,
-		"--strip-components=1",
-		`${root}/bin/node`,
-		`${root}/lib/node_modules/npm`,
-		`${root}/LICENSE`,
-	]);
-	writeFileSync(join(node, "bin", "npm"), npmWrapper("npm-cli.js"), { mode: 0o755 });
-	writeFileSync(join(node, "bin", "npx"), npmWrapper("npx-cli.js"), { mode: 0o755 });
+	run("tar", [plan.flag, archive, "-C", node, "--strip-components=1", ...plan.members]);
+	for (const [from, to] of plan.moves) {
+		mkdirSync(join(node, "lib"), { recursive: true });
+		renameWhenReleased(join(node, from), join(node, to));
+	}
+	const windows = target === "windows-x64";
+	for (const name of ["npm", "npx"])
+		writeFileSync(
+			join(node, "bin", `${name}${windows ? ".cmd" : ""}`),
+			npmWrapper(`${name}-cli.js`, windows ? "win32" : "unix"),
+			{ mode: 0o755 },
+		);
 	return version;
 }
 
@@ -151,7 +157,7 @@ function openGentleAi(daemon) {
 	return integrity;
 }
 
-function installDaemonModules(out) {
+function installDaemonModules(out, target, goExecutable) {
 	const daemon = join(out, "daemon");
 	const npmHome = join(CACHE, "npm-home");
 	mkdirSync(npmHome, { recursive: true });
@@ -159,8 +165,12 @@ function installDaemonModules(out) {
 	writeFileSync(npmrc, "");
 	say("Daemon dependencies (npm install --omit=dev)");
 	// A clean npm setup: no user npmrc, a cache of its own, and a scratch HOME for install scripts.
+	const env = installerEnv(out, CACHE, target, process.env, goExecutable);
+	if (target === "windows-x64")
+		for (const path of [env.LOCALAPPDATA, env.APPDATA, env.TEMP, env.TMP])
+			mkdirSync(path, { recursive: true });
 	const result = spawnSync(
-		join(out, "node", "bin", "node"),
+		join(out, "node", "bin", target === "windows-x64" ? "node.exe" : "node"),
 		[
 			join(out, "node", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
 			"install",
@@ -174,15 +184,7 @@ function installDaemonModules(out) {
 			cwd: daemon,
 			encoding: "utf8",
 			maxBuffer: 64 * 1024 * 1024,
-			env: {
-				HOME: npmHome,
-				PATH: `${join(out, "node", "bin")}:${SYSTEM_PATH}`,
-				TMPDIR: process.env.TMPDIR ?? "/tmp",
-				npm_config_userconfig: npmrc,
-				npm_config_cache: join(CACHE, "npm-cache"),
-				npm_config_registry: "https://registry.npmjs.org/",
-				npm_config_update_notifier: "false",
-			},
+			env,
 		},
 	);
 	process.stdout.write(result.stdout ?? "");
@@ -193,7 +195,7 @@ function installDaemonModules(out) {
 		.filter((line) => /Gentle AI|gentle-pi/.test(line) && !/^>/.test(line.trim()));
 	const gentleAi = openGentleAi(daemon);
 	say(`  gentle-pi postinstall: ${postinstall.join(" | ") || "(no output)"}`);
-	say(`  gentle-ai ${gentleAi.version} from ${gentleAi.asset} (sha256 ${gentleAi.assetSha256})`);
+	say(`  ${gentleAiIntegritySummary(gentleAi)}`);
 	const pkg = (name) =>
 		JSON.parse(readFileSync(join(daemon, "node_modules", name, "package.json"), "utf8")).version;
 	return {
@@ -226,35 +228,44 @@ async function stageEngram(out, target, requested) {
 	const { version, source } = await engramVersion(requested);
 	say(`Engram ${version} (${source})`);
 	const base = `${ENGRAM_RELEASES}/download/v${version}`;
-	const archiveName = engramArchiveName(version, target);
+	const listing = await text(`${base}/checksums.txt`);
+	const archiveName = engramArchiveName(version, target, listing);
 	const archive = await verifiedDownload(
 		`${base}/${archiveName}`,
 		archiveName,
-		checksumFor(await text(`${base}/checksums.txt`), archiveName),
+		checksumFor(listing, archiveName),
 	);
 	const extracted = mkdtempSync(join(CACHE, "engram-"));
-	run("tar", ["-xzf", archive, "-C", extracted, "engram"]);
-	const binary = join(extracted, "engram");
-	if (!lstatSync(binary).isFile()) throw new Error(`${archiveName} has no regular engram binary.`);
-	copyFileSync(binary, join(out, "bin", "engram"));
-	chmodSync(join(out, "bin", "engram"), 0o755);
+	const name = target === "windows-x64" ? "engram.exe" : "engram";
+	run("tar", [archiveName.endsWith(".zip") ? "-xf" : "-xzf", archive, "-C", extracted, name]);
+	const binary = join(extracted, name);
+	if (!lstatSync(binary).isFile()) throw new Error(`${archiveName} has no regular ${name} binary.`);
+	copyFileSync(binary, join(out, "bin", name));
+	chmodSync(join(out, "bin", name), 0o755);
 	rmSync(extracted, { recursive: true });
 	return { version, source };
 }
 
 function daemonCommit() {
-	const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO, encoding: "utf8" }).trim();
-	const dirty = execFileSync("git", ["status", "--porcelain", "--", "packages"], {
-		cwd: REPO,
-		encoding: "utf8",
-	});
-	return dirty.trim() ? `${commit}-dirty` : commit;
+	return daemonSourceRevision(REPO);
 }
 
 async function main() {
 	const options = parseArgs(process.argv.slice(2));
 	const { target } = options;
 	assertHostTarget(target);
+	// Fail before output replacement or downloads; only the chosen Go directory is
+	// added to the installer's otherwise isolated PATH. No Go setup occurs here.
+	const goExecutable =
+		target === "windows-x64"
+			? windowsBuildGo(process.env, (file) => {
+					try {
+						return lstatSync(file).isFile();
+					} catch {
+						return false;
+					}
+				})
+			: undefined;
 	const out = resolve(
 		process.env.INIT_CWD ?? process.cwd(),
 		options.out ?? join(REPO, "build", "runtime", target),
@@ -265,11 +276,13 @@ async function main() {
 
 	const node = await stageNode(out, target);
 	say("Daemon (build:runtime)");
-	run("pnpm", ["--filter", "@gentle-dot/daemon", "build:runtime", "--", "--out", out], { cwd: REPO });
-	const modules = installDaemonModules(out);
+	const daemonBuild = pnpmInvocation(["--filter", "@gentle-dot/daemon", "build:runtime", "--", "--out", out]);
+	run(daemonBuild.command, daemonBuild.args, { cwd: REPO });
+	const modules = installDaemonModules(out, target, goExecutable);
 	const engram = await stageEngram(out, target, options.engramVersion);
 	say("Web UI");
-	run("pnpm", ["--filter", "@gentle-dot/ui", "build"], { cwd: REPO });
+	const uiBuild = pnpmInvocation(["--filter", "@gentle-dot/ui", "build"]);
+	run(uiBuild.command, uiBuild.args, { cwd: REPO });
 	cpSync(join(REPO, "packages", "ui", "dist", "app"), join(out, "ui"), { recursive: true });
 
 	const links = symlinksIn(out);

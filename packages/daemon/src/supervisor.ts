@@ -1,8 +1,10 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { agentSpawnEnv } from "./config.ts";
 import { encodeRecord, JsonlDecoder } from "./jsonl.ts";
 import { writePrivateFile } from "./private-file.ts";
+import { terminateProcessTree, WINDOWS_TASKKILL_TIMEOUT_MS } from "./process-tree.ts";
 import type { OsUser } from "./vps.ts";
 
 /** A record the agent wrote to stdout that is not a command response. */
@@ -47,8 +49,16 @@ export interface SupervisorOptions {
 	requestTimeoutMs?: number;
 	/** Deadline for the agent to answer its first `get_state`. Default 60s. */
 	startTimeoutMs?: number;
-	/** Grace period after closing stdin before SIGTERM. Default 5s. */
+	/** Grace period after closing stdin before the first process-tree escalation. Default 5s. */
 	stopTimeoutMs?: number;
+	/** Lifecycle platform override; tests pair this with a termination override. */
+	platform?: NodeJS.Platform;
+	/** Time between soft and forced escalation. Default 12s on Windows, 2s on Unix. */
+	hardStopTimeoutMs?: number;
+	/** Time after forced escalation before shutdown rejects. Default 12s on Windows, 2s on Unix. */
+	terminationFailureTimeoutMs?: number;
+	/** Process-tree termination override, primarily for deterministic lifecycle tests. */
+	terminateProcessTree?: typeof terminateProcessTree;
 	log?: (line: string) => void;
 }
 
@@ -86,6 +96,13 @@ export class AgentSupervisor {
 	private restarting = false;
 	private interrupted = false;
 	private restartTimer: NodeJS.Timeout | undefined;
+	/** The spawn whose engine has not answered yet, while there is one. */
+	private initializing: Promise<void> | undefined;
+	/** A restart asked while an engine starts, run once that start settles. */
+	private queuedRestart: Promise<void> | undefined;
+	/** A restart closing the old process; the engine it starts next comes after any request made meanwhile. */
+	private replacing: Promise<void> | undefined;
+	private wasLaunched = false;
 	private closeWaiters: (() => void)[] = [];
 	/** For a session started by rotation, the session files it continues, oldest first. */
 	private chains: Record<string, string[]> = {};
@@ -98,6 +115,11 @@ export class AgentSupervisor {
 		this.sessionDir = join(options.dataDir, "sessions");
 		this.stateFile = join(options.dataDir, "state.json");
 		this.sessionFile = this.readPersistedSession();
+	}
+
+	/** Whether `start()` or `stop()` was called: before that, `stopped` only means not started yet. */
+	get launched(): boolean {
+		return this.wasLaunched;
 	}
 
 	get pid(): number | undefined {
@@ -123,9 +145,10 @@ export class AgentSupervisor {
 	/** Spawns the agent and resolves once it answered `get_state`. */
 	async start(): Promise<void> {
 		this.stopping = false;
+		this.wasLaunched = true;
 		mkdirSync(this.sessionDir, { recursive: true });
 		this.setState("starting");
-		await this.spawnAndInitialize();
+		await this.initialize();
 	}
 
 	/** Sends a command and resolves with its successful response. */
@@ -157,40 +180,132 @@ export class AgentSupervisor {
 	/**
 	 * Replaces the agent process on purpose (for example after new credentials),
 	 * reopening the same conversation. Not reported as an interruption.
+	 * An engine still starting is not cut off: it is replaced once that start settles,
+	 * once for any number of requests made meanwhile.
 	 */
-	async restart(): Promise<void> {
+	restart(): Promise<void> {
+		if (this.stopping) return Promise.resolve();
+		if (this.initializing) {
+			this.queuedRestart ??= this.initializing
+				.catch(() => {})
+				.then(() => {
+					this.queuedRestart = undefined;
+					return this.restart();
+				});
+			return this.queuedRestart;
+		}
+		if (this.replacing) return this.replacing;
+		const replacing = this.replace().finally(() => {
+			if (this.replacing === replacing) this.replacing = undefined;
+		});
+		this.replacing = replacing;
+		return replacing;
+	}
+
+	private async replace(): Promise<void> {
 		const child = this.child;
 		if (!child || this.stopping) return;
 		this.restarting = true;
-		const closed = new Promise<void>((resolve) => this.closeWaiters.push(resolve));
-		child.stdin?.end();
-		const term = setTimeout(() => child.kill("SIGTERM"), this.options.stopTimeoutMs ?? 5000);
-		await closed;
-		clearTimeout(term);
+		try {
+			await this.closeChild(child);
+		} catch (error) {
+			// The old process is still running: never spawn a second engine over it. Its stdin is
+			// closed, so it is not ready any more; its close schedules the replacement.
+			this.restarting = false;
+			if (this.child === child) this.setState("restarting");
+			throw error;
+		}
 		// Stopped while the old process was closing: nothing is started again.
 		if (this.stopping) {
 			this.setState("stopped");
 			return;
 		}
 		this.setState("restarting");
-		await this.spawnAndInitialize();
+		this.replacing = undefined;
+		await this.initialize();
 	}
 
 	async stop(): Promise<void> {
 		this.stopping = true;
+		this.wasLaunched = true;
 		clearTimeout(this.restartTimer);
 		const child = this.child;
 		if (!child) {
 			this.setState("stopped");
 			return;
 		}
-		const closed = new Promise<void>((resolve) => this.closeWaiters.push(resolve));
-		child.stdin?.end();
-		const term = setTimeout(() => child.kill("SIGTERM"), this.options.stopTimeoutMs ?? 5000);
-		const kill = setTimeout(() => child.kill("SIGKILL"), (this.options.stopTimeoutMs ?? 5000) + 2000);
-		await closed;
-		clearTimeout(term);
-		clearTimeout(kill);
+		await this.closeChild(child);
+	}
+
+	/**
+	 * Closes stdin, then escalates through the process tree: soft after the grace period, forced
+	 * after the hard window. Rejects when the child is still the current one after the failure
+	 * window, instead of waiting for a process that did not terminate.
+	 */
+	private closeChild(child: ChildProcess): Promise<void> {
+		const gracefulMs = this.options.stopTimeoutMs ?? 5000;
+		const platform = this.options.platform ?? process.platform;
+		// Leave two seconds for the child's close event after taskkill's own deadline.
+		const stageMs = platform === "win32" ? WINDOWS_TASKKILL_TIMEOUT_MS + 2000 : 2000;
+		const hardMs = this.options.hardStopTimeoutMs ?? stageMs;
+		const failureMs = this.options.terminationFailureTimeoutMs ?? stageMs;
+		const terminate = this.options.terminateProcessTree ?? terminateProcessTree;
+		return new Promise<void>((resolve, reject) => {
+			let settled = false;
+			const errors: string[] = [];
+			const timers: NodeJS.Timeout[] = [];
+			const finish = (error?: Error) => {
+				if (settled) return;
+				settled = true;
+				for (const timer of timers) clearTimeout(timer);
+				const index = this.closeWaiters.indexOf(onClose);
+				if (index >= 0) this.closeWaiters.splice(index, 1);
+				if (error) reject(error);
+				else resolve();
+			};
+			const onClose = () => finish();
+			let forced = false;
+			// A root that already exited may still be current until its children release the pipes,
+			// but its PID is free then and may be reused: never escalate on it.
+			const running = () => this.child === child && child.exitCode === null && child.signalCode === null;
+			const escalate = (force: boolean) => {
+				if (!running() || (force && forced)) return;
+				if (force) forced = true;
+				void terminate(child, force, { platform, isCurrent: running }).catch((error: Error) => {
+					errors.push(error.message);
+					this.log(error.message);
+					// taskkill /T without /F cannot end a windowless console process and fails at once:
+					// force the tree now instead of waiting out the hard window.
+					if (!force && platform === "win32") escalate(true);
+				});
+			};
+			this.closeWaiters.push(onClose);
+			child.stdin?.end();
+			timers.push(setTimeout(() => escalate(false), gracefulMs));
+			timers.push(setTimeout(() => escalate(true), gracefulMs + hardMs));
+			timers.push(
+				setTimeout(
+					() => {
+						if (this.child !== child) return finish();
+						const detail = errors.length > 0 ? `: ${errors.join("; ")}` : "";
+						finish(
+							new Error(
+								`Failed to stop agent process ${child.pid ?? "without a PID"} after bounded termination${detail}`,
+							),
+						);
+					},
+					gracefulMs + hardMs + failureMs,
+				),
+			);
+		});
+	}
+
+	private initialize(): Promise<void> {
+		const run = this.spawnAndInitialize().finally(() => {
+			if (this.initializing === run) this.initializing = undefined;
+		});
+		this.initializing = run;
+		return run;
 	}
 
 	private async spawnAndInitialize(): Promise<void> {
@@ -220,7 +335,12 @@ export class AgentSupervisor {
 		const { command, args = [], extraArgs = [], cwd, env, prepareSpawn, user } = this.options;
 		const child = spawn(command, [...args, "--mode", "rpc", "--session-dir", this.sessionDir, ...extraArgs], {
 			cwd,
-			env: { ...(env ?? process.env), ...prepareSpawn?.() },
+			env: agentSpawnEnv(
+				command,
+				args,
+				{ ...(env ?? process.env), ...prepareSpawn?.() },
+				this.options.platform,
+			),
 			stdio: ["pipe", "pipe", "pipe"],
 			...(user ? { uid: user.uid, gid: user.gid } : {}),
 		});
@@ -305,7 +425,7 @@ export class AgentSupervisor {
 		this.setState("restarting");
 		this.restartTimer = setTimeout(() => {
 			if (this.stopping) return;
-			this.spawnAndInitialize().catch((error: Error) => {
+			this.initialize().catch((error: Error) => {
 				this.log(`agent restart failed: ${error.message}`);
 				// A child that is still alive will close and schedule the next attempt.
 				if (!this.child && !this.stopping) this.scheduleRestart();

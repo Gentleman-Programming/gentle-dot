@@ -4,7 +4,8 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_PORT: u16 = 4317;
-pub const DEFAULT_SHORTCUT: &str = "Alt+Space";
+/// Windows keeps Alt+Space for the window menu, and overlays such as NVIDIA's claim it as well.
+pub const DEFAULT_SHORTCUT: &str = if cfg!(windows) { "Ctrl+Alt+Space" } else { "Alt+Space" };
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DesktopConfig {
@@ -61,10 +62,21 @@ pub fn parse_config(
     DesktopConfig { data_dir, port, shortcut }
 }
 
+/// HOME keeps precedence on every platform; USERPROFILE is a Windows-only fallback.
+/// Pure so profile selection can be checked without reading a real user's environment.
+fn home_dir(env: impl Fn(&str) -> Option<std::ffi::OsString>, windows: bool) -> PathBuf {
+    env("HOME")
+        .filter(|value| !value.is_empty())
+        .or_else(|| windows.then(|| env("USERPROFILE").filter(|value| !value.is_empty())).flatten())
+        .map(PathBuf::from)
+        .unwrap_or_default()
+}
+
 /// Reads the real environment and `<data dir>/config.json`.
 pub fn load_config() -> DesktopConfig {
     let env = |key: &str| std::env::var(key).ok();
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    // OS strings preserve non-UTF-8 Unix HOME paths too.
+    let home = home_dir(|key| std::env::var_os(key), cfg!(windows));
     let dir = data_dir(env, &home);
     let file = std::fs::read_to_string(dir.join("config.json")).ok();
     parse_config(dir, file.as_deref(), env)
@@ -140,8 +152,33 @@ mod tests {
         move |key| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string())
     }
 
+    fn os_env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<std::ffi::OsString> {
+        move |key| env_of(pairs)(key).map(Into::into)
+    }
+
     fn dir() -> PathBuf {
         PathBuf::from("/data")
+    }
+
+    #[test]
+    fn home_keeps_home_precedence_and_limits_userprofile_to_windows() {
+        let both = || os_env_of(&[("HOME", "/home/me"), ("USERPROFILE", "C:\\Users\\me")]);
+        assert_eq!(home_dir(both(), true), PathBuf::from("/home/me"));
+        assert_eq!(home_dir(both(), false), PathBuf::from("/home/me"));
+        let profile = || os_env_of(&[("USERPROFILE", "C:\\Users\\me")]);
+        assert_eq!(home_dir(profile(), true), PathBuf::from("C:\\Users\\me"));
+        assert_eq!(home_dir(profile(), false), PathBuf::new());
+        assert_eq!(home_dir(os_env_of(&[("HOME", ""), ("USERPROFILE", "C:\\Users\\me")]), true), PathBuf::from("C:\\Users\\me"));
+        assert_eq!(home_dir(os_env_of(&[]), true), PathBuf::new());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_profile_default_and_override_use_native_paths() {
+        let home = home_dir(os_env_of(&[("USERPROFILE", "C:\\Users\\me")]), cfg!(windows));
+        assert_eq!(data_dir(env_of(&[]), &home), home.join(".gentle-dot"));
+        assert_eq!(data_dir(env_of(&[("GENTLE_DOT_DATA_DIR", "D:\\dot")]), &home), PathBuf::from("D:\\dot"));
+        assert_eq!(data_dir(env_of(&[("GENTLE_DOT_DATA_DIR", "~/other")]), &home), home.join("other"));
     }
 
     #[test]
@@ -161,6 +198,16 @@ mod tests {
     fn defaults_without_file() {
         let config = parse_config(dir(), None, env_of(&[]));
         assert_eq!(config, DesktopConfig { data_dir: dir(), port: DEFAULT_PORT, shortcut: DEFAULT_SHORTCUT.into() });
+    }
+
+    #[test]
+    fn windows_default_shortcut_avoids_the_system_window_menu() {
+        // Windows owns Alt+Space (window menu) and overlays such as NVIDIA's claim it too.
+        let expected = if cfg!(windows) { "Ctrl+Alt+Space" } else { "Alt+Space" };
+        assert_eq!(DEFAULT_SHORTCUT, expected);
+        assert_eq!(parse_config(dir(), Some(r#"{ "port": 5000 }"#), env_of(&[])).shortcut, expected);
+        // A saved shortcut still wins, including Alt+Space chosen explicitly.
+        assert_eq!(parse_config(dir(), Some(r#"{ "shortcut": "Alt+Space" }"#), env_of(&[])).shortcut, "Alt+Space");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The app side of computer control (L60): the `computer_*` commands, the `computer://state`
-//! event, the panic shortcut, the timeout watcher, and the native dialogs. Off macOS the
-//! commands answer "unavailable" and nothing starts. Yolo mode (S24.9) is switched only from
+//! event, the panic shortcut, the timeout watcher, and the native dialogs. Off macOS and Windows
+//! the commands answer "unavailable" and nothing starts. Yolo mode (S24.9) is switched only from
 //! here (`computer_set_yolo` and the tray item), never from the MCP helper or the daemon.
 //!
 //! The glow (S28): a click-through overlay window (`glow`) is ordered in while a session is
@@ -16,10 +16,11 @@ use super::control::Control;
 use super::server::Endpoint;
 use super::session::{Reason, StateEvent};
 use super::working::Windows;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 use super::working::{MainThread, Rings, Task, Working, WorkingEvent, READY_TIMEOUT, WORKING_EVENT};
 use super::{Clock, PermissionKind, Permissions, SystemClock};
 use crate::alert::Choice;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -30,13 +31,52 @@ pub const GLOW_WINDOW: &str = "glow";
 pub const GLOW_TITLE: &str = "Gentle Dot Glow";
 /// ⌥⇧Esc ends the session from anywhere (S24.3).
 pub const PANIC_SHORTCUT: &str = "Alt+Shift+Escape";
+#[cfg(not(windows))]
 pub const GRANT_TEXT: &str = "Allow Gentle Dot to see and control this Mac for 30 minutes?";
+#[cfg(windows)]
+pub const GRANT_TEXT: &str = "Allow Gentle Dot to see and control this PC for 30 minutes?";
 /// Every computer-control dialog defaults to its refusing button (L75 A2).
 pub const GRANT_CHOICE: Choice = Choice { allow: "Allow", refuse: "Deny" };
 pub const CONFIRM_CHOICE: Choice = Choice { allow: "Allow", refuse: "Cancel" };
+#[cfg(not(windows))]
 pub const YOLO_TEXT: &str = "Turn on yolo mode? Gentle Dot will send, pay, delete, and submit without asking you first, \
 for up to 1 hour. Stop and ⌥⇧Esc still work.";
+#[cfg(windows)]
+pub const YOLO_TEXT: &str = "Turn on yolo mode? Gentle Dot will send, pay, delete, and submit without asking you first, \
+for up to 1 hour. Stop and Alt+Shift+Esc still work.";
 pub const YOLO_CHOICE: Choice = Choice { allow: "Turn On", refuse: "Cancel" };
+/// The yolo dialog when the panic shortcut is not registered: it promises only what works.
+pub const YOLO_TEXT_WITHOUT_PANIC: &str = "Turn on yolo mode? Gentle Dot will send, pay, delete, and submit without asking you \
+first, for up to 1 hour. Stop still works.";
+/// Told once at launch when the panic shortcut cannot be registered.
+#[cfg(not(windows))]
+pub const PANIC_UNAVAILABLE_TEXT: &str = "⌥⇧Esc cannot stop computer control: another app or macOS already uses it. \
+Use Stop in the panel or the menu bar instead.";
+#[cfg(windows)]
+pub const PANIC_UNAVAILABLE_TEXT: &str = "Alt+Shift+Esc cannot stop computer control: another app or Windows already uses \
+it. Use Stop in the panel or the tray menu instead.";
+
+/// Whether the panic shortcut was registered at launch.
+static PANIC_SHORTCUT_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+/// Records whether the panic shortcut was registered, so the yolo dialog only promises it when it works.
+pub fn set_panic_shortcut_registered(registered: bool) {
+    PANIC_SHORTCUT_REGISTERED.store(registered, Ordering::SeqCst);
+}
+
+/// Whether the panic shortcut was registered at launch; false off macOS and Windows.
+pub fn panic_shortcut_registered() -> bool {
+    PANIC_SHORTCUT_REGISTERED.load(Ordering::SeqCst)
+}
+
+/// The yolo dialog's text, naming the panic shortcut only when it is registered.
+pub fn yolo_text(panic_registered: bool) -> &'static str {
+    if panic_registered {
+        YOLO_TEXT
+    } else {
+        YOLO_TEXT_WITHOUT_PANIC
+    }
+}
 
 /// The tray's "Yolo mode" item, kept in step with the state.
 pub struct YoloMenuItem(pub tauri::menu::CheckMenuItem<tauri::Wry>);
@@ -44,15 +84,15 @@ pub struct YoloMenuItem(pub tauri::menu::CheckMenuItem<tauri::Wry>);
 pub struct Computer {
     control: Arc<Control>,
     endpoint: Option<Endpoint>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     desktop: Arc<dyn super::Desktop>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     working: Arc<Working>,
 }
 
 /// What the overlay thread hears: the session started or ended, the agent acted, or a call
 /// starts (answered once the rings were told to draw, or why not) or ends its working rings.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 enum Overlay {
     Session(bool),
     Mark(super::glow::Mark),
@@ -65,10 +105,10 @@ enum Overlay {
 const OVERLAY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The overlay's working rings, through the overlay thread.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 struct OverlayRings(std::sync::mpsc::Sender<Overlay>);
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 impl Rings for OverlayRings {
     fn show(&self, operation: u64) -> Result<(), String> {
         let (reply, answer) = std::sync::mpsc::channel();
@@ -81,10 +121,10 @@ impl Rings for OverlayRings {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 struct AppMainThread(AppHandle);
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 impl MainThread for AppMainThread {
     fn run(&self, task: Task) -> Result<(), String> {
         self.0.run_on_main_thread(task).map_err(|error| error.to_string())
@@ -101,32 +141,52 @@ pub fn show_without_focus(window: &tauri::WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
+pub fn show_without_focus(window: &tauri::WebviewWindow) -> Result<(), String> {
+    super::win::show_without_activating(window.hwnd().map_err(|e| e.to_string())?.0);
+    Ok(())
+}
+
+/// A window of Gentle Dot is shown or hidden through tao (the panel, the Dot) while the returned
+/// change lives: a computer-control capture overlapping it is not returned.
+#[cfg(windows)]
+pub(crate) fn window_change() -> super::win::WindowChange {
+    super::win::WindowChange::begin()
+}
+
+#[cfg(windows)]
+pub fn set_shown(window: &tauri::WebviewWindow, shown: bool) -> Result<(), String> {
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?.0;
+    if shown { super::win::show_window(hwnd); } else { super::win::hide_window(hwnd); }
+    Ok(())
+}
+
 impl Computer {
     /// The helper's address and key for this launch, registered with the daemon over the app's
-    /// channel (S24.7, L61); `None` off macOS or when the helper did not start.
+    /// channel (S24.7, L61); `None` off macOS and Windows or when the helper did not start.
     pub fn endpoint(&self) -> Option<Endpoint> {
         self.endpoint.clone()
     }
 }
 
-/// Creates the session and, on macOS, starts the MCP helper, the timeout watcher, and the
+/// Creates the session and, on macOS and Windows, starts the MCP helper, the timeout watcher, and the
 /// glow overlay. `windows` are the Dot and the panel, hidden during each call (S1). Runs in the
 /// app's setup, on the main thread.
 pub fn start(app: &AppHandle, windows: Arc<dyn Windows>) -> Computer {
     let (overlay, marks) = std::sync::mpsc::channel::<Overlay>();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     let working = Arc::new(Working::new(
         windows,
         Arc::new(OverlayRings(overlay.clone())),
         Arc::new(AppMainThread(app.clone())),
         READY_TIMEOUT,
     ));
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     let session_ended = {
         let working = working.clone();
         move || working.session_ended()
     };
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     let session_ended = {
         drop(windows);
         || {}
@@ -165,20 +225,33 @@ pub fn start(app: &AppHandle, windows: Arc<dyn Windows>) -> Computer {
         }
         Computer { control, endpoint, desktop, working }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        let desktop: Arc<dyn super::Desktop> = Arc::new(super::win::WinDesktop);
+        let glow = move |mark| { let _ = overlay.send(Overlay::Mark(mark)); };
+        let endpoint = start_helper(app, control.clone(), desktop.clone(), glow, working.clone())
+            .map_err(|error| eprintln!("gentle-dot: computer control is unavailable: {error}")).ok();
+        watch_timeout(control.clone());
+        match build_glow(app) {
+            Ok(window) => run_glow(app.clone(), window, control.clone(), working.clone(), marks),
+            Err(error) => eprintln!("gentle-dot: the computer-control glow is unavailable: {error}"),
+        }
+        Computer { control, endpoint, desktop, working }
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         drop((overlay, marks));
         Computer { control, endpoint: None }
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn start_helper(
     app: &AppHandle,
     control: Arc<Control>,
     desktop: Arc<dyn super::Desktop>,
     glow: impl Fn(super::glow::Mark) + Send + Sync + 'static,
-    working: Arc<Working>,
+    working: Arc<dyn super::working::Preparation>,
 ) -> std::io::Result<Endpoint> {
     let token = super::server::new_token();
     let helper = super::mcp::Helper::new(
@@ -266,7 +339,7 @@ fn cover(window: &tauri::WebviewWindow, covering: &mut Option<super::glow::Frame
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn emit_working(app: &AppHandle, operation: u64, active: bool) -> Result<(), String> {
     let event = WorkingEvent { active, operation_id: operation };
     app.emit_to(GLOW_WINDOW, WORKING_EVENT, event).map_err(|error| error.to_string())
@@ -292,7 +365,7 @@ fn run_overlay(
                         let _ = order_overlay(&app, ns_window, &number, active);
                         shown = active;
                     }
-                    if let Some(operation) = drawing.take().filter(|_| !active) {
+                    if let Some(operation) = super::working::session_clears(&mut drawing, active) {
                         let _ = emit_working(&app, operation, false);
                     }
                 }
@@ -354,8 +427,78 @@ fn run_overlay(
     }
 }
 
+/// A click-through, non-activating overlay excluded from capture.
+#[cfg(windows)]
+fn build_glow(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
+    let window = tauri::WebviewWindowBuilder::new(app, GLOW_WINDOW, tauri::WebviewUrl::App("index.html?surface=glow".into()))
+        .title(GLOW_TITLE).inner_size(1.0, 1.0).position(0.0, 0.0).transparent(true)
+        .decorations(false).always_on_top(true).resizable(false).skip_taskbar(true)
+        .shadow(false).focused(false).focusable(false).visible(false).build().map_err(|error| error.to_string())?;
+    window.set_ignore_cursor_events(true).map_err(|error| error.to_string())?;
+    if let Err(error) = super::win::prepare_overlay(window.hwnd().map_err(|error| error.to_string())?.0) {
+        let _ = window.close();
+        return Err(error);
+    }
+    Ok(window)
+}
+
+#[cfg(windows)]
+fn run_glow(app: AppHandle, window: tauri::WebviewWindow, control: Arc<Control>, working: Arc<Working>, marks: std::sync::mpsc::Receiver<Overlay>) {
+    let Ok(hwnd) = window.hwnd() else {
+        eprintln!("gentle-dot: the computer-control glow is unavailable: no window handle");
+        return;
+    };
+    let hwnd = hwnd.0 as usize;
+    let spawned = std::thread::Builder::new().name("computer-glow".into()).spawn(move || {
+        let window = hwnd as *mut std::ffi::c_void;
+        let (mut shown, mut covering, mut drawing) = (false, None, None);
+        for message in marks {
+            match message {
+                Overlay::Session(active) => {
+                    if active != shown { super::win::show_overlay(window, active); shown = active; }
+                    if let Some(operation) = super::working::session_clears(&mut drawing, active) {
+                        let _ = emit_working(&app, operation, false);
+                    }
+                }
+                Overlay::Working { operation, reply } => {
+                    let outcome = if !control.is_active(SystemClock.now_ms()) || !working.is_current(operation) {
+                        Err("the call already ended".to_string())
+                    } else {
+                        match super::win::pointer_location().and_then(super::win::display_frame_at) {
+                            None => Err("no display under the pointer".to_string()),
+                            Some(display) => {
+                                if covering != Some(display) { super::win::cover(window, display); covering = Some(display); }
+                                super::win::show_overlay(window, true);
+                                shown = true;
+                                drawing = Some(operation);
+                                emit_working(&app, operation, true)
+                            }
+                        }
+                    };
+                    let _ = reply.send(outcome);
+                }
+                Overlay::WorkingEnd(operation) => {
+                    if drawing == Some(operation) { drawing = None; let _ = emit_working(&app, operation, false); }
+                }
+                Overlay::Mark(mark) => {
+                    if !control.is_active(SystemClock.now_ms()) { continue; }
+                    let placed = super::glow::place(mark, super::win::display_frame_at, super::win::focused_frame);
+                    let Some((display, event)) = placed else { continue };
+                    if covering != Some(display) { super::win::cover(window, display); covering = Some(display); }
+                    if !shown { super::win::show_overlay(window, true); shown = true; }
+                    let event = super::glow::in_css_pixels(event, super::win::display_scale(display));
+                    if let Err(error) = app.emit_to(GLOW_WINDOW, GLOW_EVENT, event) {
+                        eprintln!("gentle-dot: cannot draw the glow: {error}");
+                    }
+                }
+            }
+        }
+    });
+    if let Err(error) = spawned { eprintln!("gentle-dot: the computer-control glow is unavailable: {error}"); }
+}
+
 /// Reports the timeout when it happens, not only at the next tool call.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn watch_timeout(control: Arc<Control>) {
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -376,21 +519,34 @@ pub fn computer_endpoint(computer: State<'_, Computer>) -> Option<Endpoint> {
 }
 
 #[tauri::command]
-pub fn computer_permissions(computer: State<'_, Computer>) -> Permissions {
-    #[cfg(target_os = "macos")]
-    return computer.desktop.permissions();
-    #[cfg(not(target_os = "macos"))]
-    {
+pub fn computer_permissions(computer: State<'_, Computer>) -> PermissionsAnswer {
+    #[cfg(any(target_os = "macos", windows))]
+    let permissions = computer.desktop.permissions();
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let permissions = {
         let _ = computer;
-        Permissions { accessibility: false, screen_recording: false, screenshots_supported: false }
-    }
+        Permissions { accessibility: false, screen_recording: false, screenshots_supported: false, screenshots_unsupported: None }
+    };
+    PermissionsAnswer { permissions, panic_shortcut: panic_shortcut_registered() }
+}
+
+/// The `computer_permissions` answer: the permissions, plus `panicShortcut`, so Connectors names
+/// the panic shortcut only when it works.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionsAnswer {
+    #[serde(flatten)]
+    pub permissions: Permissions,
+    pub panic_shortcut: bool,
 }
 
 #[tauri::command]
 pub fn computer_request_permission(kind: PermissionKind) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     return super::request_permission(kind);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    { let _ = kind; Ok(()) }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = kind;
         Err("Computer control is only available on macOS.".into())
@@ -410,9 +566,9 @@ pub fn computer_working_ready(
     computer: State<'_, Computer>,
     operation_id: u64,
 ) -> Result<bool, String> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     return computer.working.acknowledge(window.label(), operation_id);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = (window, computer, operation_id);
         Err("Computer control is only available on macOS.".into())
@@ -423,9 +579,9 @@ pub fn computer_working_ready(
 /// off the main thread; the tray item calls it from a thread of its own.
 pub fn set_yolo(app: &AppHandle, enabled: bool) -> Result<StateEvent, String> {
     let computer = app.try_state::<Computer>().ok_or("Computer control is not ready.")?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     return Ok(computer.control.set_yolo(enabled, SystemClock.now_ms(), &NativeDialogs { app: app.clone() }));
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = (computer, enabled);
         Err("Computer control is only available on macOS.".into())
@@ -454,19 +610,19 @@ pub fn computer_status(computer: State<'_, Computer>) -> StateEvent {
 }
 
 /// Dialogs shown by the app itself (an `NSAlert`, see `alert`), never the webview.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 struct NativeDialogs {
     app: AppHandle,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 impl NativeDialogs {
     fn ask(&self, message: &str, choice: Choice) -> bool {
         crate::alert::ask(&self.app, "Gentle Dot", message, choice)
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 impl super::Dialogs for NativeDialogs {
     fn ask_grant(&self) -> bool {
         self.ask(GRANT_TEXT, GRANT_CHOICE)
@@ -477,7 +633,7 @@ impl super::Dialogs for NativeDialogs {
     }
 
     fn ask_yolo(&self) -> bool {
-        self.ask(YOLO_TEXT, YOLO_CHOICE)
+        self.ask(yolo_text(panic_shortcut_registered()), YOLO_CHOICE)
     }
 }
 
@@ -486,12 +642,14 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(not(windows))]
     fn the_grant_dialog_asks_exactly_what_the_spec_says() {
         assert_eq!(GRANT_TEXT, "Allow Gentle Dot to see and control this Mac for 30 minutes?");
         assert_eq!(GRANT_CHOICE, Choice { allow: "Allow", refuse: "Deny" });
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn the_yolo_dialog_says_what_it_skips_and_for_how_long() {
         assert_eq!(
             YOLO_TEXT,
@@ -502,11 +660,54 @@ for up to 1 hour. Stop and ⌥⇧Esc still work."
     }
 
     #[test]
+    #[cfg(windows)]
+    fn windows_dialogs_name_the_pc_and_panic_shortcut() {
+        assert_eq!(GRANT_TEXT, "Allow Gentle Dot to see and control this PC for 30 minutes?");
+        assert_eq!(GRANT_CHOICE, Choice { allow: "Allow", refuse: "Deny" });
+        assert_eq!(YOLO_TEXT, "Turn on yolo mode? Gentle Dot will send, pay, delete, and submit without asking you first, \
+for up to 1 hour. Stop and Alt+Shift+Esc still work.");
+        assert_eq!(YOLO_CHOICE, Choice { allow: "Turn On", refuse: "Cancel" });
+    }
+
+    #[test]
+    fn the_yolo_dialog_promises_the_panic_shortcut_only_when_it_is_registered() {
+        assert_eq!(yolo_text(true), YOLO_TEXT);
+        assert_eq!(
+            yolo_text(false),
+            "Turn on yolo mode? Gentle Dot will send, pay, delete, and submit without asking you first, \
+for up to 1 hour. Stop still works."
+        );
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn a_missing_panic_shortcut_is_explained_once_on_the_mac() {
+        assert_eq!(
+            PANIC_UNAVAILABLE_TEXT,
+            "⌥⇧Esc cannot stop computer control: another app or macOS already uses it. \
+Use Stop in the panel or the menu bar instead."
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_missing_panic_shortcut_is_explained_once_on_windows() {
+        assert_eq!(
+            PANIC_UNAVAILABLE_TEXT,
+            "Alt+Shift+Esc cannot stop computer control: another app or Windows already uses it. \
+Use Stop in the panel or the tray menu instead."
+        );
+    }
+
+    #[test]
     fn every_computer_dialog_defaults_to_its_refusing_button() {
         for choice in [GRANT_CHOICE, CONFIRM_CHOICE, YOLO_CHOICE] {
             assert_eq!(choice.alert_buttons(), [choice.refuse, choice.allow]);
             assert!(!choice.allows_response(Some(crate::alert::REFUSE_RESPONSE)));
             assert!(!choice.allows_response(None));
+            assert!(!choice.allows_task_button(Some(crate::alert::TASK_REFUSE_ID)));
+            assert!(!choice.allows_task_button(None));
+            assert!(choice.allows_task_button(Some(crate::alert::TASK_ALLOW_ID)));
         }
     }
 
@@ -530,7 +731,46 @@ for up to 1 hour. Stop and ⌥⇧Esc still work."
 
     #[test]
     fn permissions_serialize_with_the_l60_field_names() {
-        let value = serde_json::to_value(Permissions { accessibility: true, screen_recording: false, screenshots_supported: true }).unwrap();
+        let value = serde_json::to_value(Permissions {
+            accessibility: true,
+            screen_recording: false,
+            screenshots_supported: true,
+            screenshots_unsupported: None,
+        })
+        .unwrap();
         assert_eq!(value, serde_json::json!({"accessibility": true, "screenRecording": false, "screenshotsSupported": true}));
+    }
+
+    #[test]
+    fn the_permissions_answer_says_whether_the_panic_shortcut_is_registered() {
+        let permissions = Permissions { accessibility: true, screen_recording: false, screenshots_supported: true, screenshots_unsupported: None };
+        let value = serde_json::to_value(PermissionsAnswer { permissions, panic_shortcut: false }).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"accessibility": true, "screenRecording": false, "screenshotsSupported": true, "panicShortcut": false})
+        );
+        set_panic_shortcut_registered(true);
+        assert!(panic_shortcut_registered());
+        set_panic_shortcut_registered(false);
+        assert!(!panic_shortcut_registered());
+    }
+
+    /// Why screenshots are unsupported rides next to the bool, which stays as it was for every consumer.
+    #[test]
+    fn unsupported_screenshots_say_why() {
+        let unsupported = |reason| Permissions {
+            accessibility: true,
+            screen_recording: true,
+            screenshots_supported: false,
+            screenshots_unsupported: Some(reason),
+        };
+        assert_eq!(
+            serde_json::to_value(unsupported(super::super::ScreenshotsUnsupported::TooOld)).unwrap(),
+            serde_json::json!({"accessibility": true, "screenRecording": true, "screenshotsSupported": false, "screenshotsUnsupported": "tooOld"})
+        );
+        assert_eq!(
+            serde_json::to_value(unsupported(super::super::ScreenshotsUnsupported::UnknownVersion)).unwrap(),
+            serde_json::json!({"accessibility": true, "screenRecording": true, "screenshotsSupported": false, "screenshotsUnsupported": "unknownVersion"})
+        );
     }
 }

@@ -17,16 +17,23 @@ export function runtimeModules(runtime: string): string {
 	return join(runtime, "daemon", "node_modules");
 }
 
-/** Where a user's own Engram usually lives, after the login PATH. */
-export function engramKnownDirs(home: string): string[] {
+/** Where a user's own Engram usually lives, after the login PATH on Unix. */
+export function engramKnownDirs(home: string, platform: NodeJS.Platform = process.platform): string[] {
+	if (platform === "win32") {
+		return [
+			join(home, "go", "bin"),
+			join(home, "AppData", "Local", "engram", "bin"),
+			join(home, ".local", "bin"),
+		];
+	}
 	return [join(home, "go", "bin"), "/opt/homebrew/bin", "/usr/local/bin", join(home, ".local", "bin")];
 }
 
 const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 
-function isExecutableFile(path: string): boolean {
+function isExecutableFile(path: string, platform: NodeJS.Platform = process.platform): boolean {
 	try {
-		accessSync(path, constants.X_OK);
+		accessSync(path, platform === "win32" ? constants.R_OK : constants.X_OK);
 		return statSync(path).isFile();
 	} catch {
 		return false;
@@ -54,21 +61,24 @@ function loginShellEngram(env: NodeJS.ProcessEnv, home: string): string | undefi
 
 /**
  * The Engram binary of an installed app: `ENGRAM_BIN`, then an `engram` on the
- * user's login PATH or in the usual folders, so the user's own version keeps
- * serving `~/.engram`, and only then the one the runtime carries.
+ * user's login PATH (Unix only) or in the usual folders, so the user's own version
+ * keeps serving `~/.engram`, and only then the one the runtime carries.
+ * Windows uses `engram.exe`, skips login shells and accepts readable executable files.
  */
 export function resolveEngramBin(
 	env: NodeJS.ProcessEnv,
 	runtime: string,
-	options: { home?: string; knownDirs?: string[] } = {},
+	options: { home?: string; knownDirs?: string[]; platform?: NodeJS.Platform } = {},
 ): string {
 	if (env.ENGRAM_BIN) return env.ENGRAM_BIN;
-	const home = options.home ?? (env.HOME || homedir());
-	const fromLogin = loginShellEngram(env, home);
+	const platform = options.platform ?? process.platform;
+	const home = options.home ?? (env.HOME || (platform === "win32" && env.USERPROFILE) || homedir());
+	const name = platform === "win32" ? "engram.exe" : "engram";
+	const fromLogin = platform === "win32" ? undefined : loginShellEngram(env, home);
 	if (fromLogin) return fromLogin;
-	for (const dir of options.knownDirs ?? engramKnownDirs(home)) {
-		const bin = join(dir, "engram");
-		if (isExecutableFile(bin)) return bin;
+	for (const dir of options.knownDirs ?? engramKnownDirs(home, platform)) {
+		const bin = join(dir, name);
+		if (isExecutableFile(bin, platform)) return bin;
 	}
-	return join(runtime, "bin", "engram");
+	return join(runtime, "bin", name);
 }

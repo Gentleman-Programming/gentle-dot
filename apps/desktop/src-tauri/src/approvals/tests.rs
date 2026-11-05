@@ -106,6 +106,18 @@ fn the_approval_buttons_default_to_decline() {
 }
 
 #[test]
+fn the_dialog_carries_the_approvals_deadline_so_a_late_one_refuses_itself() {
+    let prompt = Arc::new(FakePrompt::new([Answer::After(Duration::ZERO, true)]));
+    let before = Instant::now();
+    approvals(&prompt, LONG).confirm(&request(vec![]));
+    let after = Instant::now();
+    let deadline = prompt.shown.lock().unwrap()[0].deadline.expect("a deadline");
+    assert!(deadline >= before + LONG && deadline <= after + LONG, "the confirmation's own deadline");
+    // A dialog built for a preview carries none.
+    assert_eq!(ApprovalDialog::new(&request(vec![]), LONG).deadline, None);
+}
+
+#[test]
 fn allow_approves_and_decline_declines() {
     let prompt = Arc::new(FakePrompt::new([Answer::After(Duration::ZERO, true), Answer::After(Duration::ZERO, false)]));
     let approvals = approvals(&prompt, LONG);
@@ -134,6 +146,35 @@ fn a_late_click_on_a_stale_dialog_approves_nothing() {
     let approvals = Approvals { timeout: LONG, ..approvals };
     assert_eq!(approvals.confirm(&request(vec![])), Decision::Declined);
     assert_eq!(prompt.shown_titles().len(), 2);
+}
+
+/// Returns once the dialog's thread has ended; it frees the screen only after sending its answer.
+fn wait_until_answered(approvals: &Approvals) {
+    let ticket = approvals.gate.acquire(Instant::now() + LONG).expect("the dialog closed");
+    approvals.gate.release(ticket);
+}
+
+#[test]
+fn an_allow_given_after_the_deadline_is_declined_even_when_already_waiting() {
+    // A descheduled receiver: it only looks once the late Allow is queued, and the deadline gone.
+    let timeout = Duration::from_millis(50);
+    let prompt = Arc::new(FakePrompt::new([Answer::After(timeout * 2, true)]));
+    let approvals = approvals(&prompt, timeout);
+    let shown = approvals.show(&request(vec![])).expect("shown");
+    wait_until_answered(&approvals);
+    assert_eq!(approvals.wait(shown), Decision::Declined);
+    assert_eq!(prompt.dismissals(), 0, "the dialog had already closed");
+}
+
+#[test]
+fn an_allow_given_in_time_counts_even_when_seen_after_the_deadline() {
+    let timeout = Duration::from_millis(500);
+    let prompt = Arc::new(FakePrompt::new([Answer::After(Duration::ZERO, true)]));
+    let approvals = approvals(&prompt, timeout);
+    let shown = approvals.show(&request(vec![])).expect("shown");
+    wait_until_answered(&approvals);
+    std::thread::sleep(timeout + Duration::from_millis(100));
+    assert_eq!(approvals.wait(shown), Decision::Approved);
 }
 
 #[test]
