@@ -110,6 +110,31 @@ El hueco concreto:
   deltas en vivo.
 
 ### T3 — Portar el supervisor (lifecycle del agente)
+
+#### Estado (2026-11-05)
+
+Hecho:
+
+- **Sesiones en disco** (`9122ebf`): el spawner pasaba sólo `--home`, `--mode` y el system
+  prompt, así que el engine guardaba la conversación en memoria y un reinicio la borraba.
+  `ShellConfig.sessionDir` y el daemon lo apunta a `sessions/` dentro de su data dir. Test:
+  `test/session-dir.test.ts` verifica el argv real del engine (agente falso).
+- **Steering** (`03fe73d`): un mensaje con run activo viaja con `streamingBehavior: steer` en
+  vez de descartarse o abrir un segundo run. Ya estaba en el código, pero sin prueba: ahora
+  `test/steer.test.ts` lo verifica contra el engine falso.
+- **Asks** (hecho en T2.2, `41d879a`): aprobaciones de ida y vuelta por el mismo canal que
+  originó el run.
+- **Abort**: ya existía (`rpc('abort')`) para ventanas y conectores.
+
+Falta:
+
+- Historial hacia la ventana (`get_history`/`get_earlier`) leyendo los archivos de sesión.
+- `followUp` (encolar para después del run) — hoy sólo se usa `steer`.
+- Rotación y compaction: en la arquitectura nueva las hace el engine (auto-compaction); hay que
+  confirmar los límites por configuración cuando se pruebe con sesiones largas.
+- La extensión de aprobaciones (`-e approval-guard.ts`) que producción sí pasa al engine: sin
+  ella el guard de herramientas no está activo en el daemon nuevo.
+
 - Prompts con historial de sesión, asks de aprobación, steering/followUp,
   abort, rotación, Compaction.
 - Sobre el RPC client del spawner (ya verificado: prompt/set_model/abort).
