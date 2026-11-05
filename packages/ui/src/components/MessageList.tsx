@@ -33,16 +33,21 @@ const COPY_RESET_MS = 2000;
 /** Copies the answer's original markdown, so code blocks and links survive the paste. */
 function CopyAnswer({ text }: { text: string }) {
 	const [status, setStatus] = useState<keyof typeof COPY_LABELS>("idle");
-	useEffect(() => {
-		if (status === "idle") return;
-		const timer = setTimeout(() => setStatus("idle"), COPY_RESET_MS);
-		return () => clearTimeout(timer);
-	}, [status]);
-	const copy = () => {
-		navigator.clipboard.writeText(text).then(
-			() => setStatus("copied"),
-			() => setStatus("failed"),
-		);
+	const resetTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+	useEffect(() => () => clearTimeout(resetTimer.current), []);
+	const show = (next: "copied" | "failed") => {
+		clearTimeout(resetTimer.current);
+		setStatus(next);
+		resetTimer.current = setTimeout(() => setStatus("idle"), COPY_RESET_MS);
+	};
+	// Awaited in a try: on plain HTTP navigator.clipboard is undefined, which throws instead of rejecting.
+	const copy = async () => {
+		try {
+			await navigator.clipboard.writeText(text);
+			show("copied");
+		} catch {
+			show("failed");
+		}
 	};
 	return (
 		<button type="button" className="message-copy" onClick={copy}>
