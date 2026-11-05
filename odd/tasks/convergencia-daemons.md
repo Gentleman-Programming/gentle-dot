@@ -76,10 +76,13 @@ El hueco concreto:
   **HECHO** (`c532cb7`), verificado E2E contra la imagen dev: el conector recibió
   la respuesta y un cliente crudo en el socket de la app recibió los mismos 4
   deltas (`DEL`, `TA`, `-`, `OK`) más `message_done` con el mismo `messageId`.
-  **Deuda**: el test automático no se pudo escribir porque la familia de tests
-  de gateway llama `startDaemon`, que el daemon refactorizado ya no exporta, y
-  `createDaemon` ya no acepta un comando de agente: hay que reconstruir el
-  harness con motor falso antes de T2.2 (tarea propia).
+  **Test automático HECHO** (`a063709`): el harness volvió con
+  `DaemonOptions.engineCommand` ([bin, ...args]) y `stop()` ya no llama
+  `process.exit(0)` (`e42910f`); `test/delta-mirror.test.ts` bootea el daemon con
+  el agente falso, escucha el socket de la app y verifica que llegan los mismos
+  deltas, en el mismo orden y con el mismo `messageId` que al conector.
+  **Sigue pendiente**: migrar los 25 archivos de gateway que todavía llaman
+  `startDaemon` (fuente de la mayoría de los 181 fallos).
 - **T2.2** Gateway WS de app en el daemon nuevo: aceptar el `hello` del
   protocolo v1 (token del daemon, sin `connectorType`), responder `ready`,
   aceptar `send`/`abort`/`ui_response`, emitir `message_delta`, `message_done`,
