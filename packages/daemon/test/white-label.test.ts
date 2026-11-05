@@ -1,12 +1,15 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	HIDDEN_NAMES,
 	IDENTITY_SOURCE,
+	identityArgs,
 	isBlockedInput,
 	presentText,
 	shouldShowToast,
 } from "../src/white-label.ts";
+import { tempDir } from "./helpers.ts";
 
 describe("presentText", () => {
 	it.each([
@@ -70,5 +73,16 @@ describe("memory scope in the identity (S23, L85)", () => {
 	it("searches the user's whole memory, not only gentle-dot", () => {
 		expect(identity).toMatch(/all_projects: true/);
 		expect(identity).not.toMatch(/save or search memories, always use that project/);
+	});
+});
+
+describe.skipIf(process.platform === "win32")("identityArgs", () => {
+	it("leaves the prompt readable by the engine's user, whatever mode the file had", () => {
+		const dataDir = tempDir();
+		const path = join(dataDir, "identity.md");
+		writeFileSync(path, "old", { mode: 0o600 });
+		expect(identityArgs(dataDir)).toEqual(["--append-system-prompt", path]);
+		expect(statSync(path).mode & 0o777).toBe(0o644);
+		expect(readFileSync(path, "utf8")).toBe(readFileSync(IDENTITY_SOURCE, "utf8"));
 	});
 });
