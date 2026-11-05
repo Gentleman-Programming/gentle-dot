@@ -18,6 +18,9 @@ jobs:
     name: Engine and staged runtime
     runs-on: macos-latest
     timeout-minutes: 30
+    env:
+      # Keep this exact CI-only exception consistent across pnpm's automatic dependency checks.
+      PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: '["gentle-pi@4.6.0"]'
     defaults:
       run:
         shell: bash
@@ -33,9 +36,6 @@ jobs:
 
       # Keep lifecycle scripts enabled; pnpm-workspace.yaml allows esbuild and gentle-pi.
       - name: Install dependencies
-        env:
-          # Trust only this pinned release within the age window, for this step's processes.
-          PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: '["gentle-pi@4.6.0"]'
         run: pnpm install --frozen-lockfile --ignore-scripts=false
 
       - name: Typecheck
