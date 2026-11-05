@@ -56,9 +56,10 @@ mod capture_order {
 
     /// Match only the process-lifetime handles recorded at window creation. No resolver or
     /// main-thread dispatch is permitted here: callers may hold the affinity lock on a worker.
+    /// `handle` answers each part through an exhaustive match, so a new part cannot go unmatched.
     pub(super) fn current_window(saved: &[(Option<u64>, (super::working::Part, u32))], hwnd: usize,
-        handles: [Option<usize>; 2]) -> Option<usize> {
-        saved.iter().position(|(_, (window, _))| handles[*window as usize] == Some(hwnd))
+        handle: impl Fn(super::working::Part) -> Option<usize>) -> Option<usize> {
+        saved.iter().position(|(_, (window, _))| handle(*window) == Some(hwnd))
     }
 
     /// End call ownership, retaining an ownerless recovery value if native restoration fails.
@@ -80,10 +81,14 @@ mod capture_order {
         fn matching_under_the_affinity_lock_never_dispatches_a_window_query() {
             let saved = std::sync::Mutex::new(vec![(Some(1), (super::super::working::Part::Dot, 7))]);
             let guard = saved.lock().unwrap();
-            // The API accepts only recorded values, so querying Tauri is not an option.
-            assert_eq!(current_window(&guard, 101, [Some(101), Some(102)]), Some(0));
-            assert_eq!(current_window(&guard, 201, [Some(101), Some(102)]), None);
-            assert_eq!(current_window(&guard, 101, [None, None]), None);
+            // Callers pass the handles recorded at creation; querying Tauri is not an option.
+            let recorded = |part| match part {
+                super::super::working::Part::Dot => Some(101),
+                super::super::working::Part::Panel => Some(102),
+            };
+            assert_eq!(current_window(&guard, 101, recorded), Some(0));
+            assert_eq!(current_window(&guard, 201, recorded), None);
+            assert_eq!(current_window(&guard, 101, |_| None), None);
         }
 
         #[test]
