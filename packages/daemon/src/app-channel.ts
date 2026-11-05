@@ -4,6 +4,7 @@
  */
 
 import { createServer, Server as NetServer, Socket } from 'net';
+import type { Duplex } from 'node:stream';
 import { EventEmitter } from 'events';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -47,6 +48,16 @@ export interface AppChannelEvents {
 }
 
 export const APPROVAL_WAIT_MS = 30000;
+
+/**
+ * A frame larger than this is never written. The app closes the channel on a frame it cannot
+ * take, so refusing here keeps the channel open instead of killing it (S35.2).
+ */
+export const MAX_FRAME_BYTES = 256 * 1024;
+
+type ChannelFrame =
+  | { kind: 'request'; id: number; method: string; params?: unknown }
+  | { kind: 'response'; id: number; result?: unknown; error?: string };
 export const DEFAULT_SOCKET_PATH = path.join(
   process.env['HOME'] || '/tmp',
   '.gentle-dot',
@@ -59,11 +70,27 @@ export class AppChannel extends EventEmitter {
   private config: AppChannelConfig;
   private messageHandlers = new Map<string, (payload: unknown) => Promise<unknown>>();
 
-  constructor(config?: Partial<AppChannelConfig>) {
+  /** Set when the channel is the app's side of a pipe (fd 3) instead of a socket server. */
+  private stream: Duplex | null = null;
+  private buffer = '';
+  private frameSeq = 0;
+  private pendingFrames = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
+  private streamConnected = false;
+
+  constructor(config?: Partial<AppChannelConfig> | Duplex) {
+    // The daemon the desktop app launches gets its channel as a pipe; everything else uses the
+    // unix socket. One class, two transports, same frames.
+    if (config && typeof (config as Duplex).write === 'function' && typeof (config as Duplex).on === 'function') {
+      super();
+      this.config = { socketPath: DEFAULT_SOCKET_PATH, daemonPort: 0 };
+      this.attachStream(config as Duplex);
+      return;
+    }
     super();
+    const options = (config ?? {}) as Partial<AppChannelConfig>;
     this.config = {
-      socketPath: config?.socketPath || DEFAULT_SOCKET_PATH,
-      daemonPort: config?.daemonPort || 4317,
+      socketPath: options.socketPath || DEFAULT_SOCKET_PATH,
+      daemonPort: options.daemonPort || 4317,
     };
 
     // Register default handlers
@@ -282,6 +309,142 @@ export class AppChannel extends EventEmitter {
   private async handleConnectorStatus(payload: unknown): Promise<unknown> {
     return { status: 'unknown' };
   }
+  /** Wires a pipe as the channel: line-delimited JSON frames both ways. */
+  private attachStream(stream: Duplex): void {
+    this.stream = stream;
+    this.streamConnected = true;
+    stream.on('data', (chunk: Buffer) => this.readFrames(chunk));
+    const lost = () => {
+      if (!this.streamConnected) return;
+      this.streamConnected = false;
+      for (const [, pending] of this.pendingFrames) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error('app channel closed'));
+      }
+      this.pendingFrames.clear();
+      this.emit('disconnect');
+    };
+    stream.on('close', lost);
+    stream.on('end', lost);
+    stream.on('error', lost);
+  }
+
+  private readFrames(chunk: Buffer): void {
+    this.buffer += chunk.toString();
+    let index: number;
+    while ((index = this.buffer.indexOf('\n')) >= 0) {
+      const line = this.buffer.slice(0, index).trim();
+      this.buffer = this.buffer.slice(index + 1);
+      if (line === '') continue;
+      let frame: ChannelFrame;
+      try {
+        frame = JSON.parse(line) as ChannelFrame;
+      } catch {
+        continue;
+      }
+      if (frame.kind === 'response') {
+        const pending = this.pendingFrames.get(frame.id);
+        if (!pending) continue;
+        this.pendingFrames.delete(frame.id);
+        clearTimeout(pending.timer);
+        if (frame.error !== undefined) pending.reject(new Error(frame.error));
+        else pending.resolve(frame.result);
+      } else if (frame.kind === 'request') {
+        void this.answerFrame(frame);
+      }
+    }
+  }
+
+  /** Answers a request the app sent: registered handlers first, an error otherwise. */
+  private async answerFrame(frame: { id: number; method: string; params?: unknown }): Promise<void> {
+    const handler = this.messageHandlers.get(frame.method);
+    if (!handler) {
+      this.writeFrame({ kind: 'response', id: frame.id, error: `unknown method ${frame.method}` });
+      return;
+    }
+    try {
+      this.writeFrame({ kind: 'response', id: frame.id, result: await handler(frame.params) });
+    } catch (error) {
+      this.writeFrame({ kind: 'response', id: frame.id, error: (error as Error).message });
+    }
+  }
+
+  /** Writes one frame unless it is too large for the app to take. */
+  private writeFrame(frame: ChannelFrame): boolean {
+    if (!this.stream || !this.streamConnected) return false;
+    const line = JSON.stringify(frame) + '\n';
+    if (Buffer.byteLength(line) > MAX_FRAME_BYTES) return false;
+    try {
+      this.stream.write(line);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Asks the app one question and waits for its answer. */
+  async request(method: string, params: unknown = {}, timeoutMs = APPROVAL_WAIT_MS): Promise<unknown> {
+    if (!this.stream) throw new Error('not a pipe channel');
+    const id = ++this.frameSeq;
+    const sent = this.writeFrame({ kind: 'request', id, method, params });
+    if (!sent) throw new Error('frame refused');
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingFrames.delete(id);
+        reject(new Error(`no answer to ${method}`));
+      }, timeoutMs);
+      timer.unref?.();
+      this.pendingFrames.set(id, { resolve, reject, timer });
+    });
+  }
+
+  /**
+   * Asks the app to approve an action (S25.3). A request that would not fit in one frame is
+   * refused here, before it is sent, and the channel stays open.
+   */
+  async approve(request: AppApproval, signal?: AbortSignal): Promise<boolean> {
+    const id = this.frameSeq + 1;
+    const params = {
+      connector: request.connector,
+      action: request.action,
+      title: request.title ?? '',
+      summary: request.summary ?? '',
+      preview: request.preview ?? [],
+    };
+    const probe: ChannelFrame = { kind: 'request', id, method: 'approve', params };
+    if (Buffer.byteLength(JSON.stringify(probe) + '\n') > MAX_FRAME_BYTES) return false;
+
+    try {
+      const answer = await this.request('approve', params);
+      return (answer as { approved?: boolean } | null)?.approved === true;
+    } catch {
+      // A closed channel, a timeout or an aborted wait all mean the same: no consent.
+      void signal;
+      return false;
+    }
+  }
+
+  /** Whether the app is still on the other side. */
+  get connected(): boolean {
+    if (this.stream) return this.streamConnected;
+    return this.server !== null;
+  }
+
+  /** Closes the channel: the pipe ends, or the socket server stops. */
+  close(): void {
+    if (this.stream) {
+      this.streamConnected = false;
+      try {
+        this.stream.end();
+      } catch {
+        // already gone
+      }
+      this.stream = null;
+      return;
+    }
+    void this.stop();
+  }
+
 }
 
 /**
