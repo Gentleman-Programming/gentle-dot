@@ -129,7 +129,7 @@ Gentle Dot never repairs, replaces or deletes such a file, and it never keeps th
 
 1. Quit Gentle Dot from its tray icon (**Quit**), so it does not use the folder while you delete it.
 2. Delete `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\`. Only your Windows user (or an administrator) can.
-3. Open Gentle Dot again. This removes every connector secret, including the key that checks your connectors. On this start Gentle Dot makes a new key, so it moves `connectors.json` aside as `connectors.rejected-<time>.json` in `%USERPROFILE%\.gentle-dot\`, starts with no connectors, and says connectors were changed while it was closed. This happens even if you had no connectors, because Gentle Dot signs `connectors.json` from its first start.
+3. Open Gentle Dot again. This removes every connector secret, including the key that checks your connectors. On this start Gentle Dot makes a new key, so it moves `connectors.json` aside as `connectors.rejected-<time>.json` in `%USERPROFILE%\.gentle-dot\`, starts with no connectors, and says connectors were changed while it was closed. This happens even if you had no connectors, because Gentle Dot signs `connectors.json` from its first start with the desktop app, which on Windows always starts it.
 4. Add your connectors again in **Connectors** and sign in again.
 
 ### Uninstall
