@@ -1,6 +1,8 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, rm, writeFile } from "node:fs/promises";
+// Sync on purpose: these are a few small local files, and S25.8 keeps async file work off
+// libuv's thread pool (tests/engine-access.test.ts enforces it).
+import { copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -192,13 +194,18 @@ class TranscriberServer {
 				);
 			}, this.progressIntervalMs);
 			try {
-				await mkdir(this.dir, { recursive: true });
-				await copyFile(join(source, "transcriber.js"), this.script);
-				await copyFile(join(source, "package.json"), join(this.dir, "package.json"));
+				// Yield between the steps exactly like the async version did: the installer the caller
+				// injects runs afterwards and expects those microtasks to have run.
+				await Promise.resolve();
+				mkdirSync(this.dir, { recursive: true });
+				await Promise.resolve();
+				copyFileSync(join(source, "transcriber.js"), this.script);
+				await Promise.resolve();
+				copyFileSync(join(source, "package.json"), join(this.dir, "package.json"));
 				await this.installDeps();
 				this.log?.("voice: local transcriber installed");
 			} catch (error) {
-				await rm(this.script, { force: true });
+				rmSync(this.script, { force: true });
 				throw error;
 			} finally {
 				clearInterval(progress);
@@ -380,10 +387,10 @@ export class VoiceService {
 		const type = mime.split(";")[0]?.trim().toLowerCase() ?? "";
 		const extension = EXTENSIONS[type] ?? "webm";
 		const directory = join(tmpdir(), "dot-voice");
-		await mkdir(directory, { recursive: true });
+		mkdirSync(directory, { recursive: true });
 		const file = join(directory, `note-${process.pid}-${Date.now()}.${extension}`);
 		try {
-			await writeFile(file, Buffer.from(data, "base64"));
+			writeFileSync(file, Buffer.from(data, "base64"));
 			const text = await this.transcriber.transcribe(file);
 			const transcript = text.trim();
 			return transcript ? { ok: true, text: transcript } : { ok: false, reason: REASONS.empty };
@@ -391,7 +398,11 @@ export class VoiceService {
 			this.log("transcription failed: local transcriber");
 			return { ok: false, reason: REASONS.transcribeFailed };
 		} finally {
-			rm(file, { force: true }).catch(() => {});
+			try {
+				rmSync(file, { force: true });
+			} catch {
+				// the temp file is best effort
+			}
 		}
 	}
 
