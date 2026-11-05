@@ -110,6 +110,24 @@ describe("connectors over the protocol", () => {
 		expect(messages.some((m) => m.type === "user_message")).toBe(false);
 	});
 
+	it("opens the connectors screen when the user types /mcp", async () => {
+		const { send, find, messages } = await setup();
+		send({ type: "connectors_list" });
+		const list = await find("connectors");
+		expect(list.connectors.map((c) => [c.id, c.status])).toEqual([
+			["notion", "off"],
+			["linear", "off"],
+			["atlassian", "off"],
+			["discord", "off"],
+			["slack", "off"],
+			["gmail", "off"],
+		]);
+		expect(list.open).toBeUndefined();
+		send({ type: "send", text: "/mcp" });
+		expect((await find("connectors", (m) => m.open === true)).connectors).toHaveLength(6);
+		expect(messages.some((m) => m.type === "user_message")).toBe(false);
+	});
+
 	it("connects: the sign-in goes to the window that asked, every window is refreshed, and the agent restarts with the new policy", async () => {
 		const { d, send, find, agentEnv, connect: other } = await setup({ browser: "auto" });
 		const second = await other();
