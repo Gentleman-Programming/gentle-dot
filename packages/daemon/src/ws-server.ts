@@ -8,6 +8,7 @@ import { createServer, IncomingMessage, Server as HttpServer } from 'http';
 import { URL } from 'url';
 import { EventEmitter } from 'events';
 import { CONNECTOR_TYPES, ConnectorRegistry, type ConnectorInfo, type ConnectorType } from './connector-registry.ts';
+import type { UploadStore } from './uploads.ts';
 import type { AppConfig } from './config-loader.ts';
 
 export type BridgeMessageType =
@@ -201,6 +202,11 @@ export class WsServer extends EventEmitter {
   private handleHttpRequest(req: IncomingMessage, res: import('http').ServerResponse): void {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
 
+    if (url.pathname === '/upload') {
+      this.handleUpload(req, res);
+      return;
+    }
+
     if (url.pathname === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, timestamp: Date.now() }));
@@ -226,6 +232,20 @@ export class WsServer extends EventEmitter {
       return;
     }
 
+    // The daemon no longer ships a window (the desktop app does), but the root answers so a
+    // browser or a health check that lands here sees something alive instead of a 404.
+    if (url.pathname === '/' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<!doctype html><title>Gentle Dot</title><p>Gentle Dot is running.</p>');
+      return;
+    }
+
+    // A path the daemon does not serve: wrong method for a known place is a 405, anything else 404.
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405, { Allow: 'GET, HEAD' });
+      res.end();
+      return;
+    }
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not found' }));
   }
@@ -338,6 +358,85 @@ export class WsServer extends EventEmitter {
   /**
    * Handle hello message (authentication handshake)
    */
+  /**
+   * `POST /upload`: the desktop app sends a file the user dropped on the window.
+   *
+   * The access key travels in the Authorization header only (never the address, which ends up in
+   * logs), a foreign origin is refused before anything is read, and the store enforces the size
+   * limits while the body streams so a refused file never lands on disk.
+   */
+  private handleUpload(req: IncomingMessage, res: import('http').ServerResponse): void {
+    const origin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
+    const allowOrigin = origin && this.allowedOrigins.has(origin) ? origin : undefined;
+    const cors: Record<string, string> = allowOrigin
+      ? {
+          'Access-Control-Allow-Origin': allowOrigin,
+          'Access-Control-Allow-Methods': 'POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'authorization, x-file-name, x-upload-id, content-type',
+        }
+      : {};
+
+    if (origin !== undefined && !allowOrigin) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code: 'origin_refused', message: 'That origin is not allowed.' }));
+      return;
+    }
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, cors);
+      res.end();
+      return;
+    }
+    if (req.method !== 'POST') {
+      res.writeHead(405, { ...cors, Allow: 'POST, OPTIONS' });
+      res.end();
+      return;
+    }
+
+    const authorization = typeof req.headers.authorization === 'string' ? req.headers.authorization : '';
+    const bearer = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : '';
+    if (bearer !== this.getAuthToken()) {
+      res.writeHead(401, { ...cors, 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code: 'unauthorized', message: 'A valid access key is required.' }));
+      return;
+    }
+
+    const rawName = typeof req.headers['x-file-name'] === 'string' ? req.headers['x-file-name'] : '';
+    const name = rawName === '' ? '' : decodeURIComponent(rawName);
+    if (name.trim() === '') {
+      res.writeHead(400, { ...cors, 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code: 'name_required', message: 'A file name is required.' }));
+      return;
+    }
+
+    const uploadId = typeof req.headers['x-upload-id'] === 'string' ? req.headers['x-upload-id'] : undefined;
+    const declared = Number(req.headers['content-length'] ?? 0);
+    const store = this.uploads;
+    if (!store) {
+      res.writeHead(503, { ...cors, 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code: 'uploads_unavailable', message: 'Uploads are not available.' }));
+      return;
+    }
+
+    // A body that stops mid-flight leaves nothing behind: the store destroys what it wrote.
+    req.on('aborted', () => req.destroy());
+
+    void store
+      .receive(req, { name, ...(declared > 0 ? { length: declared } : {}), ...(uploadId ? { uploadId } : {}) })
+      .then((outcome) => {
+        if (outcome.ok) {
+          res.writeHead(200, { ...cors, 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(outcome.file));
+          return;
+        }
+        res.writeHead(outcome.status, { ...cors, 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ code: outcome.code, message: outcome.message }));
+      })
+      .catch((error: Error) => {
+        res.writeHead(500, { ...cors, 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ code: 'upload_failed', message: error.message }));
+      });
+  }
+
   /**
    * The client protocol's handshake: same daemon token, no connector type. A window gets the
    * flat `ready` the protocol expects, and from then on its frames go to `onAppMessage`.
@@ -620,6 +719,15 @@ export class WsServer extends EventEmitter {
   /**
    * Get authentication token from config or env
    */
+  /** Where an uploaded file goes; set by the daemon once its workspace is known. */
+  uploads: UploadStore | null = null;
+
+  /**
+   * Origins the desktop app's windows come from. Anything else is refused, here and on the upload
+   * endpoint, because a page the user happens to open must not drive their assistant.
+   */
+  allowedOrigins = new Set<string>(['tauri://localhost', 'https://tauri.localhost']);
+
   /** Names the model the assistant is running, for the window's ready frame. */
   modelName: (() => string | undefined) | null = null;
 

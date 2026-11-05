@@ -13,6 +13,8 @@ import { childGuardFile, installChildGuardFile, watchChildGuard } from './child-
 import { Transcript } from './transcript.ts';
 import { AuthManager, createModelAuthRuntime, type AuthRuntime } from './auth.ts';
 import { ProfileError, ProfileStore, defaultImportPath, splitModel, toModelOptions } from './profiles.ts';
+import { UploadStore, composePrompt } from './uploads.ts';
+import type { AttachmentRef } from '@gentle-dot/protocol';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createRequire } from 'node:module';
@@ -43,6 +45,8 @@ export interface DaemonOptions {
   authRuntime?: () => Promise<AuthRuntime>;
   /** Another setup's profiles.json, only ever read, for the one-time import. */
   profilesImportPath?: string;
+  /** Upload limits for the desktop app's files; the store's defaults apply when absent. */
+  uploadLimits?: { fileBytes: number; messageBytes: number; files: number };
 }
 
 /** Las peticiones de UI que son preguntas para el usuario; `setStatus`/`notify` no lo son. */
@@ -117,6 +121,11 @@ export class Daemon {
 
     // WebSocket server events
     this.wsServer.modelName = () => this.currentModel?.name;
+    this.uploads = new UploadStore({
+      workspace: this.config.daemon.workspace,
+      ...(this.options.uploadLimits ? { limits: this.options.uploadLimits } : {}),
+    });
+    this.wsServer.uploads = this.uploads;
 
     this.wsServer.on('onMessage', (connectorId: string, message: any) => {
       this.handleBridgeMessage(connectorId, message);
@@ -127,7 +136,7 @@ export class Daemon {
     this.wsServer.on('onAppMessage', (clientId: string, message: any) => {
       switch (message?.type) {
         case 'send':
-          this.chatSend(clientId, String(message.text ?? ''));
+          this.chatSend(clientId, String(message.text ?? ''), message.attachments as AttachmentRef[] | undefined);
           break;
         case 'models_list': {
           void this.modelsScreen(clientId);
@@ -356,6 +365,14 @@ export class Daemon {
     } | null;
     const raw = answer?.data?.models ?? answer?.models;
     const models = Array.isArray(raw) ? raw : [];
+    // The window's message may carry files; whether they travel as pixels depends on the model.
+    const runningEntry = models.find((entry: unknown) => {
+      const model = entry as { provider?: unknown; id?: unknown };
+      return model?.provider === running?.provider && model?.id === running?.id;
+    }) as { input?: unknown } | undefined;
+    if (this.currentModel)
+      this.currentModel.images =
+        Array.isArray(runningEntry?.input) && runningEntry.input.includes('image');
 
     const byProvider = new Map<string, { provider: string; name: string; models: unknown[] }>();
     for (const entry of models) {
@@ -405,8 +422,17 @@ export class Daemon {
   private async modelsScreen(clientId?: string): Promise<void> {
     try {
       const { current, groups } = await this.modelCatalog();
+      // `images` is the daemon's own bookkeeping for attachments: the picker gets the four fields.
+      const shown = current
+        ? {
+            provider: current.provider,
+            id: current.id,
+            name: current.name,
+            ...(current.thinking ? { thinking: current.thinking } : {}),
+          }
+        : undefined;
       const frame: Record<string, unknown> = {
-        ...(current ? { current } : {}),
+        ...(shown ? { current: shown } : {}),
         groups,
         profiles: this.quickPicks(),
       };
@@ -788,11 +814,20 @@ export class Daemon {
   private restarting = false;
   private restartPending = false;
 
+  /** Files the user dropped on a window, and the prompt they belong to. */
+  private uploads: UploadStore | null = null;
+
   /** A model chosen during a reply: it applies to the next message, not this one. */
   private pendingModel: { provider: string; id: string; name: string } | null = null;
 
   /** The model the assistant is running, as the last catalog read saw it. */
-  private currentModel: { provider: string; id: string; name: string; thinking?: string } | null = null;
+  private currentModel: {
+    provider: string;
+    id: string;
+    name: string;
+    thinking?: string;
+    images?: boolean;
+  } | null = null;
 
   /** A model switch waiting for the running turn to finish. */
   private pendingRoute: { model?: string; thinking?: string } | null = null;
@@ -960,10 +995,10 @@ export class Daemon {
   private async handleBridgeMessage(connectorId: string, message: any): Promise<void> {
     switch (message.type) {
       case 'send': {
-        const payload = message.payload as { text?: string; attachments?: unknown };
+        const payload = message.payload as { text?: string; attachments?: AttachmentRef[] };
         const text = payload?.text?.trim();
         if (!text) return;
-        this.chatSend(connectorId, text);
+        this.chatSend(connectorId, text, payload.attachments);
         break;
       }
 
@@ -1029,7 +1064,7 @@ export class Daemon {
    * mensaje va como steer (influye la corrida; la respuesta sigue yendo al
    * origen original). El 'send' rechazado por ocupado lo resuelve el bridge.
    */
-  private chatSend(connectorId: string, text: string): void {
+  private chatSend(connectorId: string, text: string, attachments?: AttachmentRef[]): void {
     // A command, not a prompt: the engine never sees it and the window gets the accounts screen.
     if (text.trim() === '/login') {
       void this.authList(connectorId, true);
@@ -1052,9 +1087,24 @@ export class Daemon {
       return;
     }
 
+    // Files the user dropped on the window: described in the prompt, and attached as pixels only
+    // when the running model can see them.
+    let message = text;
+    let images: { type: 'image'; mimeType: string; data: string }[] | undefined;
+    if (attachments && attachments.length > 0 && this.uploads) {
+      const resolved = this.uploads.resolve(attachments);
+      if (resolved.ok && resolved.files.length > 0) {
+        const composed = composePrompt(text, resolved.files, { images: this.currentModel?.images });
+        message = composed.message;
+        images = composed.images;
+        this.uploads.consume(attachments);
+      }
+    }
+
     this.transcript.add('user', text);
 
-    const params: Record<string, unknown> = { message: text };
+    const params: Record<string, unknown> = { message };
+    if (images && images.length > 0) params['images'] = images;
     if (this.activeRun) {
       params['streamingBehavior'] = 'steer';
       console.log(`[Daemon] steer desde ${connectorId} (run activo de ${this.activeRun.connectorId})`);

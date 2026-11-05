@@ -113,6 +113,10 @@ export interface BootDaemonOptions {
 	authRuntime?: () => Promise<import('../src/auth.ts').AuthRuntime>;
 	/** Another setup's profiles.json, read once for the import. */
 	profilesImportPath?: string;
+	/** Upload limits for the desktop app's files. */
+	uploadLimits?: { fileBytes: number; messageBytes: number; files: number };
+	/** Upload limits for the desktop app's files. */
+	uploadLimits?: { fileBytes: number; messageBytes: number; files: number };
 }
 
 export interface BootedDaemon {
@@ -172,6 +176,8 @@ export async function bootDaemon(options: BootDaemonOptions = {}): Promise<Boote
 		...(options.appChannel ? { appChannel: options.appChannel } : {}),
 		...(options.authRuntime ? { authRuntime: options.authRuntime } : {}),
 		...(options.profilesImportPath ? { profilesImportPath: options.profilesImportPath } : {}),
+		...(options.uploadLimits ? { uploadLimits: options.uploadLimits } : {}),
+		...(options.uploadLimits ? { uploadLimits: options.uploadLimits } : {}),
 	});
 
 	return {

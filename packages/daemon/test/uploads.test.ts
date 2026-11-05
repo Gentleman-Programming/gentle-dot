@@ -3,10 +3,13 @@ import { request } from "node:http";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import type { UploadedFile } from "@gentle-dot/protocol";
-import { afterEach, describe, expect, it } from "vitest";
-import { type DaemonOptions, type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { BRIDGE_KEY, bootDaemon } from "./harness.ts";
 import { composePrompt, sanitizeName, sniffMime, splitAttachments, UploadStore } from "../src/uploads.ts";
-import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { tempDir, waitFor } from "./helpers.ts";
+
+// Every case boots a daemon and waits for the engine.
+vi.setConfig({ testTimeout: 180_000 });
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 1, 2, 3]);
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46]);
@@ -271,30 +274,17 @@ describe("the prompt for a message with files", () => {
 
 // ---------------------------------------------------------------- over HTTP
 
-const daemons: DotDaemon[] = [];
+const daemons: { stop(): Promise<void> }[] = [];
 afterEach(async () => {
-	await Promise.all(daemons.splice(0).map((d) => d.close()));
+	await Promise.all(daemons.splice(0).map((d) => d.stop()));
 });
 
-async function daemon(extra: Partial<DaemonOptions> = {}) {
+async function daemon(extra: { uploadLimits?: { fileBytes: number; messageBytes: number; files: number } } = {}) {
 	const dataDir = tempDir();
-	const uiDir = join(dataDir, "ui");
-	mkdirSync(uiDir);
-	writeFileSync(join(uiDir, "index.html"), "<!doctype html><title>Gentle Dot</title>");
 	const workspace = join(dataDir, "workspace");
-	const d = await startDaemon({
-		port: 0,
-		host: "127.0.0.1",
-		dataDir,
-		workspace,
-		uiDir,
-		agentCommand: process.execPath,
-		agentArgs: [FAKE_AGENT],
-		backoffMs: [50],
-		...extra,
-	});
-	daemons.push(d);
-	return { d, workspace };
+	const booted = await bootDaemon({ dataDir, workspace, ...(extra.uploadLimits ? { uploadLimits: extra.uploadLimits } : {}) });
+	daemons.push(booted);
+	return { d: booted.daemon, workspace };
 }
 
 type Reply = { status: number; headers: Record<string, string | string[] | undefined>; body: string };
@@ -327,7 +317,7 @@ function post(
 }
 
 const auth = (d: DotDaemon, name = "notes.txt", extra: Record<string, string> = {}) => ({
-	Authorization: `Bearer ${d.token}`,
+	Authorization: `Bearer ${BRIDGE_KEY}`,
 	"X-File-Name": encodeURIComponent(name),
 	"Content-Type": "application/octet-stream",
 	...extra,
@@ -341,7 +331,7 @@ describe("POST /upload", () => {
 		const wrong = await post(d, { headers: { ...auth(d), Authorization: "Bearer wrong" }, body: "x" });
 		expect(wrong.status).toBe(401);
 		const query = await post(d, {
-			path: `/upload?token=${d.token}`,
+			path: `/upload?token=${BRIDGE_KEY}`,
 			headers: { "X-File-Name": "a.txt" },
 			body: "x",
 		});
@@ -412,7 +402,7 @@ describe("POST /upload", () => {
 			body: "x",
 		});
 		expect(unknown.status).toBe(404);
-		const nameless = await post(d, { headers: { Authorization: `Bearer ${d.token}` }, body: "x" });
+		const nameless = await post(d, { headers: { Authorization: `Bearer ${BRIDGE_KEY}` }, body: "x" });
 		expect(nameless.status).toBe(400);
 	});
 
