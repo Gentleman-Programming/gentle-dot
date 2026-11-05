@@ -504,6 +504,8 @@ export class Daemon {
       logLevel: this.config.daemon.log_level as any,
       noAutoSetup: this.options.noAutoSetup,
       engineCommand: this.options.engineCommand,
+      // Sessions live next to the daemon's data so history survives an engine restart.
+      sessionDir: path.join(this.config.daemon.data_dir, 'sessions'),
     };
 
     await this.shellSpawner.start({

@@ -48,6 +48,8 @@ export interface ShellConfig {
   noAutoSetup?: boolean;  // GENTLE_SHELL_NO_AUTO_SETUP=1
   /** Engine argv override: `[bin, ...args]`. Defaults to `gentle-shell` from PATH. */
   engineCommand?: string[];
+  /** Where the engine keeps its session files. Without it the engine starts from nothing. */
+  sessionDir?: string;
   /** Agent home for the engine's own state (auth, settings). Defaults to config.home. */
   agentHome?: string;
 }
@@ -286,11 +288,15 @@ export class GentleShellSpawner extends EventEmitter {
    * --no-auto-setup flags are rejected by it and must not be passed.
    */
   private buildArgs(config: ShellConfig): string[] {
-    return [
+    const args = [
       '--home', config.agentHome ?? config.home,
       '--mode', config.mode,
       '--append-system-prompt', IDENTITY_PROMPT,
     ];
+    // Without a session dir the engine keeps the conversation in memory only: a restart, a
+    // crash or a rotation loses everything the user said. Production passes it, so does this.
+    if (config.sessionDir) args.push('--session-dir', config.sessionDir);
+    return args;
   }
 
   /**
