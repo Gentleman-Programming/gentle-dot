@@ -382,6 +382,15 @@ export class WsServer extends EventEmitter {
     this.sendApp(ws, 'error', { code, message });
   }
 
+  /** Sends one flat frame to every connected window. */
+  broadcastApps(type: string, payload: unknown): number {
+    let sent = 0;
+    for (const ws of this.appClients.values()) {
+      if (this.sendApp(ws, type, payload)) sent++;
+    }
+    return sent;
+  }
+
   /**
    * Deliver to whoever the id names: a window (flat client protocol) or a connector (bridge
    * envelope). The daemon routes engine events through this so one code path serves both.

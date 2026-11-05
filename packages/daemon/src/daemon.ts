@@ -12,7 +12,7 @@ import { AppChannel, type AppMessage } from './app-channel.ts';
 import { childGuardFile, installChildGuardFile, watchChildGuard } from './child-guard.ts';
 import { Transcript } from './transcript.ts';
 import { AuthManager, createModelAuthRuntime, type AuthRuntime } from './auth.ts';
-import { ProfileStore, defaultImportPath, toModelOptions } from './profiles.ts';
+import { ProfileStore, defaultImportPath, splitModel, toModelOptions } from './profiles.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createRequire } from 'node:module';
@@ -147,6 +147,10 @@ export class Daemon {
           void this.profileWrite(clientId, () =>
             this.profileStore?.duplicate(String(message.from ?? ''), String(message.to ?? '')),
           );
+          break;
+        }
+        case 'profile_apply': {
+          void this.profileApply(String(message.name ?? ''), clientId);
           break;
         }
         case 'profile_delete': {
@@ -307,11 +311,11 @@ export class Daemon {
   }
 
   /** Sends the profiles screen: the store's view plus the models a role can point at. */
-  private async profilesScreen(clientId: string, open = false): Promise<void> {
+  private async profilesScreen(clientId: string | undefined, open = false): Promise<void> {
     if (!this.profileStore) return;
     try {
       const { profiles, active } = this.profileStore.list();
-      const models = this.modelOptions();
+      const models = await this.modelOptions();
       const frame: Record<string, unknown> = {
         profiles,
         roles: this.profileStore.roles(),
@@ -320,12 +324,65 @@ export class Daemon {
       };
       if (active !== undefined) frame['active'] = active;
       if (open) frame['open'] = true;
-      this.wsServer.deliver(clientId, 'profiles', frame);
+      if (clientId) this.wsServer.deliver(clientId, 'profiles', frame);
+      else this.wsServer.broadcastApps('profiles', frame);
     } catch (error) {
+      if (clientId)
+        this.wsServer.deliver(clientId, 'toast', {
+          level: 'error',
+          message: `No se pudieron leer los perfiles: ${(error as Error).message}`,
+        });
+    }
+  }
+
+  /**
+   * Applies a profile: the store writes every file the engine routes from, every window sees the
+   * new active profile, and the engine switches model. A running answer is not interrupted — the
+   * switch waits for it, and a model whose account is not connected is reported instead of forced.
+   */
+  private async profileApply(name: string, clientId?: string): Promise<void> {
+    if (!this.profileStore) return;
+    let route: { model?: string; thinking?: string } | undefined;
+    try {
+      route = await this.profileStore.apply(name);
+    } catch (error) {
+      if (clientId)
+        this.wsServer.deliver(clientId, 'toast', { level: 'warning', message: (error as Error).message });
+      return;
+    }
+    await this.profilesScreen(undefined);
+    if (!route?.model) return;
+    const switched = await this.switchModel(route);
+    if (!switched && clientId)
       this.wsServer.deliver(clientId, 'toast', {
-        level: 'error',
-        message: `No se pudieron leer los perfiles: ${(error as Error).message}`,
+        level: 'warning',
+        message:
+          "Profile applied. The main assistant keeps its current model until that model's account is connected.",
       });
+  }
+
+  /** Switches the engine's model, or parks the switch until the running turn settles. */
+  private async switchModel(route: { model?: string; thinking?: string }): Promise<boolean> {
+    if (!route.model) return false;
+    if (this.activeRun) {
+      this.pendingRoute = route;
+      return true;
+    }
+    const split = splitModel(route.model);
+    if (!split) return false;
+    try {
+      const answer = (await this.shellSpawner.rpc('set_model', {
+        provider: split.provider,
+        modelId: split.modelId,
+        busy: false,
+      })) as { success?: boolean } | null;
+      if (answer && answer.success === false) return false;
+      if (route.thinking) {
+        await this.shellSpawner.rpc('set_thinking_level', { level: route.thinking, busy: false });
+      }
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -333,14 +390,49 @@ export class Daemon {
   private async profileWrite(clientId: string, write: () => Promise<void> | undefined): Promise<void> {
     try {
       await write();
-      await this.profilesScreen(clientId);
+      // Every window shows the same store, and editing the profile in use re-applies it.
+      await this.profilesScreen(undefined);
+      const active = this.profileStore?.list().active;
+      if (active) {
+        const saved = this.profileStore?.list().profiles.find((profile) => profile.name === active);
+        if (saved) await this.profileApply(active, clientId);
+      }
     } catch (error) {
       this.wsServer.deliver(clientId, 'toast', { level: 'warning', message: (error as Error).message });
     }
   }
 
-  /** The models a profile role may use, read from the engine's own models file. */
-  private modelOptions(): unknown[] {
+  /**
+   * The models a profile role may use: the engine's own catalog, stripped to what the screen needs
+   * (provider, id, name, reasoning) so endpoints, headers and costs never travel. The engine is the
+   * source of truth — models.json only covers a store that already exists.
+   */
+  private async modelOptions(): Promise<unknown[]> {
+    try {
+      const answer = (await this.shellSpawner.rpc('get_available_models', {})) as {
+        success?: boolean;
+        data?: { models?: unknown };
+        models?: unknown;
+      } | null;
+      const models = answer?.data?.models ?? answer?.models;
+      if (Array.isArray(models)) {
+        return models.flatMap((raw: unknown) => {
+          if (typeof raw !== 'object' || raw === null) return [];
+          const model = raw as { provider?: unknown; id?: unknown; name?: unknown; reasoning?: unknown };
+          if (typeof model.provider !== 'string' || typeof model.id !== 'string') return [];
+          return [
+            {
+              provider: model.provider,
+              id: model.id,
+              name: typeof model.name === 'string' ? model.name : model.id,
+              reasoning: model.reasoning === true,
+            },
+          ];
+        });
+      }
+    } catch {
+      // fall through to the store's file
+    }
     const file = path.join(this.config.daemon.data_dir, 'gentle-ai', 'models.json');
     try {
       if (!existsSync(file)) return [];
@@ -466,6 +558,9 @@ export class Daemon {
   private restarting = false;
   private restartPending = false;
 
+  /** A model switch waiting for the running turn to finish. */
+  private pendingRoute: { model?: string; thinking?: string } | null = null;
+
   /** The assistant's own profiles and the files the engine routes models from. */
   private profileStore: ProfileStore | null = null;
 
@@ -489,7 +584,10 @@ export class Daemon {
 
   /** Fija el modelo del engine (GENTLE_DOT_ENGINE_MODEL, default nan/glm5.3-flash). */
   private configureEngineModel(): void {
-    const model = process.env['GENTLE_DOT_ENGINE_MODEL'] ?? 'nan/glm5.3-flash';
+    // No model named means the engine keeps whatever it has: forcing one would override the
+    // user's own choice (and a saved profile) every time it starts.
+    const model = process.env['GENTLE_DOT_ENGINE_MODEL'];
+    if (!model) return;
     const slash = model.indexOf('/');
     if (slash <= 0) {
       console.warn(`[Daemon] GENTLE_DOT_ENGINE_MODEL inválido: ${model} (se espera provider/model)`);
@@ -590,6 +688,11 @@ export class Daemon {
           this.restartPending = false;
           if (origin) this.wsServer.deliver(origin, 'agent_state', { state: 'idle' });
           this.appChannel.broadcast('agent_state', { state: 'idle' });
+          if (this.pendingRoute) {
+            const route = this.pendingRoute;
+            this.pendingRoute = null;
+            void this.switchModel(route);
+          }
           if (deferred) void this.restartEngine();
           break;
         }
