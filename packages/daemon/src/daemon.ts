@@ -10,6 +10,7 @@ import { GentleShellSpawner, ShellConfig } from './gentle-shell-spawner.js';
 import { McpProxy, McpServerConfig, McpMode, ApprovalRequest, ApprovalResponse } from './mcp-proxy.js';
 import { AppChannel, AppMessage } from './app-channel.js';
 import { childGuardFile, installChildGuardFile, watchChildGuard } from './child-guard.js';
+import { Transcript } from './transcript.js';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -107,6 +108,20 @@ export class Daemon {
         case 'send':
           this.chatSend(clientId, String(message.text ?? ''));
           break;
+        case 'get_history': {
+          const { messages, hasEarlier } = this.transcript.page(undefined);
+          this.wsServer.deliver(clientId, 'history', { messages, hasEarlier });
+          break;
+        }
+        case 'get_earlier': {
+          const { messages, hasEarlier } = this.transcript.page(String(message.before ?? ''));
+          this.wsServer.deliver(clientId, 'earlier', {
+            before: String(message.before ?? ''),
+            messages,
+            hasEarlier,
+          });
+          break;
+        }
         case 'ui_response': {
           const requestId = String(message.requestId ?? '');
           if (!requestId) break;
@@ -233,6 +248,9 @@ export class Daemon {
     return true;
   }
 
+  /** The conversation as this daemon saw it, for windows that connect later. */
+  private transcript = new Transcript('');
+
   /** Stops the child-guard watcher; set when the guard is in place. */
   private stopChildGuardWatch: (() => void) | null = null;
 
@@ -287,6 +305,7 @@ export class Daemon {
           const message = event['message'] as { role?: string; content?: unknown } | undefined;
           if (message?.role !== 'assistant' || !origin || !this.activeRun) break;
           const text = this.extractText(message.content);
+          this.transcript.add('assistant', text);
           if (text.trim() !== '') {
             this.wsServer.deliver(origin, 'message_done', {
               messageId: this.activeRun.messageId,
@@ -442,6 +461,8 @@ export class Daemon {
       return;
     }
 
+    this.transcript.add('user', text);
+
     const params: Record<string, unknown> = { message: text };
     if (this.activeRun) {
       params['streamingBehavior'] = 'steer';
@@ -567,6 +588,9 @@ export class Daemon {
     // Start App Channel
     await this.appChannel.start();
     console.log('[Daemon] App Channel started');
+
+    this.transcript = new Transcript(path.join(this.config.daemon.data_dir, 'transcript.jsonl'));
+    this.transcript.load();
 
     // Start Gentle Shell in RPC mode
     // Dev/smoke: skip the engine entirely (bridges and WS still work).
