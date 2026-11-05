@@ -66,7 +66,8 @@ export function ConnectorsPanel({
 	};
 	const guided = connectors.list?.find((c) => c.id === guideFor && c.guide);
 	// Values are asked first; once the sign-in page is on its way, it is a sign-in.
-	const settingUp = flow?.flowId?.startsWith("connector-setup-") && flow.events.length === 0;
+	const settingUp =
+		flow?.flowId?.startsWith("connector-setup-") && flow.events.every((event) => event.kind === "progress");
 
 	return (
 		<section className="accounts connectors" aria-label="Connectors">

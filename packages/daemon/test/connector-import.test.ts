@@ -182,6 +182,18 @@ describe("scanning other apps' MCP configs", () => {
 		expect(byName("codegraph")?.server).toEqual({ command: "codegraph", args: ["serve", "--mcp"] });
 	});
 
+	it("finds Claude Desktop and VS Code where Windows keeps them (AppData\\Roaming)", () => {
+		const home = tempDir();
+		write(home, "AppData/Roaming/Claude/claude_desktop_config.json", {
+			mcpServers: { files: { command: "npx", args: ["-y", "files-server"] } },
+		});
+		write(home, "AppData/Roaming/Code/User/mcp.json", {
+			servers: { docs: { type: "http", url: "https://docs.example.com/mcp" } },
+		});
+		const found = scanClientConfigs(home).map((server) => `${server.source}:${server.name}`);
+		expect(found).toEqual(["Claude Desktop:files", "VS Code:docs"]);
+	});
+
 	it("finds nothing in an empty home and skips files it cannot read", () => {
 		expect(scanClientConfigs(tempDir())).toEqual([]);
 	});

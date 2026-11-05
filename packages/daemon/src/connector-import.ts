@@ -1,6 +1,7 @@
 /**
  * Finds the MCP servers the user set up in other apps (S20), read-only: Claude Desktop, Claude Code,
- * Cursor, VS Code, Windsurf, OpenCode, and Gentle Shell, on macOS and Linux. Each entry is mapped to
+ * Cursor, VS Code, Windsurf, OpenCode, and Gentle Shell, on macOS, Linux, and Windows (Claude Desktop
+ * and VS Code keep theirs in `AppData\Roaming` there). Each entry is mapped to
  * the engine's `mcp.json` schema. Values keep their meaning: a literal stays a literal (escaped, so
  * the engine neither runs it as `!command` nor expands `$NAME`), an environment reference becomes the
  * engine's `${NAME}`, and a VS Code input becomes a value the user types in the app (`${input:<id>}`).
@@ -54,6 +55,7 @@ export function scanClientConfigs(home: string): ScannedServer[] {
 	for (const path of [
 		"Library/Application Support/Claude/claude_desktop_config.json",
 		".config/Claude/claude_desktop_config.json",
+		"AppData/Roaming/Claude/claude_desktop_config.json",
 	])
 		add("Claude Desktop", read(path)?.mcpServers, "literal");
 
@@ -67,7 +69,11 @@ export function scanClientConfigs(home: string): ScannedServer[] {
 	}
 
 	add("Cursor", read(".cursor/mcp.json")?.mcpServers, "vscode");
-	for (const path of ["Library/Application Support/Code/User/mcp.json", ".config/Code/User/mcp.json"]) {
+	for (const path of [
+		"Library/Application Support/Code/User/mcp.json",
+		".config/Code/User/mcp.json",
+		"AppData/Roaming/Code/User/mcp.json",
+	]) {
 		const vscode = read(path);
 		add("VS Code", vscode?.servers, "vscode", vscode?.inputs);
 	}
