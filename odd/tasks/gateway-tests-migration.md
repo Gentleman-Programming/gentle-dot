@@ -110,3 +110,26 @@ Orden de trabajo recomendado:
 3. `private-memory` → BORRAR (feature ausente). `real-agent` → PARK (red + clave).
 4. Todo lo de 3+ bloqueantes queda PARK hasta que la superficie exista (T4 perfiles/voice/
    uploads, T6 VPS), y se migra cuando se implemente esa feature — no antes.
+
+## Aprendizajes de la primera migración (2026-11-05)
+
+Intenté migrar `child-guard.test.ts` y aparecieron tres cosas que hay que resolver antes de
+seguir con él y con `isolation`:
+
+1. **`port: 0` cae al puerto del config (4317, producción).** `bootDaemon` ahora resuelve un
+   puerto libre y fija `GENTLE_DOT_PORT`/`GENTLE_DOT_HOST`, así que un test no puede tomar el
+   puerto de producción. Ya está arreglado y probado en el harness.
+2. **`createDaemon` espera al engine listo**, así que cada boot tarda decenas de segundos y el
+   default de vitest (5s) no alcanza: los archivos migrados necesitan
+   `vi.setConfig({ testTimeout: 180_000 })`.
+3. **La config del repo arranca MCP reales** (whatsapp-meta, discord, gmail → npm 404 y
+   `Request initialize timed out`), lo que hace lento y ruidoso cada boot. Hace falta una
+   config mínima válida para tests. Intento fallido documentado: `daemon:` + `connectors: {}`
+   da "Missing daemon configuration"; agregando los bloques `telegram`/`gmail`/`discord`/
+   `whatsapp` apagados, el loader falla con `Cannot read properties of undefined (reading
+   'startsWith')`. Falta descubrir qué campo exige (revisar `config-loader.ts` zona de
+   conectores y defaults) y generarla en el harness.
+
+Estado: `child-guard.test.ts` quedó **como estaba** (revertido) para no dejar un test roto en
+`main`; el harness quedó verde con el fix de puerto. Próximo paso concreto: resolver la config
+mínima (punto 3), después migrar `child-guard` e `isolation` con timeout de 180s.

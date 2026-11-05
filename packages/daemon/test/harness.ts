@@ -87,10 +87,17 @@ export async function bootDaemon(options: BootDaemonOptions = {}): Promise<Boote
 		else process.env[key] = value;
 	}
 
+	// Port 0 means "whatever the config says", and the repo's config says 4317 — the production
+	// port. A test must never be able to take it, so an unset port is resolved here and passed
+	// as a concrete number, and GENTLE_DOT_PORT keeps the loader from preferring the file.
+	const port = options.port ?? (await freePort());
+	process.env["GENTLE_DOT_PORT"] = String(port);
+	process.env["GENTLE_DOT_HOST"] = "127.0.0.1";
+
 	const { createDaemon } = await import("../src/daemon.ts");
 	const daemon = await createDaemon({
 		configPath: CONNECTORS_CONFIG_PATH,
-		port: options.port ?? 0,
+		port,
 		host: "127.0.0.1",
 		dataDir,
 		workspace,
@@ -99,7 +106,7 @@ export async function bootDaemon(options: BootDaemonOptions = {}): Promise<Boote
 
 	return {
 		daemon,
-		port: (daemon as unknown as { config?: { daemon?: { port?: number } } }).config?.daemon?.port ?? (options.port ?? 0),
+		port,
 		dataDir,
 		workspace,
 		socketPath: APP_SOCKET_PATH,
