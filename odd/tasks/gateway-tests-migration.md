@@ -330,3 +330,25 @@ Conclusion: **no es un cableado de una tarde**. Necesita (1) decidir de donde sa
 (catalogo del engine o de `models.json` del configHome), (2) montar el store, (3) los ocho
 handlers y el comando. Conviene encararlo como tarea propia y con sesion fresca, no apurado al
 final de una sesion larga.
+
+## Tarea de seguridad pendiente: archivos subidos (uploads)
+
+Los uploads hoy están acotados en lo básico —nombre saneado (sin traversal ni nombres reservados),
+detección de tipo por *magic bytes*, permisos 0600/0700, límites por archivo/mensaje/cantidad, y
+nada se sirve de vuelta por HTTP— pero falta el bloque de endurecimiento antes de exponerlos más:
+
+1. **Contenido activo**: SVG, HTML y JS no deben tratarse nunca como imágenes visibles. Hoy
+   `sniffMime` sólo reconoce PNG/JPEG/GIF/WebP; hay que confirmar que todo lo demás cae a
+   `application/octet-stream` y que **nunca** se sirve con un `Content-Type` renderizable.
+2. **Poliglotas**: un PNG válido puede llevar un script embebido después del IEND. Mitigación:
+   re-encodear la imagen (strip de metadatos/chunks) antes de pasarla al modelo, en vez de
+   reenviar los bytes originales.
+3. **Servido futuro**: si algún día se sirven los archivos de vuelta al navegador, hacerlo con
+   `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff` y sin `inline`.
+4. **Inyección de prompt desde archivos**: el contenido de un archivo leído por las herramientas
+   del engine entra al contexto del modelo; conviene delimitarlo y marcar que es dato, no
+   instrucción (mismo criterio que `composePrompt` ya usa para describir adjuntos).
+5. **Escaneo**: opcional, un antivirus/`clamav` sobre el archivo antes de exponerlo a herramientas.
+6. **Cuotas por usuario/ventana** además de por mensaje, para que un cliente no llene el disco.
+
+Estado: registrado como tarea propia. Los tests de `uploads` (23) cubren lo funcional, no esto.
