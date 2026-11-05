@@ -24,6 +24,7 @@ import {
 } from "../src/profiles.ts";
 import { HIDDEN_NAMES } from "../src/white-label.ts";
 import { tempDir } from "./helpers.ts";
+import { expectPosixMode } from "./support/windows.ts";
 
 function setup() {
 	const root = tempDir();
@@ -152,7 +153,7 @@ describe("profile store", () => {
 	it("writes the store atomically with mode 0600 and leaves no temp files", async () => {
 		const { store, configHome, profilesPath } = setup();
 		await store.save("a", { orchestrator: { model: "fake/fake-model" } });
-		expect(statSync(profilesPath).mode & 0o777).toBe(0o600);
+		expectPosixMode(statSync(profilesPath).mode, 0o600);
 		expect(readdirSync(configHome)).toEqual(["profiles.json"]);
 	});
 
@@ -217,7 +218,7 @@ describe("applying a profile", () => {
 			defaultProvider: "anthropic",
 			defaultModel: "claude-opus-4",
 		});
-		expect(statSync(modelsPath).mode & 0o777).toBe(0o600);
+		expectPosixMode(statSync(modelsPath).mode, 0o600);
 		// The agent's own frontmatter follows the profile, as the engine's apply does.
 		expect(readFileSync(agentFile, "utf8")).toBe(
 			"---\nname: gentle-ai-worker\nmodel: openai/gpt-5\nthinking: high\n---\nBody\n",
@@ -239,7 +240,7 @@ describe("applying a profile", () => {
 		await store.save("p", { "kit.helper": { model: "x/y" } });
 		await store.apply("p");
 		expect(readFileSync(explore, "utf8")).toBe("---\nname: gentle-ai-explore\ndescription: d\n---\nB\n");
-		expect(statSync(explore).mode & 0o777).toBe(0o644);
+		expectPosixMode(statSync(explore).mode, 0o644);
 		expect(readFileSync(helper, "utf8")).toBe("---\nname: helper\nmodel: x/y\npackage: kit\n---\nB\n");
 	});
 

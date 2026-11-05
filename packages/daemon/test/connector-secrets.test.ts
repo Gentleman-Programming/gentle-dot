@@ -3,15 +3,7 @@
 // them over its private channel and keeps them in memory only; typed values, OAuth sign-ins, and
 // refreshed tokens go there and to no file; without the app, connectors that need a secret fail
 // closed while the others keep working; and the secrets that files held before move there once.
-import {
-	chmodSync,
-	existsSync,
-	mkdirSync,
-	readdirSync,
-	readFileSync,
-	statSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -33,6 +25,7 @@ import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { fakeOAuth } from "./fake-oauth.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { itWithAppChannel } from "./support/windows.ts";
 
 const FAKE_SERVER = fileURLToPath(new URL("./fixtures/fake-mcp-server.ts", import.meta.url));
 const TOKEN = "discord-bot-token-0f9c2b7e";
@@ -589,15 +582,17 @@ describe("one-time migration into the app's store", () => {
 
 		const other = legacyInstall();
 		const unreadable = join(other.agentHome, "mcp-auth.json");
-		chmodSync(unreadable, 0o000);
-		const blocked = statSync(unreadable).mode;
+		// A directory cannot be read as a sign-in file on Linux, macOS, or Windows.
+		rmSync(unreadable);
+		mkdirSync(unreadable);
 		const second = storeWith(other.dataDir, new MemorySecretSource(), logs);
 		await second.migrate();
 		expect(await (await second.credentials("notion")).authProvider?.token()).toBe("notion-access");
 		expect((await second.credentials("discord")).env).toEqual({ DISCORD_TOKEN: TOKEN });
 		expect(existsSync(unreadable)).toBe(true);
-		expect(statSync(unreadable).mode).toBe(blocked);
-		chmodSync(unreadable, 0o600);
+		// Left as it was: never removed, replaced, or written into.
+		expect(statSync(unreadable).isDirectory()).toBe(true);
+		expect(readdirSync(unreadable)).toEqual([]);
 		expect(logs.join("\n")).not.toMatch(/notion-access|linear-access/);
 	});
 
@@ -714,30 +709,33 @@ async function daemonWith(options: { dataDir: string; app?: ReturnType<typeof fa
 }
 
 describe("connector secrets end to end", () => {
-	it("connects Notion through the app: OAuth runs in the daemon, the token lives only in the app's store, and the proxy sends it", async () => {
-		const dataDir = tempDir();
-		const app = fakeApp([], "allow");
-		const { d, notion, messages, mcpText, engineClient, clientId, ws } = await daemonWith({ dataDir, app });
-		const send = sendLikeThePanel(
-			app,
-			() => clientId,
-			(m) => ws.send(JSON.stringify(m)),
-		);
-		const pid = d.supervisor.pid;
-		send({ type: "connector_connect", connectorId: "notion" });
-		await waitFor(() => messages.find((m) => m.type === "auth_done" && m.ok));
-		await waitFor(() => d.supervisor.pid !== pid && d.supervisor.state === "ready");
-		await waitFor(() => JSON.parse(mcpText()).mcpServers.notion);
-		const client = await engineClient("notion");
-		expect((await client.listTools()).map((t) => t.name)).toEqual(["notion-search"]);
-		expect(notion.seen.every((auth) => auth === "Bearer access-token-1")).toBe(true);
-		expect(JSON.parse(app.secrets.get("connector/notion/signin") ?? "{}").tokens.access_token).toBe(
-			"access-token-1",
-		);
-		expect(app.secretCalls.join("\n")).not.toContain("access-token-1");
-		expect(filesContaining(dataDir, "access-token-1")).toEqual([]);
-		expect(filesContaining(dataDir, "refresh-token-1")).toEqual([]);
-	});
+	itWithAppChannel(
+		"connects Notion through the app: OAuth runs in the daemon, the token lives only in the app's store, and the proxy sends it",
+		async () => {
+			const dataDir = tempDir();
+			const app = fakeApp([], "allow");
+			const { d, notion, messages, mcpText, engineClient, clientId, ws } = await daemonWith({ dataDir, app });
+			const send = sendLikeThePanel(
+				app,
+				() => clientId,
+				(m) => ws.send(JSON.stringify(m)),
+			);
+			const pid = d.supervisor.pid;
+			send({ type: "connector_connect", connectorId: "notion" });
+			await waitFor(() => messages.find((m) => m.type === "auth_done" && m.ok));
+			await waitFor(() => d.supervisor.pid !== pid && d.supervisor.state === "ready");
+			await waitFor(() => JSON.parse(mcpText()).mcpServers.notion);
+			const client = await engineClient("notion");
+			expect((await client.listTools()).map((t) => t.name)).toEqual(["notion-search"]);
+			expect(notion.seen.every((auth) => auth === "Bearer access-token-1")).toBe(true);
+			expect(JSON.parse(app.secrets.get("connector/notion/signin") ?? "{}").tokens.access_token).toBe(
+				"access-token-1",
+			);
+			expect(app.secretCalls.join("\n")).not.toContain("access-token-1");
+			expect(filesContaining(dataDir, "access-token-1")).toEqual([]);
+			expect(filesContaining(dataDir, "refresh-token-1")).toEqual([]);
+		},
+	);
 
 	it("without the app, a connector without secrets still works end to end, and one with a secret says why it cannot (regression)", async () => {
 		const dataDir = tempDir();

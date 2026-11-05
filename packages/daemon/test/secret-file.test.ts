@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { FileSecretSource, NO_SECRETS_KEY, parseSecretsKey } from "../src/secret-file.ts";
 import { SecretsUnavailableError } from "../src/secret-source.ts";
 import { tempDir } from "./helpers.ts";
+import { expectPosixMode } from "./support/windows.ts";
 
 const SECRET = "xoxb-plain-bot-token-0123456789";
 
@@ -25,7 +26,7 @@ describe("encrypted secrets file", () => {
 		expect(text).not.toContain(SECRET);
 		expect(text).not.toContain(Buffer.from(SECRET).toString("base64"));
 		expect(text).not.toContain("a".repeat(64));
-		expect(statSync(file).mode & 0o777).toBe(0o600);
+		expectPosixMode(statSync(file).mode, 0o600);
 		// Every record has its own nonce: the same secret twice is two different ciphertexts.
 		await source.put("connector/discord/bot", SECRET);
 		const records = JSON.parse(readFileSync(file, "utf8")).records as Record<

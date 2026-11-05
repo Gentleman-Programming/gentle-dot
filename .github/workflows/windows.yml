@@ -68,6 +68,10 @@ jobs:
       # Match the exact CI-only policy used by the macOS job and pnpm's dependency checks.
       PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: '["gentle-pi@4.6.0"]'
     steps:
+      # The runner's Git checks text out with CRLF, which biome and text fixtures read as
+      # changes; the sources are LF.
+      - name: Keep LF line endings
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v6
@@ -111,7 +115,10 @@ jobs:
           pnpm --filter @gentle-dot/daemon run build:windows-stop -- --compiler "$compiler" --headers "$inputs/node-$version/include/node" --node-lib "$inputs/node.lib"
           if ($LASTEXITCODE -ne 0) { throw 'Native addon build failed' }
 
-      # The daemon test files that run on Windows (the runtime build uses the addon built above).
-      - name: Daemon tests
-        run: pnpm exec vitest run packages/daemon/test/windows-stop.test.ts packages/daemon/test/windows-app-channel.test.ts packages/daemon/test/app-channel-platform.test.ts packages/daemon/test/app-channel.test.ts packages/daemon/test/app-channel-fd.test.ts packages/daemon/test/windows-app-channel-addon.test.ts packages/daemon/test/process-tree.test.ts packages/daemon/test/supervisor.test.ts packages/daemon/test/runtime.test.ts packages/daemon/test/config.test.ts packages/daemon/test/isolation.test.ts packages/daemon/test/private-memory.test.ts packages/daemon/test/lifecycle.test.ts packages/daemon/test/cli.test.ts packages/daemon/test/runtime-build.test.ts scripts/package/test/lib.test.ts scripts/package/test/package-windows.test.ts
-
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Lint
+        run: pnpm lint
+      # The whole suite (the runtime build uses the addon built above).
+      - name: Tests
+        run: pnpm test

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { PIN_ATTEMPTS, PIN_LOCK_MS, PinGate } from "../src/web-pin.ts";
 import { tempDir } from "./helpers.ts";
+import { expectPosixMode } from "./support/windows.ts";
 
 const PIN = "482913";
 
@@ -29,7 +30,7 @@ describe("web PIN", () => {
 		expect(saved).toMatchObject({ version: 1, kdf: "scrypt" });
 		expect(typeof saved.salt).toBe("string");
 		expect(typeof saved.hash).toBe("string");
-		expect(statSync(file).mode & 0o777).toBe(0o600);
+		expectPosixMode(statSync(file).mode, 0o600);
 		// Two PINs set from the same digits still differ: the salt is random.
 		const other = gate();
 		await other.pin.set(PIN);
