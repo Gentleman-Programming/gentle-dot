@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Shared steps for setup-debian.sh and setup-arch.sh. Sourced, not run.
+# Shared steps for setup-debian.sh, setup-fedora.sh, and setup-arch.sh. Sourced, not run.
 # The distro script defines: DISTRO_NAME, SYSTEM_PACKAGES (array), missing_packages(),
 # and install_packages(). Everything else here runs as the user, without sudo.
 
@@ -12,6 +12,7 @@ APP_BINARY="$REPO_ROOT/apps/desktop/src-tauri/target/release/gentle-dot"
 ASSUME_YES=0
 LAUNCH=1
 STEP=0
+SKIP_ROOT_CHECK=${SKIP_ROOT_CHECK:-0}
 
 for arg in "$@"; do
 	case "$arg" in
@@ -62,7 +63,9 @@ confirm() {
 
 check_user() {
 	step "Checking the system"
-	if [ "$(id -u)" = 0 ]; then
+	# SKIP_ROOT_CHECK=1 is a test seam only: containers used by the repo's own checks run as
+	# root. It is not a supported way to install as root.
+	if [ "$(id -u)" = 0 ] && [ "$SKIP_ROOT_CHECK" != 1 ]; then
 		fail "run this script as your normal user, not root. It asks for sudo only to install system packages."
 	fi
 	info "Distribution: $DISTRO_NAME"

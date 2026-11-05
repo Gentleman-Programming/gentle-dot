@@ -80,10 +80,11 @@ cp /tmp/gentle-dot-icons/{32x32,64x64,128x128,128x128@2x}.png /tmp/gentle-dot-ic
 
 ## Linux
 
-Debian and Ubuntu (GNOME) and Omarchy (Arch with Hyprland) are built from source on the user's machine, because the app records the build machine's `node` and daemon paths (see above). The setup scripts install the system libraries (the only step that uses sudo, after asking), Node 24 under `~/.local/share/gentle-dot` when no Node 24+ is present, pnpm through corepack, and Rust through rustup, then build with `tauri build --no-bundle` and install `~/.local/bin/gentle-dot` and a menu entry:
+Debian and Ubuntu (GNOME), Fedora, and Omarchy (Arch with Hyprland) are built from source on the user's machine, because the app records the build machine's `node` and daemon paths (see above). The setup scripts install the system libraries (the only step that uses sudo, after asking), Node 24 under `~/.local/share/gentle-dot` when no Node 24+ is present, pnpm through corepack, and Rust through rustup, then build with `tauri build --no-bundle` and install `~/.local/bin/gentle-dot` and a menu entry:
 
 ```sh
 scripts/linux/setup-debian.sh    # Debian, Ubuntu (apt)
+scripts/linux/setup-fedora.sh    # Fedora (dnf)
 scripts/linux/setup-arch.sh      # Omarchy, Arch (pacman)
 scripts/linux/uninstall.sh       # removes the launcher, menu entry, and private Node; --purge also ~/.gentle-dot
 ```
