@@ -871,6 +871,7 @@ impl Daemon {
         // Established launches must authenticate while fd3 remains open, otherwise
         // daemon-side EOF aborts drain and prevents a clean managed root exit.
         let close_first = child_slot.as_ref().map_or(true, |child| !child.shutdown_requires_channel());
+        let mut port_held = None;
         if close_first {
             if let Some(channel) = channel_slot.as_ref() {
                 if let Err(error) = channel.close() {
@@ -888,10 +889,10 @@ impl Daemon {
             if let Err(error) = stop_child(child.as_mut(), grace) {
                 return self.windows_stop_failure(format!("owned Windows daemon shutdown/deletion is unfinished: {error}"));
             }
-            if let Err(reason) = self.windows_wait_port() {
-                child.retain_failure();
-                return self.windows_stop_failure(reason);
-            }
+            // Checked shutdown confirmed our root exited and its Job is empty, so whatever still
+            // answers on the port is another assistant. Ours is finished, not a failed launch:
+            // release it like any stopped owner, then report the other one.
+            port_held = self.windows_wait_port().err();
         }
         if !close_first {
             if let Some(channel) = channel_slot.as_ref() {
@@ -906,7 +907,10 @@ impl Daemon {
         if has_recovered { self.windows_recovery_admission(&child_slot)?; }
         drop(child_slot.take());
         drop(channel_slot.take());
-        Ok(())
+        match port_held {
+            Some(reason) => self.windows_stop_failure(reason),
+            None => Ok(()),
+        }
     }
 
     /// Blocking: call off the main thread.
@@ -917,7 +921,14 @@ impl Daemon {
         #[cfg(unix)]
         self.stop();
         #[cfg(windows)]
-        if let Err(reason) = self.stop() { return RestartOutcome::Failed(reason); }
+        if let Err(reason) = self.stop() {
+            // Stop finished what we owned, and another assistant answers on the port.
+            if reason == foreign_daemon_message(self.port) { return RestartOutcome::External; }
+            return RestartOutcome::Failed(reason);
+        }
+        // A second admission pass, deliberately: stop released both guards before returning,
+        // so another thread may have installed or failed an owner since. These are the states
+        // the windows_*_admission checks refuse, read again under the same child -> channel order.
         #[cfg(windows)]
         {
             let child = self.child.lock().unwrap();
@@ -1158,6 +1169,62 @@ mod windows_ownership_tests {
         daemon.stop().unwrap();
         assert!(daemon.child.lock().unwrap().is_none());
         assert!(daemon.channel.lock().unwrap().is_none());
+        drop(peer);
+    }
+
+    // Its checked shutdown succeeds; a retained failure is observable as a failed launch.
+    struct StoppedChild { calls: Arc<AtomicUsize>, failed: bool }
+    impl ChildProcess for StoppedChild {
+        fn id(&self) -> u32 { 4 }
+        fn launch_failed(&self) -> bool { self.failed }
+        fn retain_failure(&mut self) { self.failed = true; }
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> { Ok(None) }
+        fn kill(&mut self) -> io::Result<()> { panic!("synthetic stopped child") }
+        fn wait(&mut self) -> io::Result<ExitStatus> { panic!("synthetic stopped child") }
+        fn shutdown_owned(&mut self, _: Duration) -> io::Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn stopped_child_is_released_not_retained_when_another_assistant_holds_the_port() {
+        let foreign = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut daemon = Daemon::new(1, PathBuf::new(), None).with_channel(Arc::new(RefusingHandler));
+        daemon.health = Some(Arc::new({ let foreign = foreign.clone(); move || foreign.load(Ordering::SeqCst) }));
+        let calls = Arc::new(AtomicUsize::new(0));
+        *daemon.child.lock().unwrap() = Some(Box::new(StoppedChild { calls: calls.clone(), failed: false }));
+        let (endpoint, peer) = channel_pair().unwrap();
+        let channel = AppChannel::start(endpoint, Arc::new(RefusingHandler)).unwrap();
+        *daemon.channel.lock().unwrap() = Some(channel.clone());
+        assert_eq!(daemon.stop(), Err(foreign_daemon_message(1)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(daemon.child.lock().unwrap().is_none(), "a stopped child is finished, not a failed launch");
+        assert!(daemon.channel.lock().unwrap().is_none());
+        assert!(!channel.is_open());
+        assert_eq!(daemon.refusal(), Some(foreign_daemon_message(1)));
+        // While the other assistant runs, restart reports it as such, and never stops ours again.
+        assert!(matches!(daemon.restart(Duration::ZERO), RestartOutcome::External));
+        assert_eq!(daemon.ensure_running(Duration::ZERO), Err(foreign_daemon_message(1)));
+        foreign.store(false, Ordering::SeqCst);
+        assert_eq!(daemon.stop(), Ok(()));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        drop(peer);
+    }
+
+    #[test]
+    fn restart_reports_another_assistant_that_took_the_port_after_ours_stopped() {
+        let mut daemon = Daemon::new(1, PathBuf::new(), None).with_channel(Arc::new(RefusingHandler));
+        daemon.health = Some(Arc::new(|| true));
+        let calls = Arc::new(AtomicUsize::new(0));
+        *daemon.child.lock().unwrap() = Some(Box::new(StoppedChild { calls: calls.clone(), failed: false }));
+        let (endpoint, peer) = channel_pair().unwrap();
+        *daemon.channel.lock().unwrap() = Some(AppChannel::start(endpoint, Arc::new(RefusingHandler)).unwrap());
+        assert!(matches!(daemon.restart(Duration::ZERO), RestartOutcome::External));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(daemon.child.lock().unwrap().is_none());
+        assert!(daemon.channel.lock().unwrap().is_none());
+        assert_eq!(daemon.refusal(), Some(foreign_daemon_message(1)));
         drop(peer);
     }
 
