@@ -372,3 +372,34 @@ espera cuatro comportamientos:
 Conclusión: no es un cableado corto — es el subsistema de conectores completo (OAuth + aprobación
 por la app + política + mcp.json + reinicio). Merece sesión propia y fresca, empezando por el
 runner de OAuth y el frame de lectura (`connectors` + `/connectors`), que es lo que da visibilidad.
+
+## Avance de `connectors-gateway` (2026-11-05, sesión 3)
+
+`2 de 8` y el resto medido con precisión (`bded1bd`).
+
+Hecho:
+- El daemon construye `ConnectorStore` (junto a los archivos del engine, con `guardPath` y
+  `childGuard: false` porque el daemon ya supervisa el child guard) y `ConnectorManager` encima.
+- `connectors_list` y el comando `/connectors` responden el frame con las **seis entradas del
+  catálogo en orden** y su `status`, con `open` sólo en el comando.
+- **La política del engine ahora sale del store** (`store.policy()`), no del builder casero: lo
+  que el guard exige y lo que la pantalla muestra ya no pueden divergir.
+- `connector_connect` / `connector_sign_in` / `connector_disconnect` pasan por el manager con el
+  **mismo dueño por ventana** que la pantalla de cuentas: los pasos del sign-in van sólo a la
+  ventana que lo pidió, un `auth_reply` responde cualquiera de los dos flujos, una ventana que se
+  va cancela también su flujo de conector, y un cambio refresca todas las ventanas y **reinicia el
+  engine** (nunca en medio de una respuesta).
+
+Falta (lo que dejan rojo los 6 restantes):
+1. **Fuente de secretos de la app** (`ConnectorStoreOptions.secrets`): sin ella, un conector que
+   necesita secreto falla cerrado (`NO_APP`) y el sign-in no completa. Es el adaptador entre el
+   canal de la app y el almacén; `connector-credentials.ts` resuelve valores del engine, no es
+   esto. **Es la pieza que destraba el resto.**
+2. **Restaurar un `mcp.json` alterado** antes de que el engine arranque de nuevo.
+3. **Cambio de modo** (`setMode`) con confirmación nativa de la app, y `remove`.
+4. **Reposición de archivos mientras el agente corre** y después de que el turno termina (B1).
+5. Conector apagado que sigue apagado aunque el asistente edite los archivos (B1).
+6. Cancelación por `auth_reply` y rechazo de conectores desconocidos (códigos del manager).
+
+Orden sugerido para retomar: (1) fuente de secretos → (6) códigos y cancelación → (2) mcp.json →
+(3) modos → (4)(5) reposición.
