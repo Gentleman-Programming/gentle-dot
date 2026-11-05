@@ -85,7 +85,7 @@ describe("queued messages in the chat", () => {
 		rerender(surface(s));
 		expect(screen.queryByRole("article", { name: "Queued message" })).not.toBeInTheDocument();
 		expect(screen.queryByText("Queued")).not.toBeInTheDocument();
-		const users = [...container.querySelectorAll(".message-user")];
+		const users = [...container.querySelectorAll(".message-user .message-body")];
 		expect(users.map((u) => u.textContent)).toEqual(["slow", "queued one"]);
 		expect(users.every((u) => !u.classList.contains("message-queued"))).toBe(true);
 	});

@@ -27,18 +27,18 @@ export function summarize(activities: Activity[]): string {
 		.join(" · ");
 }
 
-const COPY_LABELS = { idle: "Copy answer", copied: "Copied", failed: "Could not copy" } as const;
+const COPY_RESULTS = { copied: "Copied", failed: "Could not copy" } as const;
 const COPY_RESET_MS = 2000;
 
-/** Copies the answer's original markdown, so code blocks and links survive the paste. */
-function CopyAnswer({ text }: { text: string }) {
-	const [status, setStatus] = useState<keyof typeof COPY_LABELS>("idle");
+/** Copies a message's original text, so an answer's code blocks and links survive the paste. */
+function CopyMessage({ text, label }: { text: string; label: string }) {
+	const [result, setResult] = useState<keyof typeof COPY_RESULTS>();
 	const resetTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 	useEffect(() => () => clearTimeout(resetTimer.current), []);
-	const show = (next: "copied" | "failed") => {
+	const show = (next: keyof typeof COPY_RESULTS) => {
 		clearTimeout(resetTimer.current);
-		setStatus(next);
-		resetTimer.current = setTimeout(() => setStatus("idle"), COPY_RESET_MS);
+		setResult(next);
+		resetTimer.current = setTimeout(() => setResult(undefined), COPY_RESET_MS);
 	};
 	// Awaited in a try: on plain HTTP navigator.clipboard is undefined, which throws instead of rejecting.
 	const copy = async () => {
@@ -51,7 +51,7 @@ function CopyAnswer({ text }: { text: string }) {
 	};
 	return (
 		<button type="button" className="message-copy" onClick={copy}>
-			{COPY_LABELS[status]}
+			{result ? COPY_RESULTS[result] : label}
 		</button>
 	);
 }
@@ -142,8 +142,15 @@ export function MessageList({ messages, queued = [], hasEarlier = false, onShowE
 							</div>
 						) : null}
 						{message.streaming ? <span className="caret" aria-hidden="true" /> : null}
-						{message.text && message.role === "assistant" && !message.streaming ? (
-							<CopyAnswer text={message.text} />
+						{message.text && message.role === "user" ? (
+							<CopyMessage text={message.text} label="Copy prompt" />
+						) : null}
+						{/* Text the model writes between tool calls is followed by more of the same turn. */}
+						{message.text &&
+						message.role === "assistant" &&
+						!message.streaming &&
+						messages[index + 1]?.role !== "assistant" ? (
+							<CopyMessage text={message.text} label="Copy answer" />
 						) : null}
 						{message.note ? (
 							<p

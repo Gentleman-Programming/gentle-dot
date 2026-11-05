@@ -87,14 +87,31 @@ describe("copying an answer", () => {
 		expect(screen.getByRole("button", { name: "Copied" })).toBeInTheDocument();
 	});
 
-	it("offers no copy while an answer streams, on your own messages, or on an empty answer", () => {
+	it("offers no copy while an answer streams or on an empty answer", () => {
+		render(list([message({ id: "a", streaming: true }), message({ id: "c", text: "" })]));
+		expect(screen.queryByRole("button", { name: "Copy answer" })).not.toBeInTheDocument();
+	});
+
+	it("copies a prompt you sent", async () => {
+		const writeText = vi.fn(async () => {});
+		const user = mockClipboard(writeText);
+		render(list([message({ id: "u1", role: "user", text: "hello **there**" })]));
+		await user.click(screen.getByRole("button", { name: "Copy prompt" }));
+		expect(writeText).toHaveBeenCalledWith("hello **there**");
+		expect(await screen.findByRole("button", { name: "Copied" })).toBeInTheDocument();
+	});
+
+	it("offers copy only on the turn's last answer, not on text between tool calls", () => {
 		render(
 			list([
-				message({ id: "a", streaming: true }),
-				message({ id: "b", role: "user", text: "hello" }),
-				message({ id: "c", text: "" }),
+				message({ id: "u1", role: "user", text: "hello" }),
+				message({ id: "a1", text: "a stray fragment" }),
+				message({ id: "a2", text: "the final answer" }),
+				message({ id: "u2", role: "user", text: "thanks" }),
 			]),
 		);
-		expect(screen.queryByRole("button", { name: "Copy answer" })).not.toBeInTheDocument();
+		const buttons = screen.getAllByRole("button", { name: "Copy answer" });
+		expect(buttons).toHaveLength(1);
+		expect(buttons[0]?.closest("article")).toHaveTextContent("the final answer");
 	});
 });

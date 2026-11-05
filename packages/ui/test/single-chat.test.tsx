@@ -123,7 +123,13 @@ describe("recent history", () => {
 		const order = [...container.querySelectorAll(".messages > *")].map((el) =>
 			el.matches(".earlier-divider") ? "divider" : el.textContent,
 		);
-		expect(order.slice(0, 5)).toEqual(["Show earlier", "compact", "Compacted.Copy answer", "divider", "two"]);
+		expect(order.slice(0, 5)).toEqual([
+			"Show earlier",
+			"compactCopy prompt",
+			"Compacted.Copy answer",
+			"divider",
+			"twoCopy prompt",
+		]);
 	});
 
 	it("draws no divider when every message is from the current session", () => {
