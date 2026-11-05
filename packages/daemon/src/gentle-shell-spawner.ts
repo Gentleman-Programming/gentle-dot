@@ -5,7 +5,7 @@
  * Implements Regla de Oro #10: Engram global project "gentle-dot"
  */
 
-import { spawn, ChildProcess, SpawnOptions } from 'child_process';
+import { spawn, type ChildProcess, type SpawnOptions } from 'child_process';
 import { EventEmitter } from 'events';
 import * as path from 'path';
 

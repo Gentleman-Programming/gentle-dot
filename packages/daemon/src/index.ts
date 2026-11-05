@@ -2,23 +2,23 @@
  * Daemon Package - Main exports
  */
 
-export { Daemon, createDaemon } from './daemon.js';
-export type { DaemonOptions } from './daemon.js';
+export { Daemon, createDaemon } from './daemon.ts';
+export type { DaemonOptions } from './daemon.ts';
 
-export { WsServer } from './ws-server.js';
-export type { BridgeMessage, BridgeMessageType, HelloPayload, ReadyPayload } from './ws-server.js';
+export { WsServer } from './ws-server.ts';
+export type { BridgeMessage, BridgeMessageType, HelloPayload, ReadyPayload } from './ws-server.ts';
 
-export { ConnectorRegistry, connectorRegistry } from './connector-registry.js';
-export type { ConnectorInfo, ConnectorType, ConnectorStatus } from './connector-registry.js';
+export { ConnectorRegistry, connectorRegistry } from './connector-registry.ts';
+export type { ConnectorInfo, ConnectorType, ConnectorStatus } from './connector-registry.ts';
 
-export { GentleShellSpawner, gentleShellSpawner, IDENTITY_PROMPT } from './gentle-shell-spawner.js';
-export type { ShellConfig, ShellSpawnOptions } from './gentle-shell-spawner.js';
+export { GentleShellSpawner, gentleShellSpawner, IDENTITY_PROMPT } from './gentle-shell-spawner.ts';
+export type { ShellConfig, ShellSpawnOptions } from './gentle-shell-spawner.ts';
 
-export { McpProxy } from './mcp-proxy.js';
-export type { McpServerConfig, McpMode, McpTool, ApprovalRequest, ApprovalResponse } from './mcp-proxy.js';
+export { McpProxy } from './mcp-proxy.ts';
+export type { McpServerConfig, McpMode, McpTool, ApprovalRequest, ApprovalResponse } from './mcp-proxy.ts';
 
-export { AppChannel, AppChannelClient } from './app-channel.js';
-export type { AppMessage, AppChannelConfig } from './app-channel.js';
+export { AppChannel, AppChannelClient } from './app-channel.ts';
+export type { AppMessage, AppChannelConfig } from './app-channel.ts';
 
-export { loadConfig, loadAndValidateConfig, validateConfig, watchConfig, getDefaultConfigPath } from './config-loader.js';
-export type { AppConfig, DaemonConfig, ConnectorsConfig, ValidationResult } from './config-loader.js';
+export { loadConfig, loadAndValidateConfig, validateConfig, watchConfig, getDefaultConfigPath } from './config-loader.ts';
+export type { AppConfig, DaemonConfig, ConnectorsConfig, ValidationResult } from './config-loader.ts';

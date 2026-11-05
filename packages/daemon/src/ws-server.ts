@@ -7,8 +7,8 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage, Server as HttpServer } from 'http';
 import { URL } from 'url';
 import { EventEmitter } from 'events';
-import { CONNECTOR_TYPES, ConnectorRegistry, ConnectorInfo, ConnectorType } from './connector-registry.js';
-import { AppConfig } from './config-loader.js';
+import { CONNECTOR_TYPES, ConnectorRegistry, type ConnectorInfo, type ConnectorType } from './connector-registry.ts';
+import type { AppConfig } from './config-loader.ts';
 
 export type BridgeMessageType =
   | 'hello'

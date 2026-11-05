@@ -4,7 +4,7 @@
  */
 
 import { program } from 'commander';
-import { createDaemon, DaemonOptions } from './daemon.js';
+import { createDaemon, type DaemonOptions } from './daemon.ts';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 

@@ -3,14 +3,14 @@
  * Coordinates: Config Loader, WebSocket Server, Connector Registry, Gentle Shell Spawner, MCP Proxy, App Channel
  */
 
-import { loadAndValidateConfig, watchConfig, AppConfig } from './config-loader.js';
-import { WsServer } from './ws-server.js';
-import { ConnectorRegistry, connectorRegistry, ConnectorInfo, ConnectorType } from './connector-registry.js';
-import { GentleShellSpawner, ShellConfig } from './gentle-shell-spawner.js';
-import { McpProxy, McpServerConfig, McpMode, ApprovalRequest, ApprovalResponse } from './mcp-proxy.js';
-import { AppChannel, AppMessage } from './app-channel.js';
-import { childGuardFile, installChildGuardFile, watchChildGuard } from './child-guard.js';
-import { Transcript } from './transcript.js';
+import { loadAndValidateConfig, watchConfig, type AppConfig } from './config-loader.ts';
+import { WsServer } from './ws-server.ts';
+import { ConnectorRegistry, connectorRegistry, type ConnectorInfo, type ConnectorType } from './connector-registry.ts';
+import { GentleShellSpawner, type ShellConfig } from './gentle-shell-spawner.ts';
+import { McpProxy, type McpServerConfig, type McpMode, type ApprovalRequest, type ApprovalResponse } from './mcp-proxy.ts';
+import { AppChannel, type AppMessage } from './app-channel.ts';
+import { childGuardFile, installChildGuardFile, watchChildGuard } from './child-guard.ts';
+import { Transcript } from './transcript.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';

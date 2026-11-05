@@ -8,7 +8,7 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { encodeRecord } from "./jsonl.js";
+import { encodeRecord } from "./jsonl.ts";
 
 export interface TranscriptEntry {
 	id: string;
@@ -24,8 +24,13 @@ export const DEFAULT_PAGE = 50;
 export class Transcript {
 	private entries: TranscriptEntry[] = [];
 	private seq = 0;
+	private readonly file: string;
 
-	constructor(private readonly file: string) {}
+	// Written out instead of a parameter property: the CLI runs from source under node's
+	// strip-only type support, which rejects that syntax.
+	constructor(file: string) {
+		this.file = file;
+	}
 
 	/** Reads what earlier runs appended. A malformed line is skipped, not fatal. */
 	load(): void {
