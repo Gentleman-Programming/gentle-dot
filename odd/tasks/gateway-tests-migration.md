@@ -300,3 +300,26 @@ Conclusión: el próximo paso productivo **no** es perseguir rojos por conteo, s
 módulo terminado. El mejor candidato es **profiles** (17 tests entre perfiles y selector de
 modelo), con el mismo patrón que auth: responder `profiles_*` y `models_*` por el protocolo de
 cliente usando `ProfileStore`.
+
+## Alcance real de cablear profiles (2026-11-05, sesion 2)
+
+Antes de empezar se midio el trabajo, y no es "igual que auth":
+
+- `ProfileStore` (781 lineas) pide `ProfileStoreOptions`: `configHome` (`GENTLE_PI_CONFIG_HOME`
+  del engine), `agentHome` (el `--home` del engine) e `importPath` (otro setup, solo lectura, para
+  la importacion unica). El daemon debe construirlo con esos tres.
+- El frame `profiles` que espera el protocolo trae `profiles`, `active?`, `roles`, **`models`**
+  (`ModelOption[]` = provider/id/name/reasoning), `importable` y `open?`. El store da perfiles,
+  roles e importable, pero **no hay fuente de `models` en el daemon**: `AuthRuntime` expone
+  proveedores y estado de sesion, no un catalogo de modelos (hoy solo `get_state` del engine
+  devuelve el modelo actual).
+- Faltan ocho handlers: `profiles_list`, `profile_save`, `profile_rename`, `profile_duplicate`,
+  `profile_delete`, `profile_apply`, `profile_import`, `profile_save_current`, mas el comando
+  `/profiles` que abre la pantalla.
+- `profile_apply` necesita ademas hablar con el engine (`set_model` por rol) y `models_list` /
+  `model_set` un catalogo con grupos.
+
+Conclusion: **no es un cableado de una tarde**. Necesita (1) decidir de donde salen los modelos
+(catalogo del engine o de `models.json` del configHome), (2) montar el store, (3) los ocho
+handlers y el comando. Conviene encararlo como tarea propia y con sesion fresca, no apurado al
+final de una sesion larga.
