@@ -96,6 +96,14 @@ test:
 
 Orden de trabajo recomendado:
 
+0. **Corrección de la medición**: `log` **no** hace falta como costura de producción. El daemon
+   loguea por `console.log` y los tests corren en el mismo proceso, así que
+   `vi.spyOn(console, "log").mockImplementation((...a) => lines.push(a.join(" ")))` captura las
+   líneas que `child-guard` assertea ("put back" con el shim, "subagents are off") sin agregar
+   API nueva al host. Igual `backoffMs`: se puede omitir y dejar que el test espere el backoff
+   real si el timeout lo permite; sólo se agrega al host si el tiempo de test se vuelve un
+   problema medido, no preventivo.
+
 1. Agregar `log` y `backoffMs` a `DaemonOptions` (con su test) — destraba `child-guard`,
    `isolation`, y deja `attachments-gateway`/`gateway`/`uploads` a un paso.
 2. Migrar `child-guard` e `isolation` con esas costuras.
