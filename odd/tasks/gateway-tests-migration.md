@@ -133,3 +133,37 @@ seguir con él y con `isolation`:
 Estado: `child-guard.test.ts` quedó **como estaba** (revertido) para no dejar un test roto en
 `main`; el harness quedó verde con el fix de puerto. Próximo paso concreto: resolver la config
 mínima (punto 3), después migrar `child-guard` e `isolation` con timeout de 180s.
+
+## El diagnostico real: el daemon nuevo es un esqueleto (2026-11-05)
+
+Migrar `child-guard` fallo por una razon que no es de harness: el test espera que el daemon
+ponga `GENTLE_PI_AGENTS=1` en el engine, y `src/daemon.ts` no toca esa variable ni importa
+`child-guard.ts`.
+
+La superficie de imports del daemon nuevo lo dice todo:
+
+```
+src/daemon.ts importa: config-loader, ws-server, connector-registry,
+                       gentle-shell-spawner, mcp-proxy, app-channel
+```
+
+Nada mas. `child-guard`, `isolation`, `auth`, `profiles`, `conversations`, `rotation`,
+`engine-access`, `connectors` existen como archivos, pero no estan cableados al daemon.
+
+Consecuencia: la mayoria de los 24 archivos no se puede migrar, porque prueban features que el
+daemon refactorizado todavia no invoca. El trabajo real no es "migrar 24 tests" sino
+**re-cablear las features**, y cada una trae sus tests.
+
+Veredicto revisado:
+
+| Veredicto | Archivos | Por que |
+| --- | --- | --- |
+| MIGRABLES hoy | `delta-mirror` (hecho), `harness` (hecho) | tocan solo la superficie cableada |
+| MIGRABLE con reescritura | `app-channel` | el canal hoy es un socket, no un duplex fd 3 |
+| PARK (feature no cableada) | `child-guard`, `isolation`, `auth`, `lifecycle`, `connectors-*`, `connector-*`, `computer`, `subagent-probe` | el modulo existe, `daemon.ts` no lo usa |
+| PARK (feature del roadmap) | `uploads`, `voice`, `profiles-gateway`, `models-gateway`, `vps-*` | T4 / T6 |
+| BORRADO | `private-memory` | no esta en el plan |
+
+Los 181 tests en rojo, entonces, no son deuda de migracion: son el inventario de lo que falta
+re-cablear. Eso convierte la tarea en algo mucho mas honesto de planificar: por cada feature que
+se re-cablee (child guard, isolation, auth, conectores), se migran sus tests en el mismo commit.

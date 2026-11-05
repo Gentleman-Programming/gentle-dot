@@ -17,11 +17,10 @@
  * 3. `Daemon.stop()` is the teardown call; `close()` no longer exists, and stop() no longer
  *    exits the process.
  */
-import { mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { FAKE_AGENT } from "./helpers.ts";
 
 /** One HOME per test process, set before the daemon module (and AppChannel) is imported. */
@@ -33,8 +32,65 @@ mkdirSync(join(HARNESS_HOME, ".gentle-dot"), { recursive: true });
 /** The app-channel socket for this HOME (see AppChannel.DEFAULT_SOCKET_PATH). */
 export const APP_SOCKET_PATH = join(HARNESS_HOME, ".gentle-dot", "app-channel.sock");
 
-/** The repo's connector config: the daemon expects real blocks, not an empty stub. */
-export const CONNECTORS_CONFIG_PATH = fileURLToPath(new URL("../connectors.yaml", import.meta.url));
+/**
+ * A minimal config with the same *shape* as `packages/daemon/connectors.yaml`, every connector
+ * disabled, written per boot because the loader requires `daemon.data_dir` and
+ * `daemon.workspace` and expands them (`expandTilde` throws on a missing value).
+ *
+ * The blocks and their nested fields must exist even when disabled: the daemon reads
+ * `connectors.gmail|discord|whatsapp` directly, and the repo config would spawn real MCP
+ * servers on every boot (npm 404s and initialize timeouts that turn 40s into minutes).
+ */
+export function writeTestConfig(dataDir: string, workspace: string, port: number): string {
+	const configPath = join(dataDir, "connectors.yaml");
+	writeFileSync(
+		configPath,
+		[
+			"daemon:",
+			`  port: ${port}`,
+			'  host: "127.0.0.1"',
+			'  log_level: "warn"',
+			`  data_dir: "${dataDir}"`,
+			`  workspace: "${workspace}"`,
+			"connectors:",
+			"  telegram:",
+			"    enabled: false",
+			'    mode: "read_only"',
+			"    nickname_required: true",
+			"    long_polling: false",
+			'    webhook_url: ""',
+			"  gmail:",
+			"    enabled: false",
+			'    mode: "read_only"',
+			"    oauth_scopes:",
+			'      - "https://www.googleapis.com/auth/gmail.readonly"',
+			'    webhook_secret_env: "GMAIL_WEBHOOK_SECRET"',
+			"  discord:",
+			"    enabled: false",
+			'    mode: "read_only"',
+			'    bot_token_env: "DISCORD_BOT_TOKEN"',
+			'    client_id_env: "DISCORD_CLIENT_ID"',
+			"    slash_commands: false",
+			"    intents:",
+			'      - "Guilds"',
+			"  whatsapp:",
+			"    enabled: false",
+			'    mode: "read_only"',
+			"    modes:",
+			"      baileys:",
+			"        enabled: false",
+			"        multi_device: false",
+			'        session_store: "sqlite"',
+			"      meta_cloud:",
+			"        enabled: false",
+			'        phone_number_id_env: "WHATSAPP_PHONE_ID"',
+			'        access_token_env: "WHATSAPP_ACCESS_TOKEN"',
+			'        webhook_verify_token_env: "WHATSAPP_WEBHOOK_VERIFY"',
+			"",
+		].join("\n"),
+	);
+	return configPath;
+}
 
 export interface BootDaemonOptions {
 	/** Where the daemon keeps its own state; a fresh temp dir by default. */
@@ -94,9 +150,10 @@ export async function bootDaemon(options: BootDaemonOptions = {}): Promise<Boote
 	process.env["GENTLE_DOT_PORT"] = String(port);
 	process.env["GENTLE_DOT_HOST"] = "127.0.0.1";
 
+	const configPath = writeTestConfig(dataDir, workspace, port);
 	const { createDaemon } = await import("../src/daemon.ts");
 	const daemon = await createDaemon({
-		configPath: CONNECTORS_CONFIG_PATH,
+		configPath,
 		port,
 		host: "127.0.0.1",
 		dataDir,
