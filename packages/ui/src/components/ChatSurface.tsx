@@ -337,6 +337,7 @@ export function ChatSurface({
 					messages={state.messages}
 					queued={[...state.queue.steering, ...state.queue.followUp]}
 					hasEarlier={state.hasEarlier}
+					agentState={state.agentState}
 					onShowEarlier={() => {
 						const first = state.messages[0];
 						if (first) send({ type: "get_earlier", before: first.id });

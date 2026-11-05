@@ -1,4 +1,4 @@
-import type { Activity, ActivityKind } from "@gentle-dot/protocol";
+import type { Activity, ActivityKind, AgentState } from "@gentle-dot/protocol";
 import { Fragment, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -25,6 +25,32 @@ export function summarize(activities: Activity[]): string {
 			return `${verb} ${count} ${count === 1 ? one : many}`;
 		})
 		.join(" · ");
+}
+
+const LONG_WAIT_SECONDS = 60;
+
+/** Seconds as "1:23". */
+function formatWait(seconds: number): string {
+	return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+/** What the chat shows between sending a message and the answer's first words. */
+function WaitingIndicator({ label }: { label: string }) {
+	const [seconds, setSeconds] = useState(0);
+	useEffect(() => {
+		const timer = setInterval(() => setSeconds((value) => value + 1), 1000);
+		return () => clearInterval(timer);
+	}, []);
+	return (
+		<div className="waiting" role="status">
+			<span className="state-dot state-thinking" aria-hidden="true" />
+			<span>{label}</span>
+			<span className="waiting-time">{formatWait(seconds)}</span>
+			{seconds >= LONG_WAIT_SECONDS ? (
+				<p className="waiting-hint">Still waiting on the model. You can stop and pick another one.</p>
+			) : null}
+		</div>
+	);
 }
 
 function Activities({ activities }: { activities: Activity[] }) {
@@ -61,17 +87,27 @@ interface MessageListProps {
 	/** Offers "Show earlier" at the top, which calls `onShowEarlier`. */
 	hasEarlier?: boolean;
 	onShowEarlier?: () => void;
+	/** Shows a waiting line while the assistant has nothing to display yet. */
+	agentState?: AgentState;
 }
 
-export function MessageList({ messages, queued = [], hasEarlier = false, onShowEarlier }: MessageListProps) {
+export function MessageList({
+	messages,
+	queued = [],
+	hasEarlier = false,
+	onShowEarlier,
+	agentState,
+}: MessageListProps) {
 	const end = useRef<HTMLDivElement>(null);
 	const last = messages.at(-1);
 	const lastEarlier = messages.findLastIndex((m) => m.earlier);
+	const answering = last?.streaming === true && last.text !== "";
+	const waiting = (agentState === "thinking" || agentState === "working") && !answering;
 	// Earlier pages are added on top, so only the newest message moves the view.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: scroll whenever the newest content grows
 	useEffect(() => {
 		end.current?.scrollIntoView?.({ block: "end" });
-	}, [last?.id, last?.text, last?.activities.length, last?.note, queued.length]);
+	}, [last?.id, last?.text, last?.activities.length, last?.note, queued.length, waiting]);
 
 	if (messages.length === 0 && queued.length === 0) {
 		return (
@@ -142,6 +178,7 @@ export function MessageList({ messages, queued = [], hasEarlier = false, onShowE
 					<div className="message-body message-plain">{text}</div>
 				</article>
 			))}
+			{waiting ? <WaitingIndicator label={agentState === "working" ? "Working…" : "Thinking…"} /> : null}
 			<div ref={end} />
 		</div>
 	);

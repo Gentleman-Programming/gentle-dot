@@ -1034,6 +1034,27 @@ html[data-effects="none"] .chat-panel {
 	color: var(--text);
 }
 
+.waiting {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	font-size: 13px;
+	line-height: 18px;
+	color: var(--muted);
+}
+
+.waiting-time {
+	font-variant-numeric: tabular-nums;
+}
+
+.waiting-hint {
+	flex-basis: 100%;
+	margin: 0;
+	font-size: 12px;
+	line-height: 16px;
+}
+
 .message-note {
 	margin: 6px 0 0;
 	font-size: 12px;
