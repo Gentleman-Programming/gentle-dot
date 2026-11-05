@@ -9,6 +9,10 @@ import { ConnectorRegistry, connectorRegistry, ConnectorInfo, ConnectorType } fr
 import { GentleShellSpawner, gentleShellSpawner, ShellConfig } from './gentle-shell-spawner.js';
 import { McpProxy, McpServerConfig, McpMode, ApprovalRequest, ApprovalResponse } from './mcp-proxy.js';
 import { AppChannel, AppMessage } from './app-channel.js';
+import { childGuardFile, childGuardText } from './child-guard.js';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import * as path from 'path';
 
 export interface DaemonOptions {
@@ -157,6 +161,28 @@ export class Daemon {
     this.appChannel.on('onMessage', (clientId: string, message: AppMessage) => {
       this.handleAppMessage(clientId, message);
     });
+  }
+
+  /** The approval guard module the engine loads with `-e`, next to this daemon's sources. */
+  private approvalGuardPath(): string {
+    return fileURLToPath(new URL('./extensions/approval-guard.ts', import.meta.url));
+  }
+
+  /** Writes `<agentHome>/extensions/gentle-dot-child-guard.ts` when it is missing or stale. */
+  private installChildGuard(agentHome: string | undefined): void {
+    if (!agentHome) return;
+    const file = childGuardFile(agentHome);
+    const text = childGuardText(this.approvalGuardPath());
+    try {
+      mkdirSync(dirname(file), { recursive: true });
+      // A missing file is the normal first run, not a failure.
+      if (existsSync(file) && readFileSync(file, 'utf8') === text) return;
+      writeFileSync(file, text);
+      console.log(`[Daemon] Child guard installed: ${file}`);
+    } catch (error) {
+      // Never keep the engine from starting over a guard file: say it loudly and carry on.
+      console.error(`[Daemon] Could not install the child guard (${file}):`, error);
+    }
   }
 
   /** Run activo: el conector que originó el prompt actual y su messageId. */
@@ -506,7 +532,12 @@ export class Daemon {
       engineCommand: this.options.engineCommand,
       // Sessions live next to the daemon's data so history survives an engine restart.
       sessionDir: path.join(this.config.daemon.data_dir, 'sessions'),
+      extensions: [this.approvalGuardPath()],
     };
+
+    // The subagents of the assistant's engine load the guard from its extensions folder; the
+    // file is rewritten at every start so a changed or deleted one comes back.
+    this.installChildGuard(shellConfig.agentHome);
 
     await this.shellSpawner.start({
       config: shellConfig,

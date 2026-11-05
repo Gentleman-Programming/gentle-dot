@@ -50,6 +50,8 @@ export interface ShellConfig {
   engineCommand?: string[];
   /** Where the engine keeps its session files. Without it the engine starts from nothing. */
   sessionDir?: string;
+  /** Extension modules the engine loads at start (`-e`), e.g. the approval guard. */
+  extensions?: string[];
   /** Agent home for the engine's own state (auth, settings). Defaults to config.home. */
   agentHome?: string;
 }
@@ -296,6 +298,8 @@ export class GentleShellSpawner extends EventEmitter {
     // Without a session dir the engine keeps the conversation in memory only: a restart, a
     // crash or a rotation loses everything the user said. Production passes it, so does this.
     if (config.sessionDir) args.push('--session-dir', config.sessionDir);
+    // Production loads the approval guard this way; without it a tool call never asks.
+    for (const extension of config.extensions ?? []) args.push('-e', extension);
     return args;
   }
 
