@@ -232,6 +232,11 @@ export class GentleShellSpawner extends EventEmitter {
     });
   }
 
+  /** The engine process id, for callers that supervise it. */
+  get pid(): number | undefined {
+    return this.shellProcess?.pid;
+  }
+
   /**
    * Answers an `extension_ui_request`. The engine correlates by that request's own id and does
    * not reply, so this writes straight to stdin instead of going through rpc().

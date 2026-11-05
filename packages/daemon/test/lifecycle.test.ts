@@ -3,18 +3,22 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppChannel } from "../src/app-channel.ts";
-import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import { fakeApp } from "./fake-app.ts";
-import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
-import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { bootDaemon } from "./harness.ts";
+import { tempDir, waitFor } from "./helpers.ts";
+
+// Booting waits for the engine and every case boots its own daemon.
+vi.setConfig({ testTimeout: 180_000 });
 
 const MARKER = ".gentle-shell-home";
 
-const daemons: DotDaemon[] = [];
+const daemons: { stop(): Promise<void> }[] = [];
+const spies: { mockRestore(): void }[] = [];
 afterEach(async () => {
-	await Promise.all(daemons.splice(0).map((d) => d.close()));
+	await Promise.all(daemons.splice(0).map((d) => d.stop()));
+	for (const spy of spies.splice(0)) spy.mockRestore();
 });
 
 async function start(
@@ -23,25 +27,25 @@ async function start(
 	const dataDir = options.dataDir ?? tempDir();
 	const markerFile = join(tempDir(), "marker.json");
 	const logs: string[] = [];
-	const fake = fakeAuthRuntime();
-	const d = await startDaemon({
-		port: 0,
-		host: "127.0.0.1",
+	// The daemon logs through console.log; capture those lines without a host seam.
+	const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+		logs.push(args.map(String).join(" "));
+	});
+	spies.push(spy);
+
+	const booted = await bootDaemon({
 		dataDir,
 		workspace: join(dataDir, "workspace"),
-		uiDir: dataDir,
-		agentCommand: process.execPath,
-		agentArgs: [FAKE_AGENT],
-		agentHome: options.agentHome ?? join(dataDir, "agent"),
-		agentEnv: { ...process.env, FAKE_AGENT_MARKER_FILE: markerFile },
-		backoffMs: [50],
-		authRuntime: async () => fake.runtime,
+		env: {
+			FAKE_AGENT_MARKER_FILE: markerFile,
+			// Only an explicit override is passed: the daemon owns <data dir>/agent by default.
+			...(options.agentHome ? { GENTLE_DOT_AGENT_HOME: options.agentHome } : {}),
+		},
 		...(options.appChannel ? { appChannel: options.appChannel.daemonEnd } : {}),
-		log: (line) => logs.push(line),
 	});
-	daemons.push(d);
+	daemons.push(booted);
 	const markedAtSpawn = () => JSON.parse(readFileSync(markerFile, "utf8")) as boolean;
-	return { d, dataDir, logs, markedAtSpawn };
+	return { d: booted.daemon, dataDir, logs, markedAtSpawn };
 }
 
 const health = (port: number) =>

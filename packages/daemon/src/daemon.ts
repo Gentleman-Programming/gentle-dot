@@ -13,8 +13,10 @@ import { childGuardFile, installChildGuardFile, watchChildGuard } from './child-
 import { Transcript } from './transcript.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import * as path from 'path';
+import type { Duplex } from 'node:stream';
 
 export interface DaemonOptions {
   configPath?: string;
@@ -30,6 +32,11 @@ export interface DaemonOptions {
    * rpc arguments appended.
    */
   engineCommand?: string[];
+  /**
+   * The app's side of its pipe (fd 3). A daemon launched by the app lives as long as that pipe:
+   * when it closes, the daemon stops. Without it the daemon runs on its own.
+   */
+  appChannel?: Duplex;
 }
 
 /** Las peticiones de UI que son preguntas para el usuario; `setStatus`/`notify` no lo son. */
@@ -67,7 +74,13 @@ export class Daemon {
     // fail with "Gentle Shell already running", which is how tests boot several.
     this.shellSpawner = new GentleShellSpawner();
     this.mcpProxy = new McpProxy();
-    this.appChannel = new AppChannel({ daemonPort: this.config.daemon.port });
+    this.closed = new Promise<void>((resolve) => {
+      this.resolveClosed = resolve;
+    });
+    // A pipe from the app replaces the socket server: one class, two transports.
+    this.appChannel = this.options.appChannel
+      ? new AppChannel(this.options.appChannel)
+      : new AppChannel({ daemonPort: this.config.daemon.port });
 
     this.setupEventHandlers();
   }
@@ -174,6 +187,14 @@ export class Daemon {
       console.error(`[Daemon] MCP server error (${serverName}):`, error);
     });
 
+    // The daemon lives as long as the app that launched it (S35.2, #22): when its pipe goes,
+    // there is nobody left to talk to.
+    this.appChannel.on('disconnect', () => {
+      if (this.stopped || this.stopping) return;
+      console.log('[Daemon] The app channel closed, stopping');
+      void this.stop();
+    });
+
     // App Channel events
     this.appChannel.on('onMessage', (clientId: string, message: AppMessage) => {
       this.handleAppMessage(clientId, message);
@@ -250,6 +271,12 @@ export class Daemon {
 
   /** The conversation as this daemon saw it, for windows that connect later. */
   private transcript = new Transcript('');
+
+  /** Resolves once stop() finished, so a caller can wait for the daemon to be gone. */
+  readonly closed: Promise<void>;
+  private resolveClosed!: () => void;
+  private stopping: Promise<void> | null = null;
+  private stopped = false;
 
   /** Stops the child-guard watcher; set when the guard is in place. */
   private stopChildGuardWatch: (() => void) | null = null;
@@ -575,6 +602,40 @@ export class Daemon {
   }
 
   /**
+   * Marks a fresh default engine home as the engine's own, before the first spawn (S35.3, #13).
+   * The engine writes the same record itself; a home that already has one is left untouched, and
+   * one that only holds the daemon's earlier files is recovered by writing the marker.
+   */
+  private markEngineHome(agentHome: string): void {
+    const marker = path.join(agentHome, '.gentle-shell-home');
+    if (existsSync(marker)) return;
+    try {
+      mkdirSync(agentHome, { recursive: true, mode: 0o700 });
+      const require = createRequire(import.meta.url);
+      const version = (require('gentle-pi/package.json') as { version: string }).version;
+      writeFileSync(marker, `${JSON.stringify({ createdBy: 'gentle-shell', version })}\n`);
+    } catch (error) {
+      // Never keep the engine from starting over a marker.
+      console.error(`[Daemon] Could not mark the engine home (${agentHome}):`, error);
+    }
+  }
+
+  /** The port the daemon listens on, for callers that health-check it. */
+  get port(): number {
+    return this.config.daemon.port;
+  }
+
+  /** The engine process this daemon supervises: its pid and whether it is still running. */
+  get supervisor(): { pid: number | undefined; state: 'ready' | 'stopped' } {
+    return { pid: this.shellSpawner.pid, state: this.stopped ? 'stopped' : 'ready' };
+  }
+
+  /** Same as stop(), for callers that think in terms of closing: idempotent. */
+  close(): Promise<void> {
+    return this.stop();
+  }
+
+  /**
    * Start the daemon
    */
   async start(): Promise<void> {
@@ -597,9 +658,15 @@ export class Daemon {
     if (process.env['GENTLE_DOT_NO_SHELL'] === '1') {
       console.log('[Daemon] GENTLE_DOT_NO_SHELL=1 — skipping Gentle Shell spawn');
     } else {
+    // The engine's own home: the operator's choice when named, <data_dir>/agent otherwise. Only
+    // the default is claimed for the engine (S35.3) — an overridden home is not ours to mark.
+    const chosenHome = process.env['GENTLE_DOT_AGENT_HOME'];
+    const engineHome = chosenHome ?? path.join(this.config.daemon.data_dir, 'agent');
+    if (!chosenHome) this.markEngineHome(engineHome);
+
     const shellConfig: ShellConfig = {
       home: this.config.daemon.workspace,
-      agentHome: process.env['GENTLE_DOT_AGENT_HOME'],
+      agentHome: engineHome,
       engramProject: 'gentle-dot',
       mode: 'rpc',
       logLevel: this.config.daemon.log_level as any,
@@ -740,7 +807,19 @@ export class Daemon {
   /**
    * Stop the daemon
    */
+  /**
+   * Stops the daemon. Idempotent: closing twice, or closing while the app quits, stops it once
+   * and every caller waits for the same promise.
+   */
   async stop(): Promise<void> {
+    this.stopping ??= this.doStop().finally(() => {
+      this.stopped = true;
+      this.resolveClosed();
+    });
+    return this.stopping;
+  }
+
+  private async doStop(): Promise<void> {
     if (this.shutdown) {
       console.log('[Daemon] Shutting down...');
     }

@@ -21,6 +21,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Duplex } from "node:stream";
 import { FAKE_AGENT } from "./helpers.ts";
 
 /** One HOME per test process, set before the daemon module (and AppChannel) is imported. */
@@ -103,6 +104,8 @@ export interface BootDaemonOptions {
 	engineCommand?: string[];
 	/** Environment for this boot: set before start, restored on stop. */
 	env?: Record<string, string | undefined>;
+	/** The app's side of its pipe, for the lifetime tests (fd 3 in production). */
+	appChannel?: Duplex;
 }
 
 export interface BootedDaemon {
@@ -159,6 +162,7 @@ export async function bootDaemon(options: BootDaemonOptions = {}): Promise<Boote
 		dataDir,
 		workspace,
 		engineCommand: options.engineCommand ?? [process.execPath, FAKE_AGENT],
+		...(options.appChannel ? { appChannel: options.appChannel } : {}),
 	});
 
 	return {
