@@ -161,10 +161,10 @@ export class Daemon {
         case 'message_update': {
           const nested = event['assistantMessageEvent'] as { type?: string; delta?: string } | undefined;
           if (nested?.type === 'text_delta' && nested.delta && origin && this.activeRun) {
-            this.wsServer.sendToConnector(origin, 'message_delta', {
-              messageId: this.activeRun.messageId,
-              delta: nested.delta,
-            });
+            const payload = { messageId: this.activeRun.messageId, delta: nested.delta };
+            this.wsServer.sendToConnector(origin, 'message_delta', payload);
+            // Las ventanas necesitan el texto en vivo, no solo el mensaje final.
+            this.appChannel.broadcast('message_delta', { ...payload, connectorId: origin });
           }
           break;
         }
