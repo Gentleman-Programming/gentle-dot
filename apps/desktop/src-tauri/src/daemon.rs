@@ -1229,6 +1229,47 @@ mod windows_ownership_tests {
     }
 
     #[test]
+    fn failed_launch_cleanup_is_released_not_retained_when_another_assistant_holds_the_port() {
+        let mut daemon = Daemon::new(1, PathBuf::new(), None).with_channel(Arc::new(RefusingHandler));
+        daemon.health = Some(Arc::new(|| true));
+        let calls = Arc::new(AtomicUsize::new(0));
+        *daemon.child.lock().unwrap() = Some(Box::new(StoppedChild { calls: calls.clone(), failed: true }));
+        assert!(!daemon.child.lock().unwrap().as_ref().unwrap().shutdown_requires_channel(), "stop closes first");
+        let (endpoint, peer) = channel_pair().unwrap();
+        let channel = AppChannel::start(endpoint, Arc::new(RefusingHandler)).unwrap();
+        *daemon.channel.lock().unwrap() = Some(channel.clone());
+        assert_eq!(daemon.stop(), Err(foreign_daemon_message(1)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(daemon.child.lock().unwrap().is_none());
+        assert!(daemon.channel.lock().unwrap().is_none());
+        assert!(!channel.is_open());
+        assert_eq!(daemon.refusal(), Some(foreign_daemon_message(1)));
+        drop(peer);
+    }
+
+    #[test]
+    fn exited_child_is_released_on_replacement_when_another_assistant_holds_the_port() {
+        let mut daemon = Daemon::new(1, PathBuf::new(), None).with_channel(Arc::new(RefusingHandler));
+        daemon.health = Some(Arc::new(|| true));
+        // Refusal must stop before this deliberately invalid launcher is reached.
+        daemon.launch = Some(LaunchSpec { program: "must-not-launch".into(), args: vec![], envs: vec![] });
+        let calls = Arc::new(AtomicUsize::new(0));
+        *daemon.child.lock().unwrap() = Some(Box::new(CompletedChild(calls.clone())));
+        let (endpoint, peer) = channel_pair().unwrap();
+        let channel = AppChannel::start(endpoint, Arc::new(RefusingHandler)).unwrap();
+        *daemon.channel.lock().unwrap() = Some(channel.clone());
+        assert_eq!(daemon.spawn(), Err(foreign_daemon_message(1)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(daemon.child.lock().unwrap().is_none(), "an exited child is finished, not a failed launch");
+        assert!(daemon.channel.lock().unwrap().is_none());
+        assert!(!channel.is_open());
+        assert_eq!(daemon.refusal(), Some(foreign_daemon_message(1)));
+        assert_eq!(daemon.stop(), Ok(()), "nothing of ours is left to stop");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        drop(peer);
+    }
+
+    #[test]
     fn exited_root_replacement_retains_both_owners_when_old_channel_close_fails() {
         let mut daemon = Daemon::new(1, PathBuf::new(), None).with_channel(Arc::new(RefusingHandler));
         daemon.health = Some(Arc::new(|| false));
