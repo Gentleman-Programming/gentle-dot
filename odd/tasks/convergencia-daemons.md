@@ -132,8 +132,18 @@ Falta:
 - `followUp` (encolar para después del run) — hoy sólo se usa `steer`.
 - Rotación y compaction: en la arquitectura nueva las hace el engine (auto-compaction); hay que
   confirmar los límites por configuración cuando se pruebe con sesiones largas.
-- La extensión de aprobaciones (`-e approval-guard.ts`) que producción sí pasa al engine: sin
-  ella el guard de herramientas no está activo en el daemon nuevo.
+- **Extensión de aprobaciones HECHA** (`a186ac0`): `ShellConfig.extensions` se renderiza como
+  `-e` y el daemon apunta a su propio `extensions/approval-guard.ts`; antes de arrancar el
+  engine reescribe `<agentHome>/extensions/gentle-dot-child-guard.ts` cuando cambió, y un fallo
+  ahí se loguea pero nunca impide arrancar. Test: `test/guard-wiring.test.ts`.
+- **Subagentes** (`8aaf543`): el engine recibe `GENTLE_PI_AGENTS=1` salvo
+  `GENTLE_DOT_SUBAGENTS=off`, para que el interruptor y el child guard viajen juntos.
+
+Falta de la supervisión del child guard (lo que dejan en rojo los 7 tests restantes de
+`test/child-guard.test.ts`, ya migrado al harness con 2/9 en verde): proteger el archivo del
+guard, reponerlo cuando cambia o desaparece mientras corre, reemplazar una carpeta
+`extensions/` que pasó a ser un link sin tocar su destino, y apagarse a subagentes off cuando el
+guard no se puede instalar.
 
 - Prompts con historial de sesión, asks de aprobación, steering/followUp,
   abort, rotación, Compaction.
