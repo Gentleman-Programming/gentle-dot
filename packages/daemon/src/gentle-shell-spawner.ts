@@ -319,6 +319,10 @@ export class GentleShellSpawner extends EventEmitter {
     // Set Engram project (Regla de Oro #10)
     env['ENGRAM_PROJECT'] = config.engramProject;
 
+    // Subagents are on unless the operator turns them off; the child guard is what makes them
+    // safe, so the two always travel together.
+    env['GENTLE_PI_AGENTS'] = env['GENTLE_DOT_SUBAGENTS'] === 'off' ? '0' : '1';
+
     // Gentle AI config home
     env['GENTLE_PI_CONFIG_HOME'] = path.join(config.home, 'gentle-ai');
 

@@ -15,18 +15,24 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { APPROVAL_GUARD } from "../src/connectors.ts";
-import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { bootDaemon } from "./harness.ts";
 import { type ConnectorPolicy, POLICY_ENV, PROPOSE_TOOL } from "../src/extensions/approval-guard.ts";
-import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { tempDir, waitFor } from "./helpers.ts";
+
+// Booting a real daemon waits for the engine to report ready, which is slower than the 5s
+// default; the old startDaemon returned before that.
+vi.setConfig({ testTimeout: 180_000 });
 
 const SHIM = "gentle-dot-child-guard.ts";
 
-const daemons: DotDaemon[] = [];
+const daemons: { stop(): Promise<void> }[] = [];
+const spies: { mockRestore(): void }[] = [];
 const savedEnv = { ...process.env };
 afterEach(async () => {
-	await Promise.all(daemons.splice(0).map((d) => d.close()));
+	await Promise.all(daemons.splice(0).map((d) => d.stop()));
+	for (const spy of spies.splice(0)) spy.mockRestore();
 	for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
 	Object.assign(process.env, savedEnv);
 });
@@ -38,19 +44,27 @@ async function start(options: { env?: NodeJS.ProcessEnv; before?: (agentHome: st
 	options.before?.(agentHome);
 	const envFile = join(scratch, "env.json");
 	const lines: string[] = [];
-	const d = await startDaemon({
-		port: 0,
-		host: "127.0.0.1",
+	// The daemon logs through console.log and the tests run in-process, so a spy captures the
+	// lines this file asserts (the shim being put back, subagents off) without the host needing
+	// a log sink of its own.
+	const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+		lines.push(args.map(String).join(" "));
+	});
+	spies.push(spy);
+
+	const booted = await bootDaemon({
 		dataDir,
 		workspace: join(dataDir, "workspace"),
-		uiDir: dataDir,
-		agentCommand: process.execPath,
-		agentArgs: [FAKE_AGENT],
-		agentHome,
-		agentEnv: { PATH: process.env.PATH, HOME: scratch, ...options.env, FAKE_AGENT_ENV_FILE: envFile },
-		log: (line) => lines.push(line),
+		env: {
+			PATH: process.env.PATH,
+			HOME: scratch,
+			GENTLE_DOT_AGENT_HOME: agentHome,
+			FAKE_AGENT_ENV_FILE: envFile,
+			...options.env,
+		},
 	});
-	daemons.push(d);
+	daemons.push(booted);
+	const d = booted.daemon;
 	const env = () => JSON.parse(readFileSync(envFile, "utf8")) as Record<string, string | undefined>;
 	return { d, dataDir, agentHome, shim: join(agentHome, "extensions", SHIM), env, lines };
 }
