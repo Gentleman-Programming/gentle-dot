@@ -283,3 +283,20 @@ otra ventana da `auth_flow_not_found`; una ventana que se desconecta **cancela**
    en curso (`onCredentialsChanged` sigue sin cablear).
 3. El caso sin cuenta donde el engine se reporta **no listo** antes de mandar el prompt: hoy sale
    `engine_unavailable` y el test espera `no_account`.
+
+## Verificación de módulos (2026-11-05, sesión 2)
+
+Antes de elegir el próximo bloque se comprobó qué módulos existen realmente y cuáles están
+cableados en `daemon.ts`:
+
+| Test | Módulo de la feature | Estado |
+| --- | --- | --- |
+| `computer.test.ts` (8) | **no existe** `src/computer.ts`; 0 menciones de "computer" en `src/` | **PARK**: la feature nunca se portó, hay que construirla |
+| `profiles-gateway` (9) + `models-gateway` (8) | `src/profiles.ts` (781 líneas: `ProfileStore`, parse/serialize, escritura atómica, `splitModel`, `defaultImportPath`) | **completo y sin cablear** (`grep profiles src/daemon.ts` = 0). Mismo caso que auth: el trabajo está hecho y es inalcanzable |
+| `uploads` (7), `voice` (3), `vps` (16), `conversations` | módulos ausentes o parciales | PARK / T4 / T6 |
+| `mcp-proxy` (30), `gateway` (37) | diseños anteriores | PARK |
+
+Conclusión: el próximo paso productivo **no** es perseguir rojos por conteo, sino cablear un
+módulo terminado. El mejor candidato es **profiles** (17 tests entre perfiles y selector de
+modelo), con el mismo patrón que auth: responder `profiles_*` y `models_*` por el protocolo de
+cliente usando `ProfileStore`.
