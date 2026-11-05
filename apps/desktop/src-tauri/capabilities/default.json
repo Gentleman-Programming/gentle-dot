@@ -26,6 +26,12 @@
 			]
 		},
 		{
+			"identifier": "panel-zoom",
+			"description": "Cmd or Ctrl with + and - scale the panel, for larger text; the Dot has no text to scale.",
+			"windows": ["panel"],
+			"permissions": ["core:webview:allow-set-webview-zoom"]
+		},
+		{
 			"identifier": "voice",
 			"description": "Voice input (S30.1, S30.5): the panel's mic button records and transcribes natively, and the panel downloads, cancels, and removes the optional local voice model; the Dot never records.",
 			"windows": ["panel"],
