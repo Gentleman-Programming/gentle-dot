@@ -148,10 +148,19 @@ De paso: cada `Daemon` tiene su propio `GentleShellSpawner` (el singleton compar
 un segundo daemon en el mismo proceso con "Gentle Shell already running") y el watcher se detiene
 en `stop()`.
 
-`test/child-guard.test.ts`: **7 de 9** en verde. Los 2 restantes necesitan piezas propias:
-1. La **política de conectores** (`POLICY_ENV`) con `protectedPaths` que incluya el child guard y
-   el guard: el daemon nuevo todavía no arma esa política.
-2. La limpieza del `.pi/mcp.json` plantado cuando el guard no se puede reponer (y avisar una vez).
+**Política de conectores HECHA** (`fe92a77`): el guard estaba cargado pero **ciego**, porque el
+daemon nunca armaba la política que lee del entorno. Ahora publica
+`GENTLE_DOT_CONNECTOR_POLICY` con:
+- `protectedPaths`: primero el `mcp.json` del workspace (lo escribe el engine, el asistente no
+  debe tocarlo), después el guard y el child guard.
+- `connectors`: los conectores aprobados con su modo (`read_only`/`read_write`).
+- `proxied` y `builtin` (`computer`).
+
+También: el watcher reporta **una vez por episodio** cuando la carpeta no se puede escribir (en
+vez de cada 250ms) y, en ese caso, el daemon **borra el `.pi/mcp.json` plantado**, porque con el
+guard inaplicable ese archivo llegaría al engine sin control.
+
+`test/child-guard.test.ts`: **9 de 9**. La seguridad del engine queda a la par de producción.
 
 - Prompts con historial de sesión, asks de aprobación, steering/followUp,
   abort, rotación, Compaction.
