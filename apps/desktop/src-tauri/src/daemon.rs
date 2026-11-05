@@ -377,6 +377,24 @@ pub enum RestartOutcome {
     Failed(String),
 }
 
+/// What a successful checked Windows stop left on the port.
+#[cfg(windows)]
+enum WindowsStop {
+    Released,
+    /// Ours is finished and released, and another assistant answers (the refusal).
+    PortHeld(String),
+}
+
+/// Only a stop that released ours while another assistant holds the port is `External`.
+#[cfg(windows)]
+fn windows_restart_stop(stop: Result<WindowsStop, String>) -> Result<(), RestartOutcome> {
+    match stop {
+        Ok(WindowsStop::Released) => Ok(()),
+        Ok(WindowsStop::PortHeld(_)) => Err(RestartOutcome::External),
+        Err(reason) => Err(RestartOutcome::Failed(reason)),
+    }
+}
+
 #[cfg(windows)]
 struct WindowsRecovery {
     owner: windows::RecoveredLaunch,
@@ -550,7 +568,7 @@ impl Daemon {
 
     // Stop callers need this attempt's reason, not an unrelated sticky admission refusal.
     #[cfg(windows)]
-    fn windows_stop_failure(&self, reason: String) -> Result<(), String> {
+    fn windows_stop_failure<T>(&self, reason: String) -> Result<T, String> {
         self.windows_refuse(reason.clone());
         Err(reason)
     }
@@ -715,10 +733,8 @@ impl Daemon {
         #[cfg(windows)]
         {
             if slot.is_some() {
-                if let Err(reason) = self.windows_wait_port() {
-                    slot.as_mut().unwrap().retain_failure();
-                    return Err(self.windows_refuse(reason));
-                }
+                // Checked shutdown succeeded: ours is finished, so a held port is another assistant's.
+                let port_held = self.windows_wait_port().err();
                 if let Some(channel) = channel_slot.as_ref() {
                     if let Err(error) = channel.close() {
                         return Err(self.windows_refuse(format!("cannot replace unfinished Windows channel: {error}")));
@@ -726,6 +742,7 @@ impl Daemon {
                 }
                 drop(channel_slot.take());
                 drop(slot.take());
+                if let Some(reason) = port_held { return Err(self.windows_refuse(reason)); }
             }
             // Direct spawn has the same fallible admission, under the same guard.
             self.windows_recovery_admission(&slot)?;
@@ -865,6 +882,14 @@ impl Daemon {
     /// Returns this checked stop's outcome independently of the admission refusal latch.
     #[cfg(windows)]
     pub fn stop(&self) -> Result<(), String> {
+        self.windows_stop().and_then(|stop| match stop {
+            WindowsStop::Released => Ok(()),
+            WindowsStop::PortHeld(reason) => Err(reason),
+        })
+    }
+
+    #[cfg(windows)]
+    fn windows_stop(&self) -> Result<WindowsStop, String> {
         let mut child_slot = self.child.lock().unwrap();
         let mut channel_slot = self.channel.lock().unwrap();
         // Only failed-launch cleanup may close first: its listener may not exist.
@@ -908,8 +933,8 @@ impl Daemon {
         drop(child_slot.take());
         drop(channel_slot.take());
         match port_held {
-            Some(reason) => self.windows_stop_failure(reason),
-            None => Ok(()),
+            Some(reason) => { self.windows_refuse(reason.clone()); Ok(WindowsStop::PortHeld(reason)) }
+            None => Ok(WindowsStop::Released),
         }
     }
 
@@ -921,11 +946,7 @@ impl Daemon {
         #[cfg(unix)]
         self.stop();
         #[cfg(windows)]
-        if let Err(reason) = self.stop() {
-            // Stop finished what we owned, and another assistant answers on the port.
-            if reason == foreign_daemon_message(self.port) { return RestartOutcome::External; }
-            return RestartOutcome::Failed(reason);
-        }
+        if let Err(outcome) = windows_restart_stop(self.windows_stop()) { return outcome; }
         // A second admission pass, deliberately: stop released both guards before returning,
         // so another thread may have installed or failed an owner since. These are the states
         // the windows_*_admission checks refuse, read again under the same child -> channel order.
@@ -1226,6 +1247,57 @@ mod windows_ownership_tests {
         assert!(daemon.channel.lock().unwrap().is_none());
         assert_eq!(daemon.refusal(), Some(foreign_daemon_message(1)));
         drop(peer);
+    }
+
+    #[test]
+    fn failed_launch_cleanup_is_released_not_retained_when_another_assistant_holds_the_port() {
+        let mut daemon = Daemon::new(1, PathBuf::new(), None).with_channel(Arc::new(RefusingHandler));
+        daemon.health = Some(Arc::new(|| true));
+        let calls = Arc::new(AtomicUsize::new(0));
+        *daemon.child.lock().unwrap() = Some(Box::new(StoppedChild { calls: calls.clone(), failed: true }));
+        assert!(!daemon.child.lock().unwrap().as_ref().unwrap().shutdown_requires_channel(), "stop closes first");
+        let (endpoint, peer) = channel_pair().unwrap();
+        let channel = AppChannel::start(endpoint, Arc::new(RefusingHandler)).unwrap();
+        *daemon.channel.lock().unwrap() = Some(channel.clone());
+        assert_eq!(daemon.stop(), Err(foreign_daemon_message(1)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(daemon.child.lock().unwrap().is_none());
+        assert!(daemon.channel.lock().unwrap().is_none());
+        assert!(!channel.is_open());
+        assert_eq!(daemon.refusal(), Some(foreign_daemon_message(1)));
+        drop(peer);
+    }
+
+    #[test]
+    fn exited_child_is_released_on_replacement_when_another_assistant_holds_the_port() {
+        let mut daemon = Daemon::new(1, PathBuf::new(), None).with_channel(Arc::new(RefusingHandler));
+        daemon.health = Some(Arc::new(|| true));
+        // Refusal must stop before this deliberately invalid launcher is reached.
+        daemon.launch = Some(LaunchSpec { program: "must-not-launch".into(), args: vec![], envs: vec![] });
+        let calls = Arc::new(AtomicUsize::new(0));
+        *daemon.child.lock().unwrap() = Some(Box::new(CompletedChild(calls.clone())));
+        let (endpoint, peer) = channel_pair().unwrap();
+        let channel = AppChannel::start(endpoint, Arc::new(RefusingHandler)).unwrap();
+        *daemon.channel.lock().unwrap() = Some(channel.clone());
+        assert_eq!(daemon.spawn(), Err(foreign_daemon_message(1)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(daemon.child.lock().unwrap().is_none(), "an exited child is finished, not a failed launch");
+        assert!(daemon.channel.lock().unwrap().is_none());
+        assert!(!channel.is_open());
+        assert_eq!(daemon.refusal(), Some(foreign_daemon_message(1)));
+        assert_eq!(daemon.stop(), Ok(()), "nothing of ours is left to stop");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        drop(peer);
+    }
+
+    #[test]
+    fn only_a_port_held_after_our_stop_maps_restart_to_external() {
+        // A latched recovered-admission failure cannot be built here (RecoveredLaunch is private
+        // to windows.rs), so this pins the mapping: the foreign text alone is not External.
+        let foreign = foreign_daemon_message(1);
+        assert!(matches!(windows_restart_stop(Ok(WindowsStop::PortHeld(foreign.clone()))), Err(RestartOutcome::External)));
+        assert!(matches!(windows_restart_stop(Err(foreign.clone())), Err(RestartOutcome::Failed(reason)) if reason == foreign));
+        assert!(matches!(windows_restart_stop(Ok(WindowsStop::Released)), Ok(())));
     }
 
     #[test]
