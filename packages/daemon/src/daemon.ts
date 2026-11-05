@@ -15,6 +15,7 @@ import { AuthManager, createModelAuthRuntime, type AuthRuntime } from './auth.ts
 import { ProfileError, ProfileStore, defaultImportPath, splitModel, toModelOptions } from './profiles.ts';
 import { UploadStore, composePrompt } from './uploads.ts';
 import { ConnectorManager, ConnectorStore } from './connectors.ts';
+import { AppSecretSource } from './secret-source.ts';
 import type { AttachmentRef } from '@gentle-dot/protocol';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -1515,6 +1516,9 @@ export class Daemon {
       workspace: this.config.daemon.workspace,
       guardPath: this.approvalGuardPath(),
       childGuard: false,
+      // The connectors' secrets live in the app's own store, over its channel: the daemon never
+      // keeps them, and without the app a connector that needs one fails closed.
+      secrets: new AppSecretSource(this.appChannel),
       log: (line) => console.log(line),
     });
     this.connectorManager ??= new ConnectorManager({

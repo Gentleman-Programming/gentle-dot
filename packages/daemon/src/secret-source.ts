@@ -50,11 +50,21 @@ const ID = /^[A-Za-z0-9._:@/-]{1,200}$/;
  * (an item made by another build), so calls wait as long as an approval does. A failure never
  * carries a secret: the app answers with the store's error, and the daemon adds nothing.
  */
+/**
+ * What the source needs from the app's channel: whether it is there, and a request/response call.
+ * Both the socket client and the daemon's own pipe channel satisfy this, so the source does not
+ * care which transport carried the question.
+ */
+export interface SecretChannel {
+	readonly connected: boolean;
+	request(method: string, params?: unknown, timeoutMs?: number): Promise<unknown>;
+}
+
 export class AppSecretSource implements SecretSource {
-	private readonly channel: AppChannelClient | undefined;
+	private readonly channel: SecretChannel | undefined;
 	private readonly timeoutMs: number;
 
-	constructor(channel: AppChannelClient | undefined, timeoutMs = APPROVAL_WAIT_MS) {
+	constructor(channel: SecretChannel | undefined, timeoutMs = APPROVAL_WAIT_MS) {
 		this.channel = channel;
 		this.timeoutMs = timeoutMs;
 	}
