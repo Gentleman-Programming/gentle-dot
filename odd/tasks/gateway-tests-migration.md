@@ -167,3 +167,40 @@ Veredicto revisado:
 Los 181 tests en rojo, entonces, no son deuda de migracion: son el inventario de lo que falta
 re-cablear. Eso convierte la tarea en algo mucho mas honesto de planificar: por cada feature que
 se re-cablee (child guard, isolation, auth, conectores), se migran sus tests en el mismo commit.
+
+## Mapa de rojos por archivo (2026-11-05)
+
+Corrida completa, conteo de tests fallidos por archivo:
+
+| Fallos | Archivo | Veredicto |
+| --- | --- | --- |
+| 37 | `gateway.test.ts` | PARK parcial: mezcla el WS base con conversaciones/white-label que no existen |
+| 30 | `mcp-proxy.test.ts` | **PARK: prueba un diseño anterior del proxy** (`rotateKey`, `handle`, `sync`, `close`); el módulo nuevo expone `registerServer`/`callTool`/`respondToApproval` y `connectors-proxy.test.ts` ya lo cubre |
+| 15 | `auth.test.ts` | PARK: `auth.ts` no está cableado |
+| 11 + 5 | `vps-gateway`, `vps-auth-helper` | PARK: T6 |
+| 9 + 8 | `profiles-gateway`, `models-gateway` | PARK: T4 |
+| 9 + 2 | `app-channel`, `app-channel-fd` | PARK: inyectan un duplex fd 3; hoy el canal es un socket |
+| 8 | `lifecycle.test.ts` | MIGRABLE (candidato) |
+| 8 | `connectors-gateway.test.ts` | PARK: pide authRuntime/importHome |
+| 8 | `computer.test.ts` | PARK: server builtin |
+| 7 | `uploads.test.ts` | PARK: T4 |
+| 4 | `connector-secrets.test.ts` | PARK: secretos cifrados con clave del host |
+| 4 | `attachments-gateway.test.ts` | PARK |
+| 3 | `voice.test.ts` | PARK: T4 |
+| 3 | `runtime-build.test.ts` | MIGRABLE (candidato) |
+| 3 | `isolation.test.ts` | PARK hasta cablear `isolation.ts` |
+| 3 | `connectors-proxy-gateway.test.ts` | PARK |
+| 3 | `connector-integrity.test.ts` | PARK: necesita canal duplex de la app + auth runtime + cableado de integridad |
+| 3 | `cli.test.ts` | MIGRABLE (candidato) |
+| 1 | `engine-access.test.ts` | MIGRABLE (candidato) |
+| 1 | `connector-drafts.test.ts` | PARK |
+
+### Conectores: estado real
+
+`connectors.test.ts`, `connectors-proxy.test.ts`, `connector-masking.test.ts`,
+`connector-probe.test.ts` y `connectors-guided.test.ts` **pasan** (58 tests). El registro, el
+proxying y el filtrado por modo ya funcionan en el daemon nuevo. Lo que queda en conectores es la
+**integridad firmada con la app** (S25.6) y los tests del diseño viejo del proxy.
+
+Siguiente candidato recomendado: `lifecycle.test.ts` (8), `runtime-build.test.ts` (3),
+`cli.test.ts` (3) y `engine-access.test.ts` (1) — son superficies que el daemon nuevo sí tiene.
