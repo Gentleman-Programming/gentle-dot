@@ -33,6 +33,9 @@ jobs:
 
       # Keep lifecycle scripts enabled; pnpm-workspace.yaml allows esbuild and gentle-pi.
       - name: Install dependencies
+        env:
+          # Trust only this pinned release within the age window, for this step's processes.
+          PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: '["gentle-pi@4.6.0"]'
         run: pnpm install --frozen-lockfile --ignore-scripts=false
 
       - name: Typecheck
