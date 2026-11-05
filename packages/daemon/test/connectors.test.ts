@@ -313,12 +313,12 @@ afterEach(() => {
 });
 
 /** `auto`: the browser approves at once; `fail`: it does, and the provider refuses the code. */
-function setup(mode?: "fail" | "auto") {
+function setup(mode?: "fail" | "auto" | "no-registration") {
 	const dataDir = tempDir();
 	const agentHome = join(dataDir, "agent");
 	const logs: string[] = [];
 	const secrets = new MemorySecretSource();
-	const oauth = fakeOAuth(mode === "fail" ? { mode: "fail" } : {});
+	const oauth = fakeOAuth(mode === "fail" || mode === "no-registration" ? { mode } : {});
 	const store = new ConnectorStore({ dataDir, agentHome, secrets });
 	const manager = new ConnectorManager({
 		store,
@@ -474,6 +474,19 @@ describe("connector sign-in", () => {
 		manager.cancelOwnedBy(owner);
 		await find("auth_done");
 		await waitFor(() => manager.signIn(owner, "notion", emit) === undefined);
+	});
+
+	it("says what to do when the service does not let apps register for sign-in", async () => {
+		const { manager, owner, emit, find, logs } = setup("no-registration");
+		manager.connect(owner, "notion", emit);
+		const done = await find("auth_done");
+		expect(done).toMatchObject({
+			ok: false,
+			message:
+				"This service does not let apps sign in on their own. Ask the assistant to connect it with an access token instead.",
+		});
+		expect(manager.list()[0]?.status).toBe("error");
+		expect(logs.some((l) => l.includes("sign-in to connector notion failed"))).toBe(true);
 	});
 
 	it("reports a failed sign-in in plain words and marks the connector", async () => {
