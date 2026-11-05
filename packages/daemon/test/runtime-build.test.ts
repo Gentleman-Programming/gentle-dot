@@ -73,6 +73,7 @@ describe.skipIf(skipBuild)("build:runtime", () => {
 				windows ? "bin/pi.cmd" : "bin/pi",
 				"daemon/cli.mjs",
 				"daemon/extensions/approval-guard.ts",
+				"daemon/extensions/command-code.ts",
 				"daemon/extensions/screenshot-context.ts",
 				"daemon/identity.md",
 				...(windows ? ["daemon/native/windows-stop.node"] : []),
@@ -84,6 +85,9 @@ describe.skipIf(skipBuild)("build:runtime", () => {
 		);
 		expect(readFileSync(join(out, "daemon", "extensions", "approval-guard.ts"), "utf8")).toBe(
 			readFileSync(join(PACKAGE, "src", "extensions", "approval-guard.ts"), "utf8"),
+		);
+		expect(readFileSync(join(out, "daemon", "extensions", "command-code.ts"), "utf8")).toBe(
+			readFileSync(join(PACKAGE, "src", "extensions", "command-code.ts"), "utf8"),
 		);
 	});
 
