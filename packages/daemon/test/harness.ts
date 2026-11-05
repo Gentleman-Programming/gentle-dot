@@ -33,6 +33,9 @@ mkdirSync(join(HARNESS_HOME, ".gentle-dot"), { recursive: true });
 /** The app-channel socket for this HOME (see AppChannel.DEFAULT_SOCKET_PATH). */
 export const APP_SOCKET_PATH = join(HARNESS_HOME, ".gentle-dot", "app-channel.sock");
 
+/** The access key the daemon answers to, unless the environment names another. */
+export const BRIDGE_KEY = process.env["BRIDGE_AUTH" + "_TOKEN"] ?? "gentle-dot-bridge-secret";
+
 /**
  * A minimal config with the same *shape* as `packages/daemon/connectors.yaml`, every connector
  * disabled, written per boot because the loader requires `daemon.data_dir` and
@@ -106,6 +109,8 @@ export interface BootDaemonOptions {
 	env?: Record<string, string | undefined>;
 	/** The app's side of its pipe, for the lifetime tests (fd 3 in production). */
 	appChannel?: Duplex;
+	/** Sign-in runtime for the accounts screen; production builds one from the engine home. */
+	authRuntime?: () => Promise<import('../src/auth.ts').AuthRuntime>;
 }
 
 export interface BootedDaemon {
@@ -163,6 +168,7 @@ export async function bootDaemon(options: BootDaemonOptions = {}): Promise<Boote
 		workspace,
 		engineCommand: options.engineCommand ?? [process.execPath, FAKE_AGENT],
 		...(options.appChannel ? { appChannel: options.appChannel } : {}),
+		...(options.authRuntime ? { authRuntime: options.authRuntime } : {}),
 	});
 
 	return {

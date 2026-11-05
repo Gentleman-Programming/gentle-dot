@@ -11,6 +11,7 @@ import { McpProxy, type McpServerConfig, type McpMode, type ApprovalRequest, typ
 import { AppChannel, type AppMessage } from './app-channel.ts';
 import { childGuardFile, installChildGuardFile, watchChildGuard } from './child-guard.ts';
 import { Transcript } from './transcript.ts';
+import { AuthManager, createModelAuthRuntime, type AuthRuntime } from './auth.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createRequire } from 'node:module';
@@ -37,6 +38,8 @@ export interface DaemonOptions {
    * when it closes, the daemon stops. Without it the daemon runs on its own.
    */
   appChannel?: Duplex;
+  /** Sign-in runtime for the accounts screen; tests inject one, production builds it from the engine home. */
+  authRuntime?: () => Promise<AuthRuntime>;
 }
 
 /** Las peticiones de UI que son preguntas para el usuario; `setStatus`/`notify` no lo son. */
@@ -121,6 +124,25 @@ export class Daemon {
         case 'send':
           this.chatSend(clientId, String(message.text ?? ''));
           break;
+        case 'auth_list': {
+          void this.authList(clientId);
+          break;
+        }
+        case 'auth_login': {
+          void this.authLogin(clientId, message);
+          break;
+        }
+        case 'auth_reply': {
+          this.authManager?.reply(this, String(message.flowId ?? ''), {
+            value: message.value === undefined ? undefined : String(message.value),
+            cancelled: message.cancelled === true,
+          });
+          break;
+        }
+        case 'auth_logout': {
+          void this.authLogout(clientId, String(message.providerId ?? ''));
+          break;
+        }
         case 'get_history': {
           const { messages, hasEarlier } = this.transcript.page(undefined);
           this.wsServer.deliver(clientId, 'history', { messages, hasEarlier });
@@ -206,6 +228,48 @@ export class Daemon {
     return fileURLToPath(new URL('./extensions/approval-guard.ts', import.meta.url));
   }
 
+  /** Answers `auth_list` with the providers the engine can sign into and their status. */
+  private async authList(clientId: string): Promise<void> {
+    if (!this.authManager) return;
+    try {
+      const providers = await this.authManager.providers();
+      this.wsServer.deliver(clientId, 'auth_providers', { providers, open: true });
+    } catch (error) {
+      this.wsServer.deliver(clientId, 'toast', {
+        level: 'error',
+        message: `No se pudieron leer las cuentas: ${(error as Error).message}`,
+      });
+    }
+  }
+
+  /** Starts a sign-in; the flow's prompts and news go to the window that asked. */
+  private async authLogin(clientId: string, message: { providerId?: string; method?: string }): Promise<void> {
+    if (!this.authManager) return;
+    const refusal = this.authManager.start(
+      this,
+      String(message.providerId ?? ''),
+      (message.method === 'oauth' ? 'oauth' : 'api_key'),
+      (event) => {
+        // The manager already speaks the client protocol's frames; the window gets them flat.
+        const { type, ...payload } = event as { type: string } & Record<string, unknown>;
+        this.wsServer.deliver(clientId, type, payload);
+      },
+    );
+    if (refusal) this.wsServer.deliver(clientId, 'toast', { level: 'warning', message: refusal.message });
+  }
+
+  /** Signs a provider out, reporting the outcome to the window that asked. */
+  private async authLogout(clientId: string, providerId: string): Promise<void> {
+    if (!this.authManager) return;
+    try {
+      const refusal = await this.authManager.logout(providerId);
+      if (refusal) this.wsServer.deliver(clientId, 'toast', { level: 'warning', message: refusal.message });
+      else await this.authList(clientId);
+    } catch (error) {
+      this.wsServer.deliver(clientId, 'toast', { level: 'error', message: (error as Error).message });
+    }
+  }
+
   /** Removes the workspace `mcp.json` the engine writes, when the guard cannot be enforced. */
   private removePlantedMcpJson(): void {
     const file = path.join(this.config.daemon.workspace, '.pi', 'mcp.json');
@@ -268,6 +332,9 @@ export class Daemon {
     );
     return true;
   }
+
+  /** Sign-in flows for the accounts screen. */
+  private authManager: AuthManager | null = null;
 
   /** The conversation as this daemon saw it, for windows that connect later. */
   private transcript = new Transcript('');
@@ -658,6 +725,13 @@ export class Daemon {
     if (process.env['GENTLE_DOT_NO_SHELL'] === '1') {
       console.log('[Daemon] GENTLE_DOT_NO_SHELL=1 — skipping Gentle Shell spawn');
     } else {
+    // Sign-in goes through the engine's own runtime: the accounts screen never sees a key it
+    // cannot reach, and tests inject a fake one.
+    this.authManager ??= new AuthManager({
+      runtime: this.options.authRuntime ?? (() => createModelAuthRuntime(engineHome, process.cwd())),
+      log: (line) => console.log(line),
+    });
+
     // The engine's own home: the operator's choice when named, <data_dir>/agent otherwise. Only
     // the default is claimed for the engine (S35.3) — an overridden home is not ours to mark.
     const chosenHome = process.env['GENTLE_DOT_AGENT_HOME'];
