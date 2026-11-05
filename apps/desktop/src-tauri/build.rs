@@ -37,6 +37,8 @@ fn find_in_path(program: &str, path: &str) -> Option<PathBuf> {
 }
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=GENTLE_DOT_UPDATE_PUBLIC_KEY");
+    println!("cargo:rerun-if-env-changed=GENTLE_DOT_UPDATE_REPOSITORY");
     // Apps launched from Finder get a minimal PATH, so record what the build saw:
     // the absolute `node`, the daemon entry point, and PATH itself (the daemon
     // needs it to find `gentle-shell`). Runtime env vars override the first two.
