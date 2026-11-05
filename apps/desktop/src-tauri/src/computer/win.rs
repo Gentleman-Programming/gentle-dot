@@ -633,7 +633,7 @@ fn restore_affinity(changed: &[(HWND, u32)]) {
     for &(hwnd, previous) in changed {
         // A hide may have taken ownership since enumeration. Hand it the original affinity
         // instead of undoing its exclusion; it restores after showing, or at call end if left hidden.
-        if let Some(index) = super::capture_order::current_window(&saved, hwnd as usize, call_handles()) {
+        if let Some(index) = super::capture_order::current_window(&saved, hwnd as usize, call_window) {
             saved[index].1.1 = previous;
             continue;
         }
@@ -1650,10 +1650,6 @@ fn call_window(part: super::working::Part) -> Option<usize> {
     call_slot(part).get().copied()
 }
 
-fn call_handles() -> [Option<usize>; 2] {
-    [call_window(super::working::Part::Dot), call_window(super::working::Part::Panel)]
-}
-
 /// Exclude before hiding. If exclusion fails, still hide, then put this window back and fail
 /// preparation: Working has not yet recorded it as hidden and cannot restore it on that error.
 /// The failed call therefore never reaches capture, and no persistent failure poisons later calls.
@@ -1689,7 +1685,7 @@ pub fn hide_for_call(part: super::working::Part, operation: u64) -> Result<(), S
 
 fn restore_call_affinity(hwnd: HWND) {
     let mut saved = CALL_AFFINITIES.lock().unwrap_or_else(|error| error.into_inner());
-    let Some(index) = super::capture_order::current_window(&saved, hwnd as usize, call_handles()) else { return };
+    let Some(index) = super::capture_order::current_window(&saved, hwnd as usize, call_window) else { return };
     let previous = saved[index].1.1;
     // This function is called only inside the showing WindowChange, after ShowWindow. Restoring
     // even a nonzero affinity must count as a change, so an overlapping capture cannot be accepted.
