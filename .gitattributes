@@ -1,0 +1,18 @@
+# Store text files as LF and check them out as LF on every platform.
+# Without this, a Windows clone with core.autocrlf=true (the Git for Windows
+# default) writes CRLF into the working tree and `pnpm lint` (biome check)
+# reports a formatting error on every file: 216 errors on a clean checkout.
+* text=auto eol=lf
+
+# Assets that must never be converted.
+*.png binary
+*.ico binary
+*.icns binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.pdf binary
