@@ -6,10 +6,10 @@
 import { loadAndValidateConfig, watchConfig, AppConfig } from './config-loader.js';
 import { WsServer } from './ws-server.js';
 import { ConnectorRegistry, connectorRegistry, ConnectorInfo, ConnectorType } from './connector-registry.js';
-import { GentleShellSpawner, gentleShellSpawner, ShellConfig } from './gentle-shell-spawner.js';
+import { GentleShellSpawner, ShellConfig } from './gentle-shell-spawner.js';
 import { McpProxy, McpServerConfig, McpMode, ApprovalRequest, ApprovalResponse } from './mcp-proxy.js';
 import { AppChannel, AppMessage } from './app-channel.js';
-import { childGuardFile, childGuardText } from './child-guard.js';
+import { installChildGuardFile, watchChildGuard } from './child-guard.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -62,7 +62,9 @@ export class Daemon {
     // Initialize components
     this.registry = connectorRegistry;
     this.wsServer = new WsServer(this.registry, this.config);
-    this.shellSpawner = gentleShellSpawner;
+    // One spawner per daemon: a shared singleton makes a second daemon in the same process
+    // fail with "Gentle Shell already running", which is how tests boot several.
+    this.shellSpawner = new GentleShellSpawner();
     this.mcpProxy = new McpProxy();
     this.appChannel = new AppChannel({ daemonPort: this.config.daemon.port });
 
@@ -168,22 +170,27 @@ export class Daemon {
     return fileURLToPath(new URL('./extensions/approval-guard.ts', import.meta.url));
   }
 
-  /** Writes `<agentHome>/extensions/gentle-dot-child-guard.ts` when it is missing or stale. */
-  private installChildGuard(agentHome: string | undefined): void {
-    if (!agentHome) return;
-    const file = childGuardFile(agentHome);
-    const text = childGuardText(this.approvalGuardPath());
-    try {
-      mkdirSync(dirname(file), { recursive: true });
-      // A missing file is the normal first run, not a failure.
-      if (existsSync(file) && readFileSync(file, 'utf8') === text) return;
-      writeFileSync(file, text);
-      console.log(`[Daemon] Child guard installed: ${file}`);
-    } catch (error) {
-      // Never keep the engine from starting over a guard file: say it loudly and carry on.
-      console.error(`[Daemon] Could not install the child guard (${file}):`, error);
+  /**
+   * Puts the child guard in place and keeps it there while the engine runs. Returns false when it
+   * cannot, so the caller starts the engine with subagents off instead of unprotected.
+   */
+  private superviseChildGuard(agentHome: string | undefined, guardPath: string): boolean {
+    if (!agentHome) return false;
+    const install = installChildGuardFile(agentHome, guardPath);
+    if (!install.ok) {
+      if (install.reason === 'cannot-be-written')
+        console.log(`[Daemon] The child guard folder cannot be written (${install.file}), subagents are off`);
+      else console.log(`[Daemon] The child guard cannot be put in place (${install.file}), subagents are off`);
+      return false;
     }
+    console.log(`[Daemon] Child guard installed: ${install.file}`);
+    this.stopChildGuardWatch?.();
+    this.stopChildGuardWatch = watchChildGuard(agentHome, guardPath, (line) => console.log(line));
+    return true;
   }
+
+  /** Stops the child-guard watcher; set when the guard is in place. */
+  private stopChildGuardWatch: (() => void) | null = null;
 
   /** Run activo: el conector que originó el prompt actual y su messageId. */
   private activeRun: { connectorId: string; messageId: string } | null = null;
@@ -535,9 +542,11 @@ export class Daemon {
       extensions: [this.approvalGuardPath()],
     };
 
-    // The subagents of the assistant's engine load the guard from its extensions folder; the
-    // file is rewritten at every start so a changed or deleted one comes back.
-    this.installChildGuard(shellConfig.agentHome);
+    // The subagents of the assistant's engine load the guard from its extensions folder. If it
+    // cannot be put there (or kept there), the engine runs with subagents off rather than
+    // unprotected.
+    const guardPath = shellConfig.extensions?.[0] ?? this.approvalGuardPath();
+    if (!this.superviseChildGuard(shellConfig.agentHome, guardPath)) shellConfig.subagentsOn = false;
 
     await this.shellSpawner.start({
       config: shellConfig,
@@ -679,6 +688,9 @@ export class Daemon {
 
     await this.shellSpawner.stop();
     console.log('[Daemon] Gentle Shell stopped');
+
+    this.stopChildGuardWatch?.();
+    this.stopChildGuardWatch = null;
 
     await this.appChannel.stop();
     console.log('[Daemon] App Channel stopped');

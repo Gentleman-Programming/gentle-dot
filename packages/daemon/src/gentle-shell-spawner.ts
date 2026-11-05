@@ -52,6 +52,8 @@ export interface ShellConfig {
   sessionDir?: string;
   /** Extension modules the engine loads at start (`-e`), e.g. the approval guard. */
   extensions?: string[];
+  /** False keeps the engine's subagents off, e.g. when the child guard cannot be installed. */
+  subagentsOn?: boolean;
   /** Agent home for the engine's own state (auth, settings). Defaults to config.home. */
   agentHome?: string;
 }
@@ -321,7 +323,8 @@ export class GentleShellSpawner extends EventEmitter {
 
     // Subagents are on unless the operator turns them off; the child guard is what makes them
     // safe, so the two always travel together.
-    env['GENTLE_PI_AGENTS'] = env['GENTLE_DOT_SUBAGENTS'] === 'off' ? '0' : '1';
+    env['GENTLE_PI_AGENTS'] =
+      config.subagentsOn === false || env['GENTLE_DOT_SUBAGENTS'] === 'off' ? '0' : '1';
 
     // Gentle AI config home
     env['GENTLE_PI_CONFIG_HOME'] = path.join(config.home, 'gentle-ai');

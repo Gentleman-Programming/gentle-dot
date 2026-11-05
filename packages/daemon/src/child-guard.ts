@@ -1,3 +1,4 @@
+import { watch, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { POLICY_ENV } from "./extensions/approval-guard.ts";
 
@@ -30,4 +31,74 @@ export function childGuardText(guardPath: string): string {
 		"}",
 		"",
 	].join("\n");
+}
+
+export type ChildGuardInstall =
+	| { ok: true; file: string }
+	| { ok: false; reason: "not-a-folder" | "cannot-be-written"; file: string };
+
+/**
+ * Puts the child guard in place. An `extensions` folder that became a symlink is replaced by a
+ * real folder without ever writing through the link, and a folder that cannot be written is
+ * reported instead of thrown: the caller turns subagents off.
+ */
+export function installChildGuardFile(agentHome: string, guardPath: string): ChildGuardInstall {
+	const folder = join(agentHome, "extensions");
+	const file = childGuardFile(agentHome);
+
+	try {
+		const stat = existsSync(folder) ? lstatSync(folder) : null;
+		if (stat?.isSymbolicLink()) {
+			// Never write through the link: drop it and make our own folder.
+			rmSync(folder, { force: true });
+			mkdirSync(folder, { recursive: true });
+		} else if (stat && !stat.isDirectory()) {
+			return { ok: false, reason: "not-a-folder", file };
+		} else if (!stat) {
+			mkdirSync(folder, { recursive: true });
+		}
+
+		writeFileSync(file, childGuardText(guardPath), { mode: 0o600 });
+		chmodSync(file, 0o600);
+		return { ok: true, file };
+	} catch {
+		return { ok: false, reason: "cannot-be-written", file };
+	}
+}
+
+/**
+ * Puts the file back when it changes or disappears while the engine runs, saying so for each
+ * repair. Returns the stop function. Best effort: a file the agent can write is a race it can
+ * always win, and this is defense in depth, not the boundary.
+ */
+export function watchChildGuard(agentHome: string, guardPath: string, log: (line: string) => void): () => void {
+	const file = childGuardFile(agentHome);
+	const expected = childGuardText(guardPath);
+	let stopped = false;
+
+	const repair = () => {
+		if (stopped) return;
+		try {
+			if (existsSync(file) && readFileSync(file, "utf8") === expected) return;
+			installChildGuardFile(agentHome, guardPath);
+			log(`[Daemon] Child guard put back: ${file}`);
+		} catch {
+			// keep watching; the next event tries again
+		}
+	};
+
+	let watcher: ReturnType<typeof watch> | null = null;
+	try {
+		watcher = watch(join(agentHome, "extensions"), { persistent: false }, repair);
+	} catch {
+		watcher = null;
+	}
+	// A deletion can be reported on the file itself even when the folder watcher misses it.
+	const poll = setInterval(repair, 250);
+
+	return () => {
+		stopped = true;
+		clearInterval(poll);
+		watcher?.close();
+	};
 }
