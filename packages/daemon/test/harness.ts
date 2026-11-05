@@ -111,6 +111,8 @@ export interface BootDaemonOptions {
 	appChannel?: Duplex;
 	/** Sign-in runtime for the accounts screen; production builds one from the engine home. */
 	authRuntime?: () => Promise<import('../src/auth.ts').AuthRuntime>;
+	/** Another setup's profiles.json, read once for the import. */
+	profilesImportPath?: string;
 }
 
 export interface BootedDaemon {
@@ -169,6 +171,7 @@ export async function bootDaemon(options: BootDaemonOptions = {}): Promise<Boote
 		engineCommand: options.engineCommand ?? [process.execPath, FAKE_AGENT],
 		...(options.appChannel ? { appChannel: options.appChannel } : {}),
 		...(options.authRuntime ? { authRuntime: options.authRuntime } : {}),
+		...(options.profilesImportPath ? { profilesImportPath: options.profilesImportPath } : {}),
 	});
 
 	return {

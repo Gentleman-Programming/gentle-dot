@@ -12,6 +12,7 @@ import { AppChannel, type AppMessage } from './app-channel.ts';
 import { childGuardFile, installChildGuardFile, watchChildGuard } from './child-guard.ts';
 import { Transcript } from './transcript.ts';
 import { AuthManager, createModelAuthRuntime, type AuthRuntime } from './auth.ts';
+import { ProfileStore, defaultImportPath, toModelOptions } from './profiles.ts';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { createRequire } from 'node:module';
@@ -40,6 +41,8 @@ export interface DaemonOptions {
   appChannel?: Duplex;
   /** Sign-in runtime for the accounts screen; tests inject one, production builds it from the engine home. */
   authRuntime?: () => Promise<AuthRuntime>;
+  /** Another setup's profiles.json, only ever read, for the one-time import. */
+  profilesImportPath?: string;
 }
 
 /** Las peticiones de UI que son preguntas para el usuario; `setStatus`/`notify` no lo son. */
@@ -124,6 +127,32 @@ export class Daemon {
         case 'send':
           this.chatSend(clientId, String(message.text ?? ''));
           break;
+        case 'profiles_list': {
+          void this.profilesScreen(clientId);
+          break;
+        }
+        case 'profile_save': {
+          void this.profileWrite(clientId, () =>
+            this.profileStore?.save(String(message.name ?? ''), message.roles as never),
+          );
+          break;
+        }
+        case 'profile_rename': {
+          void this.profileWrite(clientId, () =>
+            this.profileStore?.rename(String(message.from ?? ''), String(message.to ?? '')),
+          );
+          break;
+        }
+        case 'profile_duplicate': {
+          void this.profileWrite(clientId, () =>
+            this.profileStore?.duplicate(String(message.from ?? ''), String(message.to ?? '')),
+          );
+          break;
+        }
+        case 'profile_delete': {
+          void this.profileWrite(clientId, () => this.profileStore?.remove(String(message.name ?? '')));
+          break;
+        }
         case 'auth_list': {
           void this.authList(clientId);
           break;
@@ -277,6 +306,50 @@ export class Daemon {
     );
   }
 
+  /** Sends the profiles screen: the store's view plus the models a role can point at. */
+  private async profilesScreen(clientId: string, open = false): Promise<void> {
+    if (!this.profileStore) return;
+    try {
+      const { profiles, active } = this.profileStore.list();
+      const models = this.modelOptions();
+      const frame: Record<string, unknown> = {
+        profiles,
+        roles: this.profileStore.roles(),
+        models,
+        importable: this.profileStore.importable(),
+      };
+      if (active !== undefined) frame['active'] = active;
+      if (open) frame['open'] = true;
+      this.wsServer.deliver(clientId, 'profiles', frame);
+    } catch (error) {
+      this.wsServer.deliver(clientId, 'toast', {
+        level: 'error',
+        message: `No se pudieron leer los perfiles: ${(error as Error).message}`,
+      });
+    }
+  }
+
+  /** Runs one profile write and answers with the refreshed screen, or a plain error. */
+  private async profileWrite(clientId: string, write: () => Promise<void> | undefined): Promise<void> {
+    try {
+      await write();
+      await this.profilesScreen(clientId);
+    } catch (error) {
+      this.wsServer.deliver(clientId, 'toast', { level: 'warning', message: (error as Error).message });
+    }
+  }
+
+  /** The models a profile role may use, read from the engine's own models file. */
+  private modelOptions(): unknown[] {
+    const file = path.join(this.config.daemon.data_dir, 'gentle-ai', 'models.json');
+    try {
+      if (!existsSync(file)) return [];
+      return toModelOptions(JSON.parse(readFileSync(file, 'utf8')));
+    } catch {
+      return [];
+    }
+  }
+
   /** Answers `auth_list` with the providers the engine can sign into and their status. */
   private async authList(clientId: string, open = false): Promise<void> {
     if (!this.authManager) return;
@@ -392,6 +465,9 @@ export class Daemon {
   private engineHome: string | null = null;
   private restarting = false;
   private restartPending = false;
+
+  /** The assistant's own profiles and the files the engine routes models from. */
+  private profileStore: ProfileStore | null = null;
 
   /** Sign-in flows for the accounts screen. */
   private authManager: AuthManager | null = null;
@@ -617,6 +693,10 @@ export class Daemon {
     // A command, not a prompt: the engine never sees it and the window gets the accounts screen.
     if (text.trim() === '/login') {
       void this.authList(connectorId, true);
+      return;
+    }
+    if (text.trim() === '/profiles') {
+      void this.profilesScreen(connectorId, true);
       return;
     }
 
@@ -938,6 +1018,13 @@ export class Daemon {
     const chosenHome = process.env['GENTLE_DOT_AGENT_HOME'];
     this.engineHome = chosenHome ?? path.join(this.config.daemon.data_dir, 'agent');
     if (!chosenHome) this.markEngineHome(this.engineHome);
+
+    this.profileStore ??= new ProfileStore({
+      configHome: path.join(this.config.daemon.data_dir, 'gentle-ai'),
+      agentHome: this.engineHome as string,
+      importPath: this.options.profilesImportPath ?? defaultImportPath(),
+    });
+
 
     const shellConfig: ShellConfig = {
       home: this.config.daemon.workspace,
