@@ -140,137 +140,8 @@ export class Daemon {
     // Windows speak the client protocol: their frames are flat, so they get their own switch
     // instead of the bridge envelope one.
     this.wsServer.on('onAppMessage', (clientId: string, message: any) => {
-      switch (message?.type) {
-        case 'send':
-          this.chatSend(clientId, String(message.text ?? ''), message.attachments as AttachmentRef[] | undefined);
-          break;
-        case 'connector_connect': {
-          void this.connectorAction(clientId, 'connect', String(message.connectorId ?? ''));
-          break;
-        }
-        case 'connector_sign_in': {
-          void this.connectorAction(clientId, 'signIn', String(message.connectorId ?? ''));
-          break;
-        }
-        case 'connector_disconnect': {
-          void this.connectorAction(clientId, 'disconnect', String(message.connectorId ?? ''));
-          break;
-        }
-        case 'connectors_list': {
-          void this.connectorsScreen(clientId);
-          break;
-        }
-        case 'models_list': {
-          void this.modelsScreen(clientId);
-          break;
-        }
-        case 'model_set': {
-          void this.modelSwitch(clientId, message);
-          break;
-        }
-        case 'profiles_list': {
-          void this.profilesScreen(clientId);
-          break;
-        }
-        case 'profile_save': {
-          void this.profileWrite(clientId, () =>
-            this.profileStore?.save(String(message.name ?? ''), message.roles as never),
-          );
-          break;
-        }
-        case 'profile_rename': {
-          void this.profileWrite(clientId, () =>
-            this.profileStore?.rename(String(message.from ?? ''), String(message.to ?? '')),
-          );
-          break;
-        }
-        case 'profile_duplicate': {
-          void this.profileWrite(clientId, () =>
-            this.profileStore?.duplicate(String(message.from ?? ''), String(message.to ?? '')),
-          );
-          break;
-        }
-        case 'profile_save_current': {
-          void this.profileSaveCurrent(String(message.name ?? ''), clientId);
-          break;
-        }
-        case 'profile_import': {
-          void this.profileImport(clientId);
-          break;
-        }
-        case 'profile_apply': {
-          void this.profileApply(String(message.name ?? ''), clientId);
-          break;
-        }
-        case 'profile_delete': {
-          void this.profileWrite(clientId, () => this.profileStore?.remove(String(message.name ?? '')));
-          break;
-        }
-        case 'auth_list': {
-          void this.authList(clientId);
-          break;
-        }
-        case 'auth_login': {
-          void this.authLogin(clientId, message);
-          break;
-        }
-        case 'auth_reply': {
-          const answer = {
-            value: message.value === undefined ? undefined : String(message.value),
-            cancelled: message.cancelled === true,
-          };
-          const owner = this.authOwner(clientId);
-          const answeredByAccount = this.authManager?.reply(owner, String(message.flowId ?? ''), answer) === true;
-          const answered =
-            answeredByAccount ||
-            this.connectorManager?.reply(owner, String(message.flowId ?? ''), answer) === true;
-          // Another window's flow is none of this one's business.
-          if (answered === false)
-            this.wsServer.deliver(clientId, 'error', {
-              code: 'auth_flow_not_found',
-              message: 'That sign-in is not available.',
-            });
-          break;
-        }
-        case 'auth_logout': {
-          void this.authLogout(clientId, String(message.providerId ?? ''));
-          break;
-        }
-        case 'get_history': {
-          const { messages, hasEarlier } = this.transcript.page(undefined);
-          this.wsServer.deliver(clientId, 'history', { messages, hasEarlier });
-          break;
-        }
-        case 'get_earlier': {
-          const { messages, hasEarlier } = this.transcript.page(String(message.before ?? ''));
-          this.wsServer.deliver(clientId, 'earlier', {
-            before: String(message.before ?? ''),
-            messages,
-            hasEarlier,
-          });
-          break;
-        }
-        case 'ui_response': {
-          const requestId = String(message.requestId ?? '');
-          if (!requestId) break;
-          const sent = this.shellSpawner.uiRespond(requestId, {
-            value: message.value,
-            confirmed: message.confirmed,
-            cancelled: message.cancelled,
-          });
-          if (sent) this.wsServer.deliver(clientId, 'ask_resolved', { requestId });
-          break;
-        }
-        case 'abort':
-          this.shellSpawner.rpc('abort', {}, 60_000).catch((error) =>
-            console.error(`[Daemon] abort falló: ${(error as Error).message}`),
-          );
-          break;
-        default:
-          break;
-      }
+      void this.handleAppFrame(clientId, message);
     });
-
     this.wsServer.on('onConnection', (ws, connectorId) => {
       console.log(`[Daemon] Bridge connected: ${connectorId}`);
     });
@@ -308,6 +179,14 @@ export class Daemon {
       if (this.stopped || this.stopping) return;
       console.log('[Daemon] The app channel closed, stopping');
       void this.stop();
+    });
+
+    // The panel's channel is the other way a window's app command reaches the daemon.
+    this.appChannel.registerHandler('command', async (params) => {
+      const request = params as { clientId?: unknown; message?: { type?: string } };
+      const clientId = typeof request?.clientId === 'string' ? request.clientId : '';
+      if (clientId !== '' && request.message) await this.handleAppFrame(clientId, request.message);
+      return {};
     });
 
     // A window that disappears takes its sign-in with it.
@@ -381,6 +260,12 @@ export class Daemon {
     const emit = (event: { type: string } & Record<string, unknown>) => {
       const { type, ...payload } = event;
       this.wsServer.deliver(clientId, type, payload);
+      // A sign-in finishes long after it starts: the files and the policy change only then, so
+      // that is when the screen is refreshed and the engine restarts with the new policy.
+      if (type === 'auth_done') {
+        void this.connectorsScreen();
+        void this.restartEngine();
+      }
     };
     const refusal =
       action === 'disconnect'
@@ -393,10 +278,149 @@ export class Daemon {
       return;
     }
 
-    // The action either started a flow (it finishes later through auth_reply) or already changed
-    // the files: either way the screen is stale, so every window gets it and the engine restarts.
+    // The screen is stale either way; a change that is already done (a disconnect) restarts the
+    // engine here, and a sign-in restarts when its flow closes.
     await this.connectorsScreen();
-    if (action !== 'signIn') void this.restartEngine();
+    if (action === 'disconnect') void this.restartEngine();
+  }
+
+  /**
+   * One frame from a window, whatever carried it. The desktop panel sends a window's app commands
+   * over its own channel (`command` with the window's id); everything else arrives on the
+   * WebSocket. Both end here, so an action behaves the same either way, and the events an action
+   * produces go to that window's WebSocket — which is where the window reads them.
+   */
+  private async handleAppFrame(clientId: string, message: any): Promise<void> {
+    switch (message?.type) {
+      case 'send':
+        this.chatSend(clientId, String(message.text ?? ''), message.attachments as AttachmentRef[] | undefined);
+        break;
+      case 'connector_connect': {
+        void this.connectorAction(clientId, 'connect', String(message.connectorId ?? ''));
+        break;
+      }
+      case 'connector_sign_in': {
+        void this.connectorAction(clientId, 'signIn', String(message.connectorId ?? ''));
+        break;
+      }
+      case 'connector_disconnect': {
+        void this.connectorAction(clientId, 'disconnect', String(message.connectorId ?? ''));
+        break;
+      }
+      case 'connectors_list': {
+        void this.connectorsScreen(clientId);
+        break;
+      }
+      case 'models_list': {
+        void this.modelsScreen(clientId);
+        break;
+      }
+      case 'model_set': {
+        void this.modelSwitch(clientId, message);
+        break;
+      }
+      case 'profiles_list': {
+        void this.profilesScreen(clientId);
+        break;
+      }
+      case 'profile_save': {
+        void this.profileWrite(clientId, () =>
+          this.profileStore?.save(String(message.name ?? ''), message.roles as never),
+        );
+        break;
+      }
+      case 'profile_rename': {
+        void this.profileWrite(clientId, () =>
+          this.profileStore?.rename(String(message.from ?? ''), String(message.to ?? '')),
+        );
+        break;
+      }
+      case 'profile_duplicate': {
+        void this.profileWrite(clientId, () =>
+          this.profileStore?.duplicate(String(message.from ?? ''), String(message.to ?? '')),
+        );
+        break;
+      }
+      case 'profile_save_current': {
+        void this.profileSaveCurrent(String(message.name ?? ''), clientId);
+        break;
+      }
+      case 'profile_import': {
+        void this.profileImport(clientId);
+        break;
+      }
+      case 'profile_apply': {
+        void this.profileApply(String(message.name ?? ''), clientId);
+        break;
+      }
+      case 'profile_delete': {
+        void this.profileWrite(clientId, () => this.profileStore?.remove(String(message.name ?? '')));
+        break;
+      }
+      case 'auth_list': {
+        void this.authList(clientId);
+        break;
+      }
+      case 'auth_login': {
+        void this.authLogin(clientId, message);
+        break;
+      }
+      case 'auth_reply': {
+        const answer = {
+          value: message.value === undefined ? undefined : String(message.value),
+          cancelled: message.cancelled === true,
+        };
+        const owner = this.authOwner(clientId);
+        const answeredByAccount = this.authManager?.reply(owner, String(message.flowId ?? ''), answer) === true;
+        const answered =
+          answeredByAccount ||
+          this.connectorManager?.reply(owner, String(message.flowId ?? ''), answer) === true;
+        // Another window's flow is none of this one's business.
+        if (answered === false)
+          this.wsServer.deliver(clientId, 'error', {
+            code: 'auth_flow_not_found',
+            message: 'That sign-in is not available.',
+          });
+        break;
+      }
+      case 'auth_logout': {
+        void this.authLogout(clientId, String(message.providerId ?? ''));
+        break;
+      }
+      case 'get_history': {
+        const { messages, hasEarlier } = this.transcript.page(undefined);
+        this.wsServer.deliver(clientId, 'history', { messages, hasEarlier });
+        break;
+      }
+      case 'get_earlier': {
+        const { messages, hasEarlier } = this.transcript.page(String(message.before ?? ''));
+        this.wsServer.deliver(clientId, 'earlier', {
+          before: String(message.before ?? ''),
+          messages,
+          hasEarlier,
+        });
+        break;
+      }
+      case 'ui_response': {
+        const requestId = String(message.requestId ?? '');
+        if (!requestId) break;
+        const sent = this.shellSpawner.uiRespond(requestId, {
+          value: message.value,
+          confirmed: message.confirmed,
+          cancelled: message.cancelled,
+        });
+        if (sent) this.wsServer.deliver(clientId, 'ask_resolved', { requestId });
+        break;
+      }
+      case 'abort':
+        this.shellSpawner.rpc('abort', {}, 60_000).catch((error) =>
+          console.error(`[Daemon] abort falló: ${(error as Error).message}`),
+        );
+        break;
+      default:
+      break;
+    }
+
   }
 
   /** Answers `connectors_list` and the /connectors command with what the screen shows. */
