@@ -1034,6 +1034,25 @@ html[data-effects="none"] .chat-panel {
 	color: var(--text);
 }
 
+.message-copy {
+	display: block;
+	margin: 4px 0 0;
+	padding: 0;
+	border: 0;
+	background: none;
+	font: inherit;
+	font-size: 12px;
+	line-height: 16px;
+	color: var(--muted);
+	cursor: pointer;
+}
+
+.message-copy:hover,
+.message-copy:focus-visible {
+	color: inherit;
+	text-decoration: underline;
+}
+
 .message-note {
 	margin: 6px 0 0;
 	font-size: 12px;

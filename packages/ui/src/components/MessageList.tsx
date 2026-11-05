@@ -27,6 +27,30 @@ export function summarize(activities: Activity[]): string {
 		.join(" · ");
 }
 
+const COPY_LABELS = { idle: "Copy answer", copied: "Copied", failed: "Could not copy" } as const;
+const COPY_RESET_MS = 2000;
+
+/** Copies the answer's original markdown, so code blocks and links survive the paste. */
+function CopyAnswer({ text }: { text: string }) {
+	const [status, setStatus] = useState<keyof typeof COPY_LABELS>("idle");
+	useEffect(() => {
+		if (status === "idle") return;
+		const timer = setTimeout(() => setStatus("idle"), COPY_RESET_MS);
+		return () => clearTimeout(timer);
+	}, [status]);
+	const copy = () => {
+		navigator.clipboard.writeText(text).then(
+			() => setStatus("copied"),
+			() => setStatus("failed"),
+		);
+	};
+	return (
+		<button type="button" className="message-copy" onClick={copy}>
+			{COPY_LABELS[status]}
+		</button>
+	);
+}
+
 function Activities({ activities }: { activities: Activity[] }) {
 	const [open, setOpen] = useState(false);
 	const running = activities.find((a) => a.status === "running");
@@ -113,6 +137,9 @@ export function MessageList({ messages, queued = [], hasEarlier = false, onShowE
 							</div>
 						) : null}
 						{message.streaming ? <span className="caret" aria-hidden="true" /> : null}
+						{message.text && message.role === "assistant" && !message.streaming ? (
+							<CopyAnswer text={message.text} />
+						) : null}
 						{message.note ? (
 							<p
 								className={`message-note message-note-${message.note.kind}`}
