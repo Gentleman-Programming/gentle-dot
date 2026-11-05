@@ -1326,6 +1326,47 @@ mod windows_ownership_tests {
         drop(peer);
     }
 
+    #[test]
+    fn exited_root_replacement_with_a_held_port_retains_both_owners_when_old_channel_close_fails() {
+        let foreign = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let mut daemon = Daemon::new(1, PathBuf::new(), None).with_channel(Arc::new(RefusingHandler));
+        daemon.health = Some(Arc::new({ let foreign = foreign.clone(); move || foreign.load(Ordering::SeqCst) }));
+        // Regression must stop before this deliberately invalid launcher is reached.
+        daemon.launch = Some(LaunchSpec { program: "must-not-launch".into(), args: vec![], envs: vec![] });
+        let calls = Arc::new(AtomicUsize::new(0));
+        *daemon.child.lock().unwrap() = Some(Box::new(CompletedChild(calls.clone())));
+        let (endpoint, peer) = channel_pair().unwrap();
+        let retained = AppChannel::start(endpoint, Arc::new(RefusingHandler)).unwrap();
+        *daemon.channel.lock().unwrap() = Some(retained.clone());
+        retained.test_inject_cancel_error(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32);
+        // The port wait comes first; the failed close then outranks the held port.
+        let replaced = daemon.spawn().unwrap_err();
+        assert!(replaced.starts_with("cannot replace unfinished Windows channel:"));
+        assert_eq!(daemon.refusal(), Some(replaced));
+        assert!(daemon.child.lock().unwrap().is_some());
+        assert!(!daemon.child.lock().unwrap().as_ref().unwrap().launch_failed(), "an exited child is not a failed launch");
+        assert!(Arc::ptr_eq(daemon.channel.lock().unwrap().as_ref().unwrap(), &retained));
+        assert!(!retained.is_open());
+        assert!(retained.close_error().is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let unfinished = "the assistant's channel shutdown is unfinished (";
+        let spawned = daemon.spawn().unwrap_err();
+        assert!(spawned.starts_with(unfinished), "refused by the channel check, not as foreign: {spawned}");
+        let started = daemon.ensure_running(Duration::ZERO).unwrap_err();
+        assert!(started.starts_with(unfinished), "refused by the channel check, not as foreign: {started}");
+        assert_eq!(daemon.refusal(), Some(started));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "admission rejects a logically closed retained channel");
+        assert!(daemon.child.lock().unwrap().is_some());
+        assert!(Arc::ptr_eq(daemon.channel.lock().unwrap().as_ref().unwrap(), &retained));
+        // Cleanup with the port released, so checked stop does not wait on it again.
+        foreign.store(false, Ordering::SeqCst);
+        retained.test_inject_cancel_error(0);
+        daemon.stop().unwrap();
+        assert!(daemon.child.lock().unwrap().is_none());
+        assert!(daemon.channel.lock().unwrap().is_none());
+        drop(peer);
+    }
+
     fn failed_close_serializes_start(direct_spawn: bool) {
         let ready = Arc::new(AtomicUsize::new(0));
         let mut daemon = Daemon::new(1, PathBuf::new(), None)
