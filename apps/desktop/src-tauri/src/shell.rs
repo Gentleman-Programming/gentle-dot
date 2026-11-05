@@ -610,6 +610,8 @@ fn build_windows(
         .skip_taskbar(true)
         // Lets the chat receive HTML5 drops of attachments (S31); Tauri's own handler would take them.
         .disable_drag_drop_handler()
+        // Cmd or Ctrl with + and - scale the chat, for anyone who needs larger text (#173).
+        .zoom_hotkeys_enabled(true)
         .visible(false);
     #[cfg(windows)]
     let panel = panel.minimizable(false);
