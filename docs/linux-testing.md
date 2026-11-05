@@ -54,6 +54,7 @@ You can run the script again at any time; it skips what is already done. `script
 | Global shortcut | Add a custom shortcut in GNOME Settings (step 7) | `SUPER + ALT + D`, from the binding you paste in step 3C |
 | Tray icon | Needs the AppIndicator extension. Ubuntu has it on already; Debian needs it enabled (step 6). | Shown by Waybar |
 | Panel background | Solid dark, with no blur behind it | Same |
+| Startup with NVIDIA | Not affected (the app runs under XWayland). | The app sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` before GTK starts, and the snippets you paste set it for the whole session: WebKitGTK's DMA-BUF renderer would otherwise be rejected with `Error 71` (protocol error) at startup ([WebKitGTK bug 280210](https://bugs.webkit.org/show_bug.cgi?id=280210)). |
 
 `gentle-dot --toggle` shows or hides the panel of the running app. If the app is not running, the command starts it and opens the panel.
 
