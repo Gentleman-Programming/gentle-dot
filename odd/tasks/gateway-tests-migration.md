@@ -352,3 +352,23 @@ nada se sirve de vuelta por HTTP— pero falta el bloque de endurecimiento antes
 6. **Cuotas por usuario/ventana** además de por mensaje, para que un cliente no llene el disco.
 
 Estado: registrado como tarea propia. Los tests de `uploads` (23) cubren lo funcional, no esto.
+
+## Alcance de `connectors-gateway` (2026-11-05)
+
+Medido antes de empezar: `src/connectors.ts` tiene **2590 líneas** con el catálogo, `fillServer`,
+secretos por conector y la lógica de mcp.json. Su test (232 líneas, 8 casos) inyecta dos cosas y
+espera cuatro comportamientos:
+
+- **`connectorOAuth`** (`oauthOptions(...)`): runner de OAuth por conector (módulo
+  `connector-oauth.ts` existe, sin cablear al daemon).
+- **`appChannel`** duplex: las cambios de conector los **confirma la app** de escritorio, y el
+  test usa `fakeApp([], "allow")`.
+- Comportamientos que pide: listar conectores; `/connectors` abre la pantalla; el sign-in va a la
+  ventana que lo pidió y **todas** se refrescan; el engine **reinicia con la política nueva**
+  esperando al turno en curso; se **restaura un `mcp.json` cambiado** antes de reiniciar; un
+  conector apagado **sigue apagado** aunque el asistente edite los archivos; y cancelar el sign-in
+  por `auth_reply` con rechazo de conectores desconocidos.
+
+Conclusión: no es un cableado corto — es el subsistema de conectores completo (OAuth + aprobación
+por la app + política + mcp.json + reinicio). Merece sesión propia y fresca, empezando por el
+runner de OAuth y el frame de lectura (`connectors` + `/connectors`), que es lo que da visibilidad.
