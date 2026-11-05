@@ -84,6 +84,12 @@ Notion, Linear, and Atlassian connect through their official servers; Discord, S
 
 ---
 
+### Channels (prototype: WhatsApp)
+
+Channels are doors where you talk to the assistant; Connectors are tools it uses. The first one is WhatsApp (an external, opt-in bridge process): pair your dedicated number with a QR right from the app, keep an allowlist of who may write, verify the link with a test message, and unpair whenever you want. The bridge runs outside Gentle Dot, only your last four digits ever show, and the assistant still asks before anything it sends on your behalf.
+
+---
+
 ### Files in the chat
 
 Attach files with the paperclip, drag and drop, or paste. Images go straight to the model when it can see them; everything else lands in the assistant's workspace for it to read.
