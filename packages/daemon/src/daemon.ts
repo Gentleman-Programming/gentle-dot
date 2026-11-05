@@ -9,8 +9,8 @@ import { ConnectorRegistry, connectorRegistry, ConnectorInfo, ConnectorType } fr
 import { GentleShellSpawner, ShellConfig } from './gentle-shell-spawner.js';
 import { McpProxy, McpServerConfig, McpMode, ApprovalRequest, ApprovalResponse } from './mcp-proxy.js';
 import { AppChannel, AppMessage } from './app-channel.js';
-import { installChildGuardFile, watchChildGuard } from './child-guard.js';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { childGuardFile, installChildGuardFile, watchChildGuard } from './child-guard.js';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as path from 'path';
@@ -170,6 +170,43 @@ export class Daemon {
     return fileURLToPath(new URL('./extensions/approval-guard.ts', import.meta.url));
   }
 
+  /** Removes the workspace `mcp.json` the engine writes, when the guard cannot be enforced. */
+  private removePlantedMcpJson(): void {
+    const file = path.join(this.config.daemon.workspace, '.pi', 'mcp.json');
+    try {
+      if (!existsSync(file)) return;
+      rmSync(file, { force: true });
+      console.log(`[Daemon] Removed a planted mcp.json with the guard unenforceable: ${file}`);
+    } catch (error) {
+      console.log(`[Daemon] Could not remove the planted mcp.json (${file}): ${(error as Error).message}`);
+    }
+  }
+
+  /**
+   * The policy the approval guard reads: which connectors are approved and in which mode, the
+   * files only the daemon may touch, and which servers its proxy already fronts. The lead entry
+   * is the workspace's own `mcp.json`, because the engine writes it and the assistant must not.
+   */
+  private connectorPolicy(agentHome: string | undefined): Record<string, unknown> {
+    const connectors: Record<string, { name: string; mode: string; readOnlyTools: string[] }> = {};
+    const proxied: string[] = [];
+    for (const [name, entry] of Object.entries(this.config.connectors ?? {})) {
+      const connector = entry as { enabled?: boolean; mode?: string };
+      if (!connector?.enabled) continue;
+      connectors[name] = {
+        name: name.charAt(0).toUpperCase() + name.slice(1),
+        mode: connector.mode ?? 'read_only',
+        readOnlyTools: [],
+      };
+      proxied.push(name);
+    }
+
+    const protectedPaths = [path.join(this.config.daemon.workspace, '.pi', 'mcp.json'), this.approvalGuardPath()];
+    if (agentHome) protectedPaths.push(childGuardFile(agentHome));
+
+    return { connectors, protectedPaths, proxied, builtin: ['computer'] };
+  }
+
   /**
    * Puts the child guard in place and keeps it there while the engine runs. Returns false when it
    * cannot, so the caller starts the engine with subagents off instead of unprotected.
@@ -185,7 +222,14 @@ export class Daemon {
     }
     console.log(`[Daemon] Child guard installed: ${install.file}`);
     this.stopChildGuardWatch?.();
-    this.stopChildGuardWatch = watchChildGuard(agentHome, guardPath, (line) => console.log(line));
+    this.stopChildGuardWatch = watchChildGuard(
+      agentHome,
+      guardPath,
+      (line) => console.log(line),
+      // With the guard unenforceable, a planted project mcp.json would reach the engine with no
+      // one checking it: drop it and say why, once.
+      () => this.removePlantedMcpJson(),
+    );
     return true;
   }
 
@@ -541,6 +585,7 @@ export class Daemon {
       sessionDir: path.join(this.config.daemon.data_dir, 'sessions'),
       extensions: [this.approvalGuardPath()],
     };
+    shellConfig.policy = this.connectorPolicy(shellConfig.agentHome);
 
     // The subagents of the assistant's engine load the guard from its extensions folder. If it
     // cannot be put there (or kept there), the engine runs with subagents off rather than

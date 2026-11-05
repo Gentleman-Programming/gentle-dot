@@ -54,6 +54,8 @@ export interface ShellConfig {
   extensions?: string[];
   /** False keeps the engine's subagents off, e.g. when the child guard cannot be installed. */
   subagentsOn?: boolean;
+  /** The connector policy the guard reads from the environment: what is protected and what is allowed. */
+  policy?: Record<string, unknown>;
   /** Agent home for the engine's own state (auth, settings). Defaults to config.home. */
   agentHome?: string;
 }
@@ -325,6 +327,10 @@ export class GentleShellSpawner extends EventEmitter {
     // safe, so the two always travel together.
     env['GENTLE_PI_AGENTS'] =
       config.subagentsOn === false || env['GENTLE_DOT_SUBAGENTS'] === 'off' ? '0' : '1';
+
+    // The guard reads the policy from this process's environment, which the assistant cannot
+    // change. Without it nothing counts as read-only and every connector call would ask.
+    if (config.policy) env['GENTLE_DOT_CONNECTOR_POLICY'] = JSON.stringify(config.policy);
 
     // Gentle AI config home
     env['GENTLE_PI_CONFIG_HOME'] = path.join(config.home, 'gentle-ai');

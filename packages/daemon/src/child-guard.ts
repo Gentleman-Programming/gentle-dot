@@ -71,17 +71,37 @@ export function installChildGuardFile(agentHome: string, guardPath: string): Chi
  * repair. Returns the stop function. Best effort: a file the agent can write is a race it can
  * always win, and this is defense in depth, not the boundary.
  */
-export function watchChildGuard(agentHome: string, guardPath: string, log: (line: string) => void): () => void {
+export function watchChildGuard(
+	agentHome: string,
+	guardPath: string,
+	log: (line: string) => void,
+	onCannotWrite?: () => void,
+): () => void {
 	const file = childGuardFile(agentHome);
 	const expected = childGuardText(guardPath);
 	let stopped = false;
+	/** One report per episode: the poll runs every 250ms and must not shout each time. */
+	let reported = false;
 
 	const repair = () => {
 		if (stopped) return;
 		try {
-			if (existsSync(file) && readFileSync(file, "utf8") === expected) return;
-			installChildGuardFile(agentHome, guardPath);
-			log(`[Daemon] Child guard put back: ${file}`);
+			const intact = existsSync(file) && readFileSync(file, "utf8") === expected;
+			if (intact) {
+				reported = false;
+				return;
+			}
+			const install = installChildGuardFile(agentHome, guardPath);
+			if (install.ok) {
+				reported = false;
+				log(`[Daemon] Child guard put back: ${install.file}`);
+				return;
+			}
+			if (install.reason === "cannot-be-written" && !reported) {
+				reported = true;
+				log(`[Daemon] The child guard folder cannot be written (${install.file}), subagents are off`);
+				onCannotWrite?.();
+			}
 		} catch {
 			// keep watching; the next event tries again
 		}
