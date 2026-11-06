@@ -386,8 +386,8 @@ export class AppChannel extends EventEmitter {
   async request(method: string, params: unknown = {}, timeoutMs = APPROVAL_WAIT_MS): Promise<unknown> {
     if (!this.stream) throw new Error('not a pipe channel');
     const id = ++this.frameSeq;
-    const sent = this.writeFrame({ kind: 'request', id, method, params });
-    if (!sent) throw new Error('frame refused');
+    // The pipe can answer in the same tick: the pending entry is registered before the write so a
+    // synchronous response is matched instead of dropped.
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingFrames.delete(id);
@@ -395,6 +395,12 @@ export class AppChannel extends EventEmitter {
       }, timeoutMs);
       timer.unref?.();
       this.pendingFrames.set(id, { resolve, reject, timer });
+      const sent = this.writeFrame({ kind: 'request', id, method, params });
+      if (!sent) {
+        clearTimeout(timer);
+        this.pendingFrames.delete(id);
+        reject(new Error('frame refused'));
+      }
     });
   }
 
