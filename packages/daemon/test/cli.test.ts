@@ -3,7 +3,10 @@ import { readFileSync, statSync } from "node:fs";
 import { createServer, type Socket, connect as unixConnect } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// The CLI boots a whole daemon, which takes longer than the 5s default.
+vi.setConfig({ testTimeout: 180_000 });
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));

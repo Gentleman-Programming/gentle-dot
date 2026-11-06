@@ -177,7 +177,7 @@ export class Daemon {
     // there is nobody left to talk to.
     this.appChannel.on('disconnect', () => {
       if (this.stopped || this.stopping) return;
-      console.log('[Daemon] The app channel closed, stopping');
+      console.log("the desktop app's channel closed; stopping the assistant");
       void this.stop();
     });
 
@@ -1397,11 +1397,18 @@ export class Daemon {
     if (process.env['GENTLE_DOT_NO_SHELL'] === '1') {
       console.log('[Daemon] GENTLE_DOT_NO_SHELL=1 — skipping Gentle Shell spawn');
     } else {
-      await this.startEngine();
+      try {
+        await this.startEngine();
+      } catch (error) {
+        // A daemon stopped on purpose while its engine was still starting is not a failure: the
+        // readiness timeout must not turn an orderly closure into a startup error.
+        if (!this.stopping) throw error;
+      }
     }
 
-    // Register MCP servers based on config
-    await this.registerMcpServers();
+    // Register MCP servers based on config. Not awaited: a server that needs installing (or whose
+    // package does not exist) must not keep the daemon from reporting itself ready.
+    void this.registerMcpServers();
 
     // Watch config for hot reload
     this.configWatcher = watchConfig(this.options.configPath || '', (newConfig) => {
@@ -1545,6 +1552,8 @@ export class Daemon {
       secrets: new AppSecretSource(this.appChannel),
       log: (line) => console.log(line),
     });
+    // The app is asked for the connectors' integrity key at start, the way it always was.
+    void this.connectorStore.checkIntegrity();
     this.connectorManager ??= new ConnectorManager({
       store: this.connectorStore,
       ...(this.options.connectorOAuth ? { oauth: this.options.connectorOAuth } : {}),
