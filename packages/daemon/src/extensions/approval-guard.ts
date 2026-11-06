@@ -21,7 +21,9 @@
  * read with the file tools either, by any path, symlink, or hard link.
  *
  * Commands are checked by text: one that names one of those files (by its name, with quotes
- * removed), the data folder, the keychain, or the engine's home variable is blocked. That check is
+ * removed), the data folder, the keychain, or the engine's home variable is blocked. The data folder
+ * may be named on the way to the engine's own workspace (where the user's attachments are saved), as
+ * long as the command does not climb with `..`. That check is
  * best effort, NOT a security boundary: the assistant runs as the user with a shell, so a command
  * can still build a name the check does not see. The daemon keeps the connector state in memory
  * and puts changed files back (docs/design.md, Connectors); the engine's `mcp.json` holds no tokens
@@ -257,7 +259,7 @@ export function decide(call: GuardCall, policy: ConnectorPolicy): GuardDecision 
 	if (COMMAND_TOOLS.has(toolName)) {
 		const command = typeof input.command === "string" ? input.command : "";
 		if (CONNECTOR_COMMAND.test(command)) return { action: "block", reason: USE_CONNECTORS_SCREEN };
-		return namesPrivateFile(command, policy.protectedPaths)
+		return namesPrivateFile(command, policy.protectedPaths, call.cwd)
 			? { action: "block", reason: PRIVATE_FILE }
 			: { action: "pass" };
 	}
@@ -360,10 +362,11 @@ function show(value: unknown): string {
 /**
  * True when a command mentions a private file by name (quotes, backslashes, and string
  * concatenation removed, any case), the data folder, the engine's home variable, or the keychain.
+ * The workspace (`cwd`) does not count as the data folder (see {@link withoutWorkspace}).
  * Best effort: a shell can always spell a name some other way.
  */
-function namesPrivateFile(command: string, protectedPaths: string[]): boolean {
-	const text = command
+function namesPrivateFile(command: string, protectedPaths: string[], cwd: string): boolean {
+	const text = withoutWorkspace(command, cwd)
 		.replace(/(["'`])\s*\+\s*(["'`])/g, "")
 		.replace(/["'`\\]/g, "")
 		.toLowerCase();
@@ -377,6 +380,24 @@ function namesPrivateFile(command: string, protectedPaths: string[]): boolean {
 			(word) => /[*?[]/.test(word) && word.replace(/[*?[\]]/g, "").length >= 3 && glob(word).test(name),
 		);
 	});
+}
+
+/**
+ * The command without its mentions of the engine's workspace (`cwd`) when that sits in the data
+ * folder (`~/.gentle-dot/workspace`): the files the user attaches are saved there, so naming them
+ * names the data folder too. A command that climbs (`..`) keeps every mention, since it can leave
+ * the workspace; so does a workspace outside the data folder, or the data folder itself.
+ */
+function withoutWorkspace(command: string, cwd: string): string {
+	if (command.includes("..")) return command;
+	const segments = cwd.split(/[\\/]+/).filter(Boolean);
+	const lower = segments.map((segment) => segment.toLowerCase());
+	const at = Math.max(...PRIVATE_NAMES.map((name) => lower.lastIndexOf(name)));
+	if (at < 0 || at === segments.length - 1) return command;
+	const escaped = segments.slice(at).map((segment) => segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+	// The workspace's last folder must end there: `workspace-old` is another folder.
+	const path = new RegExp(`${escaped.join("[\\\\/]+")}(?=[\\\\/"'\`\\s;|&()<>]|$)`, "gi");
+	return command.replace(path, "");
 }
 
 /** A shell pattern (`mcp-a*`) as a regular expression for one file name. */
