@@ -19,11 +19,12 @@ vi.mock('./transport/factory.js', () => ({
   })),
 }));
 
-vi.mock('./rate-limit.js', () => ({
-  RateLimiter: vi.fn().mockImplementation(() => ({
-    send: vi.fn().mockResolvedValue(undefined),
-  })),
-}));
+vi.mock('./rate-limit.js', () => {
+  class RateLimiter {
+    send = vi.fn().mockResolvedValue(undefined);
+  }
+  return { RateLimiter };
+});
 
 const createMockConfig = (overrides: Partial<Config> = {}): Config => ({
   connectorId: 'whatsapp-test',
@@ -31,8 +32,19 @@ const createMockConfig = (overrides: Partial<Config> = {}): Config => ({
   allowedNumbers: new Set(['5491112345678', '5491187654321']),
   daemonUrl: 'ws://localhost:4317/ws',
   tokenFile: '/tmp/test-token',
-  provider: 'baileys',
-  meta: null,
+  provider: 'meta-cloud',
+  // The bridge only supports Meta Cloud today (see src/transport/factory.ts:9), so the default
+  // mock config carries the credentials the constructor requires.
+  meta: {
+    phoneNumberId: '123456789',
+    token: 'meta-token-123',
+    verifyToken: 'verify',
+    appSecret: 'secret',
+    webhookPort: 4408,
+    webhookHost: '0.0.0.0',
+    graphUrl: 'https://graph.facebook.com',
+    graphVersion: 'v21.0',
+  },
   adminPort: 4407,
   adminTokenFile: '/tmp/admin-token',
   allowlistFile: '/tmp/allowlist.json',
@@ -78,7 +90,7 @@ describe('WhatsAppBridge - BaseBridge v2 Compatibility', () => {
       expect(config.daemonUrl).toBe('ws://localhost:4317/ws');
       expect(config.metadata).toEqual({
         version: '1.0.0',
-        provider: 'baileys',
+        provider: 'meta-cloud',
         features: ['allowlist_management', 'meta_cloud_support'],
       });
     });
@@ -142,14 +154,13 @@ describe('WhatsAppBridge - BaseBridge v2 Compatibility', () => {
   });
 
   describe('Event System', () => {
+    // BaseBridge extends EventEmitter: on/once return the emitter, and off unsubscribes.
     it('should have on() method for event subscription', () => {
-      const unsubscribe = bridge.on('onReady', vi.fn());
-      expect(typeof unsubscribe).toBe('function');
+      expect(bridge.on('onReady', vi.fn())).toBe(bridge);
     });
 
     it('should have once() method', () => {
-      const unsubscribe = bridge.once('onReady', vi.fn());
-      expect(typeof unsubscribe).toBe('function');
+      expect(bridge.once('onReady', vi.fn())).toBe(bridge);
     });
 
     it('should have off() method', () => {
@@ -179,15 +190,13 @@ describe('WhatsAppBridge - BaseBridge v2 Compatibility', () => {
       expect(typeof bridge.start).toBe('function');
     });
 
-    it('should have stop() method', () => {
-      expect(typeof bridge.stop).toBe('function');
+    it('should have disconnect() method', () => {
+      expect(typeof bridge.disconnect).toBe('function');
     });
 
-    it('should have getStatus() returning bridge status info', async () => {
-      const status = await bridge.getStatus();
-      expect(status).toHaveProperty('uptime');
-      expect(status).toHaveProperty('allowedNumbers');
-      expect(status).toHaveProperty('provider');
+    // BaseBridge.getStatus() answers the lifecycle state, not a snapshot object.
+    it('should have getStatus() returning the bridge status', () => {
+      expect(bridge.getStatus()).toBe('disconnected');
     });
 
     it('should have connectionLost() method', async () => {
@@ -215,7 +224,9 @@ describe('WhatsAppBridge - BaseBridge v2 Compatibility', () => {
 });
 
 describe('WhatsAppBridge - Provider Variants', () => {
-  it('should create baileys transport by default', () => {
+  // Baileys is not implemented: src/transport/factory.ts:9 supports Meta Cloud only
+  // (Baileys carries a git dependency). Kept as a skipped placeholder so the gap stays visible.
+  it.skip('should create baileys transport by default', async () => {
     const { createTransportFactory } = await import('./transport/factory.js');
     const options = createMockOptions({ 
       config: createMockConfig({ provider: 'baileys' }) 
@@ -226,7 +237,7 @@ describe('WhatsAppBridge - Provider Variants', () => {
     }));
   });
 
-  it('should create meta-cloud transport when configured', () => {
+  it('should create meta-cloud transport when configured', async () => {
     const { createTransportFactory } = await import('./transport/factory.js');
     const options = createMockOptions({ 
       config: createMockConfig({

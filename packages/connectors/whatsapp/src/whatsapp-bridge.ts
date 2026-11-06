@@ -91,6 +91,7 @@ export class WhatsAppBridge extends BaseBridge {
       authDir: options.config.authDir,
       allowedNumbers: options.config.allowedNumbers,
       log: options.log,
+      provider: options.config.provider,
       meta: options.config.meta,
     };
     this.transport = createTransportFactory(transportOptions);
