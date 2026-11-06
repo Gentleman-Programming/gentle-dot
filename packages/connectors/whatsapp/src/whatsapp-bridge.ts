@@ -3,7 +3,7 @@
  * Meta Cloud API provider only (Baileys has git dependency issues)
  */
 
-import { BaseBridge, type BridgeConfig, type BridgeMessage, type BridgeStatus, type HelloPayload, type ReadyPayload, type ChannelNotifyPayload, type ConnectorEventPayload, type CommandPayload, type CommandResultPayload } from '@gentle-dot/bridges-base';
+import { BaseBridge, brandInbound, type BridgeConfig, type BridgeMessage, type BridgeStatus, type HelloPayload, type ReadyPayload, type ChannelNotifyPayload, type ConnectorEventPayload, type CommandPayload, type CommandResultPayload } from '@gentle-dot/bridges-base';
 import { type Config, loadConfig, type MetaCloudConfig } from './config.js';
 import { createTransportFactory, type ChannelTransport, type ChannelInbound, type TransportStateEvent, type TransportFactoryOptions } from './transport/factory.js';
 import { RateLimiter } from './rate-limit.js';
@@ -226,7 +226,7 @@ export class WhatsAppBridge extends BaseBridge {
       await this.reply(from, "Sigo trabajando en lo anterior; si querés frenar, mandá /stop.");
       return;
     }
-    this.send('send', { text: `${SOURCE_LABEL}${trimmed}` });
+    this.send('send', { text: brandInbound(SOURCE_LABEL, trimmed) });
   }
 
   private async onTransportState(event: TransportStateEvent): Promise<void> {

@@ -5,13 +5,15 @@
 
 import { Bot, Context, InlineKeyboard } from 'grammy';
 import { readFileSync } from 'node:fs';
-import { BaseBridge, type BridgeConfig, type BridgeStatus, type HelloPayload, type ReadyPayload, type ChannelNotifyPayload, type ConnectorEventPayload, type CommandPayload, type CommandResultPayload, type BridgeMessage } from '@gentle-dot/bridges-base';
+import { BaseBridge, brandInbound, type BridgeConfig, type BridgeStatus, type HelloPayload, type ReadyPayload, type ChannelNotifyPayload, type ConnectorEventPayload, type CommandPayload, type CommandResultPayload, type BridgeMessage } from '@gentle-dot/bridges-base';
 import { NicknameStore } from './storage/nickname-store.js';
 import { loadConfig, Config } from './config.js';
 import { splitMessage, telegramDownloader } from './utils.js';
 import type { AttachmentRef } from '@gentle-dot/protocol';
 
 const TELEGRAM_TEXT_LIMIT = 4096;
+/** The branded label the contract prepends to every inbound (#48). */
+const CHANNEL_LABEL = '📱 [Telegram] ';
 const DRAFT_REFRESH_MS = 20000;
 const MAX_VOICE_AUDIO = 1024 * 1024; // ~1MB base64
 const TELEGRAM_DOWNLOAD_LIMIT = 20 * 1024 * 1024;
@@ -561,7 +563,9 @@ export class TelegramBridge extends BaseBridge {
   }
 
   private async sendToAssistant(chatId: number, text: string, attachments?: AttachmentRef[]): Promise<void> {
-    const payload = attachments ? { type: 'send', text, attachments } : { type: 'send', text };
+    // The channel resolves its own identity (#48): the assistant always knows which channel it answers.
+    const labelled = brandInbound(CHANNEL_LABEL, text);
+    const payload = attachments ? { type: 'send', text: labelled, attachments } : { type: 'send', text: labelled };
     this.send(payload.type, payload);
     if (this.turn) return;
     const turn = {

@@ -556,3 +556,6 @@ export function createBridgeConfigFromEnv(connectorType: string): BridgeConfig {
     metadata: {},
   };
 }
+/** The two rules every channel transport owns, so no provider re-implements them (#48). */
+export { brandInbound, createEchoGuard } from "./channel-contract.js";
+export type { MessageEchoGuard } from "./channel-contract.js";
