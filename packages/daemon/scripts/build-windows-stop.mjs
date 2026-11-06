@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Explicit production addon build. Uses existing inputs only; never installs or downloads.
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -56,6 +56,20 @@ if (args.includes("--help")) {
 		throw new Error("Production Windows native source is missing");
 	}
 	mkdirSync(dirname(source), { recursive: true });
+	// A failed link must never leave the previous artifact behind: the addon test
+	// asserts only that this file exists, so a stale binary would pass as a build.
+	const artifact = join(native, "windows-stop.node");
+	for (const stale of [
+		artifact,
+		join(native, "windows-stop.lib"),
+		join(native, "windows-stop.pdb"),
+		channelObject,
+		streamObject,
+		napiObject,
+		join(native, "windows-stop.obj"),
+	]) {
+		rmSync(stale, { force: true });
+	}
 	// Separate translation-unit invocation: /Fo must not name one file for two sources.
 	// Host libuv imports resolve through node.lib below; never link a separate libuv.
 	const channelResult = spawnSync(
@@ -135,7 +149,7 @@ if (args.includes("--help")) {
 			`/Fo${join(native, "windows-stop.obj")}`,
 			"/link",
 			"/INCREMENTAL:NO",
-			`/OUT:${join(native, "windows-stop.node")}`,
+			`/OUT:${artifact}`,
 			`/IMPLIB:${join(native, "windows-stop.lib")}`,
 			`/PDB:${join(native, "windows-stop.pdb")}`,
 			nodeLib,
@@ -146,4 +160,7 @@ if (args.includes("--help")) {
 	);
 	if (result.error) throw new Error("Windows stop compiler could not be started");
 	process.exitCode = result.status ?? 1;
+	if (result.status === 0 && !existsSync(artifact)) {
+		throw new Error(`Windows stop link reported success but produced no ${artifact}`);
+	}
 }
