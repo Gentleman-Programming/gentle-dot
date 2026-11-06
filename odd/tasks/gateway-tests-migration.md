@@ -605,3 +605,46 @@ orden de los logs.
 4. Como red de seguridad de producto, envolver el reinicio en un perro guardián que no dependa del
    event loop (p. ej. un `Worker` o un proceso aparte) — un bucle infinito en el cálculo de la
    política no debe congelar el daemon entero.
+
+## Corrección del diagnóstico: el reinicio sí funciona (2026-11-06)
+
+La instrumentación anterior mentía por una razón tonta: **`process.stderr` a un pipe es
+asíncrono**, así que la última línea escrita antes de un cuelgue se pierde. Al cambiar el
+diagnóstico a un log **sincrónico a archivo** (`appendFileSync`), el reinicio se ve completo:
+
+```
+restartEngine: start
+restartEngine: stopping
+restartEngine: stopped
+startEngine: start → before home → policy begin → policy done → guard begin → guard done → spawn begin
+startEngine: engine ready        (+516 ms)
+```
+
+O sea: **el engine nuevo arranca y queda listo**. Los "siete descartes" siguen siendo válidos, pero
+la conclusión de "el hijo nace mudo" era un artefacto del diagnóstico: el padre estaba bien; lo que
+faltaba era ver la línea siguiente.
+
+### El bloqueo real que queda (y es otro)
+
+Con el reinicio funcionando, el test falla igual porque el estado del conector nunca pasa a
+`connected`:
+
+```
+connectorsScreen: notion=needs_signin,linear=off,atlassian=off,discord=off,slack=off,gmail=off
+```
+
+El flujo de sign-in emite `auth_done`, pero el store **no registra la firma**, así que:
+- ninguna ventana recibe un frame `connectors` con `status: "connected"`, y
+- la política del engine nuevo sigue vacía (`connectors: {}`).
+
+Además se ordenó el refresco con `connectorStore.settled()` antes de emitir la pantalla y reiniciar
+(el store escribe un instante después de que el flujo reporta `done`).
+
+### Siguiente paso
+
+1. Mirar la ruta de éxito de `ConnectorManager.signIn`: ¿llama a `store.saveSignIn(id, state)`? ¿Esa
+   escritura necesita la fuente de secretos de la app (`SecretSource`) o el `signinHome`, y falla en
+   silencio?
+2. Hacer visible ese fallo (log con `console.error`) en vez de dejarlo mudo: hoy el flow dice `done`
+   aunque el guardado no ocurra.
+3. Con la firma guardada, revisar el orden `settled() → refresh → restart` (ya cableado).

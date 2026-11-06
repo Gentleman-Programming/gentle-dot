@@ -263,8 +263,14 @@ export class Daemon {
       // A sign-in finishes long after it starts: the files and the policy change only then, so
       // that is when the screen is refreshed and the engine restarts with the new policy.
       if (type === 'auth_done') {
-        void this.connectorsScreen();
-        void this.restartEngine();
+        // The store writes the new sign-in a moment after the flow reports done: settle first, so
+        // the screen every window receives already says "connected" and the restarted engine reads
+        // the policy that includes the connector.
+        void (async () => {
+          await this.connectorStore?.settled().catch(() => undefined);
+          await this.connectorsScreen();
+          await this.restartEngine();
+        })();
       }
     };
     const refusal =
