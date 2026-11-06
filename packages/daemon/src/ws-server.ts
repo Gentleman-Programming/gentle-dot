@@ -115,7 +115,25 @@ interface ConnectionState {
   authenticated: boolean;
 }
 
+/**
+ * The one shared key this server authenticates windows and bridges with. The daemon
+ * generates it at startup and persists it in `<dataDir>/token` (cli.ts); a built-in
+ * default would be a secret published in the source that any local process could use,
+ * so a missing key is an error rather than a fallback (S25.8).
+ */
+export function requireAuthToken(env: NodeJS.ProcessEnv = process.env): string {
+  const token = env['BRIDGE_AUTH_TOKEN'];
+  if (!token) {
+    throw new Error(
+      'BRIDGE_AUTH_TOKEN is not set: the daemon must generate its access key before the WebSocket server starts.',
+    );
+  }
+  return token;
+}
+
 export class WsServer extends EventEmitter {
+  /** Captured once at start, so a later env change cannot move the key mid-life. */
+  private authToken: string | undefined;
   private wss: WebSocketServer | null = null;
   private httpServer: HttpServer | null = null;
   private registry: ConnectorRegistry;
@@ -134,6 +152,8 @@ export class WsServer extends EventEmitter {
    * Start the WebSocket server
    */
   async start(): Promise<void> {
+    // Fail closed before listening: without a key, no client can authenticate.
+    this.authToken = requireAuthToken();
     return new Promise((resolve, reject) => {
       this.httpServer = createServer((req, res) => {
         this.handleHttpRequest(req, res);
@@ -841,8 +861,9 @@ export class WsServer extends EventEmitter {
   private appSeq = 0;
 
   private getAuthToken(): string {
-    // In production, this should come from a secure config
-    // For now, use a simple shared secret from env or default
-    return process.env['BRIDGE_AUTH_TOKEN'] || 'gentle-dot-bridge-secret';
+    if (this.authToken === undefined) {
+      throw new Error('The WebSocket server has no access key: start() was never called.');
+    }
+    return this.authToken;
   }
 }
