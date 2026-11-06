@@ -429,6 +429,20 @@ export class Daemon {
 
   }
 
+  /** Changes a connector's mode; widening it is the app's decision, and the engine restarts. */
+  private async connectorMode(clientId: string, connectorId: string, mode: unknown): Promise<void> {
+    const manager = this.connectorManager;
+    if (!manager || connectorId === '') return;
+    const next = mode === 'read_write' ? 'read_write' : 'read_only';
+    const refusal = manager.setMode(connectorId, next);
+    if (refusal) {
+      this.wsServer.deliver(clientId, 'error', { code: refusal.code, message: refusal.message });
+      return;
+    }
+    await this.connectorsScreen();
+    void this.restartEngine();
+  }
+
   /** Answers `connectors_list` and the /connectors command with what the screen shows. */
   private async connectorsScreen(clientId?: string, open = false): Promise<void> {
     try {
