@@ -487,3 +487,51 @@ Pistas para retomarlo:
 Con eso deberían caer el resto: esperar al turno antes de reiniciar, cancelación y rechazos,
 restaurar `mcp.json` y las dos de reposición B1 (los códigos del manager y su cancelación ya están
 cableados por el mismo `handleAppFrame`).
+
+## El segundo arranque del engine, instrumentado (2026-11-06)
+
+Se instrumentó `GentleShellSpawner.start()` con un contador de arranques y trazas en spawn, probe,
+stdout/stderr, exit/error y timeout. Lo que dicen las trazas, en el test que falla:
+
+```
+start() called, shellProcess? false
+spawner.start bin: <node>
+spawned pid 32512 argv: <fake-agent.ts> --home <data>/agent --mode rpc ...
+probe sent stdin writable: true
+event spawn
+child stdout {"type":"response",...,"id":"gentle-shell-ready-probe",...}   <- run 1 responde
+...
+[reinicio]
+start() called, shellProcess? false
+spawner.start bin: <node>
+spawned pid 32643 argv: <idéntico>
+probe sent stdin writable: true
+event spawn
+(…nada más: ni stdout, ni stderr, ni exit, ni timeout dentro de la ventana)
+```
+
+Es decir: en la segunda vuelta el hijo **nace y queda mudo**, y el padre está sano
+(`stdout attached, flowing true, paused false`).
+
+Controles hechos para descartar culpables:
+
+| Prueba | Resultado |
+| --- | --- |
+| El agente falso solo, dos arranques seguidos (`node fake-agent.ts`, probe `get_state`) | **responde en ambos** |
+| `GentleShellSpawner` solo, dos arranques seguidos (`start(); stop(); start()`), con `engineCommand` al agente falso | **ready en ~557 ms en ambos** |
+| Padre drenando stdout en la segunda vuelta | correcto (`flowing true`, `paused false`) |
+
+Conclusión: no es el agente, no es el spawner y no es el drenaje. **Es algo del contexto del daemon
+en el momento del reinicio.** Hipótesis a probar, en orden:
+
+1. **Diferencia de entorno entre los dos spawns del daemon**: volcar las claves (y el tamaño de
+   `GENTLE_DOT_CONNECTOR_POLICY`, que en el reinicio ya incluye el conector) antes de cada spawn.
+2. **Event loop bloqueado**: el reinicio ocurre dentro del `emit` del flujo de OAuth; si alguna
+   promesa de la cadena no se resuelve, el proceso padre igualmente debería drenar… pero conviene
+   medir con un `setInterval` que loguee latidos durante el reinicio.
+3. **El canal `ipc` del stdio**: probar la segunda vuelta con `['pipe','pipe','pipe']` (sin `ipc`)
+   para descartar que el canal del hijo anterior interfiera.
+
+Nota práctica: el guard de privacidad bloquea pasar una política de conectores en un script suelto
+(menciona archivos de conectores), así que la reproducción con política hay que hacerla dentro del
+repo (por ejemplo, un test temporal) en vez de en `/tmp`.
