@@ -123,8 +123,9 @@ fn node_runtime_path(dir: &Path) -> PathBuf {
 }
 
 /// `<node> <daemon script>` (S29.5). With a bundled runtime (`<runtime>/daemon/cli.mjs`
-/// exists) that is the runtime's own Node and daemon, a PATH of the runtime plus the
-/// system folders, and `GENTLE_DOT_RUNTIME`; otherwise the build-time paths and PATH.
+/// exists) that is the runtime's own Node and daemon, a PATH of the runtime, the system
+/// folders, and then the inherited PATH (so the daemon keeps the user's tools, such as `git`),
+/// and `GENTLE_DOT_RUNTIME`; otherwise the build-time paths and PATH.
 /// `GENTLE_DOT_NODE` and `GENTLE_DOT_DAEMON_SCRIPT` override the program and script in both.
 pub fn launch_spec(env: impl Fn(&str) -> Option<String>, dev: bool, runtime: Option<&Path>) -> LaunchSpec {
     let pick = |key: &str, fallback: String| env(key).filter(|v| !v.is_empty()).unwrap_or(fallback);
@@ -146,11 +147,20 @@ pub fn launch_spec(env: impl Fn(&str) -> Option<String>, dev: bool, runtime: Opt
             let (node, script, path) = {
                 let system = PathBuf::from(env("SystemRoot").filter(|v| !v.is_empty())
                     .unwrap_or_else(|| r"C:\Windows".into()));
+                let mut path = format!("{};{};{};{}", dir.join("bin").display(), dir.join("node/bin").display(),
+                    system.join("System32").display(), system.display());
+                // The runtime bins stay first so its own Node is never shadowed; what the app
+                // inherited follows, because the daemon runs the user's tools (`git`) and a
+                // PATH of nothing but the runtime and Windows cannot find them. An absent or
+                // empty PATH adds nothing: an empty entry would mean the current directory.
+                if let Some(inherited) = env("PATH").filter(|v| !v.is_empty()) {
+                    path.push(';');
+                    path.push_str(&inherited);
+                }
                 (
                     dir.join("node/bin/node.exe").display().to_string(),
                     dir.join("daemon/cli.mjs").display().to_string(),
-                    format!("{};{};{};{}", dir.join("bin").display(), dir.join("node/bin").display(),
-                        system.join("System32").display(), system.display()),
+                    path,
                 )
             };
             (
@@ -227,6 +237,37 @@ mod packaged_runtime_tests {
         assert_eq!(overridden.program, r"E:\custom\node.exe");
         assert_eq!(overridden.args, vec![r"E:\custom\cli.mjs"]);
         assert_eq!(overridden.envs, spec.envs);
+    }
+
+    /// The daemon keeps the tools a normal Windows app would have (`git`, `ffmpeg`): the runtime
+    /// bins stay first, so they cannot be shadowed, and the inherited `PATH` follows.
+    #[cfg(windows)]
+    #[test]
+    fn bundled_windows_runtime_appends_the_inherited_path() {
+        let runtime = fixture("inherited-path");
+        let spec = launch_spec(|key| match key {
+            "SystemRoot" => Some(r"D:\Windows".into()),
+            "PATH" => Some(r"C:\Program Files\Git\cmd;C:\Tools".into()),
+            _ => None,
+        }, false, Some(&runtime));
+        assert_eq!(spec.envs, vec![
+            ("PATH".into(), format!(
+                "{};{};D:\\Windows\\System32;D:\\Windows;C:\\Program Files\\Git\\cmd;C:\\Tools",
+                runtime.join("bin").display(), runtime.join("node/bin").display())),
+            ("GENTLE_DOT_RUNTIME".into(), runtime.display().to_string()),
+        ]);
+        // Nothing to inherit adds nothing: on Windows an empty entry would mean the current
+        // directory, so no trailing separator is ever emitted.
+        for empty in [None, Some(String::new())] {
+            let spec = launch_spec(|key| match key {
+                "SystemRoot" => Some(r"D:\Windows".into()),
+                "PATH" => empty.clone(),
+                _ => None,
+            }, false, Some(&runtime));
+            assert_eq!(spec.envs[0], ("PATH".into(), format!(
+                "{};{};D:\\Windows\\System32;D:\\Windows",
+                runtime.join("bin").display(), runtime.join("node/bin").display())));
+        }
     }
 
     #[cfg(windows)]
