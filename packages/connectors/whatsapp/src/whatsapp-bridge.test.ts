@@ -260,3 +260,34 @@ describe('WhatsAppBridge - Provider Variants', () => {
     }));
   });
 });
+describe('WhatsAppBridge - the transport never answers itself (#48)', () => {
+  const deliverInbound = async (id: string, text: string) => {
+    const { createTransportFactory } = await import('./transport/factory.js');
+    const transport = (createTransportFactory as unknown as { mock: { results: { value: { onMessage: { mock: { calls: unknown[][] } } } }[] } }).mock.results.at(-1)!.value;
+    const handler = transport.onMessage.mock.calls[0]![0] as (message: ChannelInbound) => void;
+    handler({ from: '5491112345678', id, text });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  };
+
+  it('drops an inbound whose id this transport already sent', async () => {
+    const { createEchoGuard } = await import('@gentle-dot/bridges-base');
+    const echoGuard = createEchoGuard();
+    echoGuard.remember('wamid.ECHO');
+    const bridge = new WhatsAppBridge(createMockOptions({ echoGuard }));
+    const send = vi.spyOn(bridge as unknown as { send: (...args: unknown[]) => void }, 'send');
+
+    await deliverInbound('wamid.ECHO', 'hola');
+
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('lets an inbound with a different id reach the assistant, labelled', async () => {
+    const { createEchoGuard } = await import('@gentle-dot/bridges-base');
+    const bridge = new WhatsAppBridge(createMockOptions({ echoGuard: createEchoGuard() }));
+    const send = vi.spyOn(bridge as unknown as { send: (...args: unknown[]) => void }, 'send');
+
+    await deliverInbound('wamid.FRESH', 'hola');
+
+    expect(send).toHaveBeenCalledWith('send', { text: '📱 [Gentle Dot] hola' });
+  });
+});

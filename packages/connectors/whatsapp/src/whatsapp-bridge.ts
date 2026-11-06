@@ -3,7 +3,7 @@
  * Meta Cloud API provider only (Baileys has git dependency issues)
  */
 
-import { BaseBridge, brandInbound, type BridgeConfig, type BridgeMessage, type BridgeStatus, type HelloPayload, type ReadyPayload, type ChannelNotifyPayload, type ConnectorEventPayload, type CommandPayload, type CommandResultPayload } from '@gentle-dot/bridges-base';
+import { BaseBridge, brandInbound, createEchoGuard, type MessageEchoGuard, type BridgeConfig, type BridgeMessage, type BridgeStatus, type HelloPayload, type ReadyPayload, type ChannelNotifyPayload, type ConnectorEventPayload, type CommandPayload, type CommandResultPayload } from '@gentle-dot/bridges-base';
 import { type Config, loadConfig, type MetaCloudConfig } from './config.js';
 import { createTransportFactory, type ChannelTransport, type ChannelInbound, type TransportStateEvent, type TransportFactoryOptions } from './transport/factory.js';
 import { RateLimiter } from './rate-limit.js';
@@ -31,6 +31,8 @@ function splitMessage(text: string, limit = WHATSAPP_TEXT_LIMIT): string[] {
 export interface WhatsAppBridgeOptions {
   config: Config;
   log(message: string): void;
+  /** Injected in tests; a bounded guard over the ids this transport sent (#48). */
+  echoGuard?: MessageEchoGuard;
 }
 
 interface Turn {
@@ -54,6 +56,8 @@ export class WhatsAppBridge extends BaseBridge {
   private options: WhatsAppBridgeOptions;
   private logFn: (message: string) => void;
   private rateLimiter: RateLimiter;
+  /** Ids this transport sent, so its own echo is dropped by id and never by a fromMe-style flag. */
+  private echo: MessageEchoGuard;
 
   // State
   private turn: Turn | undefined;
@@ -96,6 +100,7 @@ export class WhatsAppBridge extends BaseBridge {
     };
     this.transport = createTransportFactory(transportOptions);
     this.rateLimiter = new RateLimiter(this.transport, options.log);
+    this.echo = options.echoGuard ?? createEchoGuard();
 
     this.setupTransport();
   }
@@ -207,6 +212,10 @@ export class WhatsAppBridge extends BaseBridge {
       this.logFn(`ignored: number not allowlisted (…${from.slice(-4)})`);
       return;
     }
+    if (this.echo.isEcho(id)) {
+      this.logFn(`ignored: this transport's own message echoed back (${id.slice(-6)})`);
+      return;
+    }
     this.lastFrom = from;
     const trimmed = text.trim();
     if (trimmed === "") return;
@@ -294,7 +303,9 @@ export class WhatsAppBridge extends BaseBridge {
 
   private async reply(to: string, text: string): Promise<void> {
     try {
-      await this.rateLimiter.send(to, text);
+      const sentId = await this.rateLimiter.send(to, text);
+      // Whatever this bridge sends can come back as an inbound echo: remember the id, not a flag.
+      if (sentId) this.echo.remember(sentId);
     } catch (error) {
       this.logFn(`rate limit send failed: ${(error as Error)?.message ?? String(error)}`);
     }

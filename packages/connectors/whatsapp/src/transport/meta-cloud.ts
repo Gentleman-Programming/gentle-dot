@@ -135,12 +135,15 @@ export function createMetaCloudTransport(options: {
       });
     },
     async sendText(toNumber, text) {
-      await sendGraphRequest(`${meta.phoneNumberId}/messages`, {
+      const response = await sendGraphRequest(`${meta.phoneNumberId}/messages`, {
         messaging_product: "whatsapp",
         to: toNumber,
         type: "text",
         text: { body: text },
       });
+      // Meta Cloud answers { messages: [{ id: "wamid..." }] }: that id is the echo anchor.
+      const id = (response as { messages?: { id?: unknown }[] } | undefined)?.messages?.[0]?.id;
+      return typeof id === "string" && id !== "" ? id : undefined;
     },
     async stop() {
       if (server) {

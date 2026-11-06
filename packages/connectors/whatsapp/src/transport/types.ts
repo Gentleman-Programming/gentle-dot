@@ -24,8 +24,12 @@ export interface ChannelTransport {
   start(): Promise<void>;
   /** Register the inbound handler for allowlisted direct texts (anti-loop already applied). */
   onMessage(handler: (message: ChannelInbound) => void): void;
-  /** Sends plain text; throws when the socket is down (the bridge retries via daemon backoff). */
-  sendText(toNumber: string, text: string): Promise<void>;
+  /**
+   * Sends plain text; throws when the socket is down (the bridge retries via daemon backoff).
+   * Answers the provider's own message id when it has one, which is what lets the transport
+   * recognise its own echo by id instead of trusting a `fromMe`-style flag (#48).
+   */
+  sendText(toNumber: string, text: string): Promise<string | undefined>;
   /** Stops the socket; process exit is owned by main. */
   stop(): Promise<void>;
   /** Registers a connectivity observer for admin surfaces; optional for simple providers. */

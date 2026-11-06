@@ -38,10 +38,11 @@ export class RateLimiter {
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
 
-  async send(toNumber: string, text: string): Promise<void> {
+  async send(toNumber: string, text: string): Promise<string | undefined> {
     await this.waitForSlot();
-    await this.transport.sendText(toNumber, text);
+    const id = await this.transport.sendText(toNumber, text);
     this.recordSent();
+    return id;
   }
 
   private async waitForSlot(): Promise<void> {
