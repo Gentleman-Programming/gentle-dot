@@ -1616,16 +1616,6 @@ export class Daemon {
     // store starts watching its files: what the assistant edits is put back while it runs, and the
     // user is told once each time it happens.
     void this.connectorStore.checkIntegrity();
-    this.connectorStore.onReverted = () => {
-      this.wsServer.broadcastApps('toast', {
-        level: 'warning',
-        message: 'A change to your connectors was blocked.',
-      });
-      void this.connectorsScreen();
-    };
-    this.connectorStore.onSetAside = (notice: string) => {
-      this.wsServer.broadcastApps('toast', { level: 'warning', message: notice });
-    };
     this.connectorStore.watch();
     this.connectorManager ??= new ConnectorManager({
       store: this.connectorStore,
@@ -1633,6 +1623,20 @@ export class Daemon {
       ...(this.options.importHome ? { importHome: this.options.importHome } : {}),
       log: (line) => console.log(line),
     });
+    // The manager replaces the store's revert hooks in its constructor, so the daemon talks to the
+    // manager: the toast and the restart have to be attached after it exists.
+    this.connectorManager.onBlocked = () => {
+      this.wsServer.broadcastApps('toast', {
+        level: 'warning',
+        message: 'A change to your connectors was blocked.',
+      });
+      void this.connectorsScreen();
+      // The engine was working with files the user did not approve: it comes back with the real ones.
+      void this.restartEngine();
+    };
+    this.connectorManager.onSetAside = (notice: string) => {
+      this.wsServer.broadcastApps('toast', { level: 'warning', message: notice });
+    };
 
     this.profileStore ??= new ProfileStore({
       configHome: path.join(this.config.daemon.data_dir, 'gentle-ai'),

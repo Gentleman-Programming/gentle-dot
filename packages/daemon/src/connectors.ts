@@ -1825,6 +1825,8 @@ export class ConnectorManager {
 	/** Puts back connector files changed outside the Connectors screen (for example after a run). */
 	enforce(): void {
 		try {
+		} catch {}
+		try {
 			this.options.store.enforce();
 		} catch (error) {
 			this.log(`could not check the connector files: ${(error as Error).message}`);
