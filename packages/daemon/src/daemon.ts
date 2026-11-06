@@ -25,6 +25,7 @@ import {
 	policyEnv,
 } from "./connectors.ts";
 import { DiscordPackage } from "./discord-package.ts";
+import { discordProxyView } from "./discord-proxy-view.ts";
 import { directAccess, type EngineAccess, engineAccess } from "./engine-access.ts";
 import { approvalRequest } from "./extensions/approval-guard.ts";
 import {
@@ -234,23 +235,12 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 			? new DiscordPackage(join(options.dataDir, "connector-packages"))
 			: undefined;
 	const proxy = new McpProxy({
-		connector: (id) => {
-			const view = connectorStore.proxyView(id);
-			// A connector that cannot run anyway (no app for its secret) keeps that reason: preparing
-			// Discord would not help, and its advice would hide the real cause.
-			if (
-				!view ||
-				view.unavailable ||
-				!discordPackage ||
-				id !== "discord" ||
-				connectorStore.state().connectors[id]?.custom
-			)
-				return view;
-			const command = discordPackage.command();
-			return command
-				? { ...view, server: command, revision: `${view.revision}:${command.args[0]}` }
-				: { ...view, unavailable: "Discord needs preparation. Open Connectors and configure Discord again." };
-		},
+		connector: (id) =>
+			discordPackage
+				? discordProxyView(connectorStore.proxyView(id), connectorStore.state().connectors[id], () =>
+						discordPackage.command(),
+					)
+				: connectorStore.proxyView(id),
 		prepare: (id) => connectorStore.prepare(id),
 		credentials: (id) => connectorStore.credentials(id),
 		// In the desktop app's native dialog, outside the agent's reach (S25.3).
@@ -333,7 +323,10 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	const connectors = new ConnectorManager({
 		store: connectorStore,
 		...(discordPackage
-			? { prepareConnector: (_id: string, signal: AbortSignal) => discordPackage.prepare(signal) }
+			? {
+					prepareConnector: (_id: string, signal: AbortSignal) => discordPackage.prepare(signal),
+					connectorPrepared: () => discordPackage.command() !== undefined,
+				}
 			: {}),
 		...(options.connectorOAuth ? { oauth: options.connectorOAuth } : {}),
 		...((options.importHome ?? process.env.GENTLE_DOT_IMPORT_HOME)

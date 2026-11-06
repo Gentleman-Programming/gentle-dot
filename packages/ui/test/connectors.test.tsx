@@ -114,6 +114,31 @@ describe("ConnectorsPanel", () => {
 		return { send, dispatch, openUrl };
 	}
 
+	it("shows a Discord connected before preparation as needing it, and prepares it with Connect again", async () => {
+		const { send } = panel(
+			apply(ready, {
+				type: "connectors",
+				connectors: [
+					connector({
+						id: "discord",
+						name: "Discord",
+						added: true,
+						enabled: true,
+						status: "needs_preparation",
+						noSignIn: true,
+					}),
+				],
+				open: true,
+			}),
+		);
+		const discord = within(screen.getByRole("listitem", { name: "Discord" }));
+		expect(discord.getByText("Needs preparation")).toBeInTheDocument();
+		expect(discord.queryByText("Connected")).not.toBeInTheDocument();
+		expect(discord.queryByRole("button", { name: "Set up Discord" })).not.toBeInTheDocument();
+		await userEvent.setup().click(discord.getByRole("button", { name: "Prepare Discord" }));
+		expect(send).toHaveBeenCalledWith({ type: "connector_connect", connectorId: "discord" });
+	});
+
 	it("shows package preparation as setup, not successful connection or sign-in", () => {
 		let state = apply(ready, {
 			type: "connectors",

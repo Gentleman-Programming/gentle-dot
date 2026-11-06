@@ -14,7 +14,6 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { McpOAuthState } from "@earendil-works/pi-mcp/oauth";
@@ -29,7 +28,7 @@ import type {
 import { MAX_CONNECTOR_DRAFTS } from "@gentle-dot/protocol";
 import { childGuardFile, childGuardText } from "./child-guard.ts";
 import { resolveRecord, resolveValue, storedSignIn } from "./connector-credentials.ts";
-import { type ScannedServer, scanClientConfigs, valueNotes } from "./connector-import.ts";
+import { importLocations, type ScannedServer, scanClientConfigs, valueNotes } from "./connector-import.ts";
 import {
 	INTEGRITY_KEY_ID,
 	macMatches,
@@ -1789,8 +1788,10 @@ export interface ConnectorManagerOptions {
 	store: ConnectorStore;
 	/** Prepares the curated Discord runtime before asking for credentials or enabling it. */
 	prepareConnector?: (id: string, signal: AbortSignal) => Promise<void>;
+	/** Whether that runtime is ready; absent where nothing needs preparing. */
+	connectorPrepared?: (id: string) => boolean;
 	oauth?: ConnectorOAuthOptions;
-	/** The home folder "Import my MCP servers" scans; default the user's. */
+	/** The home folder "Import my MCP servers" scans; default the user's, with AppData where Windows says. */
 	importHome?: string;
 	log?: (line: string) => void;
 }
@@ -2143,12 +2144,12 @@ export class ConnectorManager {
 
 	/** Reads the other apps' configurations (only reads them) and lists what it found, without any value. */
 	scan(): ImportCandidate[] {
-		const home = this.options.importHome ?? homedir();
+		const { home, ...folders } = importLocations(this.options.importHome);
 		const groups = new Map<string, { candidate: ImportCandidate; server: ScannedServer }>();
 		const found = new Map<string, ScannedServer>();
 		const computerUrl = this.options.store.computerUrl();
 		const computer = computerUrl === undefined ? undefined : fingerprint({ url: computerUrl });
-		for (const server of scanClientConfigs(home)) {
+		for (const server of scanClientConfigs(home, folders)) {
 			const key = server.server ? fingerprint(server.server) : `${server.source}:${server.name}`;
 			// The helper is built in; a copy of it elsewhere is never offered.
 			if (key === computer) continue;
@@ -2282,9 +2283,16 @@ export class ConnectorManager {
 	): ConnectorInfo["status"] {
 		if (!saved?.enabled) return "off";
 		if (missingValues(spec, saved.values)) return "needs_setup";
+		if (this.needsPreparation(id, saved)) return "needs_preparation";
 		if (this.failed.has(id)) return "error";
 		if (spec.oauth && !this.options.store.isSignedIn(id)) return "needs_signin";
 		return "connected";
+	}
+
+	/** The curated Discord whose runtime is not on this computer yet (only where it is prepared). */
+	private needsPreparation(id: string, saved: SavedConnector | undefined): boolean {
+		const prepared = this.options.connectorPrepared;
+		return prepared !== undefined && id === "discord" && !saved?.custom && !prepared(id);
 	}
 
 	private busy(): boolean {
@@ -2304,6 +2312,7 @@ export class ConnectorManager {
 		if (this.busy()) return REFUSALS.busy;
 		const prepare = this.options.prepareConnector;
 		if (!prepare || id !== "discord" || saved?.custom) return proceed();
+		if (this.options.connectorPrepared?.(id)) return proceed();
 		const pending = {
 			owner,
 			id: `connector-setup-${randomUUID()}`,
@@ -2330,7 +2339,9 @@ export class ConnectorManager {
 						ok: false,
 						message: refused.message,
 					});
-			} catch {
+			} catch (error) {
+				if (!pending.controller.signal.aborted)
+					this.log(`could not prepare connector ${id}: ${(error as Error).message}`);
 				emit({
 					type: "auth_done",
 					flowId: pending.id,
