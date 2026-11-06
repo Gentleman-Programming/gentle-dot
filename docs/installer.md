@@ -3,8 +3,9 @@
 **Implemented:** a Node-builtins-only, host-callable loopback session API in
 `scripts/installer/server.mjs`. This is not a browser installer or verified
 installation. It has no CLI, HTML, browser launch, download, verification,
-application shutdown or OS operation. Installer authority is separate from the
-agent and daemon APIs.
+application shutdown or OS operation. A separate host-only verified downloader is
+available below; it is not connected to any HTTP route. Installer authority is
+separate from the agent and daemon APIs.
 
 ## Host integration
 
@@ -59,6 +60,60 @@ close. Headers are capped at 8192 bytes; header/request/socket timeouts are
 5 seconds, with a 1-second keep-alive bound. HTTP-parser/timeout disconnects
 are transport failures, not application JSON responses.
 
+## Host-only verified download
+
+Import `createReleaseDownloader` from `scripts/updates/download.mjs` (Node >=24).
+Construct it only in trusted host code, never from browser-supplied configuration:
+
+```js
+const download = createReleaseDownloader({
+  publicKey: independentlyPinnedPublicKey,
+  platform: 'linux-amd64', currentVersion: '1.2.2', format: 'deb',
+  maxBytes: hostApprovedMemoryBudget,
+  fetch: hostFetch, timeoutMs: 30000,
+});
+const { release, bytes } = await download(untrustedEnvelope);
+```
+
+`release` is T1's `{schemaVersion, version, artifact}` descriptor; `bytes` is a
+new Uint8Array, returned only after T1 verifies the selected artifact's exact
+size and SHA-256. There is no partial success, cache, file output or installation.
+A failed call does not change the factory configuration or prevent a later call.
+
+- `publicKey` is required: a public Ed25519 KeyObject or SPKI `PUBLIC KEY` PEM
+  string/Buffer. Private keys and other algorithms fail. The constructor snapshots
+  the normalized public key, platform, current version, format and transport;
+  later options/Buffer mutation cannot change trust or selection. There is no key
+  discovery, production default or browser-selected trust/budget/transport.
+- `maxBytes` is **required**, a positive finite safe integer chosen by the host.
+  No production package-size budget is guessed. `timeoutMs` defaults to 30000 and
+  accepts integers 1–2147483647. `fetch` defaults to the host's captured global
+  fetch function. `format` defaults to `dmg` for macOS and `deb` for Linux.
+  Targets, formats and stable versions follow the unchanged
+  [release verification contract](release-verification.md).
+- T1 authenticates the envelope and selects the exact HTTPS GitHub asset URL
+  before any transport. Signed size above `maxBytes` fails before fetch. Streaming
+  is bounded by both signed size and budget; Content-Length is ignored. Memory
+  retains at most the signed-size output buffer, plus transport-owned chunks.
+- The only fetch options are `redirect: 'manual'`, `credentials: 'omit'` and an
+  owned AbortSignal: no authentication or authority headers. Only status 200 with
+  `redirected: false` is accepted. **Every redirect is rejected**, including an
+  automatically followed response; Location is never followed. Actual GitHub
+  release CDN redirect support is unimplemented and fails closed.
+- One finite total timeout spans fetch and body consumption. Completion/failure
+  aborts the owned request, cancels the reader and clears the timer. Cancellation
+  is best effort without waiting on an uncooperative transport; a late response
+  after timeout has its body cancelled too. The injected transport is trusted
+  host code and must honor manual redirects, credential omission and abort.
+
+Constructor errors are `Error('Invalid downloader public key')` or
+`Error('Invalid downloader options')` (including unknown options). Calls reject
+with unchanged T1 verification errors, or `Artifact exceeds download budget`,
+`Download response rejected`, `Invalid download body`,
+`Artifact exceeds download bounds`, `Download timed out`. T1 byte mismatches are
+`Artifact size mismatch` / `Artifact SHA-256 mismatch`; native transport/stream
+errors propagate. Nothing returns a verified descriptor or bytes on failure.
+
 ## Evidence boundary and next gate
 
 The public HTTP suite is `node --test scripts/installer/server.test.mjs`.
@@ -67,7 +122,10 @@ filesystem fixtures. No existing command shares this new module.
 
 Production trust remains missing and installation is always unavailable. T1's
 [release verification primitive](release-verification.md) is unchanged and not
-called here. Verified downloads, browser UI, native replacement/recovery and
-macOS/Linux CI are separate future slices. Free project signatures would not
-remove Gatekeeper warnings, grant permissions or establish paid OS signing.
-See [distribution boundaries](distribution.md) before future integration.
+called by the session server. The separate downloader reuses it unchanged.
+`node --test scripts/updates/download.test.mjs` uses synthetic in-memory Ed25519
+keys and fake host fetch/streams only: **not actual native HTTPS, installed,
+production-trust or OS-permission proof**. Browser UI, native replacement/recovery
+and macOS/Linux CI remain future slices. Free project signatures do not remove
+Gatekeeper warnings, grant permissions or establish paid OS signing.
+See [release trust boundaries](release-verification.md) before future integration.
