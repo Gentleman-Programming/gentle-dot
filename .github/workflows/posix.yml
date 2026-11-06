@@ -103,6 +103,19 @@ jobs:
         with:
           workspaces: apps/desktop/src-tauri
 
+      # `rust-cache` hashes every Cargo.toml, so any dependency change restores an older cache
+      # by prefix, and sherpa-onnx-sys skips its download when `target/sherpa-onnx-prebuilt`
+      # exists even without the library. Drop an incomplete tree so it fetches it again, as the
+      # Windows job does.
+      - name: Drop an incomplete sherpa-onnx prebuilt cache
+        run: |
+          root=apps/desktop/src-tauri/target/sherpa-onnx-prebuilt
+          [ -d "$root" ] || exit 0
+          if [ -z "$(find "$root" -type f -name 'libsherpa-onnx-c-api.a' -print -quit)" ]; then
+            rm -rf "$root"
+            echo 'removed an incomplete sherpa-onnx prebuilt cache'
+          fi
+
       # The first run downloads `sherpa-onnx`'s prebuilt static libraries from its GitHub
       # release, which its build script does unless `SHERPA_ONNX_LIB_DIR` points at a local copy;
       # the cache above carries the compiled artifacts from the second run on.
