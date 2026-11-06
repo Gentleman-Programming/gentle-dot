@@ -259,6 +259,14 @@ export function isolatedAgentEnv(
 	if (runtime) env.ENGRAM_BIN = resolveEngramBin(base, runtime, { home: realHome, platform });
 	const gitConfig = join(realHome, ".gitconfig");
 	if (!base.GIT_CONFIG_GLOBAL && existsSync(gitConfig)) env.GIT_CONFIG_GLOBAL = gitConfig;
+	// The engine's own workspace lives inside the data folder, so git must never climb above
+	// it: when $HOME is itself a repository (dotfiles, another tool's identity), every git
+	// command would otherwise resolve the whole home and the startup preflight would burn its
+	// budget on it (#51). The user's own ceilings are kept, after the data folder.
+	env.GIT_CEILING_DIRECTORIES = [
+		dataDir,
+		...(base.GIT_CEILING_DIRECTORIES ? base.GIT_CEILING_DIRECTORIES.split(delimiter) : []),
+	].join(delimiter);
 	return env;
 }
 

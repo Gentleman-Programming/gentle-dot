@@ -385,3 +385,32 @@ describe("engine memory and folders", () => {
 		expect(readdirSync(folder)).toEqual([]);
 	});
 });
+
+describe("isolatedAgentEnv git ceiling", () => {
+	it("keeps git from climbing out of the data folder to the repository above it (#51)", () => {
+		// The user's $HOME is a git repository (dotfiles, or another tool's identity).
+		const outer = tempDir();
+		spawnGit(outer, ["init", "-q"]);
+		const dataDir = join(outer, ".gentle-dot");
+		const workspace = join(dataDir, "workspace");
+		mkdirSync(workspace, { recursive: true });
+
+		const toplevel = (env: NodeJS.ProcessEnv) =>
+			spawnSync("git", ["rev-parse", "--show-toplevel"], {
+				cwd: workspace,
+				encoding: "utf8",
+				env: { ...process.env, ...env },
+			});
+
+		// Control: with the plain environment git climbs to the user's home repository.
+		expect(toplevel({}).status).toBe(0);
+		// The rule: the engine's environment must not let it climb at all.
+		expect(toplevel(isolatedAgentEnv({ HOME: outer, PATH: process.env["PATH"] }, dataDir)).status).not.toBe(0);
+	});
+
+	it("puts the data folder first and keeps the user's own ceiling entries", () => {
+		const dataDir = tempDir();
+		const env = isolatedAgentEnv({ GIT_CEILING_DIRECTORIES: "/somewhere/else" }, dataDir);
+		expect(env.GIT_CEILING_DIRECTORIES).toBe([dataDir, "/somewhere/else"].join(delimiter));
+	});
+});
