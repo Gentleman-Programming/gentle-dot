@@ -10,6 +10,7 @@ import {
 } from "../shortcut.ts";
 import { setVoiceLanguage, VOICE_LANGUAGES, voiceLanguage } from "../voice-language.ts";
 import "../settings.css";
+import { InstallerReadiness } from "./InstallerReadiness.tsx";
 
 type Status =
 	| { kind: "idle" }
@@ -149,6 +150,8 @@ export function SettingsPanel({ close }: { close: () => void }) {
 					Reset to default
 				</button>
 			</section>
+
+			<InstallerReadiness />
 
 			<section className="provider-section" aria-labelledby="settings-voice-language" hidden={isWindows()}>
 				<h3 id="settings-voice-language">Voice language</h3>

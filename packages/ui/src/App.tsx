@@ -5,6 +5,7 @@ import { ChatSurface } from "./components/ChatSurface.tsx";
 import type { ComputerControls } from "./components/Computer.tsx";
 import { DotSurface } from "./components/DotSurface.tsx";
 import { GlowSurface } from "./components/GlowSurface.tsx";
+import { InstallerReadiness } from "./components/InstallerReadiness.tsx";
 import { computerPermissions, requestComputerPermission, setComputerYolo, stopComputer } from "./computer.ts";
 import {
 	connectionInfo,
@@ -196,6 +197,7 @@ function Assistant({ surface }: { surface: Surface }) {
 					{unreachable ??
 						"This page needs your access key. On your computer, open it from the Gentle Dot menu (Open in browser); on a server, open the link with #token=<your access key>."}
 				</div>
+				{desktop && surface === "panel" ? <InstallerReadiness /> : null}
 			</div>
 		);
 	}

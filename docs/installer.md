@@ -8,6 +8,37 @@ automatic browser launch, package verification, application shutdown or OS
 operation. The separate host-only downloader below has no HTTP route. Installer
 authority remains separate from agent and daemon APIs.
 
+## Installed desktop diagnostics (read-only)
+
+Open **Settings → Bundled runtime diagnostics** in the native panel. The same
+checks appear below the original assistant connection error when the assistant
+cannot start. Opening either view queries once; **Refresh bundled-file checks**
+queries again. Browser mode never invokes these diagnostics.
+
+The panel-only Tauri command `installer_readiness` accepts **no client arguments**.
+It checks metadata only under the app's `resource_dir/runtime`, ignoring runtime
+and executable overrides. Its JSON is `{processOs, compiledArch, runtimeTarget,
+checks: [{path, status}]}`; paths are fixed bundle-relative names, never user-home
+paths. `status` is `present` for a regular file, `missing` for absent paths, or
+`unknown` for inaccessible/nonregular/link paths or unavailable resources.
+Unsupported compiled targets have a null target and no file checks. Supported
+mappings match `scripts/package/lib.mjs`: Windows x64, macOS arm64, Linux arm64/x64.
+
+Checks cover the bundled Node, daemon entry/package, Gentle Shell entry, engine
+package metadata, Engram executable, pi wrapper, UI entry and informational
+MANIFEST.json; Windows also checks its native stop addon. These are selected
+file facts, not complete payload validation. No files are read or executed,
+no registry/network/user-data queries occur, and no installation is enabled.
+Process OS and compiled architecture are **not** physical CPU or host OS-version
+probes. OS versions, GUI prerequisites and component versions remain unknown.
+Manifest presence does not authenticate the publisher or validate a version.
+
+This requires an already-running native UI: it does **not** solve fresh-PC
+WebView or Linux GUI-library absence, pre-install bootstrap, native installation,
+cryptographic verification, or native platform/IPC acceptance. Those remain
+separate T3/T4 gates. Shipped app users do not need global Node, npm, Git, Rust,
+MSVC or Go for these checks; those tools are not end-user prerequisites.
+
 ## Host integration
 
 Import `startInstallerSession` and await `startInstallerSession({ ttlMs, now })`.

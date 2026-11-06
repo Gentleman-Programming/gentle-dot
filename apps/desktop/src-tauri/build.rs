@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 /// Commands the UI may invoke; each one gets an `allow-<command>` permission.
 const COMMANDS: &[&str] = &[
     "connection_info",
+    "installer_readiness",
     "toggle_panel",
     "hide_panel",
     "set_dot_state",

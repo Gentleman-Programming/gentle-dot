@@ -2,6 +2,9 @@
 //! hiding the rose, the full-screen panel, voice input, the shortcut chosen in Settings,
 //! the daemon lifecycle (design §9), and the app's private channel to the daemon (S25.1–S25.3).
 
+#[path = "installer_readiness.rs"]
+mod installer_readiness;
+
 use crate::app_channel::{self, AppChannel, NO_CHANNEL, REGISTER_TIMEOUT};
 use crate::approvals::{native::NativePrompt, ApprovalRequest, Approvals, Decision, APPROVAL_TIMEOUT};
 use crate::computer::app as computer;
@@ -245,6 +248,23 @@ async fn connection_info(app: AppHandle) -> CommandResult<ConnectionInfo> {
     })
     .await
     .map_err(err)?
+}
+
+/// No client arguments, daemon state, runtime overrides, or user-home discovery.
+#[tauri::command]
+fn installer_readiness(app: AppHandle) -> serde_json::Value {
+    let runtime = app.path().resource_dir().ok().map(|dir| dir.join("runtime"));
+    let report = installer_readiness::snapshot(
+        runtime.as_deref(), std::env::consts::OS, std::env::consts::ARCH,
+    );
+    serde_json::json!({
+        "processOs": report.process_os,
+        "compiledArch": report.compiled_arch,
+        "runtimeTarget": report.target,
+        "checks": report.checks.iter().map(|check| serde_json::json!({
+            "path": check.path, "status": check.status,
+        })).collect::<Vec<_>>(),
+    })
 }
 
 #[tauri::command]
@@ -874,6 +894,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             connection_info,
+            installer_readiness,
             toggle_panel,
             hide_panel,
             set_dot_state,

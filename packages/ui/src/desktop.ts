@@ -5,6 +5,19 @@ import type { ConnectionInfo } from "./client.ts";
 /** Bridge to the Tauri shell (docs/design.md §9). Every call is a no-op in the browser. */
 export const inDesktop = (): boolean => isTauri();
 
+export interface InstallerSnapshot {
+	processOs: string;
+	compiledArch: string;
+	runtimeTarget: string | null;
+	checks: { path: string; status: "present" | "missing" | "unknown" }[];
+}
+
+/** App-owned bundled file metadata only; never queries a browser host. */
+export function installerReadiness(): Promise<InstallerSnapshot> {
+	if (!inDesktop()) return Promise.reject(new Error("Desktop diagnostics unavailable."));
+	return invoke<InstallerSnapshot>("installer_readiness");
+}
+
 export function connectionInfo(): Promise<ConnectionInfo> {
 	return invoke<ConnectionInfo>("connection_info");
 }
