@@ -726,3 +726,42 @@ anterior no se ejecutó). Hay que encontrar quién más emite `auth_done` con `o
 Nota: `saveSignIn` no deja la referencia en el store (verificado antes: `{"enabled":true,"mode":"read_only"}`
 sin `signIn`), lo que es coherente con que nunca se llame. El bug está en **quién completa el flujo**,
 no en el almacén de secretos.
+
+## Causa encontrada: el daemon cancela el flujo a los ~6 s (2026-11-06)
+
+Con log sincrónico dentro de `src/connectors.ts` (los tres puntos del `runLogin` más las dos rutas
+de cancelación) el flujo del conector queda así:
+
+```
+try-begin notion
+cancelOwnedBy called          <- ~6.2 s después
+CATCH notion: Sign-in cancelled
+```
+
+Es decir: **`saveSignIn` no se llama porque el flujo se cancela antes**, vía
+`ConnectorManager.cancelOwnedBy(owner)`. Eso explica todo lo anterior: el `auth_done` con `ok:true`
+que ve el test **no** viene de `runLogin` (esa rama emite `ok:false` al cancelarse); viene de
+`afterSetup`, que emite `ok:true` cuando ya está firmado o no hay nada que firmar.
+
+### Quién cancela
+
+`cancelOwnedBy` se llama desde dos sitios del daemon:
+
+1. `wsServer.on('onAppDisconnect', …)` — una ventana se desconecta.
+2. `Daemon.stop()`/cierre del canal de la app — el daemon se detiene (y al detenerse, el `wsServer`
+   cierra todas las ventanas con 1001, lo que vuelve a disparar el punto 1).
+
+Como el flujo muere a los ~6 s y el test no cierra ventanas, la sospecha es que **el canal de la
+app se cierra**: en `setup()` el `fakeApp` se pasa como `appChannel` y, o el fake termina su extremo,
+o el daemon interpreta un `end`/`close` como "la app se fue" y arranca un `stop()` que después
+cancela el flujo.
+
+### Siguiente paso (muy acotado)
+
+1. Loguear en `onAppDisconnect` **el `clientId` y el motivo** (código de cierre) para saber si el
+   que se cae es la ventana del test o el canal de la app.
+2. Decidir la semántica correcta: **cancelar el sign-in de un conector sólo si se va la ventana que
+   lo pidió**, no cuando el daemon cierra por su cuenta (hoy el cierre del daemon cierra las ventanas,
+   y eso dispara la cancelación de flujos que estaban por completarse).
+3. Con eso, `runLogin` debería llegar a `saveSignIn`, el estado pasaría a `connected` y caerían los
+   seis tests de conectores (el resto —frames, política, reinicio— ya está verificado).
