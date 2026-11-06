@@ -1,14 +1,14 @@
 {
   "title": "Gentle Dot · native installer directions",
-  "brief": "Three visual-only macOS and Linux installer concepts: guided first install, trust-first package review, and compact in-app update review. Every state is simulated; no package, network, OS or application operations occur.",
+  "brief": "Direction 01 uses top-level Windows, macOS and Linux preview cards with only the selected OS requirements visible. Directions 02 and 03 remain the original macOS/Linux trust-first and compact-update alternatives. Every state is simulated; no package, network, OS or application operations occur.",
   "feature": "odd/tasks/verified-native-updates.md",
   "artboards": [
     {
       "file": "01-guided.html",
-      "title": "Guided · one decision at a time",
-      "tradeoff": "Step rail and package overview reduce first-install uncertainty; technical trust details require an extra disclosure or review step.",
+      "title": "Choose your system · a clearer setup",
+      "tradeoff": "Prominent OS cards reveal one platform at a time and keep the check-to-approval flow compact; technical, runtime and recovery details require disclosure.",
       "width": 1440,
-      "height": 1000
+      "height": 1440
     },
     {
       "file": "02-trust-first.html",

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Gentle Dot · guided installation concept</title>
+<title>Gentle Dot · setup for your system</title>
 <style>
 :root {
   --bg: #1a1218; --surface: #20161e; --surface-2: #241822;
@@ -16,93 +16,151 @@
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 14px/20px var(--font-text); }
 .preview { position: sticky; top: 0; z-index: 2; margin: 0; padding: 12px 24px; background: var(--surface-2); color: var(--yellow); border-bottom: 1px solid var(--line); }
-main { max-width: 1200px; min-height: 1000px; margin: auto; padding: 48px 32px; }
-.brand { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 32px; }
-.brand strong { font-size: 18px; line-height: 24px; }
+main { max-width: 1040px; margin: auto; padding: 32px; }
+.brand, .section-head, .actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.brand { margin-bottom: 24px; }
+.brand strong, h2, h3 { font-size: 18px; line-height: 24px; }
 .eyebrow { font: 600 12px/16px var(--font-mono); letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
-.muted { color: var(--muted); }
 h1 { font-size: 28px; line-height: 36px; margin: 8px 0 12px; }
-h2 { font-size: 18px; line-height: 24px; margin: 0 0 12px; }
+h2, h3 { margin: 0 0 12px; }
 p { margin: 0 0 16px; }
-.shell { display: grid; grid-template-columns: 260px 1fr; border: 1px solid var(--line); border-radius: var(--radius-md); overflow: hidden; background: var(--surface); }
-aside { padding: 32px 24px; background: var(--surface-2); }
-ol { padding: 0; list-style: none; margin: 24px 0 32px; }
-li { padding: 16px 0; color: var(--muted); }
-li strong { display: block; margin-bottom: 4px; color: var(--text); }
-li[aria-current] { color: var(--accent); border-left: 2px solid var(--accent); padding-left: 16px; }
-li[aria-current] strong { color: var(--accent); }
-.content { padding: 32px; }
-.package { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 24px 0; }
-.package article { padding: 16px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg); }
-.package p:last-child { margin-bottom: 0; }
-dl { margin: 24px 0; }
-dl div { display: flex; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
-dt { color: var(--muted); } dd { margin: 0; text-align: right; }
-.note { border-left: 2px solid var(--accent); padding: 0 0 0 16px; }
-summary { padding: 12px; border: 1px solid var(--muted); border-radius: var(--radius-sm); cursor: pointer; }
-details p { padding-top: 16px; }
-.actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
-button { min-height: 44px; padding: 8px 16px; border: 1px solid var(--muted); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font: inherit; font-weight: 600; cursor: pointer; }
+.muted, dt { color: var(--muted); }
+.status, #feedback { color: var(--yellow); }
+.selector-label { margin: 24px 0 12px; font-weight: 600; }
+.os-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+button { min-height: 44px; max-width: 100%; padding: 8px 16px; border: 1px solid var(--muted); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font: inherit; font-weight: 600; cursor: pointer; }
+.os-card { padding: 24px; text-align: left; }
+.os-card strong { display: block; font-size: 18px; line-height: 24px; margin-bottom: 8px; }
+.os-card span { display: block; font-weight: 400; }
+.os-card .choice { margin-top: 16px; color: var(--muted); font-weight: 600; }
+.os-card[aria-pressed="true"] { border: 2px solid var(--accent); background: var(--surface-2); }
+.os-card[aria-pressed="true"] .choice { color: var(--accent); }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); box-shadow: var(--accent-shadow); }
-button:hover { text-decoration: underline; }
+button:disabled { color: var(--muted); cursor: not-allowed; }
+button:not(:disabled):hover { text-decoration: underline; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
-#feedback { color: var(--yellow); margin-top: 16px; }
-footer { margin-top: 24px; color: var(--muted); }
-@media (max-width: 768px) { main { padding: 24px 16px; } .shell, .package { grid-template-columns: 1fr; } .content, aside { padding: 24px 16px; } .brand { align-items: start; flex-direction: column; } dd { text-align: left; } dl div { flex-direction: column; gap: 4px; } }
+.selection-note { margin: 12px 0 24px; color: var(--muted); }
+.workspace { border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); padding: 24px; }
+.flow { margin: 0 0 24px; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 8px 24px; color: var(--muted); }
+.flow li:first-child { color: var(--accent); }
+section + section { margin-top: 24px; padding-top: 24px; border-top: 1px solid var(--line); }
+.actions { justify-content: flex-start; margin: 16px 0; gap: 12px; }
+#feedback { margin-bottom: 0; }
+.os-panel { background: var(--bg); padding: 16px; border-radius: var(--radius-sm); }
+.os-panel p:last-child { margin-bottom: 0; }
+summary { min-height: 44px; padding: 12px; border: 1px solid var(--muted); border-radius: var(--radius-sm); cursor: pointer; }
+details { margin-top: 12px; }
+details p, details ul { margin: 16px 0 0; }
+ul { padding-left: 24px; }
+li + li { margin-top: 4px; }
+.flow li { margin-top: 0; }
+dl { margin: 16px 0; }
+dl div { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; padding: 8px 0; }
+dd { margin: 0; }
+.blocked { padding-left: 16px; border-left: 2px solid var(--yellow); }
+footer { margin-top: 16px; color: var(--muted); }
+@media (max-width: 768px) {
+  main { padding: 24px 16px; }
+  .os-cards { grid-template-columns: 1fr; gap: 12px; }
+  .os-card { padding: 16px; }
+  .os-card .choice { margin-top: 8px; }
+  .workspace { padding: 16px; }
+  dl div { grid-template-columns: 1fr; gap: 4px; }
+  .preview { padding: 12px 16px; }
+}
 </style>
 </head>
 <body>
-<p class="preview">Design concept / simulated preview—no operations performed</p>
+<p class="preview"><strong>SIMULATED PREVIEW</strong> · Design concept / simulated preview—no operations performed</p>
 <main>
-<header class="brand"><strong>Gentle Dot</strong><span class="muted">Native setup / macOS &amp; Linux</span></header>
-<div class="shell">
-<aside aria-label="Illustrated setup progress">
-<p class="eyebrow">A little guidance</p>
-<ol>
-<li aria-current="step"><strong>01 / Review package</strong>Know what will change.</li>
-<li><strong>02 / Check release</strong>Authenticate before installing.</li>
-<li><strong>03 / Install natively</strong>You approve OS prompts.</li>
-<li><strong>04 / Open Gentle Dot</strong>Start when you are ready.</li>
-</ol>
-<p class="muted">A browser-based guide, with installation authority kept in a trusted native helper—not the page.</p>
-</aside>
-<div class="content">
-<p class="eyebrow">01 / Package review</p>
-<h1>Make room for Gentle Dot.</h1>
-<p class="muted">A guided first install. Review your native package before anything touches your computer.</p>
-<div class="package" aria-label="Read-only package formats">
-<article><h2>macOS</h2><p>DMG package</p><p class="muted">Native application install. System approval remains your decision.</p></article>
-<article><h2>Linux</h2><p>Debian / Arch packages</p><p class="muted">Use the package matching your distribution. Native package rules apply.</p></article>
+<header class="brand"><strong>Gentle Dot</strong><span class="muted">Native setup concept</span></header>
+<h1>Setup for your system.</h1>
+<p class="muted">Choose a platform preview. See what is included, what your OS needs and what comes next.</p>
+<p id="os-selector-label" class="selector-label">Preview operating system</p>
+<div class="os-cards" role="group" aria-labelledby="os-selector-label" aria-describedby="selection-note">
+<button class="os-card" id="os-windows" type="button" data-os="windows" aria-pressed="true" aria-controls="panel-windows"><strong>Windows</strong><span>x64 · NSIS .EXE</span><span class="choice">Selected preview</span></button>
+<button class="os-card" id="os-macos" type="button" data-os="macos" aria-pressed="false" aria-controls="panel-macos"><strong>macOS</strong><span>ARM64 · DMG</span><span class="choice">View requirements</span></button>
+<button class="os-card" id="os-linux" type="button" data-os="linux" aria-pressed="false" aria-controls="panel-linux"><strong>Linux</strong><span>Debian / Arch</span><span class="choice">View requirements</span></button>
 </div>
-<dl>
-<div><dt>Platform selection</dt><dd>Read-only package overview</dd></div>
-<div><dt>Release version &amp; size</dt><dd>Not loaded in this concept</dd></div>
-<div><dt>Authenticity</dt><dd>Not checked · no package downloaded</dd></div>
-</dl>
-<p class="note">Current build: installation unavailable. The production release trust key is not configured, and native installation is not connected.</p>
+<p id="selection-note" class="selection-note">Windows example selected manually for preview. Your operating system has not been detected.</p>
+<div class="workspace">
+<ol class="flow" aria-label="Illustrated setup flow"><li>01 / Check</li><li>02 / Requirements</li><li>03 / Review &amp; approve</li></ol>
+<section aria-labelledby="check-title">
+<div class="section-head"><h2 id="check-title">1. Check this computer</h2><span class="status">Not checked</span></div>
+<p>No real host report is connected. OS, architecture and prerequisites remain unknown.</p>
+<div class="actions"><button class="primary" type="button" id="preview-check">Preview readiness check</button></div>
+<p id="feedback" role="status" aria-live="polite">Simulated preview only. Next: preview a sample requirement report. No check has run.</p>
+</section>
+<section aria-labelledby="requirements-title">
+<h2 id="requirements-title">2. What this platform needs</h2>
+<article id="panel-windows" class="os-panel" aria-labelledby="windows-title">
+<h3 id="windows-title">Windows · example requirements</h3>
+<p><strong>x64 · NSIS .EXE</strong> · exact filename not confirmed</p>
+<p>OS-managed prerequisite: WebView2. If missing, the native installer bootstrapper requires internet to obtain it.</p>
+<details><summary>Windows package details</summary><p>WebView2 presence: Not checked. Windows ARM64 is not an established shipped target. A packaging recipe is not proof of a published or authenticated release.</p></details>
+</article>
+<article id="panel-macos" class="os-panel" aria-labelledby="macos-title" hidden>
+<h3 id="macos-title">macOS · example requirements</h3>
+<p><strong>ARM64 · DMG · macOS 12.3 or later</strong></p>
+<p>Check the OS version and architecture before opening the native application package. System approval stays with you.</p>
+<details><summary>macOS package details</summary><p>OS compatibility: Not checked. An Intel Mac package is not an established shipped target. A DMG alone is not notarization or release-authenticity proof.</p></details>
+</article>
+<article id="panel-linux" class="os-panel" aria-labelledby="linux-title" hidden>
+<h3 id="linux-title">Linux · example requirements</h3>
+<p><strong>Debian · amd64 / arm64</strong> or <strong>Arch · amd64 only</strong></p>
+<p>Use the distribution’s native package manager for OS-managed libraries. Runtime dependency status: Not checked.</p>
+<details><summary>Linux libraries and package details</summary><p>Arch declares gtk3, webkit2gtk-4.1 and libayatana-appindicator. Debian runtime dependencies must be read from the generated package; they are not confirmed here. These are not build-only development packages. Arch ARM64 is not an established shipped target.</p></details>
+</article>
 <details>
-<summary>Your data and OS security stay yours</summary>
-<p>Conversations, configuration, memory and credentials must be preserved. Only application files belong in a replacement. This preview changes nothing.</p>
-<p>Free project signatures are not Apple code signing, notarization, a malware-free guarantee or Gatekeeper approval. Do not disable OS security checks. Any native permissions require your explicit approval.</p>
+<summary>Included with Gentle Dot — no global developer tools</summary>
+<p>The packaging recipe includes private Node/npm, the Gentle Dot daemon and UI, Shell Pi, Gentle AI and Engram. Runtime presence: Not checked; presence is not authenticity proof.</p>
+<p>You should not need global Node, npm, Git, Rust, Go, MSVC, Xcode or other build tools to run a shipped native package. This preview does not bootstrap Node or connect a native caller.</p>
 </details>
-<div class="actions">
-<button class="primary" type="button" id="review">Preview next review step</button>
-<button type="button" id="cancel">Illustrate cancel</button>
+</section>
+<section aria-labelledby="review-title">
+<h2 id="review-title">3. Review before installing</h2>
+<div class="blocked"><p><strong>Installation unavailable</strong></p><p>The production trust root and signed release evidence are missing. Real readiness and native installation are not connected.</p></div>
+<dl><div><dt>Release authenticity &amp; integrity</dt><dd>Not checked · no bytes downloaded</dd></div></dl>
+<div class="actions"><button type="button" id="install" disabled aria-describedby="install-reason">Install with native approval</button></div>
+<p id="install-reason" class="muted">Next real step: connect a trusted host report, resolve prerequisites and authenticate the release. Approval would then happen natively, by your choice.</p>
+<details><summary>Release and OS security details</summary><p>Version, size and release URL are not loaded. A free project signature is not Apple code signing, notarization, a malware-free guarantee or OS approval. Do not disable SmartScreen or Gatekeeper. Native permissions require your explicit approval.</p></details>
+<details><summary>Your data, recovery and reopening</summary><p>A future installer must verify before asking to close the app, confirm orderly shutdown and stop if it fails. Replace only application files using native package semantics.</p><p>Preserve conversations, configuration, memory and credentials. Show recovery options on failure without discarding user data. Offer optional reopening only after confirmed success, never automatically.</p></details>
+</section>
 </div>
-<p id="feedback" role="status" aria-live="polite">Local illustration only. Neither button starts setup.</p>
-</div>
-</div>
-<footer>Direction 01 / Guided · reduces first-install uncertainty; adds a step before the technical trust details.</footer>
+<footer>Preview only · 0 real checks completed. Nothing is downloaded, installed, closed or changed on your computer.</footer>
 </main>
 <script>
+const cards = document.querySelectorAll('.os-card');
+const panels = document.querySelectorAll('.os-panel');
 const feedback = document.getElementById('feedback');
-document.getElementById('review').addEventListener('click', () => {
-  feedback.textContent = 'Simulated next step: a trusted helper would check signed release metadata and package bytes before offering installation. No check ran.';
+const selectionNote = document.getElementById('selection-note');
+const names = { windows: 'Windows', macos: 'macOS', linux: 'Linux' };
+const examples = {
+  windows: 'Simulated Windows report: WebView2 is missing. Its native bootstrapper would require internet. No detection or download ran; installation remains blocked.',
+  macos: 'Simulated macOS report: OS version is unknown. Confirm macOS 12.3 or later and ARM64 through the future trusted host. No detection ran; installation remains blocked.',
+  linux: 'Simulated Linux report: distribution libraries are unresolved. Review native package dependencies in the future host flow. No detection ran; installation remains blocked.'
+};
+let selected = 'windows';
+cards.forEach((card) => {
+  card.addEventListener('click', () => {
+    selected = card.dataset.os;
+    cards.forEach((item) => {
+      const active = item === card;
+      item.setAttribute('aria-pressed', String(active));
+      item.querySelector('.choice').textContent = active ? 'Selected preview' : 'View requirements';
+    });
+    panels.forEach((panel) => {
+      panel.hidden = panel.id !== card.getAttribute('aria-controls');
+    });
+    selectionNote.textContent = names[selected] + ' example selected manually for preview. Your operating system has not been detected.';
+    feedback.textContent = 'Simulated preview only. Next: preview a sample ' + names[selected] + ' requirement report. No check has run.';
+  });
 });
-document.getElementById('cancel').addEventListener('click', () => {
-  feedback.textContent = 'Simulated cancellation. No setup session, application or stored data was changed.';
+document.getElementById('preview-check').addEventListener('click', () => {
+  feedback.textContent = examples[selected];
 });
 </script>
 </body>

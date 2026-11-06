@@ -47,8 +47,9 @@ Source: `scripts/installer/page.css`: body 14px/20px; h1 28px/36px; h2 18px/24px
 - Focus: 2px solid accent, 4px offset (`scripts/installer/page.css`). Native semantic buttons, details/summary, labels and checkbox controls. No invisible interactions.
 - Eyebrows: 12px/16px mono, accent, uppercase. Body 14px/20px, headings as above. Readable text never uses decorative border color.
 - Preview disclosure is sticky and always says: “Design concept / simulated preview—no operations performed”. Simulated lifecycle states must also say simulated. No success-green status.
-- Package information is read-only. No fabricated version, size or release URL. macOS DMG; Linux Debian / Arch packages. No platform detection or permissions triggered.
-- No motion, network, persistent storage, OS actions, app commands or real verification. Interactions can only illustrate local review/cancel states. Native details are permitted.
+- Package information is read-only. No fabricated version, size or release URL. Direction 01 includes Windows x64 NSIS .EXE (exact filename unconfirmed), macOS ARM64 DMG / minimum 12.3, Debian amd64 / arm64 and Arch amd64 only. Directions 02 and 03 remain the original macOS/Linux alternatives. Do not infer shipped Windows ARM64, Intel Mac or Arch ARM64 support from metadata formats. No platform detection or permissions triggered.
+- Separate privately bundled Node/npm, daemon, Shell Pi, Gentle AI, Engram and UI from OS-managed prerequisites. End users should not need global Node/npm/Git/Rust/Xcode/MSVC/Go/build tools. Runtime presence is not release authenticity. Windows WebView2 bootstrap needs internet when missing; Arch declares gtk3 / webkit2gtk-4.1 / libayatana-appindicator; Debian runtime dependencies remain unconfirmed until generated package metadata is available. Never substitute build-only development packages.
+- No motion, network, persistent storage, OS actions, app commands or real verification. Interactions can only illustrate local review/cancel or explicitly simulated readiness examples through textContent. Initial component statuses say “Not checked”; no simulated report enables installation. Keep the sticky preview disclosure visible and native installation disabled until real host, prerequisite and trust evidence exist. Native details are permitted.
 
 ## Self-check contract
 

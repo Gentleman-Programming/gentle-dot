@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "comments": [
+    {
+      "id": "sh9xot37",
+      "file": "01-guided.html",
+      "selector": "body",
+      "excerpt": "SIMULATED PREVIEW · Design concept / simulated preview—no operations performed Gentle Dot Native setup / Windows · macOS · Linux READINESS FIRST 01 / Check this computer Not checked. Preview an example report. 02 / Understand requirements Included runtime vs. OS-managed needs. 03 / Review safe insta",
+      "comment": "mejora la ui completa quesea mas facil de entender y organiza y que salgan cards arriba y segun el sistema operativo muestra la info",
+      "createdAt": "2026-11-06T21:03:04.530Z",
+      "status": "resolved",
+      "sentAt": "2026-11-06T21:03:04.578Z",
+      "resolvedAt": "2026-11-06T21:23:24.749Z"
+    }
+  ]
+}
