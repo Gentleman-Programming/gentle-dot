@@ -1161,7 +1161,8 @@ export class Daemon {
   private async handleBridgeMessage(connectorId: string, message: any): Promise<void> {
     switch (message.type) {
       case 'send': {
-        const payload = message.payload as { text?: string; attachments?: AttachmentRef[] };
+        // A bridge may nest the body under `payload` or send it flat, the way the panel does.
+        const payload = (message.payload ?? message) as { text?: string; attachments?: AttachmentRef[] };
         const text = payload?.text?.trim();
         if (!text) return;
         this.chatSend(connectorId, text, payload.attachments);
@@ -1419,12 +1420,16 @@ export class Daemon {
   /** The engine process this daemon supervises: its pid and whether it is still running. */
   get supervisor(): {
     pid: number | undefined;
-    state: 'ready' | 'stopped';
+    state: 'ready' | 'starting' | 'stopped';
+    busy: boolean;
     restart(): Promise<void>;
   } {
     return {
       pid: this.shellSpawner.pid,
-      state: this.stopped ? 'stopped' : 'ready',
+      // A restart takes a moment: reporting `ready` until the engine answers again lets a caller send
+      // into the gap, where the message is dropped as `engine_unavailable`.
+      state: this.stopped ? 'stopped' : this.shellSpawner.isReady() ? 'ready' : 'starting',
+      busy: this.activeRun !== null,
       restart: () => this.restartEngine(),
     };
   }
@@ -1634,9 +1639,6 @@ export class Daemon {
       // The engine was working with files the user did not approve: it comes back with the real ones.
       void this.restartEngine();
     };
-    this.connectorManager.onSetAside = (notice: string) => {
-      this.wsServer.broadcastApps('toast', { level: 'warning', message: notice });
-    };
 
     this.profileStore ??= new ProfileStore({
       configHome: path.join(this.config.daemon.data_dir, 'gentle-ai'),
@@ -1689,6 +1691,7 @@ export class Daemon {
 
     await this.shellSpawner.start({
       config: shellConfig,
+      cwd: this.config.daemon.workspace,
       onReady: () => {
         this.engineReady = true;
         console.log('[Daemon] Gentle Shell RPC ready');
@@ -1700,12 +1703,19 @@ export class Daemon {
       onError: (error) => console.error('[Daemon] Gentle Shell error:', error),
       onExit: (code: number | null, signal: NodeJS.Signals | null) => {
         console.log('[Daemon] Gentle Shell exited:', code, signal);
+        try {
+        } catch {}
         const wasReady = this.engineReady;
         this.engineReady = false;
         // The engine can end itself after editing its files. It is brought back from the user's
         // state, but never while we are stopping or already restarting: the exit that our own
         // stop() causes must not schedule a second restart.
         if (!wasReady || this.stopping || this.restarting || this.restartInFlight) return;
+        // The engine died with a turn still open: it will never settle, so the restart would wait for
+        // an event that cannot arrive. The run is over; the windows hear it too.
+        this.activeRun = null;
+        this.restartPending = false;
+        this.appChannel.broadcast('agent_state', { state: 'idle' });
         setTimeout(() => {
           if (this.stopping || this.restarting || this.restartInFlight) return;
           void this.restartEngine();

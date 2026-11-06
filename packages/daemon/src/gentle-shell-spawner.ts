@@ -62,6 +62,8 @@ export interface ShellConfig {
 
 export interface ShellSpawnOptions {
   config: ShellConfig;
+  /** Where the engine runs: the user's workspace, so its relative paths mean what the user sees. */
+  cwd?: string;
   onReady?: () => void;
   onError?: (error: Error) => void;
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
@@ -110,7 +112,7 @@ export class GentleShellSpawner extends EventEmitter {
       console.log('[GentleShellSpawner] ENGRAM_PROJECT:', env['ENGRAM_PROJECT']);
 
       const spawnOptions: SpawnOptions = {
-        cwd: process.cwd(),
+        cwd: options.cwd ?? process.cwd(),
         env,
         stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
         windowsHide: true,

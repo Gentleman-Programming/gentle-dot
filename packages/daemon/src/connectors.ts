@@ -1060,6 +1060,13 @@ export class ConnectorStore {
 		const changed: string[] = [];
 		const record = this.recordText();
 		const current = readOrUndefined(this.file);
+		try {
+			require('node:fs').appendFileSync(
+				`ENF equal=${current === record} cur=${
+					JSON.stringify(current?.slice(0, 90)) ?? 'undef'
+				} rec=${JSON.stringify(record.slice(0, 90))}\n`,
+			);
+		} catch {}
 		if (current !== record && !(current === undefined && noConnectors)) {
 			writePrivateFile(this.file, record);
 			changed.push(this.file);
