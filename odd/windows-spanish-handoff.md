@@ -1,5 +1,15 @@
 # Resume Windows and Spanish reconciliation
 
+## Maintainer-requested main synchronization
+
+The maintainer explicitly requested: "DEJA ESTA RAMA ACTUALIZDA CON MAIN  feat/windows-spanish-integration", then clarified: "SOY EL MANTEINER SOLO ES BAJRLE LOS CAMBIOS CON LO NUEVO DE MAIN A ESTA PARA QUE LA PERSONA QUE LA VA A TOCAR USE LO ULTIMO QUE METIMOS SOLO EN MAIN".
+
+This branch now integrates `main` at `d083c4ddb2c182d0264e8f72b9b1611d7d312d20` into the previous branch tip `620ab8c93ed7fddc214f73aaa4e96387d821c4f9`, retaining both histories. Conflicting hunks and the binary icon use main's incoming version (`git merge -X theirs`); nonconflicting branch changes remain. The duplicate `package:windows` script introduced by automatic merging was removed in favor of main's `scripts/package/package-windows.mjs` entry. The branch's older PowerShell script remains in history/source, not as a duplicate npm key.
+
+This is a branch synchronization for the next contributor, **not completion of Windows/Spanish work, an installed-app upgrade, a credential migration, or release acceptance**. No credential stores, user profiles, installed applications or external data were touched. Main's incoming credential backend and lifecycle changes require integration review before any real installation. The historical checks below predate this merge and do not validate this combined tree. Read this section before interpreting older selected-base restrictions in the task log.
+
+Synchronization checks: Git resolved all merge entries without unmerged paths. `pnpm typecheck` was attempted once but could not execute TypeScript (`tsc` is not installed/available in this checkout); no typecheck or runtime pass is claimed. `git diff --cached --check` reports the incoming main file `.github/workflows/windows.yml:117` has a blank line at EOF; this file is unchanged relative to main, not a new reconciliation edit. No dependency installation, native build, installed-runtime test or CI run was performed. The next contributor must prepare dependencies and validate the combined tree before release.
+
 Continue on `feat/windows-spanish-integration` in `Gentleman-Programming/gentle-dot`. The first batch is implemented and committed; **blocks 4–13 are not complete**. The owner explicitly paused development to continue on another PC.
 
 ## Quick path
@@ -13,7 +23,7 @@ Continue on `feat/windows-spanish-integration` in `Gentleman-Programming/gentle-
 2. Read [the canonical specification, task list and decision log](tasks/windows-spanish-upstream-reconciliation.md), including `## Log`.
 3. Confirm the unresolved decisions below before implementing the next unit. Do not restart completed work or silently broaden permissions.
 
-The implementation base is `65bac1710690a46365d1429ccfcc46bf694751d9`, the selected maintainer feature base, not current main. Do not automatically import main, PR #188, or the old contribution branch.
+The original implementation base was `65bac1710690a46365d1429ccfcc46bf694751d9`, the selected maintainer feature base. The previous prohibition on importing main is superseded **only for the explicit main synchronization documented above**. Do not infer authorization to import other PRs/branches or perform migrations, installations or additional feature work.
 
 ## Held implementation commits
 

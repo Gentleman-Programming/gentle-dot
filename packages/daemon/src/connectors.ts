@@ -840,6 +840,11 @@ export class ConnectorStore {
 				this.log("connectors.json was signed before and is missing; starting with no connectors");
 				this.onSetAside(MISSING_NOTICE);
 			}
+			// The empty record is signed in its place: the next start verifies it instead of reporting a
+			// file that never existed (a fresh install) or one already reported.
+			this.edited = true;
+			mkdirSync(this.options.dataDir, { recursive: true, mode: 0o700 });
+			writePrivateFile(this.file, this.recordText());
 			return;
 		}
 		const record = this.loaded.record;

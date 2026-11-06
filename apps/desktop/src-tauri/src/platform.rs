@@ -18,7 +18,13 @@ impl Os {
         Os::Linux
     };
 
-    /// Only macOS blurs the desktop behind the panel (`HudWindow`); Linux has no window effects.
+    /// Windows uses app-managed placement. Preserve the existing environment-based
+    /// placement decision on the original platforms.
+    pub fn compositor_places_windows(self, env: impl Fn(&str) -> Option<String>) -> bool {
+        self != Os::Windows && compositor_places_windows(env)
+    }
+
+    /// Only macOS blurs the desktop behind the panel (`HudWindow`).
     pub fn has_vibrancy(self) -> bool {
         self == Os::MacOs
     }
@@ -181,6 +187,31 @@ mod tests {
     }
 
     #[test]
+    fn windows_frontend_dist_is_a_directory_not_a_cannot_be_base_url() {
+        use tauri::utils::config::FrontendDist;
+
+        // Reproduce the production config ambiguity without opening a webview.
+        let absolute: FrontendDist =
+            serde_json::from_value(serde_json::json!(r"C:\staged runtime\ui")).unwrap();
+        let FrontendDist::Url(url) = absolute else {
+            panic!("expected the absolute drive path to reproduce URL classification");
+        };
+        assert_eq!(url.scheme(), "c");
+        assert!(url.cannot_be_a_base());
+        assert!(url.join(panel_url(Os::Windows)).is_err());
+
+        // Packaging emits forward slashes and a ./ prefix, including when the
+        // first component could otherwise look like a URL scheme.
+        for relative in ["./../../../staged runtime/ui", "./ui", "./c:assets/ui"] {
+            let dist: FrontendDist = serde_json::from_value(serde_json::json!(relative)).unwrap();
+            let FrontendDist::Directory(directory) = dist else {
+                panic!("relative frontend must embed a directory: {relative}");
+            };
+            assert_eq!(directory, std::path::PathBuf::from(relative));
+        }
+    }
+
+    #[test]
     fn the_panel_uses_vibrancy_only_on_macos() {
         assert!(Os::MacOs.has_vibrancy());
         assert!(!Os::Linux.has_vibrancy());
@@ -191,9 +222,21 @@ mod tests {
     }
 
     #[test]
+    fn windows_placement_does_not_change_original_platform_decisions() {
+        assert!(!Os::Windows.compositor_places_windows(env_of(GNOME_WAYLAND)));
+        assert_eq!(
+            Os::MacOs.compositor_places_windows(env_of(GNOME_WAYLAND)),
+            compositor_places_windows(env_of(GNOME_WAYLAND)),
+        );
+        assert!(Os::Linux.compositor_places_windows(env_of(GNOME_WAYLAND)));
+    }
+
+    #[test]
     fn current_os_matches_the_build_target() {
         assert_eq!(Os::CURRENT == Os::MacOs, cfg!(target_os = "macos"));
         assert_eq!(Os::CURRENT == Os::Windows, cfg!(target_os = "windows"));
+        #[cfg(windows)]
+        assert_eq!(Os::CURRENT, Os::Windows);
     }
 
     #[test]

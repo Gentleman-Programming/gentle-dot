@@ -16,3 +16,10 @@ apps/desktop/src-tauri/gen/
 
 # Declarations emitted next to sources by accident
 packages/*/src/**/*.d.ts
+
+# Explicit Windows addon build outputs
+/packages/daemon/native/*.node
+/packages/daemon/native/*.obj
+/packages/daemon/native/*.lib
+/packages/daemon/native/*.exp
+/packages/daemon/native/*.pdb

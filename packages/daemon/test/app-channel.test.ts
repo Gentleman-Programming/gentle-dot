@@ -13,6 +13,7 @@ import { fakeApp } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { oauthOptions } from "./fake-oauth.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { describeWithAppChannel } from "./support/windows.ts";
 
 const FRAME_BYTES = 1024 * 1024;
 const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -264,7 +265,7 @@ async function draftAndScan(window: Awaited<ReturnType<typeof connect>>) {
 	return { draftId: draft.draftId, importId };
 }
 
-describe("a window with the access key (S25.2)", () => {
+describeWithAppChannel("a window with the access key (S25.2)", () => {
 	it("cannot change connectors, approve a draft, import, or register the computer: each is refused and nothing changes", async () => {
 		const window = await setup();
 		const { draftId, importId } = await draftAndScan(window);
@@ -309,7 +310,7 @@ describe("a window with the access key (S25.2)", () => {
 	});
 });
 
-describe("the desktop app's channel (S25.2, S25.3)", () => {
+describeWithAppChannel("the desktop app's channel (S25.2, S25.3)", () => {
 	it("changes a connector's mode; widening it is confirmed natively, narrowing it is not", async () => {
 		const { app, clientId, saved, find, d } = await setup();
 		app.answer("allow");

@@ -1,0 +1,117 @@
+# Windows checks for the native Windows port.
+#
+# The desktop shell is mostly written on Linux and macOS, where its `cfg(windows)` code never
+# compiles, so this is where that code meets a real `x86_64-pc-windows-msvc` toolchain.
+name: Windows
+
+on:
+  push:
+    # `ci/**` branches try workflow changes before they reach `main`.
+    branches: [main, 'ci/**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust shell
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The toolchain the Windows port is built and tested with. The repository has no
+      # rust-toolchain.toml, so this pin is the one place that names it; later PRs keep it.
+      - uses: dtolnay/rust-toolchain@1.96.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      # `rust-cache` hashes every Cargo.toml, so any dependency change restores an older cache
+      # by prefix, and sherpa-onnx-sys skips its download when `target/sherpa-onnx-prebuilt`
+      # exists even without the library. Drop an incomplete tree so it fetches it again.
+      - name: Drop an incomplete sherpa-onnx prebuilt cache
+        shell: pwsh
+        run: |
+          $root = Join-Path 'apps/desktop/src-tauri/target' 'sherpa-onnx-prebuilt'
+          if (-not (Test-Path $root)) { exit 0 }
+          $lib = Get-ChildItem -Path $root -Recurse -File -Include 'sherpa-onnx-c-api.lib', 'libsherpa-onnx-c-api.a'
+          if (-not $lib) {
+            Remove-Item -Recurse -Force $root
+            Write-Output 'removed an incomplete sherpa-onnx prebuilt cache'
+          }
+
+      # `tauri.conf.json` points `frontendDist` at the built UI. A debug build does not embed it,
+      # but the folder has to exist, and building the UI here would add the whole pnpm install.
+      - name: UI folder for the build script
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path packages/ui/dist/app | Out-Null
+
+      - name: cargo check
+        working-directory: apps/desktop/src-tauri
+        run: cargo check --locked --all-targets
+
+      - name: cargo test
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --locked --lib
+
+  app-channel:
+    name: Native app channel
+    runs-on: windows-latest
+    env:
+      # Match the exact CI-only policy used by the macOS job and pnpm's dependency checks.
+      PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: '["gentle-pi@4.6.0"]'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      # gentle-pi's Windows postinstall requires local Go 1.25.10 or newer.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: false
+      - run: pnpm install --frozen-lockfile
+
+      # The build takes an explicit cl.exe path and needs the SDK's INCLUDE and LIB.
+      - uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+
+      # Provision inputs here, not in the build script; match the running Node exactly.
+      - name: Build app-channel addon
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = node -p process.version
+          $inputs = Join-Path $env:RUNNER_TEMP 'node-addon-inputs'
+          New-Item -ItemType Directory -Force -Path $inputs | Out-Null
+          $release = "https://nodejs.org/download/release/$version"
+          Invoke-WebRequest "$release/node-$version-headers.tar.gz" -OutFile "$inputs/headers.tar.gz"
+          Invoke-WebRequest "$release/win-x64/node.lib" -OutFile "$inputs/node.lib"
+          # Both downloads must match the release's published SHA-256 sums.
+          $sums = (Invoke-WebRequest "$release/SHASUMS256.txt").Content -split "`n"
+          foreach ($pair in @(@("node-$version-headers.tar.gz", 'headers.tar.gz'), @('win-x64/node.lib', 'node.lib'))) {
+            $line = $sums | Where-Object { $_ -match "^[0-9a-f]{64}\s+$([regex]::Escape($pair[0]))$" }
+            if (-not $line) { throw "No published checksum for $($pair[0])" }
+            $actual = (Get-FileHash -Algorithm SHA256 (Join-Path $inputs $pair[1])).Hash.ToLowerInvariant()
+            if ($actual -ne ($line -split '\s+')[0]) { throw "Checksum mismatch for $($pair[0])" }
+          }
+          tar -xf "$inputs/headers.tar.gz" -C $inputs
+          if ($LASTEXITCODE -ne 0) { throw 'Node header extraction failed' }
+          $compiler = (Get-Command cl.exe).Source
+          pnpm --filter @gentle-dot/daemon run build:windows-stop -- --compiler "$compiler" --headers "$inputs/node-$version/include/node" --node-lib "$inputs/node.lib"
+          if ($LASTEXITCODE -ne 0) { throw 'Native addon build failed' }
+
+      # The daemon test files that run on Windows (the runtime build uses the addon built above).
+      - name: Daemon tests
+        run: pnpm exec vitest run packages/daemon/test/windows-stop.test.ts packages/daemon/test/windows-app-channel.test.ts packages/daemon/test/app-channel-platform.test.ts packages/daemon/test/app-channel.test.ts packages/daemon/test/app-channel-fd.test.ts packages/daemon/test/windows-app-channel-addon.test.ts packages/daemon/test/process-tree.test.ts packages/daemon/test/supervisor.test.ts packages/daemon/test/runtime.test.ts packages/daemon/test/config.test.ts packages/daemon/test/isolation.test.ts packages/daemon/test/private-memory.test.ts packages/daemon/test/lifecycle.test.ts packages/daemon/test/cli.test.ts packages/daemon/test/runtime-build.test.ts scripts/package/test/lib.test.ts scripts/package/test/package-windows.test.ts
+

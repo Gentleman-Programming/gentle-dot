@@ -6,6 +6,7 @@ use crate::platform::Os;
 /// rendered by `apps/desktop/scripts/make-icon.mjs`. On macOS they are 36 px template
 /// images, drawn at 18 pt on Retina menu bars. Linux panels can be light or dark and
 /// do not tint icons, so Linux gets 32 px glyphs in a light gray with a dark outline.
+/// Windows reuses those colored glyphs without template tinting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayGlyph {
     Ready,
@@ -134,6 +135,15 @@ mod tests {
             for b in &glyphs[i + 1..] {
                 assert_ne!(a.image(Os::Linux), b.image(Os::Linux), "{a:?} and {b:?}");
             }
+        }
+    }
+
+    #[test]
+    fn windows_reuses_colored_non_template_tray_glyphs() {
+        assert!(!is_template(Os::Windows));
+        for glyph in [TrayGlyph::Ready, TrayGlyph::Working, TrayGlyph::NeedsYou, TrayGlyph::Unavailable] {
+            assert_eq!(glyph.image(Os::Windows), glyph.image(Os::Linux));
+            assert_ne!(glyph.image(Os::Windows), glyph.image(Os::MacOs));
         }
     }
 
