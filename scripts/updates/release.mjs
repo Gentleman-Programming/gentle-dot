@@ -50,7 +50,7 @@ function integrity(artifact) {
 	)
 		fail("Invalid artifact integrity metadata");
 }
-function validateManifest(m) {
+export function validateManifest(m) {
 	if (!exact(m, "schemaVersion,version,artifacts") || m.schemaVersion !== 1) fail("Invalid manifest");
 	version(m.version);
 	if (!Array.isArray(m.artifacts) || m.artifacts.length < 1 || m.artifacts.length > 5)

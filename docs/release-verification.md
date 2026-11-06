@@ -10,7 +10,66 @@ publication, browser installation, native updater and native CI. Until a key is
 independently provisioned and pinned, consumers must fail closed. Never download a
 key beside the release and trust it automatically.
 
-## Maintainer setup and signing
+## Prepare an unsigned draft (no keys)
+
+**Implemented preparation only:** the host-only Node >=24 CLI hashes directly
+named package files and emits the exact T1 manifest. It does not sign, publish,
+verify a publisher, or enable the updater. No private keys are needed or accessed.
+
+```sh
+node scripts/updates/prepare-release.mjs --help
+node scripts/updates/prepare-release.mjs --input /external/recipe.json
+```
+
+Recipe example (illustrative release URL, not a claim that this asset exists):
+
+```json
+{
+  "version": "1.2.3",
+  "artifacts": [{
+    "platform": "linux-amd64",
+    "format": "deb",
+    "file": "gentle-dot_1.2.3_amd64.deb",
+    "url": "https://github.com/Gentleman-Programming/gentle-dot/releases/download/v1.2.3/gentle-dot_1.2.3_amd64.deb"
+  }]
+}
+```
+
+Only those exact recipe/artifact fields are accepted. Relative `file` paths resolve
+against the recipe directory, not the current directory. Explicit absolute paths
+are also accepted. No globs, directory scans, URL discovery, network, commands,
+key options or destination-file option exist. The UTF-8 recipe is limited to
+16 KiB; package metadata uses the existing T1 domain below, including one to five
+unique platform/format pairs. Package basenames must match the decoded canonical
+URL filename (the local DMG filename contains a space, not `%20`).
+
+Success is exit 0, one **UNSIGNED DRAFT** JSON line on stdout, empty stderr:
+`{schemaVersion,version,artifacts:[{platform,format,url,sha256,size}]}`.
+Failure is exit 1, empty stdout and `Error: <reason>\n` on stderr; no partial
+manifest or input writes. Reasons include `Invalid command or options`,
+`Invalid JSON`, `Invalid recipe`, `Invalid recipe artifact`, the existing T1
+validation errors, `Artifact filename mismatch`, `Input file too large`, and
+`Cannot read input file` / `Cannot read artifact file` or
+`Changed input file` / `Changed artifact file`.
+
+Each file must be regular and non-symlink. A single owned descriptor supplies the
+hash and byte count. Before reading, lstat/open/fstat identity, size and nanosecond
+mtime/ctime snapshots must match; after reading, descriptor and named-file
+snapshots and actual count must still match. `O_NOFOLLOW` is used when Node exposes
+it, with no retry after an open failure; identity matching remains required where
+that flag is unavailable, including Windows. Streaming stops at the snapshot size
+plus one detection byte, never continuing beyond T1's allowed size. Handles close
+on success or rejection. This detects observed changes, not an immutable upload,
+a defense against a host administrator, or production authentication. Keep package
+bytes stable through any later offline handoff and publication.
+
+**Next gate, outside this session:** a maintainer may review the draft and use the
+existing offline signer below under separate authorization. An unsigned draft
+passed to `verifyRelease` is rejected as `Invalid envelope`, before key handling.
+Production public-root confirmation, actual signatures, native integration and CI
+remain pending; T3 is blocked and T4 is not completed by preparation.
+
+## Maintainer setup and signing (future, separately authorized)
 
 1. Outside this repository, provision an Ed25519 key using a trusted offline tool
    (for example, OpenSSL `genpkey -algorithm Ed25519` and `pkey -pubout`). Keep the
@@ -99,13 +158,17 @@ CLI artifact checking streams the local file and checks both size and digest.
 ## Minimal public API
 
 ```js
-import { signManifest, verifyRelease, verifyArtifact } from './scripts/updates/release.mjs';
+import { validateManifest, signManifest, verifyRelease, verifyArtifact } from './scripts/updates/release.mjs';
 const envelope = signManifest(manifestBytes, externalPrivatePem);
 const verified = verifyRelease(envelope, pinnedPublicPem, {
   platform: 'linux-amd64', currentVersion: '1.2.2', format: 'deb',
 });
 verifyArtifact(downloadedBytes, verified.artifact); // true, or throws
 ```
+
+`validateManifest(manifest)` is the existing pure T1 validator, now exported for
+preparation reuse. It returns the input manifest or throws; it does not authenticate
+metadata and performs no I/O.
 
 `signManifest` accepts UTF-8 string/Uint8Array bytes or a JSON-compatible object
 (compactly serialized). `verifyRelease` takes a parsed envelope and returns a newly
