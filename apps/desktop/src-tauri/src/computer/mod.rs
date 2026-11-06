@@ -54,12 +54,28 @@ mod capture_order {
         restore();
     }
 
+    /// The process-lifetime handles recorded at window creation, as plain values.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) struct CallHandles {
+        pub(super) dot: Option<usize>,
+        pub(super) panel: Option<usize>,
+    }
+
+    impl CallHandles {
+        pub(super) fn get(&self, part: super::working::Part) -> Option<usize> {
+            match part {
+                super::working::Part::Dot => self.dot,
+                super::working::Part::Panel => self.panel,
+            }
+        }
+    }
+
     /// Match only the process-lifetime handles recorded at window creation. No resolver or
     /// main-thread dispatch is permitted here: callers may hold the affinity lock on a worker.
-    /// `handle` answers each part through an exhaustive match, so a new part cannot go unmatched.
+    /// `handles` is a value answered by an exhaustive match, so a new part cannot go unmatched.
     pub(super) fn current_window(saved: &[(Option<u64>, (super::working::Part, u32))], hwnd: usize,
-        handle: impl Fn(super::working::Part) -> Option<usize>) -> Option<usize> {
-        saved.iter().position(|(_, (window, _))| handle(*window) == Some(hwnd))
+        handles: CallHandles) -> Option<usize> {
+        saved.iter().position(|(_, (window, _))| handles.get(*window) == Some(hwnd))
     }
 
     /// End call ownership, retaining an ownerless recovery value if native restoration fails.
@@ -81,14 +97,11 @@ mod capture_order {
         fn matching_under_the_affinity_lock_never_dispatches_a_window_query() {
             let saved = std::sync::Mutex::new(vec![(Some(1), (super::super::working::Part::Dot, 7))]);
             let guard = saved.lock().unwrap();
-            // Callers pass the handles recorded at creation; querying Tauri is not an option.
-            let recorded = |part| match part {
-                super::super::working::Part::Dot => Some(101),
-                super::super::working::Part::Panel => Some(102),
-            };
+            // The API accepts only recorded values, so querying Tauri is not possible here.
+            let recorded = CallHandles { dot: Some(101), panel: Some(102) };
             assert_eq!(current_window(&guard, 101, recorded), Some(0));
             assert_eq!(current_window(&guard, 201, recorded), None);
-            assert_eq!(current_window(&guard, 101, |_| None), None);
+            assert_eq!(current_window(&guard, 101, CallHandles { dot: None, panel: None }), None);
         }
 
         #[test]
