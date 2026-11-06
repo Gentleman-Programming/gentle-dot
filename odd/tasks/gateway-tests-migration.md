@@ -687,3 +687,42 @@ Hipótesis a comprobar, en orden:
 Con eso debería quedar claro si el fallo es del almacén de secretos, del camino del código manual o
 de una carrera con `update()`. Después de eso, el resto del test (frames a todas las ventanas,
 política nueva y reinicio) ya está cableado.
+
+## Contradicción abierta: `runLogin` corre pero nunca llega a `saveSignIn` (2026-11-06)
+
+Con log sincrónico dentro de `src/connectors.ts`:
+
+```
+startLogin notion
+runLogin notion
+(…nada más: NO aparece "saveSignIn notion")
+```
+
+Y sin embargo la ventana recibe `auth_done` con `ok: true` (el test lo verifica y pasa esa línea).
+
+Lo que dice el código (`runLogin`):
+
+```ts
+const state = await flow.signIn.done;
+await store.saveSignIn(flow.connectorId, state);   // <- nunca se alcanza
+this.log(`signed in to connector ${flow.connectorId}`);
+flow.emit({ ...done, ok: true });                  // <- pero esto sí llega
+```
+
+Es decir: el `auth_done` con `ok:true` que ve el test **no puede venir de esta rama** (el `saveSignIn`
+anterior no se ejecutó). Hay que encontrar quién más emite `auth_done` con `ok:true`:
+
+1. Buscar en `src/connectors.ts` y en el daemon todas las emisiones de `auth_done` (además de
+   `runLogin`): `afterSetup`, el camino del código manual (`finishWithPastedAddress`) y cualquier
+   `emit({ type: "auth_done", … })`.
+2. Verificar si la ventana recibe el `auth_done` del flujo **del conector** o el de la **pantalla de
+   cuentas** (`AuthManager`), que también emite `auth_done` con `providerId`. En el test, el
+   `providerId` esperado es `"notion"`, así que un `auth_done` de cuentas no serviría… salvo que el
+   `find` del test haya matcheado otro frame.
+3. Comprobar si `flow.signIn.done` **rechaza** y el `catch` emite `ok:false`, mientras el test ve
+   otro `auth_done` con `ok:true` de un segundo flujo (por ejemplo, el que arrancó `connectorAction`
+   y otro que arranque `afterSetup`).
+
+Nota: `saveSignIn` no deja la referencia en el store (verificado antes: `{"enabled":true,"mode":"read_only"}`
+sin `signIn`), lo que es coherente con que nunca se llame. El bug está en **quién completa el flujo**,
+no en el almacén de secretos.
