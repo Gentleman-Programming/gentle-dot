@@ -237,8 +237,12 @@ size_t TakeStreamRead(Stream* s, void* destination, size_t capacity) noexcept {
   return count;
 }
 StreamStatus InspectStream(const Stream* s) noexcept {
+  // Report only what TakeStreamRead can actually deliver: outside the open phase it
+  // returns 0, so advertising readable bytes there promises data that a drain drops.
+  const size_t readable =
+      s->phase == StreamPhase::open ? s->read_size - s->read_offset : 0;
   return {s->phase, s->error, s->eof, s->read.pending || s->write.pending,
-          s->read_size - s->read_offset, s->queued_bytes, s->queued_items,
+          readable, s->queued_bytes, s->queued_items,
           s->accepted, s->completed};
 }
 void StopStream(Stream* s, StopMode mode) noexcept {
