@@ -207,6 +207,11 @@ export class WsServer extends EventEmitter {
       return;
     }
 
+    if (url.pathname === '/mcp') {
+      this.handleMcp(req, res);
+      return;
+    }
+
     if (url.pathname === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, timestamp: Date.now() }));
@@ -358,6 +363,95 @@ export class WsServer extends EventEmitter {
   /**
    * Handle hello message (authentication handshake)
    */
+  /**
+   * `POST /mcp`: the connectors' MCP endpoint (JSON-RPC 2.0), reached by the engine with the key its
+   * launch was given. A wrong key is refused before the body is read.
+   */
+  private handleMcp(req: IncomingMessage, res: import('http').ServerResponse): void {
+    const endpoint = this.mcpEndpoint;
+    if (req.method !== 'POST') {
+      res.writeHead(405, { Allow: 'POST' });
+      res.end();
+      return;
+    }
+    const authorization = typeof req.headers.authorization === 'string' ? req.headers.authorization : '';
+    const bearer = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : '';
+    if (!endpoint || bearer !== endpoint.key) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code: 'unauthorized', message: 'A valid key is required.' }));
+      return;
+    }
+
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      // A request larger than this is not something a tool call needs.
+      if (size > 4 * 1024 * 1024) {
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      let request: { id?: unknown; method?: string; params?: Record<string, unknown> };
+      try {
+        request = JSON.parse(Buffer.concat(chunks).toString('utf8')) as typeof request;
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }));
+        return;
+      }
+
+      const reply = (body: unknown): void => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(body));
+      };
+      const fail = (code: number, message: string): void =>
+        reply({ jsonrpc: '2.0', id: request.id ?? null, error: { code, message } });
+
+      switch (request.method) {
+        case 'initialize':
+          reply({
+            jsonrpc: '2.0',
+            id: request.id ?? null,
+            result: {
+              protocolVersion: '2024-11-05',
+              capabilities: { tools: {} },
+              serverInfo: { name: 'gentle-dot-connectors', version: '1.0.0' },
+            },
+          });
+          return;
+        case 'notifications/initialized':
+          res.writeHead(202);
+          res.end();
+          return;
+        case 'tools/list':
+          reply({
+            jsonrpc: '2.0',
+            id: request.id ?? null,
+            result: { tools: endpoint.list() },
+          });
+          return;
+        case 'tools/call': {
+          const params = (request.params ?? {}) as { name?: unknown; arguments?: unknown };
+          const name = typeof params.name === 'string' ? params.name : '';
+          const args = typeof params.arguments === 'object' && params.arguments !== null
+            ? (params.arguments as Record<string, unknown>)
+            : {};
+          if (name === '') return fail(-32602, 'A tool name is required');
+          void endpoint
+            .call(name, args)
+            .then((result) => reply({ jsonrpc: '2.0', id: request.id ?? null, result }))
+            .catch((error: Error) => fail(-32603, error.message));
+          return;
+        }
+        default:
+          fail(-32601, `Unknown method: ${String(request.method)}`);
+      }
+    });
+  }
+
   /**
    * `POST /upload`: the desktop app sends a file the user dropped on the window.
    *
@@ -721,6 +815,17 @@ export class WsServer extends EventEmitter {
    */
   /** Where an uploaded file goes; set by the daemon once its workspace is known. */
   uploads: UploadStore | null = null;
+
+  /**
+   * The connectors' MCP endpoint: the address the engine's server list points at, the key that
+   * launch was given, and what to list and call. The daemon owns the answers; the server only
+   * speaks JSON-RPC and checks the key.
+   */
+  mcpEndpoint: {
+    key: string;
+    list(): { name: string; description?: string; inputSchema?: unknown }[];
+    call(name: string, args: Record<string, unknown>): Promise<unknown>;
+  } | null = null;
 
   /**
    * Origins the desktop app's windows come from. Anything else is refused, here and on the upload

@@ -19,6 +19,7 @@ import { AppSecretSource } from './secret-source.ts';
 import type { AttachmentRef } from '@gentle-dot/protocol';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import * as path from 'path';
@@ -432,6 +433,34 @@ export class Daemon {
       break;
     }
 
+  }
+
+  /** The tools the proxied connectors offer, named the way the engine and the guard expect. */
+  private proxiedTools(): { name: string; description?: string; inputSchema?: unknown }[] {
+    const policy = this.connectorStore?.policy();
+    const tools: { name: string; description?: string; inputSchema?: unknown }[] = [];
+    for (const id of policy?.proxied ?? []) {
+      const mode = (policy?.connectors?.[id]?.mode ?? 'read_only') as McpMode;
+      for (const tool of this.mcpProxy.getAvailableTools(id, mode)) {
+        tools.push({
+          name: `mcp__${id}__${tool.name}`,
+          ...(tool.description === undefined ? {} : { description: tool.description }),
+          ...(tool.inputSchema === undefined ? {} : { inputSchema: tool.inputSchema }),
+        });
+      }
+    }
+    return tools;
+  }
+
+  /** Runs one proxied tool call; the name carries the connector it belongs to. */
+  private async callProxiedTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+    const parts = name.split('__');
+    if (parts.length < 3 || parts[0] !== 'mcp') throw new Error(`Unknown tool: ${name}`);
+    const connectorId = parts[1] as string;
+    const toolName = parts.slice(2).join('__');
+    const policy = this.connectorStore?.policy();
+    const mode = (policy?.connectors?.[connectorId]?.mode ?? 'read_only') as McpMode;
+    return this.mcpProxy.callTool(connectorId, toolName, args, mode);
   }
 
   /** Changes a connector's mode; widening it is the app's decision, and the engine restarts. */
@@ -1582,8 +1611,19 @@ export class Daemon {
       log: (line) => console.log(line),
     });
     // The app is asked for the connectors' integrity key at start, the way it always was, and the
-    // store starts watching its files: what the assistant edits is put back while it runs.
+    // store starts watching its files: what the assistant edits is put back while it runs, and the
+    // user is told once each time it happens.
     void this.connectorStore.checkIntegrity();
+    this.connectorStore.onReverted = () => {
+      this.wsServer.broadcastApps('toast', {
+        level: 'warning',
+        message: 'A change to your connectors was blocked.',
+      });
+      void this.connectorsScreen();
+    };
+    this.connectorStore.onSetAside = (notice: string) => {
+      this.wsServer.broadcastApps('toast', { level: 'warning', message: notice });
+    };
     this.connectorStore.watch();
     this.connectorManager ??= new ConnectorManager({
       store: this.connectorStore,
@@ -1622,6 +1662,19 @@ export class Daemon {
     // unprotected.
     // The engine is about to read its server list: whatever the assistant changed is put back
     // first, and the report says so in the log.
+    // The connectors reach the engine through the daemon: its server list points at our own MCP
+    // endpoint, and the key is new on every launch so a stale file is visibly different.
+    const proxyKey = randomBytes(24).toString('base64url');
+    this.connectorStore.setProxy({
+      url: `http://127.0.0.1:${this.config.daemon.port}/mcp`,
+      key: proxyKey,
+    });
+    this.wsServer.mcpEndpoint = {
+      key: proxyKey,
+      list: () => this.proxiedTools(),
+      call: (name, args) => this.callProxiedTool(name, args),
+    };
+
     this.engineStarts += 1;
     if (this.engineStarts > 1) this.connectorStore.enforce();
 
