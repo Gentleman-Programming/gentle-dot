@@ -305,8 +305,13 @@ export class Daemon {
         void this.connectorAction(clientId, 'connect', String(message.connectorId ?? ''));
         break;
       }
-      case 'connector_sign_in': {
+      case 'connector_sign_in':
+      case 'connector_signin': {
         void this.connectorAction(clientId, 'signIn', String(message.connectorId ?? ''));
+        break;
+      }
+      case 'connector_mode': {
+        void this.connectorMode(clientId, String(message.connectorId ?? ''), message.mode);
         break;
       }
       case 'connector_disconnect': {
@@ -934,6 +939,8 @@ export class Daemon {
   /** The engine's home, kept so a restart can reuse it. */
   private engineHome: string | null = null;
   private restarting = false;
+  /** How many times this daemon has started an engine; the first one has nothing to put back. */
+  private engineStarts = 0;
   private restartPending = false;
 
   /** The connectors the user has added: the file the engine reads and the manager over it. */
@@ -1572,8 +1579,10 @@ export class Daemon {
       secrets: new AppSecretSource(this.appChannel),
       log: (line) => console.log(line),
     });
-    // The app is asked for the connectors' integrity key at start, the way it always was.
+    // The app is asked for the connectors' integrity key at start, the way it always was, and the
+    // store starts watching its files: what the assistant edits is put back while it runs.
     void this.connectorStore.checkIntegrity();
+    this.connectorStore.watch();
     this.connectorManager ??= new ConnectorManager({
       store: this.connectorStore,
       ...(this.options.connectorOAuth ? { oauth: this.options.connectorOAuth } : {}),
@@ -1609,6 +1618,11 @@ export class Daemon {
     // The subagents of the assistant's engine load the guard from its extensions folder. If it
     // cannot be put there (or kept there), the engine runs with subagents off rather than
     // unprotected.
+    // The engine is about to read its server list: whatever the assistant changed is put back
+    // first, and the report says so in the log.
+    this.engineStarts += 1;
+    if (this.engineStarts > 1) this.connectorStore.enforce();
+
     const guardPath = shellConfig.extensions?.[0] ?? this.approvalGuardPath();
     if (!this.superviseChildGuard(shellConfig.agentHome, guardPath)) shellConfig.subagentsOn = false;
 
@@ -1684,6 +1698,7 @@ export class Daemon {
 
     this.stopChildGuardWatch?.();
     this.stopChildGuardWatch = null;
+    this.connectorStore?.close();
 
     await this.appChannel.stop();
     console.log('[Daemon] App Channel stopped');
