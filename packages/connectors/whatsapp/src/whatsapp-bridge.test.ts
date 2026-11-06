@@ -291,3 +291,20 @@ describe('WhatsAppBridge - the transport never answers itself (#48)', () => {
     expect(send).toHaveBeenCalledWith('send', { text: '📱 [Gentle Dot] hola' });
   });
 });
+
+describe('WhatsAppBridge - graceful shutdown (#48 follow-up)', () => {
+  it('closes the transport and the daemon link when main.ts calls shutdown()', async () => {
+    const bridge = new WhatsAppBridge(createMockOptions());
+    const { createTransportFactory } = await import('./transport/factory.js');
+    const transport = (createTransportFactory as unknown as { mock: { results: { value: { stop: { mock: unknown } } }[] } }).mock.results.at(-1)!.value;
+    const stop = transport.stop as unknown as { mock: { calls: unknown[] } };
+    const disconnect = vi
+      .spyOn(bridge as unknown as { disconnect: () => Promise<void> }, 'disconnect')
+      .mockResolvedValue(undefined);
+
+    await (bridge as unknown as { shutdown: () => Promise<void> }).shutdown();
+
+    expect(stop.mock.calls.length).toBe(1);
+    expect(disconnect).toHaveBeenCalled();
+  });
+});
