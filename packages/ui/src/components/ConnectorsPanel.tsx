@@ -31,6 +31,7 @@ interface ConnectorsPanelProps {
 const STATUS_LABELS: Record<ConnectorStatus, string> = {
 	off: "Off",
 	needs_setup: "Needs setup",
+	needs_preparation: "Needs preparation",
 	needs_signin: "Needs sign-in",
 	connected: "Connected",
 	error: "Sign-in failed",
@@ -66,7 +67,8 @@ export function ConnectorsPanel({
 	};
 	const guided = connectors.list?.find((c) => c.id === guideFor && c.guide);
 	// Values are asked first; once the sign-in page is on its way, it is a sign-in.
-	const settingUp = flow?.flowId?.startsWith("connector-setup-") && flow.events.length === 0;
+	const settingUp =
+		flow?.flowId?.startsWith("connector-setup-") && flow.events.every((event) => event.kind === "progress");
 
 	return (
 		<section className="accounts connectors" aria-label="Connectors">
@@ -379,7 +381,8 @@ function ConnectorRow({ connector: c, appSend, connect, signIn, setUp }: Connect
 	const readOnlyNote = c.custom
 		? "Its tools stay hidden until you choose Read and send. Then it asks you before every action."
 		: "It cannot send or change anything.";
-	const canSignIn = c.enabled && !c.noSignIn && c.status !== "needs_setup";
+	const canSignIn =
+		c.enabled && !c.noSignIn && c.status !== "needs_setup" && c.status !== "needs_preparation";
 	return (
 		<li aria-labelledby={nameId}>
 			<div className="provider-name">
@@ -437,6 +440,18 @@ function ConnectorRow({ connector: c, appSend, connect, signIn, setUp }: Connect
 						onClick={setUp}
 					>
 						Set up
+					</button>
+				) : null}
+				{c.enabled && c.status === "needs_preparation" ? (
+					// Connecting again prepares what it runs and keeps the values it already has.
+					<button
+						type="button"
+						className="primary"
+						aria-label={`Prepare ${c.name}`}
+						disabled={locked}
+						onClick={connect}
+					>
+						Prepare
 					</button>
 				) : null}
 				{canSignIn && c.status !== "connected" ? (

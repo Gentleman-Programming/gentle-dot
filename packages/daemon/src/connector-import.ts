@@ -1,12 +1,15 @@
 /**
  * Finds the MCP servers the user set up in other apps (S20), read-only: Claude Desktop, Claude Code,
- * Cursor, VS Code, Windsurf, OpenCode, and Gentle Shell, on macOS and Linux. Each entry is mapped to
+ * Cursor, VS Code, Windsurf, OpenCode, and Gentle Shell, on macOS, Linux, and Windows (VS Code keeps
+ * its file in `%APPDATA%` there, and Claude Desktop in `%APPDATA%` or, as the Store/MSIX app, in its
+ * package below `%LOCALAPPDATA%\Packages`). Each entry is mapped to
  * the engine's `mcp.json` schema. Values keep their meaning: a literal stays a literal (escaped, so
  * the engine neither runs it as `!command` nor expands `$NAME`), an environment reference becomes the
  * engine's `${NAME}`, and a VS Code input becomes a value the user types in the app (`${input:<id>}`).
  * The source files are only read; nothing here writes anywhere.
  */
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { ImportCandidate } from "@gentle-dot/protocol";
 import { literal, type ServerTemplate, type SetupField } from "./connectors.ts";
@@ -33,6 +36,7 @@ const SSE_REASON = "It uses the old SSE transport, which the assistant does not 
 const NO_SERVER = "It has no command or address the assistant can use.";
 const MAX_FILE = 50 * 1024 * 1024;
 const MAX_PROJECTS = 200;
+const MAX_PACKAGES = 20;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const INPUT_ID = /^[A-Za-z0-9_.-]{1,64}$/;
 
@@ -40,8 +44,36 @@ type Json = Record<string, unknown>;
 const isRecord = (value: unknown): value is Json =>
 	typeof value === "object" && value !== null && !Array.isArray(value);
 
+/** Where the scan looks: the home folder and the Windows AppData folders. */
+export interface ImportLocations {
+	home: string;
+	/** `%APPDATA%` (`AppData\Roaming`). */
+	appData: string;
+	/** `%LOCALAPPDATA%` (`AppData\Local`). */
+	localAppData: string;
+}
+
+/**
+ * The user's own folders, with AppData where Windows says it is (it can be redirected away from the
+ * profile); a home given for a test or a fixture keeps everything below it.
+ */
+export function importLocations(
+	importHome: string | undefined,
+	env: NodeJS.ProcessEnv = process.env,
+	home: string = homedir(),
+): ImportLocations {
+	const base = importHome ?? home;
+	const from = (value: string | undefined, fallback: string) =>
+		importHome === undefined && value && isAbsolute(value) ? value : join(base, "AppData", fallback);
+	return { home: base, appData: from(env.APPDATA, "Roaming"), localAppData: from(env.LOCALAPPDATA, "Local") };
+}
+
 /** Every server in the known configuration files below `home`; files that are missing or broken are skipped. */
-export function scanClientConfigs(home: string): ScannedServer[] {
+export function scanClientConfigs(
+	home: string,
+	folders: Partial<Omit<ImportLocations, "home">> = {},
+): ScannedServer[] {
+	const { appData, localAppData } = { ...importLocations(home), ...folders };
 	const found: ScannedServer[] = [];
 	const read = (path: string) => readJson(join(home, path));
 	const add = (source: string, servers: unknown, syntax: Syntax, inputs?: unknown) => {
@@ -51,11 +83,13 @@ export function scanClientConfigs(home: string): ScannedServer[] {
 			if (isRecord(raw)) found.push(mapServer(source, name, raw, { syntax, home, inputs: fields }));
 	};
 
-	for (const path of [
-		"Library/Application Support/Claude/claude_desktop_config.json",
-		".config/Claude/claude_desktop_config.json",
+	for (const file of [
+		join(home, "Library/Application Support/Claude/claude_desktop_config.json"),
+		join(home, ".config/Claude/claude_desktop_config.json"),
+		join(appData, "Claude", "claude_desktop_config.json"),
+		...claudePackages(localAppData),
 	])
-		add("Claude Desktop", read(path)?.mcpServers, "literal");
+		add("Claude Desktop", readJson(file)?.mcpServers, "literal");
 
 	const claude = read(".claude.json");
 	add("Claude Code", claude?.mcpServers, "claude-code");
@@ -67,8 +101,12 @@ export function scanClientConfigs(home: string): ScannedServer[] {
 	}
 
 	add("Cursor", read(".cursor/mcp.json")?.mcpServers, "vscode");
-	for (const path of ["Library/Application Support/Code/User/mcp.json", ".config/Code/User/mcp.json"]) {
-		const vscode = read(path);
+	for (const file of [
+		join(home, "Library/Application Support/Code/User/mcp.json"),
+		join(home, ".config/Code/User/mcp.json"),
+		join(appData, "Code", "User", "mcp.json"),
+	]) {
+		const vscode = readJson(file);
 		add("VS Code", vscode?.servers, "vscode", vscode?.inputs);
 	}
 	add("Windsurf", read(".codeium/windsurf/mcp_config.json")?.mcpServers, "vscode");
@@ -81,6 +119,21 @@ export function scanClientConfigs(home: string): ScannedServer[] {
 
 	add("Gentle Shell", read(".gentle-shell/agent/mcp.json")?.mcpServers, "engine");
 	return found;
+}
+
+/** Claude Desktop installed from the Store (MSIX) keeps its config in its package's virtualized AppData. */
+function claudePackages(localAppData: string): string[] {
+	try {
+		return readdirSync(join(localAppData, "Packages"))
+			.filter((name) => name.startsWith("Claude_"))
+			.sort()
+			.slice(0, MAX_PACKAGES)
+			.map((name) =>
+				join(localAppData, "Packages", name, "LocalCache", "Roaming", "Claude", "claude_desktop_config.json"),
+			);
+	} catch {
+		return [];
+	}
 }
 
 function readJson(path: string): Json | undefined {

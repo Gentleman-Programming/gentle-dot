@@ -24,6 +24,8 @@ import {
 	ConnectorStore,
 	policyEnv,
 } from "./connectors.ts";
+import { DiscordPackage } from "./discord-package.ts";
+import { discordProxyView } from "./discord-proxy-view.ts";
 import { directAccess, type EngineAccess, engineAccess } from "./engine-access.ts";
 import { approvalRequest } from "./extensions/approval-guard.ts";
 import {
@@ -228,8 +230,17 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	});
 	// The engine reaches every connector through the proxy (S25.4); its key changes with every launch.
 	let port = options.port;
+	const discordPackage =
+		process.platform === "win32" && !options.connectorTransport
+			? new DiscordPackage(join(options.dataDir, "connector-packages"))
+			: undefined;
 	const proxy = new McpProxy({
-		connector: (id) => connectorStore.proxyView(id),
+		connector: (id) =>
+			discordPackage
+				? discordProxyView(connectorStore.proxyView(id), connectorStore.state().connectors[id], () =>
+						discordPackage.command(),
+					)
+				: connectorStore.proxyView(id),
 		prepare: (id) => connectorStore.prepare(id),
 		credentials: (id) => connectorStore.credentials(id),
 		// In the desktop app's native dialog, outside the agent's reach (S25.3).
@@ -311,6 +322,12 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	});
 	const connectors = new ConnectorManager({
 		store: connectorStore,
+		...(discordPackage
+			? {
+					prepareConnector: (_id: string, signal: AbortSignal) => discordPackage.prepare(signal),
+					connectorPrepared: () => discordPackage.command() !== undefined,
+				}
+			: {}),
 		...(options.connectorOAuth ? { oauth: options.connectorOAuth } : {}),
 		...((options.importHome ?? process.env.GENTLE_DOT_IMPORT_HOME)
 			? { importHome: options.importHome ?? process.env.GENTLE_DOT_IMPORT_HOME }
@@ -425,10 +442,12 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		// Logical refusal and secret invalidation happen NOW, not after native drain.
 		// Start drain independently so a pending/failed channel cannot skip cleanup.
 		const channelClosed = attempt(() => app?.close());
+		const preparationClosed = attempt(() => connectors.close());
 		await attempt(() => {
 			for (const client of wss.clients) client.terminate();
 			wss.close();
 		});
+		await preparationClosed;
 		await attempt(() => proxy.close());
 		await attempt(() => serverClosed);
 		await attempt(() => supervisor.stop());
