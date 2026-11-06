@@ -13,14 +13,16 @@
 //! `Voice` is the pure state machine between them (idle → starting → recording → stopping,
 //! single flight, cancel, error mapping, level throttling, locale fallback), tested on every OS
 //! with fakes. The objc2 bindings live in `macos`; Linux records through a command-line recorder
-//! (`pipe`) and Windows through WASAPI (`wasapi`), both with the local model; elsewhere the
-//! commands answer "unavailable".
+//! (`pipe`) and Windows through WASAPI (`wasapi`, on a `capture_thread`), both with the local
+//! model; elsewhere the commands answer "unavailable".
 //!
 //! SpeechAnalyzer/SpeechTranscriber (macOS 26) are Swift-only, with no Objective-C interface to
 //! bind from Rust, and the app supports macOS 12.3, so `SFSpeechRecognizer` is the recognizer.
 
 pub mod app;
 pub mod audio;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod capture_thread;
 pub mod engine;
 #[cfg(test)]
 mod fake;
@@ -32,7 +34,7 @@ pub mod model;
 pub mod parakeet;
 #[cfg(unix)]
 pub mod pipe;
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub mod wasapi;
 
 pub use machine::{Sink, Voice};
@@ -51,10 +53,10 @@ pub const LEVEL_EVENT: &str = "voice://level";
 /// A failure while recording (permission, recognizer, interruption): `{message}`.
 pub const ERROR_EVENT: &str = "voice://error";
 pub const UNSUPPORTED: &str = "Voice input is available on macOS, Linux, and Windows.";
-/// Where the user turns the microphone back on. Windows asks no app: one switch covers every
-/// desktop app.
+/// Where the user turns the microphone back on. Windows asks no app: the top-level switch and
+/// the one for desktop apps both have to be on, and they cover every desktop app.
 const MICROPHONE_DENIED: &str = if cfg!(windows) {
-    "Microphone access is off for desktop apps. Turn it on in Settings → Privacy & security → Microphone → Let desktop apps access your microphone."
+    "Microphone access is off for desktop apps. In Settings → Privacy & security → Microphone, turn on Microphone access and Let desktop apps access your microphone."
 } else {
     "Microphone access is off for Gentle Dot. Turn it on in System Settings → Privacy & Security → Microphone."
 };
@@ -276,7 +278,7 @@ mod tests {
     #[test]
     fn a_denied_microphone_points_to_this_platforms_privacy_setting() {
         let expected = if cfg!(windows) {
-            "Microphone access is off for desktop apps. Turn it on in Settings → Privacy & security → Microphone → Let desktop apps access your microphone."
+            "Microphone access is off for desktop apps. In Settings → Privacy & security → Microphone, turn on Microphone access and Let desktop apps access your microphone."
         } else {
             "Microphone access is off for Gentle Dot. Turn it on in System Settings → Privacy & Security → Microphone."
         };
