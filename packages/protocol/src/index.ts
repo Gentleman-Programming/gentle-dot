@@ -433,6 +433,7 @@ export type ServerPayload =
 	| { type: "earlier"; before: string; messages: HistoryMessage[]; hasEarlier: boolean }
 	| { type: "conversations"; conversations: ConversationSummary[]; activeId?: string }
 	| { type: "interrupted" }
+	| { type: "turn_timeout"; timeoutMs: number }
 	| ({ type: "queue" } & MessageQueue)
 	| { type: "error"; code: string; message: string }
 	/** `voice` changes with the accounts: an OpenAI API key turns it on. */

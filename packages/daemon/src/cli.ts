@@ -62,6 +62,7 @@ async function main(): Promise<void> {
 			agentArgs: config.agentArgs,
 			...(config.agentHome ? { agentHome: config.agentHome } : {}),
 			allowedOrigins: config.allowedOrigins,
+			...(config.turnTimeoutMs ? { turnTimeoutMs: config.turnTimeoutMs } : {}),
 			...(channel ? { appChannel: channel } : {}),
 			// Sign-in runs in this same entry point as the engine's user (`--auth-helper`, B1).
 			...(vps
