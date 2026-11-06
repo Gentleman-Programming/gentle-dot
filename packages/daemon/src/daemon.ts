@@ -968,6 +968,8 @@ export class Daemon {
   /** The engine's home, kept so a restart can reuse it. */
   private engineHome: string | null = null;
   private restarting = false;
+  /** True once the engine reported ready; only then is an unexpected exit worth respawning. */
+  private engineReady = false;
   /** The restart currently running, so concurrent callers wait for the same one. */
   private restartInFlight: Promise<void> | null = null;
   /** How many times this daemon has started an engine; the first one has nothing to put back. */
@@ -1662,6 +1664,9 @@ export class Daemon {
     // unprotected.
     // The engine is about to read its server list: whatever the assistant changed is put back
     // first, and the report says so in the log.
+    this.engineStarts += 1;
+    if (this.engineStarts > 1) this.connectorStore.enforce();
+
     // The connectors reach the engine through the daemon: its server list points at our own MCP
     // endpoint, and the key is new on every launch so a stale file is visibly different.
     const proxyKey = randomBytes(24).toString('base64url');
@@ -1675,15 +1680,13 @@ export class Daemon {
       call: (name, args) => this.callProxiedTool(name, args),
     };
 
-    this.engineStarts += 1;
-    if (this.engineStarts > 1) this.connectorStore.enforce();
-
     const guardPath = shellConfig.extensions?.[0] ?? this.approvalGuardPath();
     if (!this.superviseChildGuard(shellConfig.agentHome, guardPath)) shellConfig.subagentsOn = false;
 
     await this.shellSpawner.start({
       config: shellConfig,
       onReady: () => {
+        this.engineReady = true;
         console.log('[Daemon] Gentle Shell RPC ready');
         this.configureEngineModel();
         this.wireEngineEvents();
@@ -1691,7 +1694,19 @@ export class Daemon {
         void this.modelsScreen();
       },
       onError: (error) => console.error('[Daemon] Gentle Shell error:', error),
-      onExit: (code, signal) => console.log('[Daemon] Gentle Shell exited:', code, signal),
+      onExit: (code: number | null, signal: NodeJS.Signals | null) => {
+        console.log('[Daemon] Gentle Shell exited:', code, signal);
+        const wasReady = this.engineReady;
+        this.engineReady = false;
+        // The engine can end itself after editing its files. It is brought back from the user's
+        // state, but never while we are stopping or already restarting: the exit that our own
+        // stop() causes must not schedule a second restart.
+        if (!wasReady || this.stopping || this.restarting || this.restartInFlight) return;
+        setTimeout(() => {
+          if (this.stopping || this.restarting || this.restartInFlight) return;
+          void this.restartEngine();
+        }, 100);
+      },
     });
 
   }
