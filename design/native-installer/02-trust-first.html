@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gentle Dot · trust-first installation concept</title>
+<style>
+:root {
+  --bg: #1a1218; --surface: #20161e; --surface-2: #241822;
+  --line: #342230; --text: #f6eff3; --muted: #a78e9b;
+  --accent: #f095c8; --accent-ink: #1a1218; --yellow: #e0c27a;
+  --font-text: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, monospace;
+  --radius-sm: 8px; --radius-md: 12px;
+  --accent-shadow: 0 10px 30px rgba(240, 149, 200, 0.3);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/20px var(--font-text); }
+.preview { position: sticky; top: 0; z-index: 2; margin: 0; padding: 12px 24px; background: var(--surface-2); color: var(--yellow); border-bottom: 1px solid var(--line); }
+main { max-width: 1280px; min-height: 1000px; padding: 48px 32px; margin: auto; }
+header { display: flex; justify-content: space-between; gap: 32px; align-items: end; margin-bottom: 32px; }
+.eyebrow { font: 600 12px/16px var(--font-mono); letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+h1 { font-size: 28px; line-height: 36px; margin: 8px 0 12px; }
+h2 { font-size: 18px; line-height: 24px; margin: 0 0 12px; }
+p { margin: 0 0 16px; }
+.muted { color: var(--muted); }
+.warning { color: var(--yellow); }
+.layout { display: grid; grid-template-columns: 1.6fr 1fr; gap: 32px; }
+.ledger { border-top: 1px solid var(--muted); }
+.check { display: grid; grid-template-columns: 48px 1fr; gap: 16px; padding: 24px 0; border-bottom: 1px solid var(--line); }
+.number { font: 600 18px/24px var(--font-mono); color: var(--accent); }
+.check p:last-child { margin: 0; }
+.receipt { padding: 24px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); }
+.receipt dl { margin: 24px 0; }
+.receipt dt { color: var(--muted); margin-bottom: 4px; }
+.receipt dd { margin: 0 0 16px; }
+.boundary { padding: 16px; background: var(--surface-2); border-left: 2px solid var(--yellow); margin: 24px 0; }
+summary { padding: 12px; border: 1px solid var(--muted); border-radius: var(--radius-sm); cursor: pointer; }
+details p { padding-top: 16px; }
+button { min-height: 44px; width: 100%; padding: 8px 16px; border: 1px solid var(--accent); border-radius: var(--radius-sm); background: var(--accent); color: var(--accent-ink); font: inherit; font-weight: 600; cursor: pointer; box-shadow: var(--accent-shadow); }
+button:hover { text-decoration: underline; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+#feedback { margin: 16px 0 0; color: var(--yellow); }
+.preserve { margin-top: 24px; padding: 24px 0; border-top: 1px solid var(--line); }
+.preserve ul { padding-left: 24px; color: var(--muted); }
+.preserve li { margin-bottom: 8px; }
+footer { margin-top: 24px; color: var(--muted); }
+@media (max-width: 768px) { main { padding: 24px 16px; } header { display: block; } .layout { grid-template-columns: 1fr; } .check { grid-template-columns: 32px 1fr; gap: 12px; } }
+</style>
+</head>
+<body>
+<p class="preview">Design concept / simulated preview—no operations performed</p>
+<main>
+<header>
+<div><p class="eyebrow">Gentle Dot / release review</p><h1>Trust the source. Then install.</h1><p class="muted">A review sheet for people who want to see the evidence before approving a change.</p></div>
+<p class="warning">Preview only<br>No release evidence loaded</p>
+</header>
+<div class="layout">
+<section aria-labelledby="checks">
+<h2 id="checks">The checks that would gate installation</h2>
+<div class="ledger">
+<article class="check"><span class="number" aria-hidden="true">01</span><div><h2>Known project key</h2><p>Authenticate signed release metadata against a project key shipped through a trusted channel—not a key fetched beside the download.</p><p class="warning">Not configured in the current build</p></div></article>
+<article class="check"><span class="number" aria-hidden="true">02</span><div><h2>The exact native package</h2><p>Match platform, version and format to the signed metadata, then check the downloaded bytes before installation is offered.</p><p class="muted">Not run · no package downloaded</p></div></article>
+<article class="check"><span class="number" aria-hidden="true">03</span><div><h2>Your explicit approval</h2><p>Review application-only changes. Any OS permission prompt belongs to the native system and requires your decision.</p><p class="muted">Not requested · nothing will be installed here</p></div></article>
+</div>
+<div class="preserve">
+<h2>Keep the things that make Dot yours</h2>
+<ul><li>Preserve conversations, configuration and memory.</li><li>Preserve credentials; never collect them in this page.</li><li>On update, verify first. If orderly shutdown fails, stop without replacing files.</li></ul>
+</div>
+</section>
+<aside aria-label="Illustrated package review receipt">
+<div class="receipt">
+<p class="eyebrow">Read-only package sheet</p>
+<h2>Gentle Dot / native</h2>
+<dl>
+<dt>macOS</dt><dd>DMG package</dd>
+<dt>Linux</dt><dd>Debian / Arch packages</dd>
+<dt>Version / size</dt><dd>Not loaded in this concept</dd>
+<dt>Project signature</dt><dd>Not checked</dd>
+<dt>Installation</dt><dd>Unavailable in the current build</dd>
+</dl>
+<div class="boundary"><strong>Project signature ≠ OS approval</strong><p>Free project signing is not Apple code signing or notarization, Gatekeeper approval, or a malware-free guarantee.</p></div>
+<button type="button" id="review">Preview the approval summary</button>
+<p id="feedback" role="status" aria-live="polite">Illustration only. This is not an installation control.</p>
+</div>
+<details style="margin-top:24px">
+<summary>What happens if a check fails?</summary>
+<p>Do not offer installation or shut down Gentle Dot. Preserve user data and report the failed check. Never ask people to disable Gatekeeper or bypass OS security.</p>
+<p>Native installation and the production trust key remain unconnected in this build.</p>
+</details>
+</aside>
+</div>
+<footer>Direction 02 / Trust first · makes the security boundary inspectable; more reading before the primary action.</footer>
+</main>
+<script>
+document.getElementById('review').addEventListener('click', () => {
+  document.getElementById('feedback').textContent = 'Simulated approval summary: installation stays blocked without trusted release evidence. No verification, permission request or installation occurred.';
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gentle Dot · installer tokens</title>
+<style>
+:root {
+  --bg: #1a1218; --surface: #20161e; --surface-2: #241822;
+  --line: #342230; --text: #f6eff3; --muted: #a78e9b;
+  --accent: #f095c8; --accent-ink: #1a1218; --yellow: #e0c27a;
+  --font-text: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, monospace;
+  --radius-sm: 8px; --radius-md: 12px;
+  --accent-shadow: 0 10px 30px rgba(240, 149, 200, 0.3);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/20px var(--font-text); }
+.preview { position: sticky; top: 0; z-index: 2; margin: 0; padding: 12px 24px; background: var(--surface-2); color: var(--yellow); border-bottom: 1px solid var(--line); }
+main { max-width: 1440px; min-height: 1000px; margin: auto; padding: 48px; }
+h1 { font-size: 28px; line-height: 36px; margin: 8px 0 12px; }
+h2 { font-size: 18px; line-height: 24px; margin: 0 0 16px; }
+p { margin: 0 0 16px; }
+.eyebrow { font: 600 12px/16px var(--font-mono); letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+.muted { color: var(--muted); }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 32px; }
+section { padding: 24px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md); }
+.swatches { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.swatch { height: 48px; margin-bottom: 8px; border: 1px solid var(--muted); border-radius: var(--radius-sm); background: var(--sample); }
+figure { margin: 0; }
+figcaption { font: 12px/16px var(--font-mono); color: var(--muted); }
+.bg { --sample: var(--bg); } .surface { --sample: var(--surface); }
+.surface-2 { --sample: var(--surface-2); } .line { --sample: var(--line); }
+.text { --sample: var(--text); } .muted-color { --sample: var(--muted); }
+.accent { --sample: var(--accent); } .ink { --sample: var(--accent-ink); }
+.yellow { --sample: var(--yellow); }
+button { min-height: 44px; padding: 8px 16px; border: 1px solid var(--accent); border-radius: var(--radius-sm); background: var(--accent); color: var(--accent-ink); font: inherit; font-weight: 600; cursor: pointer; box-shadow: var(--accent-shadow); }
+button:hover { text-decoration: underline; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+summary { padding: 12px; border: 1px solid var(--muted); border-radius: var(--radius-sm); cursor: pointer; }
+details p { padding: 16px 0 0; }
+.space { display: flex; align-items: end; gap: 16px; margin: 24px 0; }
+.space span { background: var(--accent); width: 24px; height: var(--size); }
+.s4 { --size: 4px; } .s8 { --size: 8px; } .s12 { --size: 12px; }
+.s16 { --size: 16px; } .s24 { --size: 24px; } .s32 { --size: 32px; } .s48 { --size: 48px; }
+.radius { display: inline-block; padding: 16px; margin-right: 12px; border: 1px solid var(--muted); border-radius: var(--radius-sm); }
+.radius.medium { border-radius: var(--radius-md); }
+footer { margin-top: 24px; color: var(--muted); }
+@media (max-width: 768px) { main { padding: 24px 16px; } .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<p class="preview">Design concept / simulated preview—no operations performed</p>
+<main>
+<header>
+<p class="eyebrow">Gentle Dot / source-aligned design system</p>
+<h1>A quiet installer. A clear decision.</h1>
+<p class="muted">Installer subset · 9 color tokens · 2 fallback font stacks · 7 spacing values · 2 radii · 1 shadow</p>
+</header>
+<div class="grid">
+<section aria-labelledby="palette">
+<h2 id="palette">01 / Color roles</h2>
+<div class="swatches">
+<figure><div class="swatch bg"></div><figcaption>bg · #1a1218</figcaption></figure>
+<figure><div class="swatch surface"></div><figcaption>surface · #20161e</figcaption></figure>
+<figure><div class="swatch surface-2"></div><figcaption>surface-2 · #241822</figcaption></figure>
+<figure><div class="swatch line"></div><figcaption>line · #342230</figcaption></figure>
+<figure><div class="swatch text"></div><figcaption>text · #f6eff3</figcaption></figure>
+<figure><div class="swatch muted-color"></div><figcaption>muted · #a78e9b</figcaption></figure>
+<figure><div class="swatch accent"></div><figcaption>accent · #f095c8</figcaption></figure>
+<figure><div class="swatch ink"></div><figcaption>accent-ink · #1a1218</figcaption></figure>
+<figure><div class="swatch yellow"></div><figcaption>yellow · #e0c27a</figcaption></figure>
+</div>
+</section>
+<section aria-labelledby="type">
+<h2 id="type">02 / Reading hierarchy</h2>
+<p class="eyebrow">12 / 16 · system mono · section label</p>
+<p style="font-size:28px;line-height:36px;font-weight:700">Review before you install.</p>
+<p style="font-size:18px;line-height:24px;font-weight:700">The package and the permissions</p>
+<p>14 / 20 · system sans. Project release signatures authenticate the publisher against a trusted project key.</p>
+<p class="muted">Secondary copy stays readable. A project signature is not Apple notarization or a malware-free guarantee.</p>
+</section>
+<section aria-labelledby="rhythm">
+<h2 id="rhythm">03 / Rhythm and edges</h2>
+<div class="space" aria-label="Spacing samples: 4, 8, 12, 16, 24, 32, 48 pixels">
+<span class="s4"></span><span class="s8"></span><span class="s12"></span><span class="s16"></span><span class="s24"></span><span class="s32"></span><span class="s48"></span>
+</div>
+<p class="muted">4 · 8 · 12 · 16 · 24 · 32 · 48 px</p>
+<span class="radius">8 px / action</span><span class="radius medium">12 px / panel</span>
+</section>
+<section aria-labelledby="components">
+<h2 id="components">04 / Control and disclosure</h2>
+<p><button type="button" id="sample">Preview review state</button></p>
+<p id="feedback" role="status">Local illustration only. Tab to inspect the focus ring.</p>
+<details><summary>What this design cannot do</summary><p>No package download, verification, installation, shutdown or OS permission request.</p></details>
+</section>
+</div>
+<footer>Sources: packages/ui/src/styles.css + scripts/installer/page.css. Flat installer surfaces, not the entire app component catalogue. No motion or external resources.</footer>
+</main>
+<script>
+document.getElementById('sample').addEventListener('click', () => {
+  document.getElementById('feedback').textContent = 'Simulated review state. No operation was performed.';
+});
+</script>
+</body>
+</html>

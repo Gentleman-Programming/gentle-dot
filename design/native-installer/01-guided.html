@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gentle Dot · guided installation concept</title>
+<style>
+:root {
+  --bg: #1a1218; --surface: #20161e; --surface-2: #241822;
+  --line: #342230; --text: #f6eff3; --muted: #a78e9b;
+  --accent: #f095c8; --accent-ink: #1a1218; --yellow: #e0c27a;
+  --font-text: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, monospace;
+  --radius-sm: 8px; --radius-md: 12px;
+  --accent-shadow: 0 10px 30px rgba(240, 149, 200, 0.3);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/20px var(--font-text); }
+.preview { position: sticky; top: 0; z-index: 2; margin: 0; padding: 12px 24px; background: var(--surface-2); color: var(--yellow); border-bottom: 1px solid var(--line); }
+main { max-width: 1200px; min-height: 1000px; margin: auto; padding: 48px 32px; }
+.brand { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 32px; }
+.brand strong { font-size: 18px; line-height: 24px; }
+.eyebrow { font: 600 12px/16px var(--font-mono); letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+.muted { color: var(--muted); }
+h1 { font-size: 28px; line-height: 36px; margin: 8px 0 12px; }
+h2 { font-size: 18px; line-height: 24px; margin: 0 0 12px; }
+p { margin: 0 0 16px; }
+.shell { display: grid; grid-template-columns: 260px 1fr; border: 1px solid var(--line); border-radius: var(--radius-md); overflow: hidden; background: var(--surface); }
+aside { padding: 32px 24px; background: var(--surface-2); }
+ol { padding: 0; list-style: none; margin: 24px 0 32px; }
+li { padding: 16px 0; color: var(--muted); }
+li strong { display: block; margin-bottom: 4px; color: var(--text); }
+li[aria-current] { color: var(--accent); border-left: 2px solid var(--accent); padding-left: 16px; }
+li[aria-current] strong { color: var(--accent); }
+.content { padding: 32px; }
+.package { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 24px 0; }
+.package article { padding: 16px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg); }
+.package p:last-child { margin-bottom: 0; }
+dl { margin: 24px 0; }
+dl div { display: flex; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+dt { color: var(--muted); } dd { margin: 0; text-align: right; }
+.note { border-left: 2px solid var(--accent); padding: 0 0 0 16px; }
+summary { padding: 12px; border: 1px solid var(--muted); border-radius: var(--radius-sm); cursor: pointer; }
+details p { padding-top: 16px; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
+button { min-height: 44px; padding: 8px 16px; border: 1px solid var(--muted); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font: inherit; font-weight: 600; cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); box-shadow: var(--accent-shadow); }
+button:hover { text-decoration: underline; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+#feedback { color: var(--yellow); margin-top: 16px; }
+footer { margin-top: 24px; color: var(--muted); }
+@media (max-width: 768px) { main { padding: 24px 16px; } .shell, .package { grid-template-columns: 1fr; } .content, aside { padding: 24px 16px; } .brand { align-items: start; flex-direction: column; } dd { text-align: left; } dl div { flex-direction: column; gap: 4px; } }
+</style>
+</head>
+<body>
+<p class="preview">Design concept / simulated preview—no operations performed</p>
+<main>
+<header class="brand"><strong>Gentle Dot</strong><span class="muted">Native setup / macOS &amp; Linux</span></header>
+<div class="shell">
+<aside aria-label="Illustrated setup progress">
+<p class="eyebrow">A little guidance</p>
+<ol>
+<li aria-current="step"><strong>01 / Review package</strong>Know what will change.</li>
+<li><strong>02 / Check release</strong>Authenticate before installing.</li>
+<li><strong>03 / Install natively</strong>You approve OS prompts.</li>
+<li><strong>04 / Open Gentle Dot</strong>Start when you are ready.</li>
+</ol>
+<p class="muted">A browser-based guide, with installation authority kept in a trusted native helper—not the page.</p>
+</aside>
+<div class="content">
+<p class="eyebrow">01 / Package review</p>
+<h1>Make room for Gentle Dot.</h1>
+<p class="muted">A guided first install. Review your native package before anything touches your computer.</p>
+<div class="package" aria-label="Read-only package formats">
+<article><h2>macOS</h2><p>DMG package</p><p class="muted">Native application install. System approval remains your decision.</p></article>
+<article><h2>Linux</h2><p>Debian / Arch packages</p><p class="muted">Use the package matching your distribution. Native package rules apply.</p></article>
+</div>
+<dl>
+<div><dt>Platform selection</dt><dd>Read-only package overview</dd></div>
+<div><dt>Release version &amp; size</dt><dd>Not loaded in this concept</dd></div>
+<div><dt>Authenticity</dt><dd>Not checked · no package downloaded</dd></div>
+</dl>
+<p class="note">Current build: installation unavailable. The production release trust key is not configured, and native installation is not connected.</p>
+<details>
+<summary>Your data and OS security stay yours</summary>
+<p>Conversations, configuration, memory and credentials must be preserved. Only application files belong in a replacement. This preview changes nothing.</p>
+<p>Free project signatures are not Apple code signing, notarization, a malware-free guarantee or Gatekeeper approval. Do not disable OS security checks. Any native permissions require your explicit approval.</p>
+</details>
+<div class="actions">
+<button class="primary" type="button" id="review">Preview next review step</button>
+<button type="button" id="cancel">Illustrate cancel</button>
+</div>
+<p id="feedback" role="status" aria-live="polite">Local illustration only. Neither button starts setup.</p>
+</div>
+</div>
+<footer>Direction 01 / Guided · reduces first-install uncertainty; adds a step before the technical trust details.</footer>
+</main>
+<script>
+const feedback = document.getElementById('feedback');
+document.getElementById('review').addEventListener('click', () => {
+  feedback.textContent = 'Simulated next step: a trusted helper would check signed release metadata and package bytes before offering installation. No check ran.';
+});
+document.getElementById('cancel').addEventListener('click', () => {
+  feedback.textContent = 'Simulated cancellation. No setup session, application or stored data was changed.';
+});
+</script>
+</body>
+</html>

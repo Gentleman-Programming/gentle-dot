@@ -1,0 +1,28 @@
+{
+  "title": "Gentle Dot · native installer directions",
+  "brief": "Three visual-only macOS and Linux installer concepts: guided first install, trust-first package review, and compact in-app update review. Every state is simulated; no package, network, OS or application operations occur.",
+  "feature": "odd/tasks/verified-native-updates.md",
+  "artboards": [
+    {
+      "file": "01-guided.html",
+      "title": "Guided · one decision at a time",
+      "tradeoff": "Step rail and package overview reduce first-install uncertainty; technical trust details require an extra disclosure or review step.",
+      "width": 1440,
+      "height": 1000
+    },
+    {
+      "file": "02-trust-first.html",
+      "title": "Trust first · evidence before approval",
+      "tradeoff": "An open verification ledger beside a package receipt makes trust boundaries inspectable; increases reading effort before the next action.",
+      "width": 1440,
+      "height": 1000
+    },
+    {
+      "file": "03-compact-update.html",
+      "title": "Compact · a deliberate update pause",
+      "tradeoff": "A centered update sheet and ordered handoff minimize interruption for returning users; deeper preservation and OS-permission details are collapsed.",
+      "width": 1440,
+      "height": 1000
+    }
+  ]
+}
