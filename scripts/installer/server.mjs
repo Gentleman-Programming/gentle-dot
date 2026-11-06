@@ -1,5 +1,22 @@
 import http from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+
+const assetHeaders = {
+  'cache-control': 'no-store',
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'no-referrer',
+  'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+  connection: 'close',
+};
+// Source-only literal allowlist: request bytes never become filesystem paths.
+const assets = new Map([
+  ['/', ['text/html', new URL('./page.html', import.meta.url)]],
+  ['/page.css', ['text/css', new URL('./page.css', import.meta.url)]],
+  ['/page.js', ['text/javascript', new URL('./page.js', import.meta.url)]],
+  ['/favicon.svg', ['image/svg+xml', null]],
+]);
+const favicon = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#1a1218"/><circle cx="16" cy="16" r="8" fill="#f095c8"/></svg>';
 
 const securityHeaders = {
   'content-type': 'application/json; charset=utf-8',
@@ -82,6 +99,13 @@ export async function startInstallerSession(options = {}) {
     if (req.headers.host !== boundHost
       || (req.headers.origin !== undefined && req.headers.origin !== origin)) {
       return reply(res, 403);
+    }
+    if (assets.has(req.url)) {
+      if (req.method !== 'GET') return reply(res, 405);
+      const [mime, source] = assets.get(req.url);
+      const bytes = source ? await readFile(source) : favicon;
+      res.writeHead(200, { ...assetHeaders, 'content-type': `${mime}; charset=utf-8` });
+      return res.end(bytes);
     }
     const method = { '/api/session': 'POST', '/api/status': 'GET', '/api/cancel': 'POST' };
     if (!Object.hasOwn(method, req.url)) return reply(res, 404);

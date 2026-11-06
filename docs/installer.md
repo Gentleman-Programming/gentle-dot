@@ -1,11 +1,12 @@
-# Installer session security core
+# Local setup session
 
-**Implemented:** a Node-builtins-only, host-callable loopback session API in
-`scripts/installer/server.mjs`. This is not a browser installer or verified
-installation. It has no CLI, HTML, browser launch, download, verification,
-application shutdown or OS operation. A separate host-only verified downloader is
-available below; it is not connected to any HTTP route. Installer authority is
-separate from the agent and daemon APIs.
+**Implemented:** a host-callable loopback session API and accessible browser
+frontend shell in `scripts/installer/`. Installation is always unavailable in
+this build: the production trust key is unconfigured and native installation is
+not connected. This is not a completed production installer. There is no CLI,
+automatic browser launch, package verification, application shutdown or OS
+operation. The separate host-only downloader below has no HTTP route. Installer
+authority remains separate from agent and daemon APIs.
 
 ## Host integration
 
@@ -19,13 +20,35 @@ It returns `{ origin, bootstrapToken, close }`. No server starts on import.
 - `now` defaults to `Date.now`; a host-only finite millisecond clock supports
   deterministic tests. It must be monotonic. Backwards/invalid readings fail
   closed. Unknown options fail with `TypeError('Invalid session options')`.
-- Deliver `bootstrapToken` only through a trusted host channel. Do not log it or
-  put it in URLs. Bootstrap, session and CSRF values are independent, random
-  256-bit values held only in memory. The host must also keep CSRF/cookies out
-  of logs. Nothing writes credentials or provisions production trust.
+- The trusted host opens `${origin}/#${bootstrapToken}` locally. Never log this
+  URL or token, put it in a query, or send it to a remote browser service. Page
+  JavaScript captures the fragment and immediately erases it with
+  `history.replaceState`, before the session exchange. It never puts tokens in
+  DOM, storage or logs. Bootstrap, session and CSRF values are independent random
+  256-bit values held in memory; the cookie is HttpOnly. Nothing provisions trust.
 - Always await `close()` on host teardown. It is idempotent and closes only this
   listener and its sockets, invalidating the session. Expiry does not close the
   listener automatically; ownership of teardown remains with the host.
+
+## Browser flow and fixed assets
+
+The page exchanges the one-use fragment with `POST /api/session`, reads
+`GET /api/status` once, and enables **Cancel setup session**. Cancellation sends
+exactly `{}` with the CSRF header and cookie; it never shuts down Dot. Missing,
+invalid/expired/used links, network failures, unexpected responses and cancellation
+have explicit live status messages. There is no polling or automatic retry.
+Reopen from the trusted host for a fresh session, rather than reload a used link.
+JavaScript is required; without it the page explains that requirement.
+
+Only literal `GET /`, `/page.css`, `/page.js` and `/favicon.svg` serve assets,
+after the same exact Host/Origin checks. Source filenames are fixed, never built
+from request input. Asset queries, traversal, trailing slashes and other paths
+are rejected. Assets use correct MIME, no-store, nosniff and no-referrer, plus
+CSP restricting scripts/styles/connections/images to self, everything else to
+none, with no inline execution, frames, base URL or forms. The page uses local
+system-font fallbacks and the existing UI token palette; no external resources.
+It makes no package-check, installed-version, notarization or malware-free claim,
+and does not touch conversations, configuration, memory or credentials.
 
 ## Fixed HTTP contract
 
@@ -54,7 +77,7 @@ Route errors are fixed JSON `{"error":"<message>"}`: 400 `Invalid body`,
 401 `Unauthorized`, 403 `Forbidden`, 404 `Not found`, 405 `Method not allowed`,
 413 `Body too large`, 415 `Unsupported media type`, 500 `Internal error`.
 Responses do not echo tokens or input (except the successful CSRF response).
-All route responses use JSON, `Cache-Control: no-store`,
+All API responses and route errors use JSON, `Cache-Control: no-store`,
 `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and connection
 close. Headers are capped at 8192 bytes; header/request/socket timeouts are
 5 seconds, with a 1-second keep-alive bound. HTTP-parser/timeout disconnects
@@ -116,16 +139,19 @@ errors propagate. Nothing returns a verified descriptor or bytes on failure.
 
 ## Evidence boundary and next gate
 
-The public HTTP suite is `node --test scripts/installer/server.test.mjs`.
-It uses only its own loopback sockets and synthetic in-memory tokens, with no
-filesystem fixtures. No existing command shares this new module.
+The public HTTP suite is
+`node --test scripts/installer/server.test.mjs scripts/installer/page.test.mjs`.
+It uses only owned loopback sockets and synthetic in-memory tokens, with no
+filesystem fixtures. It proves asset guards and existing API behavior, not UI
+execution. Actual browser keyboard, console, session/cancel and responsive checks
+at 320/768/1024/1440 remain a separate required acceptance gate.
 
 Production trust remains missing and installation is always unavailable. T1's
 [release verification primitive](release-verification.md) is unchanged and not
 called by the session server. The separate downloader reuses it unchanged.
 `node --test scripts/updates/download.test.mjs` uses synthetic in-memory Ed25519
 keys and fake host fetch/streams only: **not actual native HTTPS, installed,
-production-trust or OS-permission proof**. Browser UI, native replacement/recovery
-and macOS/Linux CI remain future slices. Free project signatures do not remove
+production-trust or OS-permission proof**. Native action integration,
+replacement/recovery and macOS/Linux CI remain future slices. Free project signatures do not remove
 Gatekeeper warnings, grant permissions or establish paid OS signing.
 See [release trust boundaries](release-verification.md) before future integration.

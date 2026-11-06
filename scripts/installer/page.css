@@ -1,0 +1,40 @@
+/* Subset of packages/ui/src/styles.css tokens; no remote fonts or resources. */
+:root {
+  --bg: #1a1218;
+  --surface: #20161e;
+  --line: #342230;
+  --text: #f6eff3;
+  --muted: #a78e9b;
+  --accent: #f095c8;
+  --accent-ink: #1a1218;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --reading-width: 780px;
+  --font-text: Inter, "SF Pro Text", system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: dark;
+  font: 14px / 20px var(--font-text);
+  color: var(--text);
+  background: var(--bg);
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { max-width: var(--reading-width); margin: 0 auto; padding: 32px 16px; }
+header { margin-bottom: 24px; }
+h1 { font-size: 28px; line-height: 36px; margin: 8px 0 12px; }
+h2 { font-size: 18px; line-height: 24px; margin: 0 0 12px; }
+p { margin: 0 0 16px; overflow-wrap: anywhere; }
+.eyebrow { color: var(--accent); font-weight: 600; }
+.muted, footer { color: var(--muted); }
+section { padding: 16px; margin-bottom: 16px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); }
+#status { border-left: 3px solid var(--accent); padding-left: 12px; }
+button { min-height: 44px; max-width: 100%; padding: 8px 16px; border: 1px solid var(--accent); border-radius: var(--radius-sm); background: var(--accent); color: var(--accent-ink); font: inherit; font-weight: 600; cursor: pointer; }
+button:hover:not(:disabled) { text-decoration: underline; }
+button:disabled { background: var(--surface); color: var(--muted); border-color: var(--muted); cursor: default; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+#cancel-note { margin: 12px 0 0; }
+footer { padding: 8px 0; }
+/* No animations or transitions: reduced-motion users get the same static UI. */
+@media (min-width: 768px) {
+  main { padding: 48px 24px; }
+  section { padding: 24px; }
+}

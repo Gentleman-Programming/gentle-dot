@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gentle Dot setup</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/page.css">
+  <script src="/page.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">Gentle Dot · macOS &amp; Linux</p>
+      <h1>Gentle Dot setup</h1>
+      <p>A local setup session. You stay in control of changes to your computer.</p>
+    </header>
+    <section aria-labelledby="session-heading">
+      <h2 id="session-heading">Setup session</h2>
+      <p id="status" role="status" aria-live="polite" aria-atomic="true">Connecting to the local setup session…</p>
+      <noscript><p>JavaScript is required. Reopen setup from the trusted host after enabling it.</p></noscript>
+      <button id="cancel" type="button" disabled aria-describedby="cancel-note">Cancel setup session</button>
+      <p id="cancel-note" class="muted">Cancels only this setup session. It never shuts down Gentle Dot.</p>
+    </section>
+    <section aria-labelledby="availability-heading">
+      <h2 id="availability-heading">Installation unavailable in this build</h2>
+      <p>The production release trust key is not configured, and native installation is not connected to this page. No package has been checked, downloaded or installed.</p>
+      <p>This page cannot request OS permissions or replace application files. Your conversations, configuration, memory and credentials are not changed.</p>
+    </section>
+    <footer>
+      <h2>What verification means</h2>
+      <p>Free project signatures can authenticate a release against a trusted project key. They are not Apple notarization, a malware-free guarantee or Gatekeeper approval. Never disable OS security checks to use this page.</p>
+    </footer>
+  </main>
+</body>
+</html>
