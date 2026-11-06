@@ -8,6 +8,21 @@ import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as path from 'path';
 
+
+/**
+ * Require the bridge auth token from environment
+ * Throws if not set - no fallback allowed
+ */
+export function requireAuthToken(env: NodeJS.ProcessEnv = process.env): string {
+  const token = env['BRIDGE_AUTH_TOKEN'];
+  if (!token) {
+    throw new Error(
+      'BRIDGE_AUTH_TOKEN is not set: the daemon must generate its access key before the WebSocket server starts.',
+    );
+  }
+  return token;
+}
+
 export type BridgeStatus = 'disconnected' | 'connecting' | 'authenticating' | 'ready' | 'error';
 
 export interface BridgeConfig {
@@ -545,7 +560,7 @@ export function loadBridgeConfig(configPath: string): BridgeConfig {
 export function createBridgeConfigFromEnv(connectorType: string): BridgeConfig {
   const daemonHost = process.env['DAEMON_HOST'] || '127.0.0.1';
   const daemonPort = process.env['DAEMON_PORT'] || '4317';
-  const token = process.env['BRIDGE_AUTH_TOKEN'] || 'gentle-dot-bridge-secret';
+  const token = requireAuthToken();
 
   return {
     daemonUrl: `ws://${daemonHost}:${daemonPort}/ws`,

@@ -34,7 +34,7 @@ mkdirSync(join(HARNESS_HOME, ".gentle-dot"), { recursive: true });
 export const APP_SOCKET_PATH = join(HARNESS_HOME, ".gentle-dot", "app-channel.sock");
 
 /** The access key the daemon answers to, unless the environment names another. */
-export const BRIDGE_KEY = process.env["BRIDGE_AUTH" + "_TOKEN"] ?? "gentle-dot-bridge-secret";
+export const BRIDGE_KEY = process.env["BRIDGE_AUTH" + "_TOKEN"] ?? "test-bridge-token-12345";
 
 /**
  * A minimal config with the same *shape* as `packages/daemon/connectors.yaml`, every connector
@@ -165,6 +165,7 @@ export async function bootDaemon(options: BootDaemonOptions = {}): Promise<Boote
 	const port = options.port ?? (await freePort());
 	process.env["GENTLE_DOT_PORT"] = String(port);
 	process.env["GENTLE_DOT_HOST"] = "127.0.0.1";
+	process.env["BRIDGE_AUTH_TOKEN"] = "test-bridge-token-12345";
 
 	const configPath = writeTestConfig(dataDir, workspace, port);
 	const { createDaemon } = await import("../src/daemon.ts");
