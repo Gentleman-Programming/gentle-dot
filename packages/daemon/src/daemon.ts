@@ -939,6 +939,8 @@ export class Daemon {
   /** The engine's home, kept so a restart can reuse it. */
   private engineHome: string | null = null;
   private restarting = false;
+  /** The restart currently running, so concurrent callers wait for the same one. */
+  private restartInFlight: Promise<void> | null = null;
   /** How many times this daemon has started an engine; the first one has nothing to put back. */
   private engineStarts = 0;
   private restartPending = false;
@@ -1646,13 +1648,23 @@ export class Daemon {
    * the restart waits for the turn to settle.
    */
   private async restartEngine(): Promise<void> {
-    if (!this.engineHome || this.restarting) return;
+    // A restart already in flight is shared, not skipped: a caller that asks while one runs must
+    // wait for it, or it would read the old files while the engine has not come back yet.
+    if (this.restartInFlight) return this.restartInFlight;
+    if (!this.engineHome) return;
     if (this.activeRun) {
       this.restartPending = true;
       return;
     }
-    this.restarting = true;
     this.restartPending = false;
+    this.restartInFlight = this.runRestart().finally(() => {
+      this.restartInFlight = null;
+    });
+    return this.restartInFlight;
+  }
+
+  private async runRestart(): Promise<void> {
+    this.restarting = true;
     try {
       console.log('[Daemon] Restarting the engine to use the new credentials');
       await this.shellSpawner.stop();
