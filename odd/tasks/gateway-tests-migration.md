@@ -648,3 +648,42 @@ Además se ordenó el refresco con `connectorStore.settled()` antes de emitir la
 2. Hacer visible ese fallo (log con `console.error`) en vez de dejarlo mudo: hoy el flow dice `done`
    aunque el guardado no ocurra.
 3. Con la firma guardada, revisar el orden `settled() → refresh → restart` (ya cableado).
+
+## El sign-in no deja rastro en el store (2026-11-06, continuación)
+
+Con el reinicio ya descartado como problema, el bloqueo real quedó aislado con log sincrónico. En el
+momento de `auth_done`, la entrada del conector en el store es:
+
+```
+store notion: {"enabled":true,"mode":"read_only"}      <- sin `signIn`
+manager:      notion=needs_signin, ...
+```
+
+O sea: `connect()` **sí** agrega el conector (enabled) y el flujo emite `auth_done` con `ok: true`,
+pero `saveSignIn` **no deja la referencia** `signIn` que `isSignedIn()` necesita. Sin ella el estado
+nunca pasa a `connected`, ninguna ventana recibe ese frame y la política del engine queda vacía.
+
+Código relevante (todo en `src/connectors.ts`):
+
+- `ConnectorManager.connect` → si faltan valores pregunta; si no, `save(id, {enabled:true})` y
+  `afterSetup(...)` → `startLogin(...)`.
+- `ConnectorManager.runLogin` → `startSignIn(...)`, `await store.saveSignIn(id, state)`, después el
+  `auth_done`.
+- `ConnectorStore.saveSignIn` → `keep(secretId, JSON.stringify(state))` y **sólo si**
+  `this.saved.connectors[id] && ...signIn !== secretRef(secretId)` hace
+  `update(current => { saved.signIn = secretRef(secretId) })`.
+
+Hipótesis a comprobar, en orden:
+1. **`keep()` no persiste o falla en silencio**: es la fuente de secretos de la app
+   (`AppSecretSource` → `channel.request('secret_put')`). Si el pedido no se contesta o se rechaza,
+   `saveSignIn` corta antes del `update`; conviene loguear ese error con `console.error` en
+   `runLogin` en vez de dejarlo mudo.
+2. **El camino del código manual** (`finishWithPastedAddress`) puede no llamar a `saveSignIn`: el
+   test recibe un `auth_prompt` de tipo `manual_code`, así que vale revisar ambos caminos.
+3. **`update()` no está viendo el conector**: el `if` de `saveSignIn` exige que `this.saved` ya
+   tenga el conector en el momento de guardar; con `connect()` guardando antes, debería estar, pero
+   conviene verificarlo con un log del `id` y de `saved?.signIn` justo antes del `update`.
+
+Con eso debería quedar claro si el fallo es del almacén de secretos, del camino del código manual o
+de una carrera con `update()`. Después de eso, el resto del test (frames a todas las ventanas,
+política nueva y reinicio) ya está cableado.
