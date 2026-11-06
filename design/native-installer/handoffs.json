@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "chosen": "01-guided.html",
+  "handoffs": {
+    "01-guided.html": {
+      "status": "sent",
+      "queued": false,
+      "sentAt": "2026-11-06T22:00:42.935Z",
+      "startedAt": null,
+      "implementedAt": null,
+      "feature": "odd/tasks/verified-native-updates.md"
+    }
+  }
+}
