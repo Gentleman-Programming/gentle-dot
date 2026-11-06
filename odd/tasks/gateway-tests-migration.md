@@ -563,3 +563,45 @@ Siguientes caminos, distintos de los ya descartados:
    hijo quede esperando algo del home compartido).
 4. Considerar un plazo duro: si el reinicio no está listo en N ms, reiniciar el **daemon** completo en
    vez de sólo el engine (el usuario puede aceptar que la app reinicie).
+
+## Causa raíz encontrada: el event loop del daemon se bloquea en la segunda vuelta (2026-11-06)
+
+Después de siete descartes, la instrumentación dio con el mecanismo real. Con `console.error` en
+cada paso del reinicio:
+
+```
+[diag] auth_done -> refresco y reinicio
+[diag] restartEngine { home: true, restarting: false, run: false }
+[diag] stop: begin
+[diag] stop: done
+[diag] startEngine: begin
+[diag] step: home
+[diag] step: stores
+[diag] step: policy begin          <- última línea; nunca llega "policy done"
+```
+
+Y lo decisivo: los `setTimeout` de control programados justo antes **nunca disparan** (ni el de
+500 ms ni el de 2500 ms). Eso no es un `await` pendiente: **el event loop está bloqueado**, y por
+eso el hijo recién lanzado "nace mudo" — no es que no hable, es que el padre no puede leerlo ni
+correr sus timers.
+
+El bloqueo ocurre entre `policy begin` y `policy done`, es decir en
+`this.connectorStore.policy()` durante el **segundo** `startEngine()` (después de un sign-in que ya
+dejó el conector guardado). `policy()` recorre `ordered(this.saved)`, `specOf(id, saved)` y
+`filledServer(...)`; esas funciones son de strings/estado, así que la sospecha principal es un
+**bucle infinito** con la forma que deja el sign-in (no una espera de I/O).
+
+Nota de método: `process.stderr` a un pipe es **asíncrono**, así que la última línea antes de un
+bloqueo puede perderse; por eso el corte exacto se confirma con los timers de control, no con el
+orden de los logs.
+
+### Siguiente paso (concreto)
+
+1. Test unitario de `policy()` con un conector firmado en `saved` (y con `values` reales del
+   sign-in) — con timeout, para que un bucle infinito falle rápido en vez de colgar el test.
+2. Mirar `ordered()` y `specOf()` con ese estado: buscar recorridos que no avanzan (referencias
+   circulares en `saved.base`, listas que se reinsertan, comparadores que no progresan).
+3. Recién después, volver al test de conectores: el reinicio debería completarse solo.
+4. Como red de seguridad de producto, envolver el reinicio en un perro guardián que no dependa del
+   event loop (p. ej. un `Worker` o un proceso aparte) — un bucle infinito en el cálculo de la
+   política no debe congelar el daemon entero.
