@@ -535,3 +535,31 @@ en el momento del reinicio.** Hipótesis a probar, en orden:
 Nota práctica: el guard de privacidad bloquea pasar una política de conectores en un script suelto
 (menciona archivos de conectores), así que la reproducción con política hay que hacerla dentro del
 repo (por ejemplo, un test temporal) en vez de en `/tmp`.
+
+### Segundo arranque: lo descartado (2026-11-06)
+
+Después de instrumentar, quedaron descartadas estas causas — no repetir el trabajo:
+
+| Hipótesis | Prueba | Resultado |
+| --- | --- | --- |
+| El agente falso se cuelga en el segundo arranque | dos `spawn` directos seguidos con el probe `get_state` | responde en **ambos** |
+| El spawner no soporta reinicio | `start(); stop(); start()` con el mismo código, dos spawners | **ready en ~557 ms en ambos** |
+| El padre no drena stdout | `readableFlowing`/`isPaused` en la segunda vuelta | `flowing true`, `paused false` |
+| `stop()` resuelve antes del exit del hijo (carrera) | lectura de `stop()` | **espera** el evento `exit` |
+| Spawner compartido/diferente | reusar la misma instancia en el reinicio | falla igual |
+| Entorno distinto entre spawns | diff de `Object.keys(env)` (109 claves) | **idéntico**, sin agregadas ni quitadas |
+| Canal `ipc` del `stdio` | segunda vuelta con `['pipe','pipe','pipe']` | falla igual |
+
+El síntoma exacto, con el daemon: `spawned pid …` + `event spawn` y **nunca** stdout, stderr, exit ni
+timeout dentro de la ventana del test. Con el spawner aislado el mismo hijo habla.
+
+Siguientes caminos, distintos de los ya descartados:
+1. Reproducir **dentro de un test** un `GentleShellSpawner` que arranque dos veces con el `ShellConfig`
+   completo que arma el daemon (con `policy`, `extensions`, `sessionDir`) — el aislamiento de hoy no
+   incluía la política porque el guard de comandos bloquea escribirla en `/tmp`.
+2. Comparar `process._getActiveHandles()` antes del segundo spawn (¿hay un handle que impide al hijo
+   arrancar?).
+3. Probar el segundo arranque apuntando a un **agent home y session dir nuevos** (descartar que el
+   hijo quede esperando algo del home compartido).
+4. Considerar un plazo duro: si el reinicio no está listo en N ms, reiniciar el **daemon** completo en
+   vez de sólo el engine (el usuario puede aceptar que la app reinicie).
