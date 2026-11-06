@@ -199,33 +199,65 @@ impl Approvals {
 
     /// Asks the user. Blocks until the answer or the timeout, so call it off the main thread.
     pub fn confirm(&self, request: &ApprovalRequest) -> Decision {
+        match self.show(request) {
+            Some(shown) => self.wait(shown),
+            None => Decision::Declined,
+        }
+    }
+
+    /// Waits for the screen and puts the dialog up; `None` when it cannot show in time.
+    fn show(&self, request: &ApprovalRequest) -> Option<Shown> {
         let deadline = Instant::now() + self.timeout;
         let dialog = ApprovalDialog { deadline: Some(deadline), ..ApprovalDialog::new(request, self.timeout) };
-        let Some(ticket) = self.gate.acquire(deadline) else {
-            return Decision::Declined;
-        };
+        let ticket = self.gate.acquire(deadline)?;
         // The dialog runs on a thread of its own that holds the screen until the dialog closes,
         // so a stale dialog left after the timeout still keeps the next one waiting.
         let (answer, answered) = mpsc::channel();
         let (prompt, gate) = (self.prompt.clone(), self.gate.clone());
         let spawned = std::thread::Builder::new().name("approval-dialog".into()).spawn(move || {
             let _screen = Ticket { gate, ticket };
-            let _ = answer.send(prompt.ask(&dialog));
+            let allowed = prompt.ask(&dialog);
+            let _ = answer.send(Answered { allowed, at: Instant::now() });
         });
         if spawned.is_err() {
             self.gate.release(ticket);
-            return Decision::Declined;
+            return None;
         }
+        Some(Shown { ticket, deadline, answered })
+    }
+
+    /// Waits for the answer of a dialog on screen until its deadline.
+    fn wait(&self, shown: Shown) -> Decision {
+        let Shown { ticket, deadline, answered } = shown;
         match answered.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(true) => Decision::Approved,
-            // Declined, or the dialog failed (its thread panicked).
-            Ok(false) | Err(RecvTimeoutError::Disconnected) => Decision::Declined,
+            // An Allow counts only when given before the deadline. `recv_timeout` still returns
+            // an answer already queued when this thread looks late (it was descheduled), so the
+            // time comes from the dialog's thread, stamped when the dialog returned: never earlier
+            // than the click, so any delay there refuses.
+            Ok(Answered { allowed: true, at }) if at < deadline => Decision::Approved,
+            // Declined, given too late (the dialog has closed: nothing to dismiss), or the dialog
+            // failed (its thread panicked).
+            Ok(_) | Err(RecvTimeoutError::Disconnected) => Decision::Declined,
             Err(RecvTimeoutError::Timeout) => {
                 self.gate.while_held(ticket, || self.prompt.dismiss());
                 Decision::Declined
             }
         }
     }
+}
+
+/// A dialog [`Approvals::show`] put up: its turn on the screen, its deadline, and where its
+/// answer arrives.
+struct Shown {
+    ticket: u64,
+    deadline: Instant,
+    answered: mpsc::Receiver<Answered>,
+}
+
+/// The user's answer and when the dialog gave it.
+struct Answered {
+    allowed: bool,
+    at: Instant,
 }
 
 /// Who holds the screen: at most one dialog, identified by a ticket.

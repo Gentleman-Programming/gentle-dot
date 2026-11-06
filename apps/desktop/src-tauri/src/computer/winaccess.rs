@@ -71,6 +71,19 @@ pub fn unreadable() -> AxElement {
     }
 }
 
+/// The chain the risk check gets for the element under a point and its ancestors: when any of
+/// them could not be read, the whole chain is the unreadable element. The risk check reads only
+/// the first pressable element and what is inside it, so an unreadable ancestor next to a
+/// harmless button would otherwise be let through (CC7 review).
+pub fn known_chain(chain: Vec<AxElement>) -> Vec<AxElement> {
+    let unknown = unreadable();
+    if chain.contains(&unknown) {
+        vec![unknown]
+    } else {
+        chain
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,6 +151,23 @@ mod tests {
         let reason = assess(Act::Click(&[unreadable()]), None).expect("a confirmation");
         assert!(reason.contains("Gentle Dot cannot read"), "{reason}");
         assert!(assess(Act::Drag(&[named(UIA_TEXT, "x")], &[unreadable()]), None).is_some());
+    }
+
+    #[test]
+    fn a_chain_with_any_unreadable_element_needs_a_confirmation() {
+        let open = named(UIA_BUTTON, "Open");
+        for chain in [
+            vec![open.clone(), unreadable()],
+            vec![named(UIA_TEXT, "Open"), unreadable(), named(UIA_WINDOW, "Files")],
+            vec![unreadable(), open.clone()],
+        ] {
+            let known = known_chain(chain.clone());
+            assert_eq!(known, vec![unreadable()], "{chain:?}");
+            assert!(assess(Act::Click(&known), None).is_some(), "{chain:?}");
+        }
+        // A chain read in full is kept as it is.
+        let read = vec![named(UIA_TEXT, "Open"), open, named(UIA_WINDOW, "Files")];
+        assert_eq!(known_chain(read.clone()), read);
     }
 
     #[test]

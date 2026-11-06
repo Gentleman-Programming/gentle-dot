@@ -3,6 +3,7 @@ import { loadMemory, type MemoryMode, saveMemory } from "../memory.ts";
 import {
 	formatShortcut,
 	isMac,
+	isWindows,
 	loadShortcut,
 	recordKey,
 	type ShortcutInfo,
@@ -208,7 +209,7 @@ export function SettingsPanel({ close }: { close: () => void }) {
 				) : null}
 			</section>
 
-			<section className="provider-section" aria-labelledby="settings-voice-language">
+			<section className="provider-section" aria-labelledby="settings-voice-language" hidden={isWindows()}>
 				<h3 id="settings-voice-language">Voice language</h3>
 				<p className="muted">
 					The language macOS speech listens in. The local voice model detects it by itself.

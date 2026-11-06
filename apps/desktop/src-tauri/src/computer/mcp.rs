@@ -25,7 +25,10 @@ use super::keys::{parse_combo, KeyCombo};
 use super::rate::{RateLimiter, MAX_ACTIONS_PER_SECOND};
 use super::risk::{assess, Act};
 use super::working::{NoPreparation, Preparation};
-use super::{Clock, Desktop, Dialogs, InputEvent, MouseButton};
+use super::{
+    Clock, Desktop, Dialogs, InputEvent, KeyboardRecipient, MouseButton, ScreenshotsUnsupported, TypedError,
+    KEYS_CHANGED_BEFORE_TYPING, KEYS_CHANGED_WHILE_TYPING,
+};
 use base64::Engine as _;
 use serde_json::{json, Map, Value};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -34,6 +37,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 /// Time for the screen to settle before the screenshot that follows an action.
 const SETTLE_MS: u64 = 150;
+/// After a confirmation, the previous app gets up to RESTORE_TRIES × RESTORE_STEP_MS to be back in front.
+const RESTORE_TRIES: u32 = 10;
+const RESTORE_STEP_MS: u64 = 50;
 const OPEN_APP_SETTLE_MS: u64 = 1500;
 const MAX_BATCH_STEPS: usize = 20;
 /// The tools a batch step may use: actions only (a batch returns its own screenshot).
@@ -53,11 +59,61 @@ const NEEDS_SCREENSHOT: &str = "Take a screenshot first: coordinates are pixels 
 const UNKNOWN_TARGET: &str = "Cannot tell which app is under that point, so the action was refused. \
 Take a new screenshot and try again.";
 
+#[cfg(not(windows))]
 const INSTRUCTIONS: &str = "Controls this Mac. Take a screenshot first; x and y are pixels of the latest \
 screenshot. Every action returns a fresh screenshot. Use `batch` for a predictable sequence (click a field, \
 type, press tab, type, press return) so it runs in one call; end the batch whenever you must see the screen \
 before deciding the next step. The user must allow a session, risky actions ask the user to confirm, and \
 some apps (System Settings, password managers) are off limits.";
+#[cfg(windows)]
+const INSTRUCTIONS: &str = "Controls this PC. Take a screenshot first; x and y are pixels of the latest \
+screenshot. Every action returns a fresh screenshot. Use `batch` for a predictable sequence (click a field, \
+type, press tab, type, press return) so it runs in one call; end the batch whenever you must see the screen \
+before deciding the next step. Shortcuts use ctrl (cmd also presses Ctrl). The user must allow a session, \
+risky actions ask the user to confirm, and some apps (Settings, Windows Security, password managers) are off limits.";
+
+/// Why computer control is unavailable when the system cannot take its screenshots.
+#[cfg(not(windows))]
+const SCREENSHOTS_UNSUPPORTED: &str = "Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.";
+#[cfg(windows)]
+const SCREENSHOTS_UNSUPPORTED: &str =
+    "Screenshots need Windows 10 version 2004 or later, so computer control is unavailable on this PC.";
+/// Why computer control is unavailable when Windows' build cannot be read.
+#[cfg(windows)]
+const SCREENSHOTS_UNKNOWN_VERSION: &str = "Gentle Dot cannot tell which Windows version this is, so it cannot \
+keep its own windows out of screenshots and computer control is unavailable on this PC.";
+
+/// The error for screenshots the system cannot take; one without a reason counts as too old.
+#[cfg(not(windows))]
+fn screenshots_unsupported(_: Option<ScreenshotsUnsupported>) -> &'static str {
+    SCREENSHOTS_UNSUPPORTED
+}
+#[cfg(windows)]
+fn screenshots_unsupported(reason: Option<ScreenshotsUnsupported>) -> &'static str {
+    match reason {
+        Some(ScreenshotsUnsupported::UnknownVersion) => SCREENSHOTS_UNKNOWN_VERSION,
+        Some(ScreenshotsUnsupported::TooOld) | None => SCREENSHOTS_UNSUPPORTED,
+    }
+}
+
+/// Why a key was not sent when the app receiving it changed after it was checked.
+const KEY_RECIPIENT_CHANGED: &str = "The app receiving the keys changed before the key was sent, so it was not sent.";
+
+/// The `key` and `open_app` tool descriptions, and the system an `open_app` confirmation names.
+#[cfg(not(windows))]
+const KEY_DESCRIPTION: &str = "Press a key combo in the frontmost app, for example `shift+cmd+t`, `return`, or `esc`.";
+#[cfg(windows)]
+const KEY_DESCRIPTION: &str =
+    "Press a key combo in the frontmost app, for example `ctrl+shift+t`, `return`, or `esc` (`cmd` presses Ctrl).";
+#[cfg(not(windows))]
+const OPEN_APP_DESCRIPTION: &str = "Open or bring forward an app by name or bundle id.";
+#[cfg(windows)]
+const OPEN_APP_DESCRIPTION: &str =
+    "Open or bring forward an app by name (as the Start menu shows it) or by the path of its program (.exe).";
+#[cfg(not(windows))]
+const SYSTEM: &str = "macOS";
+#[cfg(windows)]
+const SYSTEM: &str = "Windows";
 
 pub struct HttpRequest<'a> {
     pub method: &'a str,
@@ -173,9 +229,9 @@ fn tools() -> Value {
          "inputSchema": schema(json!({"x": x, "y": y, "dx": {"type": "integer"}, "dy": {"type": "integer"}}), &["x", "y", "dx", "dy"])},
         {"name": "type", "description": "Type text into the frontmost app. A newline presses Return.",
          "inputSchema": schema(json!({"text": {"type": "string"}}), &["text"])},
-        {"name": "key", "description": "Press a key combo in the frontmost app, for example `cmd+shift+t`, `return`, or `esc`.",
+        {"name": "key", "description": KEY_DESCRIPTION,
          "inputSchema": schema(json!({"combo": {"type": "string"}}), &["combo"])},
-        {"name": "open_app", "description": "Open or bring forward an app by name or bundle id.",
+        {"name": "open_app", "description": OPEN_APP_DESCRIPTION,
          "inputSchema": schema(json!({"name": {"type": "string"}}), &["name"])},
         {"name": "list_apps", "description": "List the running apps.",
          "inputSchema": schema(json!({}), &[])},
@@ -330,6 +386,8 @@ pub struct Helper {
     limiter: Mutex<RateLimiter>,
     /// Serializes actions and holds the geometry of the latest screenshot.
     actions: Mutex<Option<ScreenshotGeometry>>,
+    /// The app in front when the latest screenshot was taken: keys and text go only to it.
+    seen_front: Mutex<Option<i32>>,
     /// Where an action that went through acted (S28); must return at once.
     glow: Box<dyn Fn(Mark) + Send + Sync>,
     /// The working rings around each call that captures or acts (S1, S5).
@@ -354,6 +412,7 @@ impl Helper {
             own_pid,
             limiter: Mutex::new(RateLimiter::new(MAX_ACTIONS_PER_SECOND, 1000)),
             actions: Mutex::new(None),
+            seen_front: Mutex::new(None),
             glow: Box::new(|_| {}),
             working: Arc::new(NoPreparation),
         }
@@ -452,6 +511,7 @@ impl Helper {
         if !self.control.is_active(self.clock.now_ms()) {
             // The screenshot of an ended session no longer describes the screen.
             *latest = None;
+            *lock(&self.seen_front) = None;
             if !self.with_dialog(|| self.dialogs.ask_grant()) {
                 return Err(NOT_ALLOWED.into());
             }
@@ -493,7 +553,7 @@ impl Helper {
                 | Tool::Key { .. }
         );
         if sees && !permissions.screenshots_supported {
-            return Err("Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.".into());
+            return Err(screenshots_unsupported(permissions.screenshots_unsupported).into());
         }
         if sees && !permissions.screen_recording {
             return Err(format!("{NEEDS_PERMISSION} Screen Recording permission. {GRANT_IT}"));
@@ -543,13 +603,30 @@ impl Helper {
 
     /// The frontmost app and the app owning the focused element (they differ for a
     /// non-activating panel), each refused when blocked. The one receiving the keys, for messages.
-    fn keyboard_target(&self) -> Result<String, String> {
+    /// `sent` says whether part of the input already landed, so a refusal never claims nothing was sent.
+    fn keyboard_target(&self, sent: bool) -> Result<(String, KeyboardRecipient), String> {
         let front = self.desktop.frontmost_app().ok_or("Cannot tell which app is in front.")?;
         self.refuse_blocked(&front)?;
-        match self.desktop.focused_app().filter(|focused| focused.pid != front.pid) {
-            Some(focused) => self.refuse_blocked(&focused).map(|()| focused.name),
-            None => Ok(front.name),
+        if let Some(reason) = self.desktop.keyboard_refusal(&front) {
+            return Err(reason);
         }
+        // The user may have switched apps since the agent last looked: it looks again first.
+        if *lock(&self.seen_front) != Some(front.pid) {
+            return Err(format!(
+                "{} is in front now, not the app of the latest screenshot, so {}. Take a screenshot first.",
+                front.name,
+                if sent { "the rest was not sent" } else { "nothing was sent" }
+            ));
+        }
+        let focused = self.desktop.focused_app().filter(|focused| focused.pid != front.pid);
+        if let Some(focused) = &focused {
+            self.refuse_blocked(focused)?;
+            if let Some(reason) = self.desktop.keyboard_refusal(focused) {
+                return Err(reason);
+            }
+        }
+        let recipient = KeyboardRecipient { front_pid: front.pid, focused_pid: focused.as_ref().map(|app| app.pid) };
+        Ok((focused.map_or(front.name, |app| app.name), recipient))
     }
 
     fn confirm_if_risky(&self, risk: Option<String>, action: &str, target: &str) -> Result<(), String> {
@@ -561,18 +638,44 @@ impl Helper {
             return Ok(());
         }
         let message = format!("{action} in {target}.\n\nThis needs your OK because of {reason}.");
-        if self.with_dialog(|| self.dialogs.confirm(&message)) {
-            Ok(())
-        } else {
-            Err(format!("The user declined: {action} in {target}. Nothing was done."))
+        let before = self.desktop.frontmost_app();
+        if !self.with_dialog(|| self.dialogs.confirm(&message)) {
+            return Err(format!("The user declined: {action} in {target}. Nothing was done."));
         }
+        // The OK was for the app in front before the dialog; another app never gets the action.
+        let Some(before) = before else {
+            return Err(format!(
+                "The user allowed {action} in {target}, but Gentle Dot cannot tell which app was in front before it asked, so nothing was done."
+            ));
+        };
+        // The system hands the focus back a moment after the dialog closes.
+        for _ in 0..RESTORE_TRIES {
+            if self.desktop.frontmost_app().map(|app| app.pid) == Some(before.pid) {
+                return Ok(());
+            }
+            self.desktop.activate(before.pid);
+            self.clock.sleep_ms(RESTORE_STEP_MS);
+        }
+        if self.desktop.frontmost_app().map(|app| app.pid) == Some(before.pid) {
+            return Ok(());
+        }
+        Err(format!(
+            "The user allowed {action} in {target}, but {} could not be brought back to the front, so nothing was done.",
+            before.name
+        ))
     }
 
     fn screenshot(&self, latest: &mut Option<ScreenshotGeometry>) -> Result<Content, String> {
+        let before = self.desktop.frontmost_app().map(|app| app.pid);
         let capture = self.desktop.capture()?;
         let geometry = capture.geometry;
         *latest = Some(geometry);
-        let front = self.desktop.frontmost_app().map(|app| app.name);
+        let front = self.desktop.frontmost_app();
+        // The image shows the app in front before and after it was taken; one that changed while
+        // it was taken is not what the agent saw, so keys wait for the next screenshot.
+        let seen = front.as_ref().map(|app| app.pid).filter(|pid| before == Some(*pid));
+        *lock(&self.seen_front) = seen;
+        let front = front.map(|app| app.name);
         let meta = json!({
             "imageWidth": geometry.image_width,
             "imageHeight": geometry.image_height,
@@ -729,18 +832,48 @@ impl Helper {
                 Ok((format!("{action}: done."), SETTLE_MS))
             }
             Tool::Type { text: typed } => {
-                let target = self.keyboard_target()?;
+                let (target, recipient) = self.keyboard_target(false)?;
                 let typed = typed.replace("\r\n", "\n").replace('\r', "\n");
                 let focus = self.desktop.focused_element();
                 let action = format!("Type {} characters", typed.chars().count());
                 self.confirm_if_risky(assess(Act::Type(&typed, focus.as_ref()), intent), &action, &target)?;
                 let return_key = parse_combo("return")?;
+                let total = typed.chars().count();
+                let mut posted = 0;
+                let mut post_typed = |event, characters| -> Result<(), String> {
+                    self.keyboard_target(posted > 0).and_then(|(_, current)| {
+                        if current != recipient && posted > 0 {
+                            Err(KEYS_CHANGED_WHILE_TYPING.into())
+                        } else if current != recipient {
+                            Err(KEYS_CHANGED_BEFORE_TYPING.into())
+                        } else {
+                            Ok(())
+                        }
+                    }).map_err(|error| {
+                        format!("{error} Typing stopped after {posted} of {total} characters.")
+                    })?;
+                    // A stop before the post sent nothing more; only a failed post leaves a range uncertain.
+                    self.still_running(epoch)
+                        .map_err(|error| format!("{error} Typing stopped after {posted} of {total} characters."))?;
+                    self.desktop.post_typed(&event, &recipient).map_err(|error| match error {
+                        TypedError::Failed(error) => format!(
+                            "{error} Typing stopped within characters {}-{} of {total}.",
+                            posted + 1,
+                            posted + characters
+                        ),
+                        // Refused before any of this post went out: what was sent is certain.
+                        refused => format!("{} Typing stopped after {posted} of {total} characters.", refused.message(posted > 0)),
+                    })?;
+                    posted += characters;
+                    Ok(())
+                };
                 for (i, line) in typed.split('\n').enumerate() {
                     if i > 0 {
-                        self.post(epoch, InputEvent::Key(return_key))?;
+                        post_typed(InputEvent::Key(return_key), 1)?;
                     }
                     for chunk in chunks(line) {
-                        self.post(epoch, InputEvent::Text(chunk))?;
+                        let characters = chunk.chars().count();
+                        post_typed(InputEvent::Text(chunk), characters)?;
                     }
                 }
                 // The glow marks posted input only; an empty text posts none.
@@ -750,7 +883,7 @@ impl Helper {
                 Ok((format!("{action} in {target}: done."), SETTLE_MS))
             }
             Tool::Key { combo } => {
-                let target = self.keyboard_target()?;
+                let (target, recipient) = self.keyboard_target(false)?;
                 let focus = self.desktop.focused_element();
                 let act = if combo.is_return() {
                     Act::Return(focus.as_ref())
@@ -759,9 +892,20 @@ impl Helper {
                 } else {
                     Act::Other
                 };
-                let action = format!("Press {}", combo.key);
+                let action = format!("Press {}", combo.label());
                 self.confirm_if_risky(assess(act, intent), &action, &target)?;
-                self.post(epoch, InputEvent::Key(combo))?;
+                // Reading the focus or a confirmation can change the app in front: the key goes only
+                // to the recipient approved above, as each typed chunk does.
+                let (_, current) = self.keyboard_target(false)?;
+                if current != recipient {
+                    return Err(KEY_RECIPIENT_CHANGED.into());
+                }
+                self.still_running(epoch)?;
+                self.desktop.post_typed(&InputEvent::Key(combo), &recipient).map_err(|error| match error {
+                    // Worded as the recheck above words it (#167).
+                    TypedError::RecipientChanged => KEY_RECIPIENT_CHANGED.to_string(),
+                    other => other.message(false),
+                })?;
                 (self.glow)(Mark::Key);
                 Ok((format!("{action} in {target}: done."), SETTLE_MS))
             }
@@ -770,7 +914,7 @@ impl Helper {
                     return Err(format!("Gentle Dot does not control {label}. The app was not opened."));
                 }
                 let action = format!("Open {name}");
-                self.confirm_if_risky(assess(Act::Other, intent), &action, "macOS")?;
+                self.confirm_if_risky(assess(Act::Other, intent), &action, SYSTEM)?;
                 self.still_running(epoch)?;
                 self.desktop.open_app(&name)?;
                 Ok((format!("{action}: done."), OPEN_APP_SETTLE_MS))
@@ -798,7 +942,7 @@ mod tests {
     use super::super::keys::parse_combo;
     use super::super::risk::{AxElement, Focus};
     use super::super::session::{Reason, StateEvent, SESSION_MS};
-    use super::super::{InputEvent, MouseButton};
+    use super::super::{InputEvent, MouseButton, ScreenshotsUnsupported};
     use super::*;
 
     // Blocked apps of the platform the tests run on (each has its own list): bundle id or
@@ -1231,12 +1375,67 @@ mod tests {
     }
 
     #[test]
-    fn screenshots_before_macos_14_are_a_clear_error() {
+    fn a_key_result_names_the_whole_combo() {
+        let rig = rig();
+        rig.ready();
+        assert_eq!(first_text(&rig.call("key", json!({"combo": "ctrl+a"}))), "Press ctrl+a in Safari: done.");
+        assert_eq!(first_text(&rig.call("key", json!({"combo": "tab"}))), "Press tab in Safari: done.");
+    }
+
+    #[test]
+    fn screenshots_the_system_cannot_take_are_a_clear_error() {
         let rig = rig();
         rig.desktop.permissions.lock().unwrap().screenshots_supported = false;
         let result = rig.call("screenshot", json!({}));
         assert!(is_error(&result));
-        assert!(first_text(&result).contains("macOS 14"), "{result}");
+        #[cfg(not(windows))]
+        assert_eq!(first_text(&result), "Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.");
+        #[cfg(windows)]
+        assert_eq!(
+            first_text(&result),
+            "Screenshots need Windows 10 version 2004 or later, so computer control is unavailable on this PC."
+        );
+    }
+
+    #[test]
+    fn screenshots_on_a_system_too_old_say_so() {
+        let rig = rig();
+        {
+            let mut permissions = rig.desktop.permissions.lock().unwrap();
+            permissions.screenshots_supported = false;
+            permissions.screenshots_unsupported = Some(ScreenshotsUnsupported::TooOld);
+        }
+        let result = rig.call("screenshot", json!({}));
+        assert!(is_error(&result));
+        #[cfg(not(windows))]
+        assert_eq!(first_text(&result), "Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.");
+        #[cfg(windows)]
+        assert_eq!(
+            first_text(&result),
+            "Screenshots need Windows 10 version 2004 or later, so computer control is unavailable on this PC."
+        );
+    }
+
+    /// An unreadable Windows build is not called too old; screenshots stay off all the same.
+    #[test]
+    fn screenshots_on_an_unknown_windows_version_say_so() {
+        let rig = rig();
+        {
+            let mut permissions = rig.desktop.permissions.lock().unwrap();
+            permissions.screenshots_supported = false;
+            permissions.screenshots_unsupported = Some(ScreenshotsUnsupported::UnknownVersion);
+        }
+        let result = rig.call("screenshot", json!({}));
+        assert!(is_error(&result));
+        #[cfg(not(windows))]
+        assert_eq!(first_text(&result), "Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.");
+        #[cfg(windows)]
+        assert_eq!(
+            first_text(&result),
+            "Gentle Dot cannot tell which Windows version this is, so it cannot keep its own windows out of \
+screenshots and computer control is unavailable on this PC."
+        );
+        assert_eq!(rig.desktop.captures.load(Ordering::SeqCst), 0);
     }
 
     // --- Blocklist and rate limit (S24.4) ---
@@ -1279,6 +1478,434 @@ mod tests {
     }
 
     #[test]
+    fn typing_stops_between_chunks_when_gentle_dot_comes_to_front() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.front_after_posts.lock().unwrap() = Some((1,
+            AppIdentity { pid: OWN_PID, bundle_id: None, name: "gentle-dot".into() }));
+        let result = rig.call("type", json!({"text": "a".repeat(45)}));
+        assert!(is_error(&result), "{result}");
+        assert!(first_text(&result).contains("Gentle Dot does not control Gentle Dot. The action was refused."), "{result}");
+        assert!(first_text(&result).contains("Typing stopped after 20 of 45 characters."), "{result}");
+        assert_eq!(rig.desktop.events(), vec![InputEvent::Text("a".repeat(20))]);
+    }
+
+    #[test]
+    fn a_switch_during_a_screenshot_is_not_taken_as_what_the_agent_saw() {
+        let rig = rig();
+        rig.ready();
+        // The image shows Safari; Mail comes to the front while it is taken.
+        *rig.desktop.front_during_capture.lock().unwrap() = Some(app(400, "com.apple.mail", "Mail"));
+        assert!(!is_error(&rig.call("screenshot", json!({}))));
+        let result = rig.call("type", json!({"text": "hello"}));
+        assert_eq!(
+            first_text(&result),
+            "Mail is in front now, not the app of the latest screenshot, so nothing was sent. Take a screenshot first."
+        );
+        assert!(rig.desktop.events().is_empty());
+        // A screenshot taken with Mail steady in front lets the keys through.
+        assert!(!is_error(&rig.call("screenshot", json!({}))));
+        assert!(!is_error(&rig.call("type", json!({"text": "hello"}))));
+    }
+
+    #[test]
+    fn typing_stops_between_chunks_when_another_app_comes_to_front() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.front_after_posts.lock().unwrap() = Some((1, app(400, "com.apple.mail", "Mail")));
+        let result = rig.call("type", json!({"text": "a".repeat(45)}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), "Mail is in front now, not the app of the latest screenshot, so the rest was not sent. Take a screenshot first. Typing stopped after 20 of 45 characters.");
+        assert_eq!(rig.desktop.events(), vec![InputEvent::Text("a".repeat(20))]);
+    }
+
+    #[test]
+    fn typing_rechecks_before_return_and_counts_unicode_characters() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.front_after_posts.lock().unwrap() = Some((1, app(400, "com.apple.mail", "Mail")));
+        let result = rig.call("type", json!({"text": "🦀é\nsecond"}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), "Mail is in front now, not the app of the latest screenshot, so the rest was not sent. Take a screenshot first. Typing stopped after 2 of 9 characters.");
+        assert_eq!(rig.desktop.events(), vec![InputEvent::Text("🦀é".into())]);
+    }
+
+    #[test]
+    fn typing_rechecks_after_a_leading_return_and_keeps_the_blocked_app_refusal() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.front_after_posts.lock().unwrap() = Some((1, app(302, KEYCHAIN.0, KEYCHAIN.1)));
+        let result = rig.call("type", json!({"text": "\r\nnext"}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), format!("Gentle Dot does not control {}. The action was refused. Typing stopped after 1 of 5 characters.", KEYCHAIN.1));
+        assert_eq!(rig.desktop.events(), vec![InputEvent::Key(parse_combo("return").unwrap())]);
+    }
+
+    #[test]
+    fn typing_stops_when_an_unblocked_focused_recipient_changes() {
+        // Both replacing an existing recipient and moving focus away from the front app.
+        for initial in [None, Some(app(401, "editor.exe", "Editor"))] {
+            let rig = rig();
+            rig.ready();
+            *rig.desktop.focused_app.lock().unwrap() = initial;
+            *rig.desktop.focused_after_posts.lock().unwrap() = Some((1, app(402, "panel.exe", "Panel")));
+            let result = rig.call("type", json!({"text": "a".repeat(45)}));
+            assert!(is_error(&result), "{result}");
+            assert_eq!(first_text(&result), "The app receiving the keys changed while typing, so the rest was not sent. Typing stopped after 20 of 45 characters.");
+            assert_eq!(rig.desktop.events(), vec![InputEvent::Text("a".repeat(20))]);
+        }
+    }
+
+    #[test]
+    fn typing_rechecks_front_and_recipient_before_the_first_post() {
+        for change_front in [true, false] {
+            let rig = rig();
+            rig.ready();
+            let desktop = rig.desktop.clone();
+            *rig.desktop.during_focused_element.lock().unwrap() = Some(Box::new(move || {
+                let changed = Some(app(402, "panel.exe", "Panel"));
+                if change_front {
+                    *desktop.frontmost.lock().unwrap() = changed;
+                } else {
+                    *desktop.focused_app.lock().unwrap() = changed;
+                }
+            }));
+            let result = rig.call("type", json!({"text": "hello"}));
+            assert!(is_error(&result), "{result}");
+            assert!(first_text(&result).ends_with("Typing stopped after 0 of 5 characters."), "{result}");
+            if change_front {
+                // Nothing landed yet, so the screenshot guard can still say so.
+                assert_eq!(first_text(&result), "Panel is in front now, not the app of the latest screenshot, so nothing was sent. Take a screenshot first. Typing stopped after 0 of 5 characters.");
+            } else {
+                assert_eq!(first_text(&result), "The app receiving the keys changed before typing, so nothing was sent. Typing stopped after 0 of 5 characters.");
+            }
+            assert!(rig.desktop.events().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_key_rechecks_front_and_recipient_before_it_is_posted() {
+        for combo in ["tab", "return"] {
+            for change_front in [true, false] {
+                let rig = rig();
+                rig.ready();
+                let desktop = rig.desktop.clone();
+                *rig.desktop.during_focused_element.lock().unwrap() = Some(Box::new(move || {
+                    let changed = Some(app(402, "panel.exe", "Panel"));
+                    if change_front {
+                        *desktop.frontmost.lock().unwrap() = changed;
+                    } else {
+                        *desktop.focused_app.lock().unwrap() = changed;
+                    }
+                }));
+                let result = rig.call("key", json!({"combo": combo}));
+                assert!(is_error(&result), "{combo} {change_front}: {result}");
+                assert!(rig.desktop.events().is_empty(), "{combo} {change_front}");
+                assert!(rig.desktop.typed_posts.lock().unwrap().is_empty(), "{combo} {change_front}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_key_is_posted_bound_to_its_approved_recipient() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.focused_app.lock().unwrap() = Some(app(401, "editor.exe", "Editor"));
+        assert!(!is_error(&rig.call("key", json!({"combo": "tab"}))));
+        let recipient = KeyboardRecipient { front_pid: 200, focused_pid: Some(401) };
+        assert_eq!(
+            *rig.desktop.typed_posts.lock().unwrap(),
+            vec![(InputEvent::Key(parse_combo("tab").unwrap()), recipient)]
+        );
+    }
+
+    #[test]
+    fn a_stop_before_the_first_post_reports_nothing_sent_not_an_uncertain_range() {
+        let rig = rig();
+        rig.ready();
+        let clock = rig.clock.clone();
+        // The session runs out while the focus is read, before anything is posted.
+        *rig.desktop.during_focused_element.lock().unwrap() = Some(Box::new(move || clock.advance(SESSION_MS + 1)));
+        let result = rig.call("type", json!({"text": "hello"}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), format!("{STOPPED} Typing stopped after 0 of 5 characters."));
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn typing_post_failures_keep_the_error_and_report_the_uncertain_character_range() {
+        for (text, failed_post, expected, sent) in [
+            ("a".repeat(45), 2, "Typing stopped within characters 21-40 of 45.", vec![InputEvent::Text("a".repeat(20))]),
+            ("🦀é".into(), 1, "Typing stopped within characters 1-2 of 2.", vec![]),
+            ("a\nnext".into(), 2, "Typing stopped within characters 2-2 of 6.", vec![InputEvent::Text("a".into())]),
+        ] {
+            let rig = rig();
+            rig.ready();
+            *rig.desktop.fail_post.lock().unwrap() = Some((failed_post, "Native input failed.".into()));
+            let result = rig.call("type", json!({"text": text}));
+            assert!(is_error(&result), "{result}");
+            assert_eq!(first_text(&result), format!("Native input failed. {expected}"));
+            assert_eq!(rig.desktop.events(), sent);
+            let typed: Vec<InputEvent> = rig.desktop.typed_posts.lock().unwrap().iter().map(|(event, _)| event.clone()).collect();
+            assert_eq!(typed, sent);
+        }
+    }
+
+    #[test]
+    fn typing_binds_every_chunk_and_return_to_the_original_approval() {
+        for focused_pid in [None, Some(401)] {
+            let rig = rig();
+            rig.ready();
+            *rig.desktop.focused_app.lock().unwrap() = focused_pid.map(|pid| app(pid, "editor.exe", "Editor"));
+            let result = rig.call("type", json!({"text": format!("{}\nend", "a".repeat(45))}));
+            assert!(!is_error(&result), "{result}");
+            let recipient = KeyboardRecipient { front_pid: 200, focused_pid };
+            let events = rig.desktop.events();
+            assert_eq!(events.len(), 5);
+            assert_eq!(*rig.desktop.typed_posts.lock().unwrap(),
+                events.into_iter().map(|event| (event, recipient)).collect::<Vec<_>>());
+            // A key is bound the same way.
+            let before = rig.desktop.typed_posts.lock().unwrap().len();
+            assert!(!is_error(&rig.call("key", json!({"combo": "tab"}))));
+            let typed = rig.desktop.typed_posts.lock().unwrap();
+            assert_eq!(typed.len(), before + 1);
+            assert_eq!(typed[before], (InputEvent::Key(parse_combo("tab").unwrap()), recipient));
+        }
+    }
+
+    #[test]
+    fn typing_with_unchanged_front_posts_all_chunks() {
+        let rig = rig();
+        rig.ready();
+        let result = rig.call("type", json!({"text": "a".repeat(45)}));
+        assert!(!is_error(&result), "{result}");
+        assert!(first_text(&result).contains("Type 45 characters in Safari: done."), "{result}");
+        assert_eq!(rig.desktop.events(), vec![
+            InputEvent::Text("a".repeat(20)), InputEvent::Text("a".repeat(20)), InputEvent::Text("a".repeat(5)),
+        ]);
+    }
+
+    fn elevated_front_refuses(tool: &str, args: Value) {
+        let rig = rig();
+        rig.ready();
+        rig.desktop.elevated.lock().unwrap().push(200);
+        let result = rig.call(tool, args);
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), "Safari runs as administrator, so Gentle Dot cannot send it keys.");
+        assert!(rig.desktop.events().is_empty());
+        assert!(rig.desktop.typed_posts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn elevated_front_refuses_type() {
+        elevated_front_refuses("type", json!({"text": "hello"}));
+    }
+
+    #[test]
+    fn elevated_front_refuses_key() {
+        elevated_front_refuses("key", json!({"combo": "cmd+a"}));
+    }
+
+    /// The backend refusing a post before sending any of it (#167): the helper words it from what
+    /// earlier posts already sent, and reports no uncertain range.
+    #[test]
+    fn a_backend_refusal_is_reported_after_the_characters_already_sent() {
+        for (at, error, expected, sent) in [
+            (2, TypedError::RecipientChanged,
+             "The app receiving the keys changed while typing, so the rest was not sent. Typing stopped after 20 of 45 characters.", 1),
+            (1, TypedError::RecipientChanged,
+             "The app receiving the keys changed before typing, so nothing was sent. Typing stopped after 0 of 45 characters.", 0),
+            (2, TypedError::FrontUnknown,
+             "Cannot tell which window is in front, so the rest was not sent. Typing stopped after 20 of 45 characters.", 1),
+            (1, TypedError::FrontUnknown,
+             "Cannot tell which window is in front, so nothing was sent. Typing stopped after 0 of 45 characters.", 0),
+            (2, TypedError::NoFocus,
+             "The window in front has no keyboard focus, so the rest was not sent. Typing stopped after 20 of 45 characters.", 1),
+            (1, TypedError::NoFocus,
+             "The window in front has no keyboard focus, so nothing was sent. Typing stopped after 0 of 45 characters.", 0),
+        ] {
+            let rig = rig();
+            rig.ready();
+            *rig.desktop.refuse_typed_at.lock().unwrap() = Some((at, error.clone()));
+            let result = rig.call("type", json!({"text": "a".repeat(45)}));
+            assert!(is_error(&result), "{error:?} at {at}: {result}");
+            assert_eq!(first_text(&result), expected, "{error:?} at {at}");
+            assert_eq!(rig.desktop.events(), vec![InputEvent::Text("a".repeat(20)); sent], "{error:?} at {at}");
+        }
+    }
+
+    #[test]
+    fn held_ctrl_refuses_key_without_sending_anything() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.held_keys_at.lock().unwrap() = Some((1, vec![0xa2]));
+        let result = rig.call("key", json!({"combo": "return"}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), "Ctrl is pressed, so nothing was sent. Release Ctrl, or press and release it once if no one is holding it, and try again.");
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn held_shift_stops_type_before_the_next_return() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.held_keys_at.lock().unwrap() = Some((2, vec![0xa1]));
+        let result = rig.call("type", json!({"text": "hello\nworld"}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), "Shift is pressed, so the rest was not sent. Release Shift, or press and release it once if no one is holding it, and try again. Typing stopped after 5 of 11 characters.");
+        assert_eq!(rig.desktop.events(), vec![InputEvent::Text("hello".into())]);
+    }
+
+    #[test]
+    fn no_held_modifiers_leaves_a_combo_unchanged() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.held_keys_at.lock().unwrap() = Some((1, vec![]));
+        let result = rig.call("key", json!({"combo": "ctrl+t"}));
+        assert!(!is_error(&result), "{result}");
+        assert_eq!(rig.desktop.events(), vec![InputEvent::Key(parse_combo("ctrl+t").unwrap())]);
+    }
+
+    const POINTER_ACTIONS: [(&str, fn() -> Value); 3] = [
+        ("click", || json!({"x": 10, "y": 10})),
+        ("drag", || json!({"fromX": 10, "fromY": 20, "toX": 30, "toY": 40})),
+        ("scroll", || json!({"x": 5, "y": 6, "dx": 0, "dy": 120})),
+    ];
+
+    #[test]
+    fn held_ctrl_refuses_click_drag_and_scroll_without_sending_anything() {
+        for (tool, args) in POINTER_ACTIONS {
+            let rig = rig();
+            rig.ready();
+            *rig.desktop.held_keys.lock().unwrap() = vec![0xa2];
+            let result = rig.call(tool, args());
+            assert!(is_error(&result), "{tool}: {result}");
+            assert_eq!(first_text(&result), "Ctrl is pressed, so nothing was sent. Release Ctrl, or press and release it once if no one is holding it, and try again.", "{tool}");
+            assert!(rig.desktop.events().is_empty(), "{tool}");
+        }
+    }
+
+    #[test]
+    fn either_side_of_each_modifier_refuses_a_click() {
+        for (name, keys) in [("Ctrl", [0xa2, 0xa3]), ("Alt", [0xa4, 0xa5]), ("Shift", [0xa0, 0xa1]), ("Win", [0x5b, 0x5c])] {
+            for key in keys {
+                let rig = rig();
+                rig.ready();
+                *rig.desktop.held_keys.lock().unwrap() = vec![key];
+                let result = rig.call("click", json!({"x": 10, "y": 10}));
+                assert_eq!(first_text(&result), format!("{name} is pressed, so nothing was sent. Release {name}, or press and release it once if no one is holding it, and try again."), "{key:#x}");
+                assert!(rig.desktop.events().is_empty(), "{key:#x}");
+            }
+        }
+    }
+
+    #[test]
+    fn several_held_modifiers_are_named_once_in_order_for_a_pointer_action() {
+        for (tool, args) in POINTER_ACTIONS {
+            let rig = rig();
+            rig.ready();
+            // Both Ctrls, out of order, still name Ctrl once and first.
+            *rig.desktop.held_keys.lock().unwrap() = vec![0x5c, 0xa1, 0xa4, 0xa3, 0xa2];
+            let result = rig.call(tool, args());
+            assert_eq!(first_text(&result), "Ctrl, Alt, Shift and Win are pressed, so nothing was sent. Release them, or press and release each once if no one is holding them, and try again.", "{tool}");
+            assert!(rig.desktop.events().is_empty(), "{tool}");
+        }
+    }
+
+    #[test]
+    fn no_held_modifiers_leaves_pointer_actions_unchanged_and_a_move_ignores_them() {
+        let rig = rig();
+        rig.ready();
+        for (tool, args) in POINTER_ACTIONS {
+            assert!(!is_error(&rig.call(tool, args())), "{tool}");
+        }
+        // A plain move presses no button: Ctrl held does not change it.
+        *rig.desktop.held_keys.lock().unwrap() = vec![0xa2];
+        assert!(!is_error(&rig.call("move", json!({"x": 1, "y": 2}))));
+        let p = |x, y| Point { x, y };
+        assert_eq!(
+            rig.desktop.events(),
+            vec![
+                InputEvent::Click { at: p(20.0, 20.0), button: MouseButton::Left, count: 1 },
+                InputEvent::Drag { from: p(20.0, 40.0), to: p(60.0, 80.0) },
+                InputEvent::Scroll { at: p(10.0, 12.0), dx: 0, dy: 120 },
+                InputEvent::Move(p(2.0, 4.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_backend_refusal_of_a_key_says_the_key_was_not_sent() {
+        // The same wording as the helper's own recheck of the key (#167).
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.refuse_typed_at.lock().unwrap() = Some((1, TypedError::RecipientChanged));
+        let result = rig.call("key", json!({"combo": "tab"}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), "The app receiving the keys changed before the key was sent, so it was not sent.");
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn elevated_front_refuses_key_at_the_recheck() {
+        let rig = rig();
+        rig.ready();
+        let desktop = rig.desktop.clone();
+        // Safari becomes elevated after the first check, while the focus is read.
+        *rig.desktop.during_focused_element.lock().unwrap() = Some(Box::new(move || {
+            desktop.elevated.lock().unwrap().push(200);
+        }));
+        let result = rig.call("key", json!({"combo": "tab"}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), "Safari runs as administrator, so Gentle Dot cannot send it keys.");
+        assert!(rig.desktop.events().is_empty());
+        assert!(rig.desktop.typed_posts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn elevated_focused_panel_refuses_type() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.focused_app.lock().unwrap() = Some(app(401, "panel.exe", "Panel"));
+        rig.desktop.elevated.lock().unwrap().push(401);
+        let result = rig.call("type", json!({"text": "hello"}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), "Panel runs as administrator, so Gentle Dot cannot send it keys.");
+        assert!(rig.desktop.events().is_empty());
+        assert!(rig.desktop.typed_posts.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn elevated_after_first_chunk_stops_typing() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.elevated_after_posts.lock().unwrap() = Some((1, 200));
+        let result = rig.call("type", json!({"text": "a".repeat(45)}));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), "Safari runs as administrator, so Gentle Dot cannot send it keys. Typing stopped after 20 of 45 characters.");
+        let event = InputEvent::Text("a".repeat(20));
+        assert_eq!(rig.desktop.events(), vec![event.clone()]);
+        assert_eq!(*rig.desktop.typed_posts.lock().unwrap(), vec![(event, KeyboardRecipient { front_pid: 200, focused_pid: None })]);
+    }
+
+    #[test]
+    fn elevated_app_stops_batch() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.elevated_after_posts.lock().unwrap() = Some((1, 200));
+        let result = rig.call("batch", batch(json!([
+            {"tool": "type", "text": "hi"},
+            {"tool": "type", "text": "never"},
+            {"tool": "type", "text": "later"}
+        ])));
+        assert!(is_error(&result), "{result}");
+        assert_eq!(first_text(&result), "Stopped at step 2 of 3 (type): Safari runs as administrator, so Gentle Dot cannot send it keys.\nRan 1 of 3 steps:\n1. Type 2 characters in Safari: done.");
+        let event = InputEvent::Text("hi".into());
+        assert_eq!(rig.desktop.events(), vec![event.clone()]);
+        assert_eq!(*rig.desktop.typed_posts.lock().unwrap(), vec![(event, KeyboardRecipient { front_pid: 200, focused_pid: None })]);
+    }
+
+    #[test]
     fn keyboard_actions_check_the_frontmost_app() {
         let rig = rig();
         rig.ready();
@@ -1296,6 +1923,20 @@ mod tests {
         *rig.desktop.focused_app.lock().unwrap() = Some(app(303, PASSWORDS.0, PASSWORDS.1));
         let result = rig.call("type", json!({"text": "hello"}));
         assert!(first_text(&result).contains("1Password"), "{result}");
+        assert!(is_error(&rig.call("key", json!({"combo": "return"}))));
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn keys_are_refused_when_windows_cannot_say_where_the_focus_is() {
+        let rig = rig();
+        rig.ready();
+        // A failed focus query: no process, the blocked Unidentified app, while Safari is in front.
+        let unknown = AppIdentity { pid: 0, bundle_id: None, name: super::super::blocklist::UNIDENTIFIED.into() };
+        *rig.desktop.focused_app.lock().unwrap() = Some(unknown);
+        let result = rig.call("type", json!({"text": "hello"}));
+        assert!(first_text(&result).contains("an app Windows does not identify"), "{result}");
         assert!(is_error(&rig.call("key", json!({"combo": "return"}))));
         assert!(rig.desktop.events().is_empty());
     }
@@ -1422,7 +2063,7 @@ mod tests {
     }
 
     #[test]
-    fn the_previous_app_is_brought_back_after_a_dialog() {
+    fn an_approved_action_is_dropped_when_the_previous_app_cannot_be_brought_back() {
         let rig = rig();
         rig.ready();
         *rig.desktop.elements.lock().unwrap() = send_button();
@@ -1430,8 +2071,102 @@ mod tests {
         *rig.dialogs.during.lock().unwrap() = Some(Box::new(move || {
             *frontmost.frontmost.lock().unwrap() = Some(app(OWN_PID, "dev.gentleman.gentle-dot", "Gentle Dot"));
         }));
+        let result = rig.call("click", json!({"x": 10, "y": 10}));
+        assert!(is_error(&result), "{result}");
+        assert!(first_text(&result).contains("could not be brought back"), "{result}");
+        // Once after the dialog, then once per try.
+        let activated = rig.desktop.activated.lock().unwrap().clone();
+        assert_eq!(activated, vec![200; 1 + RESTORE_TRIES as usize]);
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn an_approved_action_is_dropped_when_no_app_was_known_to_be_in_front() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.elements.lock().unwrap() = send_button();
+        *rig.desktop.frontmost.lock().unwrap() = None;
+        let result = rig.call("click", json!({"x": 10, "y": 10}));
+        assert!(is_error(&result), "{result}");
+        assert!(first_text(&result).contains("cannot tell which app was in front"), "{result}");
+        assert_eq!(rig.dialogs.confirmations.lock().unwrap().len(), 1, "the user was asked");
+        assert!(rig.desktop.events().is_empty());
+    }
+
+    #[test]
+    fn an_approved_action_waits_a_moment_for_the_previous_app_to_come_back() {
+        // How long a risky click takes when the previous app is back after `needed` activations.
+        let elapsed = |needed: usize| {
+            let rig = rig();
+            rig.ready();
+            *rig.desktop.elements.lock().unwrap() = send_button();
+            *rig.desktop.activates_to.lock().unwrap() = rig.desktop.frontmost_app();
+            *rig.desktop.activations_needed.lock().unwrap() = needed;
+            let frontmost = rig.desktop.clone();
+            *rig.dialogs.during.lock().unwrap() = Some(Box::new(move || {
+                *frontmost.frontmost.lock().unwrap() = Some(app(OWN_PID, "dev.gentleman.gentle-dot", "Gentle Dot"));
+            }));
+            let start = rig.clock.now_ms();
+            let result = rig.call("click", json!({"x": 10, "y": 10}));
+            assert!(!is_error(&result), "{result}");
+            assert_eq!(rig.desktop.activated.lock().unwrap().len(), needed);
+            assert_eq!(rig.desktop.events().len(), 1);
+            rig.clock.now_ms() - start
+        };
+        // Back at the third activation: two more tries, each after a step's wait.
+        assert_eq!(elapsed(3) - elapsed(1), 2 * RESTORE_STEP_MS);
+    }
+
+    #[test]
+    fn an_approved_action_runs_once_the_previous_app_is_back() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.elements.lock().unwrap() = send_button();
+        *rig.desktop.activates_to.lock().unwrap() = rig.desktop.frontmost_app();
+        let frontmost = rig.desktop.clone();
+        *rig.dialogs.during.lock().unwrap() = Some(Box::new(move || {
+            *frontmost.frontmost.lock().unwrap() = Some(app(OWN_PID, "dev.gentleman.gentle-dot", "Gentle Dot"));
+        }));
+        let result = rig.call("click", json!({"x": 10, "y": 10}));
+        assert!(!is_error(&result), "{result}");
+        assert_eq!(rig.desktop.events().len(), 1);
+    }
+
+    #[test]
+    fn the_previous_app_is_brought_back_after_a_dialog() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.elements.lock().unwrap() = send_button();
+        *rig.desktop.activates_to.lock().unwrap() = rig.desktop.frontmost_app();
+        let frontmost = rig.desktop.clone();
+        *rig.dialogs.during.lock().unwrap() = Some(Box::new(move || {
+            *frontmost.frontmost.lock().unwrap() = Some(app(OWN_PID, "dev.gentleman.gentle-dot", "Gentle Dot"));
+        }));
         rig.call("click", json!({"x": 10, "y": 10}));
         assert_eq!(*rig.desktop.activated.lock().unwrap(), vec![200]);
+    }
+
+    // --- The front app changed since the last screenshot ---
+
+    #[test]
+    fn keys_and_text_wait_for_a_screenshot_once_the_front_app_changed() {
+        let rig = rig();
+        rig.ready();
+        *rig.desktop.frontmost.lock().unwrap() = Some(app(300, "com.example.terminal", "Terminal"));
+        for (tool, args) in [("key", json!({"combo": "alt+f4"})), ("type", json!({"text": "hola"}))] {
+            let result = rig.call(tool, args);
+            assert!(is_error(&result), "{result}");
+            assert_eq!(
+                first_text(&result),
+                "Terminal is in front now, not the app of the latest screenshot, so nothing was sent. Take a screenshot first."
+            );
+        }
+        assert!(rig.desktop.events().is_empty());
+        // A new screenshot shows the change: keys go through again.
+        rig.ready();
+        let result = rig.call("key", json!({"combo": "alt+f4"}));
+        assert!(!is_error(&result), "{result}");
+        assert_eq!(rig.desktop.events().len(), 1);
     }
 
     // --- Typing ---
@@ -2158,14 +2893,17 @@ mod tests {
             let caps = p.rig.desktop.captures.load(Ordering::SeqCst);
             *p.ring.ack.lock().unwrap() = None; // overlay never acks
             let control = p.rig.control.clone();
-            let t = std::thread::spawn(move || { std::thread::sleep(Duration::from_millis(100)); control.end(Reason::Stopped); });
-            // The real app wires Control's notify to session_ended; emulate that wiring here.
+            // The real app wires Control's notify to session_ended, so the session is already over
+            // when the call is given up; one thread keeps that order (two timers could swap it).
             let working = p.working.clone();
-            let ring = p.ring.clone();
-            let watcher = std::thread::spawn(move || { std::thread::sleep(Duration::from_millis(150)); working.session_ended(); let _ = ring; });
+            let t = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                control.end(Reason::Stopped);
+                working.session_ended();
+            });
             let started = Instant::now();
             let result = p.rig.call("click", json!({"x": 10, "y": 10}));
-            t.join().unwrap(); watcher.join().unwrap();
+            t.join().unwrap();
             assert!(is_error(&result));
             assert_eq!(first_text(&result), STOPPED);
             assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());

@@ -82,7 +82,7 @@ The command stages the runtime (`build/runtime/darwin-arm64`), signs the runtime
 
 ## Windows
 
-Requirements: Windows 10 or 11, 64-bit (x64).
+Requirements: Windows 10 or 11, 64-bit (x64). Computer control screenshots require Windows 10 version 2004 (build 19041) or newer: excluding Gentle Dot's windows from captures requires `WDA_EXCLUDEFROMCAPTURE`.
 
 ### Install
 
@@ -94,7 +94,7 @@ If Gentle Dot is running, the installer says **Gentle Dot is running! Click OK t
 
 ### First open
 
-Open **Gentle Dot** from the Start menu. The first open needs the network once: the engine installs its companion packages. Computer control and voice input are not available on Windows yet.
+Open **Gentle Dot** from the Start menu. The first open needs the network once: the engine installs its companion packages. The computer-control emergency stop is **Alt+Shift+Esc**. Voice input is not available on Windows yet.
 
 ### Where data lives
 
@@ -108,6 +108,17 @@ Open **Gentle Dot** from the Start menu. The first open needs the network once: 
 | Launch at login (when turned on) | a `Gentle Dot` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` |
 
 The app's install folder never changes after install; everything it writes goes to the folders above.
+
+### A connector secret that cannot be read
+
+Each connector secret is one `.bin` file in a subfolder of `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\`. If one of those files is damaged, or was put there by something other than Gentle Dot, that secret can no longer be read or saved again. The error says `The app's secure store refused it: the secret store failed: …` (in the app or in `%USERPROFILE%\.gentle-dot\daemon.log`), and setting the connector up again does not help. When the damaged file holds the key Gentle Dot checks your connectors with, Gentle Dot says on every start that it could not check your connectors, and the connectors that need a secret stay locked. Restarting, as that notice suggests, does not help in this case.
+
+Gentle Dot never repairs, replaces or deletes such a file, and it never keeps the secret unencrypted instead. That is on purpose. You have to remove it yourself. The file name is a hash and Gentle Dot does not show which file is broken, so remove the whole folder:
+
+1. Quit Gentle Dot from its tray icon (**Quit**), so it does not use the folder while you delete it.
+2. Delete `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\`. Only your Windows user (or an administrator) can.
+3. Open Gentle Dot again. This removes every connector secret, including the key that checks your connectors. On this start Gentle Dot makes a new key, so it moves `connectors.json` aside as `connectors.rejected-<time>.json` in `%USERPROFILE%\.gentle-dot\`, starts with no connectors, and says connectors were changed while it was closed. This happens even if you had no connectors, because Gentle Dot signs `connectors.json` from its first start.
+4. Add your connectors again in **Connectors** and sign in again.
 
 ### Uninstall
 

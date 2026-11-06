@@ -33,6 +33,20 @@ jobs:
         with:
           workspaces: apps/desktop/src-tauri
 
+      # `rust-cache` hashes every Cargo.toml, so any dependency change restores an older cache
+      # by prefix, and sherpa-onnx-sys skips its download when `target/sherpa-onnx-prebuilt`
+      # exists even without the library. Drop an incomplete tree so it fetches it again.
+      - name: Drop an incomplete sherpa-onnx prebuilt cache
+        shell: pwsh
+        run: |
+          $root = Join-Path 'apps/desktop/src-tauri/target' 'sherpa-onnx-prebuilt'
+          if (-not (Test-Path $root)) { exit 0 }
+          $lib = Get-ChildItem -Path $root -Recurse -File -Include 'sherpa-onnx-c-api.lib', 'libsherpa-onnx-c-api.a'
+          if (-not $lib) {
+            Remove-Item -Recurse -Force $root
+            Write-Output 'removed an incomplete sherpa-onnx prebuilt cache'
+          }
+
       # `tauri.conf.json` points `frontendDist` at the built UI. A debug build does not embed it,
       # but the folder has to exist, and building the UI here would add the whole pnpm install.
       - name: UI folder for the build script
@@ -60,6 +74,9 @@ jobs:
   app-channel:
     name: Native app channel
     runs-on: windows-latest
+    env:
+      # Match the exact CI-only policy used by the macOS job and pnpm's dependency checks.
+      PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: '["gentle-pi@4.6.0"]'
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v4
