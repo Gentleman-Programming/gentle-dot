@@ -115,6 +115,8 @@ export interface BootDaemonOptions {
 	profilesImportPath?: string;
 	/** Upload limits for the desktop app's files. */
 	uploadLimits?: { fileBytes: number; messageBytes: number; files: number };
+	/** OAuth runner for the connectors' own sign-in; tests inject a stand-in. */
+	connectorOAuth?: NonNullable<ConstructorParameters<typeof import('../src/connectors.ts').ConnectorManager>[0]['oauth']>;
 	/** Upload limits for the desktop app's files. */
 	uploadLimits?: { fileBytes: number; messageBytes: number; files: number };
 }
@@ -177,6 +179,7 @@ export async function bootDaemon(options: BootDaemonOptions = {}): Promise<Boote
 		...(options.authRuntime ? { authRuntime: options.authRuntime } : {}),
 		...(options.profilesImportPath ? { profilesImportPath: options.profilesImportPath } : {}),
 		...(options.uploadLimits ? { uploadLimits: options.uploadLimits } : {}),
+		...(options.connectorOAuth ? { connectorOAuth: options.connectorOAuth } : {}),
 		...(options.uploadLimits ? { uploadLimits: options.uploadLimits } : {}),
 	});
 
