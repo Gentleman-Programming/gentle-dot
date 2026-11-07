@@ -14,6 +14,7 @@ import {
 	isGentleAiBinary,
 	parseWindowsArgs,
 	payloadDifferences,
+	pnpmInvocation,
 	RUNTIME_HASH_SAMPLE,
 	sevenZipCandidates,
 	sha256File,
@@ -69,22 +70,23 @@ function buildInstallers(runtime) {
 	const { productName, version } = JSON.parse(readFileSync(join(TAURI, "tauri.conf.json"), "utf8"));
 	const config = windowsReleaseConfig({ runtime });
 	say(`tauri build --bundles nsis,msi (release, runtime ${runtime})`);
-	run(
-		"pnpm",
-		[
-			"--filter",
-			"@gentle-dot/desktop",
-			"exec",
-			"tauri",
-			"build",
-			"--bundles",
-			"nsis,msi",
-			"--config",
-			JSON.stringify(config),
-		],
+	// pnpm through its JavaScript entry: a bare "pnpm" spawn misses the .cmd shim on Windows.
+	const tauriBuild = pnpmInvocation([
+		"--filter",
+		"@gentle-dot/desktop",
+		"exec",
+		"tauri",
+		"build",
+		"--bundles",
+		"nsis,msi",
+		"--config",
+		JSON.stringify(config),
+	]);
+	run(tauriBuild.command, tauriBuild.args, {
+		cwd: REPO,
 		// Non-interactive bundler, and a release app that requires its packaged runtime.
-		{ cwd: REPO, env: windowsBuildEnv(process.env) },
-	);
+		env: windowsBuildEnv(process.env),
+	});
 	const names = windowsInstallerNames(productName, version);
 	const installers = { NSIS: join(BUNDLE, "nsis", names.nsis), MSI: join(BUNDLE, "msi", names.msi) };
 	for (const [kind, path] of Object.entries(installers))

@@ -160,6 +160,14 @@ describe("windowsBuildEnv", () => {
 		expect(script).toMatch(/"tauri",\s*"build"[\s\S]*?env: windowsBuildEnv\(process\.env\)/);
 	});
 
+	it("runs tauri build through pnpmInvocation, never a bare pnpm spawn that misses the .cmd shim", () => {
+		const script = readFileSync(join(REPO, "scripts/package/package-windows.mjs"), "utf8");
+		expect(script).not.toMatch(/run\(\s*"pnpm"/);
+		expect(script).toMatch(
+			/pnpmInvocation\(\s*\[\s*"--filter",\s*"@gentle-dot\/desktop",\s*"exec",\s*"tauri",\s*"build"/,
+		);
+	});
+
 	it("is the marker build.rs embeds and the release daemon checks", () => {
 		const build = readFileSync(join(REPO, "apps/desktop/src-tauri/build.rs"), "utf8");
 		const daemon = readFileSync(join(REPO, "apps/desktop/src-tauri/src/daemon.rs"), "utf8");
