@@ -1,9 +1,11 @@
 // Pure helpers for staging the installed app's runtime (`stage-runtime.mjs`).
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	copyFileSync,
 	cpSync,
 	createReadStream,
+	existsSync,
 	lstatSync,
 	mkdirSync,
 	readdirSync,
@@ -268,6 +270,29 @@ export function symlinksIn(dir, prefix = "") {
 
 export function formatSize(bytes) {
 	return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/**
+ * A copied Windows source tree has no Git revision; never manufacture one. That label is for a
+ * local copy only: CI stages release candidates, which must name their daemon commit.
+ */
+export function daemonSourceRevision(
+	repo,
+	platform = process.platform,
+	present = existsSync,
+	git = execFileSync,
+	ci = process.env.CI,
+) {
+	if (platform === "win32" && !present(join(repo, ".git"))) {
+		if (ci)
+			throw new Error(
+				`CI must stage from a Git checkout: ${repo} has no .git, so the runtime would have no daemon commit.`,
+			);
+		return "snapshot-unversioned";
+	}
+	const commit = git("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+	const dirty = git("git", ["status", "--porcelain", "--", "packages"], { cwd: repo, encoding: "utf8" });
+	return dirty.trim() ? `${commit}-dirty` : commit;
 }
 
 /** The runtime's `MANIFEST.json` content. */

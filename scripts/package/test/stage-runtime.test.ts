@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { installerEnv, pnpmInvocation, windowsBuildGo } from "../lib.mjs";
+import { daemonSourceRevision, installerEnv, pnpmInvocation, windowsBuildGo } from "../lib.mjs";
 
 describe("Windows staging install", () => {
 	it("admits only explicitly provisioned Go and adds only its directory to installer PATH", () => {
@@ -116,5 +116,43 @@ describe("pnpm invocation", () => {
 	it("keeps the plain pnpm command elsewhere", () => {
 		expect(pnpmInvocation(args, "linux", {})).toEqual({ command: "pnpm", args });
 		expect(pnpmInvocation(args, "darwin", {})).toEqual({ command: "pnpm", args });
+	});
+});
+
+describe("daemon source revision", () => {
+	const noGit = () => {
+		throw new Error("must not invoke git for a snapshot");
+	};
+
+	it("labels a Windows tree without .git as unversioned, and refuses that label in CI", () => {
+		expect(daemonSourceRevision("C:\\snapshot", "win32", () => false, noGit, "")).toBe(
+			"snapshot-unversioned",
+		);
+		for (const ci of ["true", "1"])
+			expect(() => daemonSourceRevision("C:\\snapshot", "win32", () => false, noGit, ci)).toThrow(
+				"CI must stage from a Git checkout: C:\\snapshot has no .git, so the runtime would have no daemon commit.",
+			);
+	});
+
+	it("keeps the Git revision and the dirty marker wherever .git exists", () => {
+		for (const platform of ["linux", "darwin", "win32"] as const) {
+			const calls: unknown[] = [];
+			const git = (command: string, args: string[], options: unknown) => {
+				calls.push([command, args, options]);
+				return args[0] === "rev-parse" ? "abc123\n" : " M packages/daemon/src/cli.ts\n";
+			};
+			expect(daemonSourceRevision("/repo", platform, () => true, git, "true")).toBe("abc123-dirty");
+			expect(calls).toEqual([
+				["git", ["rev-parse", "HEAD"], { cwd: "/repo", encoding: "utf8" }],
+				["git", ["status", "--porcelain", "--", "packages"], { cwd: "/repo", encoding: "utf8" }],
+			]);
+			const clean = (_command: string, args: string[]) => (args[0] === "rev-parse" ? "abc123\n" : "");
+			expect(daemonSourceRevision("/repo", platform, () => true, clean, "")).toBe("abc123");
+		}
+	});
+
+	it("keeps the Git revision on POSIX even without .git, as the stager did before", () => {
+		const git = (_command: string, args: string[]) => (args[0] === "rev-parse" ? "def456\n" : "");
+		expect(daemonSourceRevision("/repo", "linux", () => false, git, "")).toBe("def456");
 	});
 });

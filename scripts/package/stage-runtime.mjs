@@ -26,6 +26,7 @@ import {
 	assertHostTarget,
 	buildManifest,
 	checksumFor,
+	daemonSourceRevision,
 	engramArchiveName,
 	engramReleaseVersion,
 	formatSize,
@@ -315,12 +316,7 @@ function stageEngramGuard(out, target) {
 }
 
 function daemonCommit() {
-	const commit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO, encoding: "utf8" }).trim();
-	const dirty = execFileSync("git", ["status", "--porcelain", "--", "packages"], {
-		cwd: REPO,
-		encoding: "utf8",
-	});
-	return dirty.trim() ? `${commit}-dirty` : commit;
+	return daemonSourceRevision(REPO);
 }
 
 async function main() {
