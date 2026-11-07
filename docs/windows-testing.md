@@ -111,9 +111,9 @@ If the webview's developer console reports `tray icon is missing`, note your bui
 
 ### 7. Toggle shortcut
 
-The Windows default global shortcut is `Ctrl+Shift+Space` (`Alt+Space` on macOS and Linux; on Windows `Alt+Space` opens the window menu, so a global hotkey on it would take that away).
+The Windows default global shortcut is `Ctrl+Alt+Space` (`Alt+Space` on macOS and Linux; on Windows `Alt+Space` opens the window menu, so a global hotkey on it would take that away).
 
-**Expected** (measured on Windows 11): pressing `Ctrl+Shift+Space` toggles the panel — it opens when hidden and hides when open, from any app (including with the panel focused). In the panel's Settings, change the shortcut and confirm the new combination toggles the panel; **Reset to default** returns to `Ctrl+Shift+Space` (measured: `Ctrl+Alt+Space` toggled, and the reset came back to `Ctrl+Shift+Space`). Pressing `Alt+Space` opens the Windows window menu, not the panel (measured).
+**Expected**: pressing `Ctrl+Alt+Space` toggles the panel — it opens when hidden and hides when open, from any app (including with the panel focused). In the panel's Settings, change the shortcut and confirm the new combination toggles the panel; **Reset to default** returns to `Ctrl+Alt+Space` (measured: `Ctrl+Alt+Space` toggled, and the reset came back to `Ctrl+Alt+Space`). Pressing `Alt+Space` opens the Windows window menu, not the panel (measured).
 
 ### 8. Sign in with an API key
 
@@ -192,7 +192,7 @@ Autostart uses `tauri-plugin-autostart`, whose Windows backend registers the app
 | `biome check` reports around 178 errors, one per line, after switching branches | CRLF left over in an existing checkout. Renormalize with `git add --renormalize .`, then confirm `git diff --stat` stays empty. |
 | The app opens but no webview loads | You are running a **debug** build. Debug builds load the UI from the Vite dev server, which is not running (measured on Windows 11). Build a release with `pnpm --filter @gentle-dot/desktop build`, or start the UI dev server first. |
 | A connector that needs a secret or an approval never runs | Expected: the daemon and the app are not connected. The app answers secret requests and approvals over the private channel it creates before it spawns the daemon (W7); a daemon started outside the app has no channel and refuses both. |
-| `Ctrl+Shift+Space` does not toggle the panel | Check that another app does not hold that combination; pick another shortcut in the panel's Settings. `Alt+Space` opening the Windows window menu is expected: it is Windows' window-menu key, not this app's default. |
+| `Ctrl+Alt+Space` does not toggle the panel | Check that another app does not hold that combination; pick another shortcut in the panel's Settings. `Alt+Space` opening the Windows window menu is expected: it is Windows' window-menu key, not this app's default. |
 | The webview console reports `tray icon is missing` | Note your build. An early build had an ordering bug that is fixed. |
 | `%USERPROFILE%\.gentle-dot\daemon.log` says the connector cannot get its secrets | Expected until W7 lands. |
 
@@ -220,7 +220,7 @@ Build command:                (pnpm --filter @gentle-dot/desktop build)
 | 4 | Click opens the panel         |                                      |       |
 | 5 | Drag and snap                 |                                      |       |
 | 6 | Tray icon and menu            |                                      |       |
-| 7 | Toggle shortcut               |                                      | Windows default Ctrl+Shift+Space |
+| 7 | Toggle shortcut               |                                      | Windows default Ctrl+Alt+Space |
 | 8 | Sign in with an API key       |                                      |       |
 | 9 | Chat                          |                                      |       |
 |10 | Profiles                      |                                      |       |

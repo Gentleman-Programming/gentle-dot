@@ -216,7 +216,7 @@ The app itself never changes after it is built; everything it writes goes to the
 
 ### Panel shortcut and launch at login
 
-The panel opens with the global shortcut **`Ctrl+Shift+Space`**. macOS and Linux keep `Alt+Space`, which is Windows' window-menu key and a poor default for a global hotkey (it would take that menu away from every app). Change it in the panel's Settings or as `shortcut` in `config.json`; **Launch at login** in the tray menu registers the app as **`Gentle Dot`** under the Windows `Run` key — normally `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run`, or `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run` when the app runs with administrator rights, which starts it for every user.
+The panel opens with the global shortcut **`Ctrl+Alt+Space`**. macOS and Linux keep `Alt+Space`, which is Windows' window-menu key and a poor default for a global hotkey (it would take that menu away from every app). Change it in the panel's Settings or as `shortcut` in `config.json`; **Launch at login** in the tray menu registers the app as **`Gentle Dot`** under the Windows `Run` key — normally `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run`, or `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run` when the app runs with administrator rights, which starts it for every user.
 
 ### Memory
 

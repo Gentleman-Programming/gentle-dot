@@ -67,13 +67,13 @@ impl Os {
     }
 
     /// The panel shortcut a fresh install binds. macOS and Linux keep `Alt+Space`; Windows uses
-    /// `Ctrl+Shift+Space`, because `Alt+Space` opens the window menu in every app and a global
+    /// `Ctrl+Alt+Space`, because `Alt+Space` opens the window menu in every app and a global
     /// hotkey on it would take that menu away. The OS does not refuse it — measured on Windows 11,
     /// `RegisterHotKey` accepts `Alt+Space`; the conflict is what makes it a poor default.
     pub fn default_shortcut(self) -> &'static str {
         match self {
             Os::MacOs | Os::Linux => "Alt+Space",
-            Os::Windows => "Ctrl+Shift+Space",
+            Os::Windows => "Ctrl+Alt+Space",
         }
     }
 }
@@ -536,7 +536,7 @@ mod tests {
     #[test]
     fn every_os_picks_its_own_default_shortcut() {
         // Alt+Space opens the window menu on Windows, so the default must not name it there.
-        assert_eq!(Os::Windows.default_shortcut(), "Ctrl+Shift+Space");
+        assert_eq!(Os::Windows.default_shortcut(), "Ctrl+Alt+Space");
         assert_eq!(Os::MacOs.default_shortcut(), "Alt+Space");
         assert_eq!(Os::Linux.default_shortcut(), "Alt+Space");
     }
