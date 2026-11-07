@@ -18,7 +18,7 @@ use crate::secure_store::{self, SecretStore};
 use crate::shortcut;
 use crate::status::{is_template, tray_status, TrayGlyph};
 use crate::voice::app as voice;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -406,26 +406,57 @@ fn memory_get(app: AppHandle) -> MemoryInfo {
 }
 
 /// Saves the memory mode and restarts the assistant so the engine picks it up (SW9). An unchanged
-/// value is a no-op: nothing is written and the assistant is left running.
+/// value is a no-op: nothing is written and the assistant is left running. A failed restart is an
+/// error the panel shows; the mode stays saved, so the next start of the assistant uses it.
 #[tauri::command]
 async fn memory_set(app: AppHandle, memory: String) -> CommandResult<MemoryInfo> {
     tauri::async_runtime::spawn_blocking(move || {
         let mode = config::MemoryMode::parse(&memory)?;
-        let (data_dir, current) = {
-            let shell = app.state::<Shell>();
-            let current = shell.memory.lock().unwrap().clone();
-            (shell.config.data_dir.clone(), current)
-        };
-        // An invalid value is never equal to a mode, so choosing one repairs the file.
-        if current != Ok(mode) {
-            config::save_memory(&data_dir.join("config.json"), mode)?;
-            *app.state::<Shell>().memory.lock().unwrap() = Ok(mode);
-            restart_daemon(app.clone());
-        }
+        let shell = app.state::<Shell>();
+        let config_file = shell.config.data_dir.join("config.json");
+        let (daemon, port) = (shell.daemon.clone(), shell.config.port);
+        apply_memory(&shell.memory, &config_file, mode, || {
+            memory_restart_result(daemon.restart(DAEMON_START_TIMEOUT), port)
+        })?;
         Ok(MemoryInfo { memory: Some(mode.as_str()), error: None })
     })
     .await
     .map_err(err)?
+}
+
+/// Records `mode` as the memory mode (SW9): the lock is held across reading the current mode,
+/// writing `config.json` and updating it, so two calls cannot interleave their read and write.
+/// `restart` runs after the lock is released (a restart takes seconds and `memory_get` reads the
+/// same lock) and only when the mode changed; its error is the caller's. An invalid value is never
+/// equal to a mode, so choosing one repairs the file.
+fn apply_memory(
+    state: &Mutex<Result<config::MemoryMode, String>>,
+    config_file: &Path,
+    mode: config::MemoryMode,
+    restart: impl FnOnce() -> CommandResult,
+) -> CommandResult {
+    {
+        let mut current = state.lock().unwrap();
+        if *current == Ok(mode) {
+            return Ok(());
+        }
+        config::save_memory(config_file, mode)?;
+        *current = Ok(mode);
+    }
+    restart()
+}
+
+/// What `memory_set` tells the panel about a restart: the new mode is already saved either way.
+fn memory_restart_result(outcome: RestartOutcome, port: u16) -> CommandResult {
+    match outcome {
+        RestartOutcome::Restarted => Ok(()),
+        RestartOutcome::External => {
+            Err(format!("The memory mode was saved, but the assistant was not restarted. {}", daemon::foreign_daemon_message(port)))
+        }
+        RestartOutcome::Failed(error) => {
+            Err(format!("The memory mode was saved, but the assistant could not restart: {error}"))
+        }
+    }
 }
 
 struct ShortcutHost<'a> {
@@ -1218,5 +1249,86 @@ mod tests {
             let page_paints_its_own = url.ends_with("effects=none");
             assert_eq!(panel_material(effect).is_none(), page_paints_its_own, "{effect:?} gives {url}");
         }
+    }
+
+    fn memory_scratch(name: &str) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-scratch/shell-memory").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn memory_set_saves_the_mode_then_restarts_once() {
+        let file = memory_scratch("changed").join("config.json");
+        std::fs::write(&file, r#"{ "memory": "shared" }"#).unwrap();
+        let state = Mutex::new(Ok(config::MemoryMode::Shared));
+        let mut restarts = 0;
+        let result = apply_memory(&state, &file, config::MemoryMode::Private, || {
+            restarts += 1;
+            Ok(())
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(restarts, 1);
+        assert_eq!(*state.lock().unwrap(), Ok(config::MemoryMode::Private));
+        assert_eq!(std::fs::read_to_string(&file).unwrap().replace(char::is_whitespace, ""), r#"{"memory":"private"}"#);
+    }
+
+    #[test]
+    fn memory_set_to_the_current_mode_writes_and_restarts_nothing() {
+        let file = memory_scratch("same").join("config.json");
+        let state = Mutex::new(Ok(config::MemoryMode::Shared));
+        let result = apply_memory(&state, &file, config::MemoryMode::Shared, || panic!("must not restart"));
+        assert_eq!(result, Ok(()));
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn memory_set_repairs_an_invalid_value_and_restarts() {
+        let file = memory_scratch("repair").join("config.json");
+        std::fs::write(&file, r#"{ "memory": "Private" }"#).unwrap();
+        let state = Mutex::new(Err(config::invalid_memory("Private")));
+        let mut restarts = 0;
+        let result = apply_memory(&state, &file, config::MemoryMode::Shared, || {
+            restarts += 1;
+            Ok(())
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(restarts, 1);
+        assert_eq!(*state.lock().unwrap(), Ok(config::MemoryMode::Shared));
+    }
+
+    #[test]
+    fn memory_set_returns_the_restart_failure_and_keeps_the_saved_mode() {
+        let file = memory_scratch("restart-fails").join("config.json");
+        std::fs::write(&file, r#"{ "memory": "shared" }"#).unwrap();
+        let state = Mutex::new(Ok(config::MemoryMode::Shared));
+        let result = apply_memory(&state, &file, config::MemoryMode::Private, || {
+            memory_restart_result(RestartOutcome::Failed("no port".to_string()), 4317)
+        });
+        assert_eq!(result, Err("The memory mode was saved, but the assistant could not restart: no port".to_string()));
+        assert_eq!(*state.lock().unwrap(), Ok(config::MemoryMode::Private));
+        assert!(std::fs::read_to_string(&file).unwrap().contains("private"));
+    }
+
+    #[test]
+    fn memory_set_does_not_restart_when_saving_fails() {
+        // The folder does not exist as a directory: its parent is a file.
+        let dir = memory_scratch("save-fails");
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, "").unwrap();
+        let state = Mutex::new(Ok(config::MemoryMode::Shared));
+        let result = apply_memory(&state, &blocker.join("config.json"), config::MemoryMode::Private, || {
+            panic!("must not restart")
+        });
+        assert!(result.is_err());
+        assert_eq!(*state.lock().unwrap(), Ok(config::MemoryMode::Shared));
+    }
+
+    #[test]
+    fn a_foreign_assistant_after_a_memory_restart_is_an_error_naming_the_port() {
+        let result = memory_restart_result(RestartOutcome::External, 4317);
+        assert!(result.unwrap_err().contains("port 4317"));
+        assert_eq!(memory_restart_result(RestartOutcome::Restarted, 4317), Ok(()));
     }
 }
