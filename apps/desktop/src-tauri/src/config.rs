@@ -81,13 +81,13 @@ fn valid_port(value: Option<u64>) -> Option<u16> {
 }
 
 /// Resolves the port, shortcut and memory mode: environment first, then the file, then defaults.
-/// A missing or unreadable file never prevents the app from starting; a `memory` value the file
-/// spells differently from `shared`/`private` is refused with a named error (SW9).
+/// A missing or invalid file never prevents the app from starting, and neither does an invalid
+/// value in it: each key falls back to its default, `memory` included (SW9).
 pub fn parse_config(
     data_dir: PathBuf,
     file: Option<&str>,
     env: impl Fn(&str) -> Option<String>,
-) -> Result<DesktopConfig, String> {
+) -> DesktopConfig {
     let file: serde_json::Value = file
         .and_then(|text| serde_json::from_str(text).ok())
         .filter(serde_json::Value::is_object)
@@ -101,18 +101,11 @@ pub fn parse_config(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| default_shortcut())
         .to_string();
-    let memory = parse_memory(&file)?;
-    Ok(DesktopConfig { data_dir, port, shortcut, memory })
-}
-
-/// The mode `config.json` names: `shared` when the key is absent, matching the daemon, which reads
-/// `undefined` as shared but refuses `null` and every other spelling with a named error.
-fn parse_memory(file: &serde_json::Value) -> Result<MemoryMode, String> {
-    match file.get("memory") {
-        None => Ok(MemoryMode::DEFAULT),
-        Some(serde_json::Value::String(text)) => MemoryMode::parse(text),
-        Some(other) => Err(invalid_memory(&other.to_string())),
-    }
+    let memory = file["memory"]
+        .as_str()
+        .and_then(|text| MemoryMode::parse(text).ok())
+        .unwrap_or(MemoryMode::DEFAULT);
+    DesktopConfig { data_dir, port, shortcut, memory }
 }
 
 /// Nothing names a home folder, so there is nowhere to keep the app's data.
@@ -138,7 +131,7 @@ pub fn load_config() -> Result<DesktopConfig, String> {
     let env = |key: &str| std::env::var(key).ok();
     let dir = resolve_data_dir(crate::platform::Os::CURRENT, &env)?;
     let file = std::fs::read_to_string(dir.join("config.json")).ok();
-    parse_config(dir, file.as_deref(), &env)
+    Ok(parse_config(dir, file.as_deref(), &env))
 }
 
 pub const INVALID_CONFIG: &str =
@@ -277,7 +270,7 @@ mod tests {
 
     #[test]
     fn defaults_without_file() {
-        let config = parse_config(dir(), None, env_of(&[])).unwrap();
+        let config = parse_config(dir(), None, env_of(&[]));
         assert_eq!(
             config,
             DesktopConfig { data_dir: dir(), port: DEFAULT_PORT, shortcut: default_shortcut().into(), memory: MemoryMode::DEFAULT }
@@ -286,56 +279,60 @@ mod tests {
 
     #[test]
     fn reads_port_and_shortcut_from_file() {
-        let config = parse_config(dir(), Some(r#"{ "port": 5000, "shortcut": "Cmd+Shift+K", "workspace": "~" }"#), env_of(&[])).unwrap();
+        let config = parse_config(dir(), Some(r#"{ "port": 5000, "shortcut": "Cmd+Shift+K", "workspace": "~" }"#), env_of(&[]));
         assert_eq!(config.port, 5000);
         assert_eq!(config.shortcut, "Cmd+Shift+K");
     }
 
     #[test]
     fn memory_defaults_to_shared_and_reads_from_the_file() {
-        assert_eq!(parse_config(dir(), None, env_of(&[])).unwrap().memory, MemoryMode::Shared);
-        let private = parse_config(dir(), Some(r#"{ "memory": "private" }"#), env_of(&[])).unwrap();
+        assert_eq!(parse_config(dir(), None, env_of(&[])).memory, MemoryMode::Shared);
+        let private = parse_config(dir(), Some(r#"{ "memory": "private" }"#), env_of(&[]));
         assert_eq!(private.memory, MemoryMode::Private);
-        let shared = parse_config(dir(), Some(r#"{ "memory": "shared" }"#), env_of(&[])).unwrap();
+        let shared = parse_config(dir(), Some(r#"{ "memory": "shared" }"#), env_of(&[]));
         assert_eq!(shared.memory, MemoryMode::Shared);
     }
 
     #[test]
-    fn an_invalid_memory_value_is_refused_with_the_file_and_the_value() {
-        // The daemon reads only an absent key as shared; `null` is refused like any other value.
+    fn an_invalid_memory_value_falls_back_to_shared() {
+        // The app must still start, so `memory` falls back like `port` and `shortcut` do.
         let cases = [
-            (r#"{ "memory": "privat" }"#, "privat"),
-            (r#"{ "memory": "Private" }"#, "Private"),
-            (r#"{ "memory": null }"#, "null"),
-            (r#"{ "memory": 3 }"#, "3"),
-            (r#"{ "memory": true }"#, "true"),
+            r#"{ "memory": "privat" }"#,
+            r#"{ "memory": "Private" }"#,
+            r#"{ "memory": null }"#,
+            r#"{ "memory": 3 }"#,
+            r#"{ "memory": true }"#,
         ];
-        for (file, value) in cases {
-            assert_eq!(parse_config(dir(), Some(file), env_of(&[])), Err(format!("Invalid memory in config.json: {value}")));
+        for file in cases {
+            let config = parse_config(dir(), Some(file), env_of(&[("GENTLE_DOT_PORT", "6000")]));
+            assert_eq!(config.memory, MemoryMode::DEFAULT, "{file}");
+            // The other keys are resolved as usual.
+            assert_eq!(config.port, 6000, "{file}");
+            assert_eq!(config.shortcut, default_shortcut(), "{file}");
         }
     }
 
     #[test]
     fn env_port_overrides_file() {
-        let config = parse_config(dir(), Some(r#"{ "port": 5000 }"#), env_of(&[("GENTLE_DOT_PORT", "6000")])).unwrap();
+        let config = parse_config(dir(), Some(r#"{ "port": 5000 }"#), env_of(&[("GENTLE_DOT_PORT", "6000")]));
         assert_eq!(config.port, 6000);
     }
 
     #[test]
     fn invalid_values_fall_back() {
-        let config = parse_config(dir(), Some(r#"{ "port": 70000, "shortcut": 3 }"#), env_of(&[("GENTLE_DOT_PORT", "abc")])).unwrap();
+        let config = parse_config(dir(), Some(r#"{ "port": 70000, "shortcut": 3 }"#), env_of(&[("GENTLE_DOT_PORT", "abc")]));
         assert_eq!(config.port, DEFAULT_PORT);
         assert_eq!(config.shortcut, default_shortcut());
-        let config = parse_config(dir(), Some(r#"{ "port": "5001", "shortcut": "  " }"#), env_of(&[])).unwrap();
+        let config = parse_config(dir(), Some(r#"{ "port": "5001", "shortcut": "  " }"#), env_of(&[]));
         assert_eq!(config.port, DEFAULT_PORT);
         assert_eq!(config.shortcut, default_shortcut());
     }
 
     #[test]
     fn corrupt_file_falls_back_to_defaults() {
-        let config = parse_config(dir(), Some("{ not json"), env_of(&[])).unwrap();
+        let config = parse_config(dir(), Some("{ not json"), env_of(&[]));
         assert_eq!(config.port, DEFAULT_PORT);
-        let config = parse_config(dir(), Some("[1, 2]"), env_of(&[])).unwrap();
+        let config = parse_config(dir(), Some("[1, 2]"), env_of(&[]));
         assert_eq!(config.shortcut, default_shortcut());
     }
 
@@ -358,15 +355,15 @@ mod tests {
     fn parsing_is_unchanged_after_saving_a_shortcut() {
         // The file the app writes reads back like any hand-written one: port, shortcut, defaults.
         let text = with_shortcut(Some(r#"{ "port": 5000, "workspace": "~" }"#), "Shift+Super+K").unwrap();
-        let config = parse_config(dir(), Some(&text), env_of(&[])).unwrap();
+        let config = parse_config(dir(), Some(&text), env_of(&[]));
         assert_eq!(
             config,
             DesktopConfig { data_dir: dir(), port: 5000, shortcut: "Shift+Super+K".into(), memory: MemoryMode::DEFAULT }
         );
-        let config = parse_config(dir(), Some(&text), env_of(&[("GENTLE_DOT_PORT", "6000")])).unwrap();
+        let config = parse_config(dir(), Some(&text), env_of(&[("GENTLE_DOT_PORT", "6000")]));
         assert_eq!(config.port, 6000);
         let text = with_shortcut(None, "F5").unwrap();
-        assert_eq!(parse_config(dir(), Some(&text), env_of(&[])).unwrap().port, DEFAULT_PORT);
+        assert_eq!(parse_config(dir(), Some(&text), env_of(&[])).port, DEFAULT_PORT);
     }
 
     #[test]
@@ -413,7 +410,7 @@ mod tests {
         // A missing file is created.
         let fresh = scratch("fresh").join("config.json");
         save_shortcut(&fresh, "F5").unwrap();
-        assert_eq!(parse_config(dir.clone(), std::fs::read_to_string(&fresh).ok().as_deref(), env_of(&[])).unwrap().shortcut, "F5");
+        assert_eq!(parse_config(dir.clone(), std::fs::read_to_string(&fresh).ok().as_deref(), env_of(&[])).shortcut, "F5");
     }
 
     #[test]
@@ -432,7 +429,7 @@ mod tests {
             assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
         }
         // The file the app wrote reads back as the private mode, with the other keys kept.
-        let config = parse_config(dir.clone(), std::fs::read_to_string(&file).ok().as_deref(), env_of(&[])).unwrap();
+        let config = parse_config(dir.clone(), std::fs::read_to_string(&file).ok().as_deref(), env_of(&[]));
         assert_eq!(config.memory, MemoryMode::Private);
         assert_eq!(config.shortcut, "Alt+Space");
         // A missing file is created with just the key.
