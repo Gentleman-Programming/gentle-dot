@@ -27,7 +27,24 @@ function launchNodePath(): string {
 	return path;
 }
 
+/** The runtime folders the Windows launch spec puts on PATH, read from its `format!("{};{};...")` block. */
+function launchPathDirs(source: string): string[] {
+	// Up to the closing `),` of the format! call: its arguments hold `)` themselves.
+	const block = /format!\("\{\};\{\};[^"]*",([\s\S]*?)\),\s*\n/.exec(source)?.[1];
+	if (!block) throw new Error("launch.rs has no Windows PATH format! block.");
+	return [...block.matchAll(/dir\.join\("([^"]+)"\)/g)].map((match) => match[1]);
+}
+
 describe("Windows runtime layout against launch.rs", () => {
+	it("puts the folder of the Node it runs on the PATH it builds", () => {
+		const nodeDir = launchNodePath().replace(/\/node\.exe$/, "");
+		expect(launchPathDirs(launch)).toContain(nodeDir);
+		// A PATH entry that drifts from the Node path is caught, not only a moved node.exe.
+		const drifted = launch.replace('dir.join("node/bin").display()', 'dir.join("node").display()');
+		expect(drifted).not.toBe(launch);
+		expect(launchPathDirs(drifted)).not.toContain(nodeDir);
+	});
+
 	it("reads a non-trivial required-file list and a Node path from launch.rs", () => {
 		expect(requiredRuntimeFiles().length).toBeGreaterThan(5);
 		expect(launchNodePath()).toBe("node/bin/node.exe");
