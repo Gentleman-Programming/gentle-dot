@@ -273,17 +273,18 @@ async function stageEngram(out, target, requested) {
 	const { version, source } = await engramVersion(requested);
 	say(`Engram ${version} (${source})`);
 	const base = `${ENGRAM_RELEASES}/download/v${version}`;
-	const archiveName = engramArchiveName(version, target);
+	const listing = await text(`${base}/checksums.txt`);
+	const archiveName = engramArchiveName(version, target, listing);
 	const archive = await verifiedDownload(
 		`${base}/${archiveName}`,
 		archiveName,
-		checksumFor(await text(`${base}/checksums.txt`), archiveName),
+		checksumFor(listing, archiveName),
 	);
 	const windows = TARGETS[target].platform === "win32";
 	const binaryName = windows ? "engram.exe" : "engram";
 	const extracted = mkdtempSync(join(CACHE, "engram-"));
-	if (windows) extractZip(archive, extracted);
-	else run("tar", ["-xzf", archive, "-C", extracted, "engram"]);
+	if (archiveName.endsWith(".zip")) extractZip(archive, extracted);
+	else run("tar", ["-xzf", archive, "-C", extracted, ...(windows ? [] : ["engram"])]);
 	const binary = findFile(extracted, binaryName);
 	if (!binary || !lstatSync(binary).isFile()) throw new Error(`${archiveName} has no regular ${binaryName}.`);
 	copyFileSync(binary, join(out, "bin", binaryName));

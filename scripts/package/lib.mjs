@@ -97,8 +97,30 @@ export function nodeArchiveName(version, target) {
 	return `node-v${version}-${TARGETS[target].node}.${archiveExtension(target)}`;
 }
 
-export function engramArchiveName(version, target) {
-	return `engram_${version}_${TARGETS[target].engram}.${archiveExtension(target)}`;
+/**
+ * The Engram release archive for `target`. Windows releases have shipped both ZIP and tar.gz, so
+ * given the release's checksum `listing` the Windows name is the one format it lists, and it must
+ * list exactly one. Without a listing the name is the target's usual extension, unchecked.
+ */
+export function engramArchiveName(version, target, listing) {
+	const base = `engram_${version}_${TARGETS[target].engram}`;
+	if (TARGETS[target].platform !== "win32" || listing === undefined)
+		return `${base}.${archiveExtension(target)}`;
+	const candidates = ["zip", "tar.gz"]
+		.map((extension) => `${base}.${extension}`)
+		.filter((name) => {
+			try {
+				checksumFor(listing, name);
+				return true;
+			} catch {
+				return false;
+			}
+		});
+	if (candidates.length !== 1)
+		throw new Error(
+			"Windows Engram needs exactly one supported archive in the release checksum list (ZIP or tar.gz).",
+		);
+	return candidates[0];
 }
 
 /** Explicit build prerequisite only; never search or inherit the user's entire PATH. */

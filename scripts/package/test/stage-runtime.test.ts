@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { daemonSourceRevision, installerEnv, pnpmInvocation, windowsBuildGo } from "../lib.mjs";
+import {
+	daemonSourceRevision,
+	engramArchiveName,
+	installerEnv,
+	pnpmInvocation,
+	windowsBuildGo,
+} from "../lib.mjs";
 
 describe("Windows staging install", () => {
 	it("admits only explicitly provisioned Go and adds only its directory to installer PATH", () => {
@@ -154,5 +160,36 @@ describe("daemon source revision", () => {
 	it("keeps the Git revision on POSIX even without .git, as the stager did before", () => {
 		const git = (_command: string, args: string[]) => (args[0] === "rev-parse" ? "def456\n" : "");
 		expect(daemonSourceRevision("/repo", "linux", () => false, git, "")).toBe("def456");
+	});
+});
+
+describe("Windows Engram archive", () => {
+	const line = (name: string) => `${"a".repeat(64)}  ${name}`;
+
+	it("takes the one archive format the release checksum list names, ZIP or tar.gz", () => {
+		for (const target of ["win-x64", "win-arm64"]) {
+			const arch = target === "win-x64" ? "amd64" : "arm64";
+			for (const extension of ["zip", "tar.gz"]) {
+				const name = `engram_3.2.1_windows_${arch}.${extension}`;
+				expect(engramArchiveName("3.2.1", target, `${line(name)}\n`)).toBe(name);
+			}
+		}
+	});
+
+	it("refuses a checksum list with none or both formats", () => {
+		const usage = /exactly one supported archive in the release checksum list/;
+		expect(() => engramArchiveName("3.2.1", "win-x64", "")).toThrow(usage);
+		expect(() => engramArchiveName("3.2.1", "win-x64", line("engram_3.2.1_linux_amd64.tar.gz"))).toThrow(
+			usage,
+		);
+		const both = ["zip", "tar.gz"].map((ext) => line(`engram_3.2.1_windows_amd64.${ext}`)).join("\n");
+		expect(() => engramArchiveName("3.2.1", "win-x64", both)).toThrow(usage);
+	});
+
+	it("leaves the other targets on their tar.gz, whatever the list says", () => {
+		expect(engramArchiveName("3.2.1", "linux-x64", "")).toBe("engram_3.2.1_linux_amd64.tar.gz");
+		expect(engramArchiveName("3.2.1", "darwin-arm64", line("engram_3.2.1_darwin_arm64.zip"))).toBe(
+			"engram_3.2.1_darwin_arm64.tar.gz",
+		);
 	});
 });
