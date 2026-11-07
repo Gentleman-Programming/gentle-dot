@@ -119,6 +119,7 @@ pnpm package:linux --arch arm64
 pnpm package:linux --arch amd64
 
 # Windows 10/11 (x86_64): stages the runtime and writes a self-contained NSIS and MSI
+# (set GENTLE_DOT_BUILD_GO to the real go.exe first, see docs/install.md)
 pnpm package:windows            # add --check to verify both payloads, which needs 7-Zip
 ```
 

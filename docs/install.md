@@ -176,10 +176,13 @@ Building the Windows installers needs Node.js 24, pnpm, Rust with the MSVC toolc
 
 From the repository root:
 
-```sh
+```powershell
 pnpm install
+$env:GENTLE_DOT_BUILD_GO = "C:\Program Files\Go\bin\go.exe"
 pnpm package:windows           # add --check to verify both installers (needs 7-Zip)
 ```
+
+`GENTLE_DOT_BUILD_GO` must be the full path of the real `go.exe` in `GOROOT\bin`, not a Scoop or Chocolatey shim; staging refuses anything else before it downloads or writes anything. gentle-pi's postinstall builds the Gentle AI engine from source with it. Staging runs `npm install` with a fixed environment instead of yours: a scratch home, the staged Node, the Windows system folders, and the folder of that `go.exe`. Your other variables, tokens such as `GITHUB_TOKEN` included, never reach the install scripts.
 
 `pnpm package:windows` stages the app's runtime (`build/runtime/win-x64`: Node, the assistant engine, a fallback Engram, the daemon, and the web UI), then runs the release build and writes two **self-contained** installers under `apps/desktop/src-tauri/target/release/bundle/`:
 

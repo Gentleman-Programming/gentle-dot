@@ -1,7 +1,7 @@
 // Pure helpers for staging the installed app's runtime (`stage-runtime.mjs`).
 import { createHash } from "node:crypto";
 import { createReadStream, lstatSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix, win32 } from "node:path";
 
 /**
  * The targets a runtime can be staged for, with the names Node's and Engram's
@@ -89,6 +89,62 @@ export function nodeArchiveName(version, target) {
 
 export function engramArchiveName(version, target) {
 	return `engram_${version}_${TARGETS[target].engram}.${archiveExtension(target)}`;
+}
+
+/** Explicit build prerequisite only; never search or inherit the user's entire PATH. */
+export function windowsBuildGo(source, isFile) {
+	const exe = source.GENTLE_DOT_BUILD_GO;
+	if (
+		!exe ||
+		!win32.isAbsolute(exe) ||
+		win32.basename(exe).toLowerCase() !== "go.exe" ||
+		/[;\r\n"]/.test(exe)
+	)
+		throw new Error(
+			"GENTLE_DOT_BUILD_GO must be the full path of the real go.exe in GOROOT\\bin (not a Scoop or Chocolatey shim), such as C:\\Program Files\\Go\\bin\\go.exe.",
+		);
+	if (!isFile(exe)) throw new Error(`GENTLE_DOT_BUILD_GO names ${exe}, which is not an existing file.`);
+	return exe;
+}
+
+/** Child-only environment: installers do not inherit the user's home or credentials. */
+export function installerEnv(out, cache, target, source = process.env, goExecutable) {
+	const windows = TARGETS[target].platform === "win32";
+	const path = windows ? win32.join : posix.join;
+	const home = path(cache, "npm-home");
+	const env = {
+		HOME: home,
+		PATH: `${path(out, "node", "bin")}:/usr/bin:/bin:/usr/sbin:/sbin`,
+		TMPDIR: source.TMPDIR ?? "/tmp",
+		npm_config_userconfig: path(cache, "npmrc"),
+		npm_config_cache: path(cache, "npm-cache"),
+		npm_config_registry: "https://registry.npmjs.org/",
+		npm_config_update_notifier: "false",
+	};
+	if (windows) {
+		const get = (key) =>
+			Object.entries(source).find(([name]) => name.toLowerCase() === key.toLowerCase())?.[1];
+		const root = get("SystemRoot");
+		if (!root) throw new Error("Windows installers require SystemRoot.");
+		delete env.TMPDIR;
+		Object.assign(env, {
+			USERPROFILE: home,
+			LOCALAPPDATA: path(home, "AppData", "Local"),
+			APPDATA: path(home, "AppData", "Roaming"),
+			SystemRoot: root,
+			ComSpec: path(root, "System32", "cmd.exe"),
+			// Node's Windows zip keeps node.exe and the npm shims in the folder's root.
+			PATH: [
+				path(out, "node"),
+				path(root, "System32"),
+				root,
+				...(goExecutable ? [win32.dirname(goExecutable)] : []),
+			].join(";"),
+			TEMP: get("TEMP") ?? get("TMP") ?? path(home, "Temp"),
+			TMP: get("TMP") ?? get("TEMP") ?? path(home, "Temp"),
+		});
+	}
+	return env;
 }
 
 /** The SHA-256 a `SHASUMS256.txt` / `checksums.txt` listing gives `fileName`; throws when it is absent. */

@@ -30,6 +30,7 @@ import {
 	engramReleaseVersion,
 	formatSize,
 	gentleAiProvenance,
+	installerEnv,
 	nodeArchiveName,
 	nodeVersion,
 	npmWrapper,
@@ -39,12 +40,12 @@ import {
 	treeSize,
 	verifyChecksum,
 	versionFromReleaseUrl,
+	windowsBuildGo,
 } from "./lib.mjs";
 
 const REPO = fileURLToPath(new URL("../..", import.meta.url));
 const CACHE = join(REPO, ".cache", "package");
 const ENGRAM_RELEASES = "https://github.com/Gentleman-Programming/engram/releases";
-const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 
 const say = (line) => process.stdout.write(`${line}\n`);
 
@@ -199,7 +200,7 @@ function openGentleAi(daemon) {
 	return integrity;
 }
 
-function installDaemonModules(out, target) {
+function installDaemonModules(out, target, goExecutable) {
 	const daemon = join(out, "daemon");
 	const npmHome = join(CACHE, "npm-home");
 	mkdirSync(npmHome, { recursive: true });
@@ -208,6 +209,10 @@ function installDaemonModules(out, target) {
 	say("Daemon dependencies (npm install --omit=dev)");
 	const windows = TARGETS[target].platform === "win32";
 	// A clean npm setup: no user npmrc, a cache of its own, and a scratch HOME for install scripts.
+	const env = installerEnv(out, CACHE, target, process.env, goExecutable);
+	if (windows)
+		for (const path of [env.LOCALAPPDATA, env.APPDATA, env.TEMP, env.TMP])
+			mkdirSync(path, { recursive: true });
 	const result = spawnSync(
 		windows ? join(out, "node", "node.exe") : join(out, "node", "bin", "node"),
 		[
@@ -225,26 +230,7 @@ function installDaemonModules(out, target) {
 			cwd: daemon,
 			encoding: "utf8",
 			maxBuffer: 64 * 1024 * 1024,
-			env: windows
-				? {
-						...process.env,
-						USERPROFILE: npmHome,
-						HOME: npmHome,
-						PATH: [join(out, "node"), join(out, "bin"), process.env.PATH ?? ""].filter(Boolean).join(";"),
-						npm_config_userconfig: npmrc,
-						npm_config_cache: join(CACHE, "npm-cache"),
-						npm_config_registry: "https://registry.npmjs.org/",
-						npm_config_update_notifier: "false",
-					}
-				: {
-						HOME: npmHome,
-						PATH: `${join(out, "node", "bin")}:${SYSTEM_PATH}`,
-						TMPDIR: process.env.TMPDIR ?? "/tmp",
-						npm_config_userconfig: npmrc,
-						npm_config_cache: join(CACHE, "npm-cache"),
-						npm_config_registry: "https://registry.npmjs.org/",
-						npm_config_update_notifier: "false",
-					},
+			env,
 		},
 	);
 	process.stdout.write(result.stdout ?? "");
@@ -343,6 +329,18 @@ async function main() {
 	const options = parseArgs(process.argv.slice(2));
 	const { target } = options;
 	assertHostTarget(target);
+	// Fail before output replacement or downloads; only the chosen Go directory is added to the
+	// installer's otherwise isolated PATH. No Go setup occurs here.
+	const goExecutable =
+		TARGETS[target].platform === "win32"
+			? windowsBuildGo(process.env, (file) => {
+					try {
+						return lstatSync(file).isFile();
+					} catch {
+						return false;
+					}
+				})
+			: undefined;
 	const out = resolve(
 		process.env.INIT_CWD ?? process.cwd(),
 		options.out ?? join(REPO, "build", "runtime", target),
@@ -354,7 +352,7 @@ async function main() {
 	const node = await stageNode(out, target);
 	say("Daemon (build:runtime)");
 	run("pnpm", ["--filter", "@gentle-dot/daemon", "build:runtime", "--", "--out", out], { cwd: REPO });
-	const modules = installDaemonModules(out, target);
+	const modules = installDaemonModules(out, target, goExecutable);
 	const engram = await stageEngram(out, target, options.engramVersion);
 	say("Engram guard");
 	const guard = stageEngramGuard(out, target);
