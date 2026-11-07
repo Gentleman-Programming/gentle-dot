@@ -1,5 +1,5 @@
 import type { ConnectorInfo } from "@gentle-dot/protocol";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
 	type ComputerPermission,
 	type ComputerPermissions,
@@ -7,11 +7,12 @@ import {
 	type ComputerYolo,
 	timeLeft,
 } from "../computer.ts";
-import { isWindows } from "../shortcut.ts";
+import { computerCopy, computerPlatform, computerReadiness } from "../computer-capabilities.ts";
+import { useLocale } from "../i18n.tsx";
 
 /** Computer control in the desktop panel (S24.5, S24.6); the web page never gets it. */
 export interface ComputerControls {
-	/** The app has a helper (macOS), so the Connectors screen offers it. */
+	/** A helper is registered, not necessarily ready or allowed to act. */
 	available: boolean;
 	/** The session the user allowed, while it lasts. */
 	session?: ComputerSession;
@@ -24,22 +25,13 @@ export interface ComputerControls {
 	requestPermission: (kind: ComputerPermission) => Promise<unknown>;
 }
 
-const PERMISSIONS: [ComputerPermission, string][] = [
-	["accessibility", "Accessibility"],
-	["screenRecording", "Screen Recording"],
-];
+const PERMISSIONS = [
+	["accessibility", "computer.accessibility"],
+	["screenRecording", "computer.screenRecording"],
+] as const;
 
 export const DEBUG_BUILD_NOTE =
 	"Debug builds lose these permissions on every rebuild because macOS ties them to the app's signature; grant them again after updating.";
-/** Names the panic shortcut only when the app registered it; until it says so, only Stop is promised. */
-const yoloNote = (windows: boolean, panicShortcut: boolean) =>
-	`Yolo mode lets the assistant send, pay, delete, and submit without asking you first. It turns itself off after 1 hour or when the app quits; ${panicShortcut ? `Stop and ${windows ? "Alt+Shift+Esc" : "⌥⇧Esc"} still work` : "Stop still works"}.`;
-const WINDOWS_TOO_OLD_NOTE =
-	"Computer control needs Windows 10 version 2004 (build 19041) or newer for screenshots.";
-const WINDOWS_UNKNOWN_VERSION_NOTE =
-	"Gentle Dot cannot tell which Windows version this is, so computer control is unavailable: screenshots need Windows 10 version 2004 (build 19041) or newer.";
-const NO_IMAGES_NOTE =
-	"The current model does not accept images, so the assistant cannot see your screen. Choose a model that does in Profiles.";
 
 interface ComputerBannerProps {
 	session: ComputerSession;
@@ -47,28 +39,33 @@ interface ComputerBannerProps {
 	stop: () => void;
 }
 
-/** "Controlling your Mac · mm:ss left" with a Stop button, while a session is active. */
+/** Native session authority, independent of transport or prerequisite status. */
 export function ComputerBanner({ session, yolo, stop }: ComputerBannerProps) {
+	const { t } = useLocale();
+	const platform = computerPlatform(navigator.userAgent);
 	const [now, setNow] = useState(() => Date.now());
 	useEffect(() => {
 		const timer = setInterval(() => setNow(Date.now()), 1000);
 		return () => clearInterval(timer);
 	}, []);
-	const left = session.endsAt === undefined ? "" : ` · ${timeLeft(session.endsAt, now)} left`;
+	const left =
+		session.endsAt === undefined
+			? ""
+			: ` · ${t("computer.left").replace("{time}", timeLeft(session.endsAt, now))}`;
 	return (
-		<section className="computer-banner" aria-label="Computer control">
+		<section className="computer-banner" aria-label={t("computer.control")}>
 			<span className="computer-banner-light" aria-hidden="true" />
 			<span>
-				Controlling your {isWindows() ? "PC" : "Mac"}
+				{t(`computer.${platform}.banner`)}
 				{left}
 			</span>
 			{yolo ? (
-				<span className="chip computer-yolo-chip" title="Risky actions run without asking you first">
+				<span className="chip computer-yolo-chip" title={t("computer.yoloRisk")}>
 					Yolo
 				</span>
 			) : null}
 			<button type="button" className="primary" onClick={stop}>
-				Stop
+				{t("computer.stop")}
 			</button>
 		</section>
 	);
@@ -80,21 +77,50 @@ interface ComputerEntryProps {
 	controls: ComputerControls;
 }
 
-/** The built-in Computer connector: the macOS permissions it needs and how to grant them (Windows asks for none). */
+/** Current native prerequisites (including screenshot support), never session or Yolo consent. */
 export function ComputerEntry({ info, controls }: ComputerEntryProps) {
 	const { permissions, requestPermission, yolo, setYolo } = controls;
-	const windows = isWindows();
+	const platform = computerPlatform(navigator.userAgent);
+	const { t } = useLocale();
+	// Only the existing pure helper supplies accelerator bytes; guidance is display-local.
+	const panic = platform === "unknown" ? t("computer.unknown.panic") : computerCopy(platform).panic;
 	const [granted, setGranted] = useState<ComputerPermissions>();
+	const [checking, setChecking] = useState(true);
+	const generation = useRef(0);
+	const live = useRef(false);
 	const check = useCallback(() => {
-		permissions().then(setGranted, () => setGranted(undefined));
+		if (!live.current) return;
+		const request = ++generation.current;
+		setGranted(undefined);
+		setChecking(true);
+		const finish = (value?: ComputerPermissions) => {
+			if (!live.current || request !== generation.current) return;
+			// Reject incomplete or malformed native responses, not just false prerequisites.
+			const valid =
+				value &&
+				typeof value.accessibility === "boolean" &&
+				typeof value.screenRecording === "boolean" &&
+				typeof value.screenshotsSupported === "boolean";
+			setGranted(valid ? value : undefined);
+			setChecking(false);
+		};
+		permissions().then(finish, () => finish());
 	}, [permissions]);
-	useEffect(check, [check]);
+	useEffect(() => {
+		live.current = true;
+		check();
+		return () => {
+			live.current = false;
+			generation.current++;
+		};
+	}, [check]);
+	const ready = computerReadiness(granted);
 
 	return (
 		<li className="computer-entry" aria-labelledby="connector-computer">
 			<div className="provider-name">
-				<b id="connector-computer">Computer</b>
-				<span className="chip connector-connected">Built in</span>
+				<b id="connector-computer">{t("computer.name")}</b>
+				<span className="chip connector-connected">{t("computer.builtIn")}</span>
 			</div>
 			{info ? (
 				<>
@@ -102,53 +128,75 @@ export function ComputerEntry({ info, controls }: ComputerEntryProps) {
 					<p className="connector-note">{info.sends}</p>
 				</>
 			) : null}
-			{windows ? (
-				<p className="connector-note">Windows asks for no permission for computer control.</p>
-			) : null}
-			{windows ? null : (
-				<ul className="computer-permissions">
-					{PERMISSIONS.map(([kind, label]) => {
-						const allowed = granted?.[kind] === true;
-						const id = `computer-permission-${kind}`;
-						return (
-							<li key={kind} aria-labelledby={id}>
-								<span id={id}>{label}</span>
-								<span className={`chip ${allowed ? "connector-connected" : "connector-needs_setup"}`}>
-									{granted === undefined ? "Checking…" : allowed ? "Allowed" : "Not allowed"}
-								</span>
-								{granted !== undefined && !allowed ? (
-									<button
-										type="button"
-										className="primary"
-										aria-label={`Grant ${label}`}
-										onClick={() => {
-											requestPermission(kind).then(check, check);
-										}}
-									>
-										Grant
-									</button>
-								) : null}
-							</li>
-						);
-					})}
-				</ul>
-			)}
-			{windows ? null : (
-				<div className="provider-actions">
-					<button type="button" onClick={check}>
-						Check again
-					</button>
-				</div>
-			)}
-			{windows && granted?.screenshotsSupported === false ? (
+			<p className="connector-note">
+				{t("computer.registered")}
+				{" · "}
+				{t(
+					checking
+						? "computer.checkingPrerequisites"
+						: ready
+							? "computer.prerequisitesMet"
+							: "computer.prerequisitesUnavailable",
+				)}
+			</p>
+			<p className="connector-note">{t(`computer.${platform}.prerequisites`)}</p>
+			<ul className="computer-permissions">
+				{(platform === "mac" ? PERMISSIONS : []).map(([kind, labelKey]) => {
+					const label = t(labelKey);
+					const allowed = granted?.[kind] === true;
+					const id = `computer-permission-${kind}`;
+					return (
+						<li key={kind} aria-labelledby={id}>
+							<span id={id}>{label}</span>
+							<span className={`chip ${allowed ? "connector-connected" : "connector-needs_setup"}`}>
+								{t(
+									checking
+										? "computer.checking"
+										: granted === undefined
+											? "computer.unable"
+											: allowed
+												? "computer.allowed"
+												: "computer.notAllowed",
+								)}
+							</span>
+							{granted !== undefined && !allowed ? (
+								<button
+									type="button"
+									className="primary"
+									aria-label={`${t("computer.grant")} ${label}`}
+									onClick={() => {
+										requestPermission(kind).then(check, check);
+									}}
+								>
+									{t("computer.grant")}
+								</button>
+							) : null}
+						</li>
+					);
+				})}
+				<li>
+					<span>{t("computer.captureInput")}</span>
+					<span className={`chip ${ready ? "connector-connected" : "connector-needs_setup"}`}>
+						{t(checking ? "computer.checking" : ready ? "computer.currentlyMet" : "computer.unavailable")}
+					</span>
+				</li>
+			</ul>
+			<div className="provider-actions">
+				<button type="button" onClick={check}>
+					{t("computer.checkAgain")}
+				</button>
+			</div>
+			{platform === "windows" && granted?.screenshotsSupported === false ? (
 				<p className="connector-note computer-warning">
-					{granted.screenshotsUnsupported === "unknownVersion"
-						? WINDOWS_UNKNOWN_VERSION_NOTE
-						: WINDOWS_TOO_OLD_NOTE}
+					{t(
+						granted.screenshotsUnsupported === "unknownVersion"
+							? "computer.windows.unknownVersion"
+							: "computer.windows.screenshotsUnsupported",
+					)}
 				</p>
 			) : null}
 			<div className="computer-yolo">
-				<span id="computer-yolo-label">Yolo mode</span>
+				<span id="computer-yolo-label">{t("computer.yoloMode")}</span>
 				<button
 					type="button"
 					role="switch"
@@ -162,9 +210,14 @@ export function ComputerEntry({ info, controls }: ComputerEntryProps) {
 					<span className="switch-knob" aria-hidden="true" />
 				</button>
 			</div>
-			<p className="connector-note">{yoloNote(windows, granted?.panicShortcut === true)}</p>
-			{windows ? null : <p className="connector-note">{DEBUG_BUILD_NOTE}</p>}
-			{info?.noImages ? <p className="connector-note computer-warning">{NO_IMAGES_NOTE}</p> : null}
+			<p className="connector-note">
+				{t("computer.yoloNote")} {granted?.panicShortcut === true && platform !== "unknown"
+					? t("computer.panicNote").replace("{panic}", panic)
+					: t("computer.stopNote")}
+			</p>
+			<p className="connector-note">{t(`computer.${platform}.limits`)}</p>
+			{platform === "mac" ? <p className="connector-note">{t("computer.debug")}</p> : null}
+			{info?.noImages ? <p className="connector-note computer-warning">{t("computer.noImages")}</p> : null}
 		</li>
 	);
 }

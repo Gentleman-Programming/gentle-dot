@@ -102,6 +102,8 @@ async function emitState(payload: unknown) {
 }
 
 beforeEach(() => {
+	// These scenarios exercise macOS UI, not the host running this synthetic DOM.
+	vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)");
 	h.tauri = true;
 	h.endpoint = { url: HELPER, token: KEY };
 	h.permissions = {
@@ -132,6 +134,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	vi.useRealTimers();
+	vi.restoreAllMocks();
 	window.history.replaceState(null, "", "/");
 	window.sessionStorage.clear();
 });
@@ -308,11 +311,12 @@ describe("on Windows", () => {
 		await renderApp("?surface=panel");
 		const entry = await screen.findByRole("listitem", { name: "Computer" });
 		expect(
-			within(entry).getByText("Windows asks for no permission for computer control."),
+			within(entry).getByText(/Current native prerequisites are not a session grant/),
 		).toBeInTheDocument();
 		expect(within(entry).queryByText("Accessibility")).toBeNull();
 		expect(within(entry).queryByText("Screen Recording")).toBeNull();
-		expect(within(entry).queryByRole("button", { name: "Check again" })).toBeNull();
+		expect(within(entry).getByRole("button", { name: "Check again" })).toBeInTheDocument();
+		expect(within(entry).queryByRole("button", { name: /^Grant/ })).toBeNull();
 		expect(within(entry).queryByText(DEBUG_NOTE)).toBeNull();
 		expect(await within(entry).findByText(/Stop and Alt\+Shift\+Esc still work/)).toBeInTheDocument();
 	});
@@ -365,10 +369,11 @@ describe("on Windows", () => {
 	});
 
 	it("says nothing about Windows 10 version 2004 when screenshots are supported", async () => {
+		h.permissions = { accessibility: true, screenRecording: true, screenshotsSupported: true };
 		h.state = connectorsOpen([computerEntry()]);
 		await renderApp("?surface=panel");
 		const entry = await screen.findByRole("listitem", { name: "Computer" });
-		await within(entry).findByText("Windows asks for no permission for computer control.");
+		await within(entry).findByText("Helper registered · Current prerequisites met");
 		expect(within(entry).queryByText(WINDOWS_2004_NOTE)).toBeNull();
 		expect(within(entry).queryByText(UNKNOWN_WINDOWS_NOTE)).toBeNull();
 	});
@@ -376,7 +381,7 @@ describe("on Windows", () => {
 	it("names the PC in the session banner", async () => {
 		h.status = { active: true };
 		await renderApp("?surface=panel");
-		expect(await screen.findByText("Controlling your PC")).toBeInTheDocument();
+		expect(await screen.findByText("Controlling your Windows PC")).toBeInTheDocument();
 	});
 });
 

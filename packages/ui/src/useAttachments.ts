@@ -1,6 +1,7 @@
 import { ATTACHMENT_LIMITS, type AttachmentRef, type UploadedFile } from "@gentle-dot/protocol";
 import { useCallback, useMemo, useRef, useState } from "react";
-import { formatSize, type Uploader } from "./uploads.ts";
+import type { AttachmentDisplay } from "./i18n-attachment-messages.ts";
+import { formatSize, type Uploader, UploadFailure } from "./uploads.ts";
 
 /** A file the user attached to the message they are writing. */
 export interface PendingFile {
@@ -13,6 +14,9 @@ export interface PendingFile {
 	refused?: string;
 	/** The last upload failed; sending again retries it. */
 	error?: string;
+	/** Optional renderer-only provenance; the existing raw strings remain the public contract. */
+	refusedDisplay?: AttachmentDisplay;
+	errorDisplay?: AttachmentDisplay;
 }
 
 export interface AttachmentControls {
@@ -51,10 +55,19 @@ export function useAttachments(uploader?: Uploader): AttachmentControls | undefi
 				const item: PendingFile = { id: `a${++nextId}`, file };
 				if (kept.length >= ATTACHMENT_LIMITS.files) {
 					item.refused = `Too many files: up to ${ATTACHMENT_LIMITS.files} files per message.`;
+					item.refusedDisplay = { key: "attachment.fileCount", limit: ATTACHMENT_LIMITS.files };
 				} else if (file.size > ATTACHMENT_LIMITS.fileBytes) {
 					item.refused = `Too large: up to ${formatSize(ATTACHMENT_LIMITS.fileBytes)} per file.`;
+					item.refusedDisplay = {
+						key: "attachment.fileSize",
+						limit: formatSize(ATTACHMENT_LIMITS.fileBytes),
+					};
 				} else if (bytes + file.size > ATTACHMENT_LIMITS.messageBytes) {
 					item.refused = `Too large together: up to ${formatSize(ATTACHMENT_LIMITS.messageBytes)} per message.`;
+					item.refusedDisplay = {
+						key: "attachment.totalSize",
+						limit: formatSize(ATTACHMENT_LIMITS.messageBytes),
+					};
 				}
 				next.push(item);
 			}
@@ -88,7 +101,7 @@ export function useAttachments(uploader?: Uploader): AttachmentControls | undefi
 			for (const item of list) {
 				let done = item.uploaded;
 				if (!done) {
-					update(item.id, ({ error: _error, ...f }) => ({ ...f, progress: 0 }));
+					update(item.id, ({ error: _error, errorDisplay: _display, ...f }) => ({ ...f, progress: 0 }));
 					try {
 						done = await uploader(item.file, {
 							...(uploadId ? { uploadId } : {}),
@@ -99,7 +112,18 @@ export function useAttachments(uploader?: Uploader): AttachmentControls | undefi
 					} catch (error) {
 						failed = true;
 						const message = (error as Error).message || "The upload did not work.";
-						update(item.id, ({ progress: _progress, ...f }) => ({ ...f, error: message }));
+						// Native/backend Errors stay raw, including their existing empty-message fallback.
+						const display =
+							error instanceof UploadFailure
+								? error.display
+								: !(error instanceof Error) && !(error as Error).message
+									? ({ key: "attachment.uploadFailed" } as const)
+									: undefined;
+						update(item.id, ({ progress: _progress, ...f }) => ({
+							...f,
+							error: message,
+							...(display ? { errorDisplay: display } : {}),
+						}));
 						continue;
 					}
 				}

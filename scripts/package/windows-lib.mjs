@@ -1,9 +1,13 @@
-// Windows packaging consumes an existing runtime; it never stages or installs one.
+// Pure Windows admission/plans shared by automatic staging and explicit-runtime routes.
 import hostPath from "node:path";
 
 export const WINDOWS_USAGE =
-	"usage: package-windows [--runtime <staged-dir>] [--help]\n" +
-	"Native Windows x64 only; consumes build/runtime/windows-x64 by default. Builds NSIS; the installer adds WebView2 when missing (needs internet then).";
+	"usage: package-windows [--skip-stage] [--check] [--runtime <staged-dir>] [--help]\n" +
+	"Native Windows x64 only. Default: stage build/runtime/windows-x64, build NSIS and MSI. " +
+	"--skip-stage reuses that stage; --check extracts and verifies the produced payloads without installing.\n" +
+	"--runtime selects an existing stage and retains the NSIS-only/no-staging route; " +
+	"--skip-stage is redundant with it, and --check verifies NSIS only. " +
+	"The installer adds WebView2 when missing (needs internet then).";
 export const WINDOWS_FILES = Object.freeze([
 	"MANIFEST.json",
 	"node/bin/node.exe",
@@ -19,17 +23,27 @@ export const WINDOWS_FILES = Object.freeze([
 export function parseWindowsArgs(argv) {
 	const args = argv.filter((arg) => arg !== "--");
 	if (args.length === 1 && args[0] === "--help") return { help: true };
-	if (args.length === 0) return {};
-	if (args.length === 2 && args[0] === "--runtime" && args[1] && !args[1].startsWith("--"))
-		return { runtime: args[1] };
-	throw new Error(WINDOWS_USAGE);
+	/** @type {{ runtime?: string, skipStage?: boolean, check?: boolean }} */
+	const options = {};
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg === "--skip-stage") options.skipStage = true;
+		else if (arg === "--check") options.check = true;
+		else if (
+			arg === "--runtime" &&
+			options.runtime === undefined &&
+			args[i + 1] &&
+			!args[i + 1].startsWith("--")
+		)
+			options.runtime = args[++i];
+		else throw new Error(`Unexpected argument ${arg}.\n${WINDOWS_USAGE}`);
+	}
+	return options;
 }
 
 export function assertWindowsHost(platform, arch) {
 	if (platform !== "win32" || arch !== "x64")
-		throw new Error(
-			`Packaging requires native Windows x64; got ${platform}-${arch}. No cross-build or implicit staging.`,
-		);
+		throw new Error(`Packaging requires native Windows x64; got ${platform}-${arch}. No cross-build.`);
 }
 
 /** Pure admission/argument plan. The CLI supplies filesystem predicates; tests execute no build. */
@@ -43,8 +57,10 @@ export function windowsPackagePlan({
 	isFile,
 	isDirectory,
 	path = hostPath,
+	bundles = "nsis",
 }) {
 	assertWindowsHost(platform, arch);
+	if (bundles !== "nsis" && bundles !== "nsis,msi") throw new Error("Unsupported Windows bundles.");
 	const { resolve } = path;
 	if (manifest?.name !== "gentle-dot-runtime" || manifest?.target !== "windows-x64")
 		throw new Error("MANIFEST.json must describe a staged gentle-dot-runtime for windows-x64.");
@@ -87,7 +103,7 @@ export function windowsPackagePlan({
 	};
 	return {
 		program: node,
-		args: [cli, "build", "--bundles", "nsis", "--config", JSON.stringify(config)],
+		args: [cli, "build", "--bundles", bundles, "--config", JSON.stringify(config)],
 		cwd: desktop,
 		env: { GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED: "1" },
 	};

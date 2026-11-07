@@ -14,6 +14,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AskCard } from "../src/components/AskCard.tsx";
 import { ChatSurface } from "../src/components/ChatSurface.tsx";
 import { ConnectorsPanel } from "../src/components/ConnectorsPanel.tsx";
+import { LocaleProvider, UI_LANGUAGE_KEY } from "../src/i18n.tsx";
 import { type DotState, initialState, reduce } from "../src/store.ts";
 
 const connector = (overrides: Partial<ConnectorInfo>): ConnectorInfo => ({
@@ -191,6 +192,97 @@ describe("ConnectorsPanel", () => {
 			{ type: "auth_reply", flowId: "connector-9", value: "http://127.0.0.1:1/callback?code=c" },
 			{ type: "auth_reply", flowId: "connector-9", cancelled: true },
 		]);
+	});
+
+	it("localizes only shared sign-in chrome in English and Spanish, preserving connector commands", async () => {
+		for (const locale of ["en", "es"] as const) {
+			localStorage.setItem(UI_LANGUAGE_KEY, locale);
+			const send = vi.fn();
+			const openUrl = vi.fn();
+			const view = render(
+				<LocaleProvider>
+					<ConnectorsPanel
+						connectors={{
+							open: true,
+							list,
+							flow: {
+								providerId: "linear",
+								flowId: "connector-seam",
+								events: [
+									{ kind: "auth_url", url: "https://example.test/login?challenge=Original" },
+									{
+										kind: "auth_url",
+										url: "https://example.test/custom",
+										instructions: "Backend instructions Original",
+									},
+									{ kind: "info", message: "Backend progress Original" },
+								],
+								prompt: {
+									kind: "manual_code",
+									flowId: "connector-seam",
+									message: "Backend challenge Original",
+									optional: true,
+								},
+							},
+						}}
+						send={send}
+						dispatch={vi.fn()}
+						openUrl={openUrl}
+					/>
+				</LocaleProvider>,
+			);
+			try {
+				expect(screen.getByRole("region", { name: locale === "es" ? "Conectores" : "Connectors" })).toBeInTheDocument();
+				expect(screen.getByText(locale === "es" ? "Iniciando sesión en Linear" : "Signing in to Linear")).toBeInTheDocument();
+				expect(
+					screen.getByText(
+						locale === "es"
+							? "Permite que el asistente use tus otras aplicaciones. Siempre te pregunta antes de enviar o cambiar algo."
+							: "Let the assistant use your other apps. It always asks you before it sends or changes anything.",
+					),
+				).toBeInTheDocument();
+				for (const text of [APP_REQUIRED, "Backend instructions Original", "Backend progress Original"]) {
+					expect(screen.getByText(text)).toBeInTheDocument();
+				}
+				expect(
+					screen.getByText(
+						locale === "es"
+							? "Termina de iniciar sesión en la página del proveedor."
+							: "Finish signing in on the provider's page.",
+					),
+				).toBeInTheDocument();
+				for (const button of screen.getAllByRole("button", {
+					name: locale === "es" ? "Abrir la página de inicio de sesión" : "Open the sign-in page",
+				})) {
+					await userEvent.click(button);
+				}
+				expect(openUrl.mock.calls).toEqual([
+					["https://example.test/login?challenge=Original"],
+					["https://example.test/custom"],
+				]);
+				const input = screen.getByLabelText("Backend challenge Original");
+				expect(input).toHaveAttribute(
+					"placeholder",
+					locale === "es"
+						? "Pega aquí el código o la dirección completa"
+						: "Paste the code or the full address here",
+				);
+				await userEvent.type(input, "  CODE-Original  ");
+				await userEvent.click(
+					screen.getByRole("button", { name: locale === "es" ? "Continuar" : "Continue" }),
+				);
+				await userEvent.click(screen.getByRole("button", { name: locale === "es" ? "Omitir" : "Skip" }));
+				await userEvent.click(screen.getByRole("button", { name: locale === "es" ? "Cancelar" : "Cancel" }));
+				expect(send.mock.calls).toEqual([
+					[{ type: "auth_reply", flowId: "connector-seam", value: "CODE-Original" }],
+					[{ type: "auth_reply", flowId: "connector-seam", value: "" }],
+					[{ type: "auth_reply", flowId: "connector-seam", cancelled: true }],
+				]);
+			} finally {
+				view.unmount();
+				localStorage.removeItem(UI_LANGUAGE_KEY);
+			}
+		}
 	});
 
 	it("says when a sign-in finished", () => {

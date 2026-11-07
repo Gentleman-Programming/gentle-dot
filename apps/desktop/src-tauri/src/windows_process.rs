@@ -245,13 +245,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn saturated_app_channel_cannot_delay_the_owned_child_stop_deadline() {
-        struct Refuse;
-        impl crate::app_channel::Handler for Refuse {
-            fn approve(&self, _: &crate::approvals::ApprovalRequest) -> bool {
-                false
-            }
-        }
+    fn saturated_legacy_stdio_shutdown_cannot_delay_its_owned_fixture_termination() {
         let root = std::env::temp_dir().join(format!("gentle-dot-backpressure-{}", std::process::id()));
         private_directory(&root).unwrap();
         let script = root.join("not-reading.mjs");
@@ -264,12 +258,11 @@ mod tests {
         let (mut child, stream) = spawn(&spec, File::create(root.join("test.log")).unwrap(), true).unwrap();
         let stream = stream.unwrap();
         let writer = stream.writer.clone();
-        let channel = crate::app_channel::AppChannel::start(stream, Arc::new(Refuse)).unwrap();
-        let sending = channel.clone();
+        // This fixture exercises legacy anonymous stdio, not the authenticated app channel.
+        let mut sending = stream.try_clone().unwrap();
         let (sent, finished) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result =
-                sending.request("blocked", serde_json::json!({"data":"x".repeat(900_000)}), Duration::from_secs(30));
+            let result = std::io::Write::write_all(&mut sending, &vec![b'x'; 900_000]);
             let _ = sent.send(result);
         });
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -279,17 +272,22 @@ mod tests {
         assert!(matches!(writer.try_lock(), Err(TryLockError::WouldBlock)), "the pipe must actually be backpressured");
         let (closed, answer) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            channel.close();
-            let _ = closed.send(());
+            let _ = closed.send(stream.shutdown(Shutdown::Both));
         });
-        if answer.recv_timeout(Duration::from_millis(500)).is_err() {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("channel close waited for the blocked writer");
-        }
+        let shutdown = match answer.recv_timeout(Duration::from_millis(500)) {
+            Ok(result) => result,
+            Err(error) => {
+                child.kill().expect("cannot kill the owned non-reading fixture");
+                child.wait().expect("cannot reap the owned non-reading fixture");
+                panic!("legacy stdio shutdown waited for the blocked writer: {error}");
+            }
+        };
+        shutdown.expect("legacy stdio shutdown failed");
         let stopping = Instant::now();
-        crate::daemon::stop_child(child.as_mut(), Duration::from_millis(100));
+        child.kill().expect("cannot kill the owned non-reading fixture");
+        let status = child.wait().expect("cannot reap the owned non-reading fixture");
         assert!(stopping.elapsed() < Duration::from_secs(2));
+        assert!(!status.success(), "the non-reading fixture must be terminated");
         assert!(child.try_wait().unwrap().is_some());
         assert!(finished.recv_timeout(Duration::from_secs(3)).unwrap().is_err());
     }

@@ -17,7 +17,7 @@ import type { ServerMessage } from "@gentle-dot/protocol";
 import { describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { bundledMcpCli } from "../src/connectors.ts";
-import { tempDir, waitFor } from "./helpers.ts";
+import { fixtureNodeArgs, fixtureNodeEnv, tempDir, waitFor } from "./helpers.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const FAKE_SERVER = fileURLToPath(new URL("./fixtures/fake-mcp-server.ts", import.meta.url));
@@ -153,16 +153,19 @@ describe.skipIf(!enabled)("@real-agent T18b connector probe", () => {
 			}),
 		);
 		const memoryPort = await freePort();
-		const child: ChildProcess = spawn(process.execPath, [CLI], {
-			env: {
-				PATH: process.env.PATH,
-				HOME: home,
-				GENTLE_DOT_DATA_DIR: dataDir,
-				GENTLE_DOT_PORT: "0",
-				GENTLE_DOT_ENGRAM: "private",
-				GENTLE_DOT_ENGRAM_PORT: String(memoryPort),
-				GENTLE_DOT_IMPORT_HOME: importHome,
-			},
+		const child: ChildProcess = spawn(process.execPath, fixtureNodeArgs(CLI), {
+			env: fixtureNodeEnv(
+				{
+					PATH: process.env.PATH,
+					HOME: home,
+					GENTLE_DOT_DATA_DIR: dataDir,
+					GENTLE_DOT_PORT: "0",
+					GENTLE_DOT_ENGRAM: "private",
+					GENTLE_DOT_ENGRAM_PORT: String(memoryPort),
+					GENTLE_DOT_IMPORT_HOME: importHome,
+				},
+				home,
+			),
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 		let output = "";

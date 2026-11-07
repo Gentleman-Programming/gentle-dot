@@ -13,6 +13,7 @@ export default defineConfig({
 						"scripts/package/test-linux/**/*.test.ts",
 					],
 					environment: "node",
+					setupFiles: ["packages/daemon/test/daemon-account-home-setup.ts"],
 					testTimeout: 20_000,
 					globalSetup: ["packages/daemon/test/windows-private-storage-global-setup.ts"],
 				},

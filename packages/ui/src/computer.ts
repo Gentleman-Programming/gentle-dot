@@ -1,7 +1,8 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { computerPermissionKinds, registeredComputerEndpoint } from "./computer-capabilities.ts";
 
 /**
- * Computer control on macOS (S24): the desktop app's helper, reached through its Tauri commands.
+ * Computer control on supported desktop platforms (S24): the desktop app's helper, reached through its Tauri commands.
  * Outside the desktop app (the web page, a VPS) every call is a no-op, so computer control is never offered.
  */
 
@@ -14,14 +15,14 @@ export interface ComputerEndpoint {
 export interface ComputerPermissions {
 	accessibility: boolean;
 	screenRecording: boolean;
-	screenshotsSupported?: boolean;
+	screenshotsSupported: boolean;
 	/** The app registered the panic shortcut at launch, so it can stop computer control. */
 	panicShortcut?: boolean;
 	/** Why screenshots are unsupported, only when they are; an older app sends none. */
 	screenshotsUnsupported?: "tooOld" | "unknownVersion";
 }
 
-export type ComputerPermission = "accessibility" | "screenRecording";
+export type ComputerPermission = (typeof computerPermissionKinds)[number];
 
 /** A control session the user allowed; `endsAt` in milliseconds since the epoch. */
 export interface ComputerSession {
@@ -47,21 +48,30 @@ interface ComputerStateEvent {
 	yoloEndsAt?: unknown;
 }
 
-/** The helper's endpoint, or null when the app has none (off macOS, or the helper did not start). */
+/** Registered transport only, not readiness or consent; null when the app has no helper. */
 export async function computerEndpoint(): Promise<ComputerEndpoint | null> {
 	if (!isTauri()) return null;
 	const endpoint = await invoke<Partial<ComputerEndpoint> | null>("computer_endpoint");
-	return typeof endpoint?.url === "string" && typeof endpoint.token === "string"
-		? { url: endpoint.url, token: endpoint.token }
-		: null;
+	return registeredComputerEndpoint(endpoint) ? { url: endpoint.url, token: endpoint.token } : null;
 }
 
-export function computerPermissions(): Promise<ComputerPermissions> {
-	if (!isTauri()) return Promise.resolve({ accessibility: false, screenRecording: false });
-	return invoke<ComputerPermissions>("computer_permissions");
+export async function computerPermissions(): Promise<ComputerPermissions> {
+	if (!isTauri()) return { accessibility: false, screenRecording: false, screenshotsSupported: false };
+	const reply = await invoke<Partial<ComputerPermissions> | null>("computer_permissions");
+	// Older or incomplete native replies never imply screenshot support or a grant.
+	return {
+		accessibility: reply?.accessibility === true,
+		screenRecording: reply?.screenRecording === true,
+		screenshotsSupported: reply?.screenshotsSupported === true,
+		...(reply?.panicShortcut === true ? { panicShortcut: true } : {}),
+		...(reply?.screenshotsSupported !== true &&
+		(reply?.screenshotsUnsupported === "tooOld" || reply?.screenshotsUnsupported === "unknownVersion")
+			? { screenshotsUnsupported: reply.screenshotsUnsupported }
+			: {}),
+	};
 }
 
-/** Prompts for the permission and opens its System Settings pane. */
+/** macOS prompts and opens System Settings; Windows explicitly refuses this request. */
 export function requestComputerPermission(kind: ComputerPermission): Promise<unknown> {
 	if (!isTauri()) return Promise.resolve();
 	return invoke("computer_request_permission", { kind });

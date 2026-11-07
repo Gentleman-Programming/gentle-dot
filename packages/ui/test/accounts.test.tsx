@@ -2,7 +2,7 @@ import type { ServerMessage, ServerPayload } from "@gentle-dot/protocol";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { AccountsPanel } from "../src/components/AccountsPanel.tsx";
+import { AccountsPanel, FlowEvent, FlowPrompt } from "../src/components/AccountsPanel.tsx";
 import { ChatSurface } from "../src/components/ChatSurface.tsx";
 import { type DotState, initialState, reduce } from "../src/store.ts";
 
@@ -237,6 +237,52 @@ describe("AccountsPanel", () => {
 		});
 		rerender(<AccountsPanel auth={s.auth} send={vi.fn()} dispatch={vi.fn()} openUrl={vi.fn()} />);
 		expect(screen.getByRole("status")).toHaveTextContent("Sign-in cancelled.");
+	});
+});
+
+describe("shared account flow English defaults", () => {
+	it("keeps fallback instructions and default manual-code placeholder without a locale provider", async () => {
+		const send = vi.fn();
+		const openUrl = vi.fn();
+		render(
+			<>
+				<FlowEvent event={{ kind: "auth_url", url: "https://example.test/login" }} openUrl={openUrl} />
+				<FlowPrompt
+					prompt={{
+						kind: "manual_code",
+						flowId: "legacy-flow",
+						message: "Backend challenge",
+						optional: true,
+					}}
+					send={send}
+				/>
+			</>,
+		);
+		expect(screen.getByText("Finish signing in on the provider's page.")).toBeInTheDocument();
+		await userEvent.click(screen.getByRole("button", { name: "Open the sign-in page" }));
+		expect(openUrl.mock.calls).toEqual([["https://example.test/login"]]);
+		await userEvent.type(
+			screen.getByPlaceholderText("Paste the code or the full address here"),
+			"  CODE-Original  ",
+		);
+		await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+		await userEvent.click(screen.getByRole("button", { name: "Skip" }));
+		expect(send.mock.calls).toEqual([
+			[{ type: "auth_reply", flowId: "legacy-flow", value: "CODE-Original" }],
+			[{ type: "auth_reply", flowId: "legacy-flow", value: "" }],
+		]);
+	});
+
+	it("keeps the exact English failed-login fallback", () => {
+		render(
+			<AccountsPanel
+				auth={{ open: true, providers, flow: { providerId: "anthropic", events: [], done: { ok: false } } }}
+				send={vi.fn()}
+				dispatch={vi.fn()}
+				openUrl={vi.fn()}
+			/>,
+		);
+		expect(screen.getByRole("status")).toHaveTextContent("Sign-in did not finish.");
 	});
 });
 

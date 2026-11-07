@@ -1,6 +1,6 @@
 //! Spawns the daemon, and stops what it spawned. A daemon it spawns gets its end of the app's
-//! private channel on fd 3 (S25.1, `app_channel`) and stops by itself when that channel closes, so it
-//! lives as long as this app, crashes included (S35.2).
+//! connected private channel on fd 3 (S25.1, `app_channel`). The daemon stops by itself
+//! when that channel closes, so it lives as long as this app, crashes included (S35.2).
 //!
 //! An app with a channel never attaches to a daemon it did not launch: that daemon has no channel,
 //! so connectors would stay locked with no way out. When a healthy daemon holds the port at start,
@@ -54,7 +54,7 @@ runs, or quit the process listening on port {port}), then choose \"Restart assis
 }
 
 /// A daemon this app launched, as the pid file records it.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Launched {
     pub pid: u32,
@@ -96,6 +96,80 @@ pub fn process_started(_pid: u32) -> Option<u64> {
     None
 }
 
+/// When `pid` started (its creation time, 100 ns ticks since 1601), while it is live; `None` once
+/// it is gone or cannot be read. Windows has no `/proc`: the creation time comes from
+/// `GetProcessTimes` over a handle opened only to query it, which a same-user process may do. A
+/// process that has ended may still be openable by pid while another handle keeps its object alive
+/// (the pid file tests hold the child), so liveness is its handle being unsignaled: a terminated
+/// process is `WAIT_OBJECT_0`, not `WAIT_TIMEOUT`, and reads as gone here (W19).
+#[cfg(windows)]
+pub fn process_started(pid: u32) -> Option<u64> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, WAIT_TIMEOUT};
+    use windows_sys::Win32::Storage::FileSystem::SYNCHRONIZE;
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    if pid == 0 {
+        return None;
+    }
+    // SAFETY: OpenProcess takes a pid and returns a handle or null; it dereferences nothing.
+    // `SYNCHRONIZE` is what lets the handle be waited on below; it and the query right do not
+    // confer any ability to read or change the process's memory.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) };
+    if process.is_null() {
+        return None;
+    }
+    // SAFETY: a zero-timeout wait on a process handle: `WAIT_TIMEOUT` while it runs, and
+    // `WAIT_OBJECT_0` once it has terminated (any other result fails closed below).
+    let running = unsafe { WaitForSingleObject(process, 0) } == WAIT_TIMEOUT;
+    let mut created = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let mut exited = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let mut kernel = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let mut user = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    // SAFETY: `process` is a live process handle and every out-pointer is a valid FILETIME.
+    let ok = unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) };
+    // SAFETY: `process` came from OpenProcess and is closed exactly once here.
+    unsafe { CloseHandle(process) };
+    (ok != 0 && running).then(|| (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+}
+
+// The app's own files, and only the user who runs it reads them. Unix expresses that with mode
+// bits, and refuses to follow a symlink or block on a FIFO at those paths. Windows has no mode
+// bits, and privacy there comes from the ACL of the profile folder the data folder lives in, so
+// these entries are created and opened plainly (L13, `posix-modes.ts`).
+#[cfg(unix)]
+fn create_private(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(file)
+}
+
+/// Opens an app-owned file for reading without following a symlink or blocking on a FIFO there.
+/// Windows has no such entry types to refuse, so it opens plainly.
+#[cfg(unix)]
+fn open_private_read(path: &Path) -> io::Result<File> {
+    OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)
+}
+
+/// The folder the app keeps its own files in. Unix also repairs a looser mode on it.
+#[cfg(unix)]
+fn create_private_dir(path: &Path) -> io::Result<()> {
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(unix)]
+fn open_appended_private(path: &Path) -> io::Result<File> {
+    let log = OpenOptions::new().create(true).append(true).mode(0o600).open(path)?;
+    log.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(log)
+}
+
 /// Records the daemon just spawned as `pid` (private, 0600). A new file in the same folder renamed
 /// over the pid file: never written through a symlink there, and never seen half written.
 #[cfg(unix)]
@@ -103,14 +177,8 @@ pub fn record_launch(data_dir: &Path, pid: u32) -> io::Result<()> {
     let started = process_started(pid).ok_or_else(|| io::Error::other("the assistant is not running"))?;
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let temp = data_dir.join(format!(".{PID_FILE}.{}.{nanos}", std::process::id()));
-    let written = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&temp)
+    let written = create_private(&temp)
         .and_then(|mut file| {
-            file.set_permissions(fs::Permissions::from_mode(0o600))?;
             use std::io::Write;
             writeln!(file, "{pid} {started}")
         })
@@ -134,15 +202,19 @@ fn may_be_daemon(pid: u32) -> bool {
     pid > 1 && pid != std::process::id() && Some(pid) != parent
 }
 
+/// Windows has no `getppid` in `std`, and this process's parent is not readable there without a
+/// Win32 call, so the parent check is absent. What remains still refuses this process and the
+/// kernel's low pids. Like the Unix arm, only a pid that names a recorded live process reaches it.
+#[cfg(not(unix))]
+fn may_be_daemon(pid: u32) -> bool {
+    pid > 1 && pid != std::process::id()
+}
+
 /// The daemon the pid file names, if it holds a launch. Only a small regular file is read: a
 /// symlink, a FIFO, or anything else there is ignored (opened without following or blocking).
 #[cfg(unix)]
 pub fn recorded_launch(data_dir: &Path) -> Option<Launched> {
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(data_dir.join(PID_FILE))
-        .ok()?;
+    let file = open_private_read(&data_dir.join(PID_FILE)).ok()?;
     let meta = file.metadata().ok()?;
     if !meta.file_type().is_file() || meta.len() > PID_FILE_MAX {
         return None;
@@ -243,19 +315,8 @@ pub fn open_private_log(data_dir: &Path) -> io::Result<File> {
 /// 0600 (looser modes are repaired) because the daemon's output is private.
 #[cfg(unix)]
 pub fn open_private_log(data_dir: &Path) -> io::Result<File> {
-    #[cfg(windows)]
-    {
-        crate::windows_process::private_directory(data_dir)?;
-        return OpenOptions::new().create(true).append(true).open(data_dir.join("daemon.log"));
-    }
-    #[cfg(unix)]
-    {
-        fs::DirBuilder::new().recursive(true).mode(0o700).create(data_dir)?;
-        fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))?;
-        let log = OpenOptions::new().create(true).append(true).mode(0o600).open(data_dir.join("daemon.log"))?;
-        log.set_permissions(fs::Permissions::from_mode(0o600))?;
-        Ok(log)
-    }
+    create_private_dir(data_dir)?;
+    open_appended_private(&data_dir.join("daemon.log"))
 }
 
 #[cfg(windows)]
@@ -391,14 +452,12 @@ pub fn stop_child(child: &mut dyn ChildProcess, grace: Duration) {
     let _ = child.wait();
 }
 
-#[cfg(windows)]
-pub fn stop_child(child: &mut dyn ChildProcess, grace: Duration) {
-    let deadline = Instant::now() + grace;
-    while Instant::now() < deadline {
-        if !matches!(child.try_wait(), Ok(None)) {
-            return;
-        }
-        thread::sleep(Duration::from_millis(50));
+/// No Unix signal and no Win32 wait to use: terminate outright, as the Windows arm did before the
+/// job and grace work (W5b). No target the app ships reaches this.
+#[cfg(not(any(unix, windows)))]
+pub fn stop_child(child: &mut dyn ChildProcess, _grace: Duration) {
+    if !matches!(child.try_wait(), Ok(None)) {
+        return;
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -479,7 +538,7 @@ impl Daemon {
         }
     }
 
-    /// Every daemon this app spawns gets a channel served by `handler`.
+    /// Every daemon this app spawns gets a connected fd-3 channel served by `handler`.
     pub fn with_channel(mut self, handler: Arc<dyn Handler>) -> Self {
         self.handler = Some(handler);
         self
@@ -806,7 +865,7 @@ impl Daemon {
             }
         };
         let log = open_private_log(&self.data_dir).map_err(|e| format!("cannot open daemon.log: {e}"))?;
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let pair = match &self.handler {
             Some(_) => Some(channel_pair().map_err(|e| format!("cannot open the assistant's channel: {e}"))?),
             None => None,
@@ -1494,11 +1553,15 @@ mod windows_ownership_tests {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::app_channel::{AppChannel, Handler};
     use std::io::{BufRead, BufReader, Write};
+    #[cfg(unix)]
     use std::os::fd::{AsFd, AsRawFd};
+    #[cfg(unix)]
     use std::os::unix::net::UnixStream;
+    #[cfg(unix)]
     use std::process::Command;
+    #[cfg(windows)]
+    use std::process::{Command, Stdio};
 
     fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
         move |key| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string())
@@ -1513,9 +1576,34 @@ mod tests {
         let spec = launch_spec(env_of(&[]), false, None);
         assert_eq!(spec.program, env!("GENTLE_DOT_BUILD_NODE"));
         assert_eq!(spec.args, vec![env!("GENTLE_DOT_BUILD_DAEMON_SCRIPT").to_string()]);
-        assert!(spec.args[0].ends_with("packages/daemon/src/cli.ts"));
+        assert!(Path::new(&spec.args[0]).ends_with("packages/daemon/src/cli.ts"));
         assert_eq!(env_value(&spec, "PATH"), Some(env!("GENTLE_DOT_BUILD_PATH")));
         assert_eq!(env_value(&spec, "GENTLE_DOT_ALLOWED_ORIGINS"), None);
+    }
+
+    #[test]
+    fn launch_spec_preserves_inherited_path_for_source_launches() {
+        let spec = launch_spec(env_of(&[("PATH", "/user tools/bin:/system/bin")]), false, None);
+        let separator = if cfg!(windows) { ';' } else { ':' };
+        assert_eq!(env_value(&spec, "PATH"), Some(format!("/user tools/bin:/system/bin{separator}{}",
+            env!("GENTLE_DOT_BUILD_PATH")).as_str()));
+        assert_eq!(spec.program, env!("GENTLE_DOT_BUILD_NODE"));
+        assert_eq!(spec.args, vec![env!("GENTLE_DOT_BUILD_DAEMON_SCRIPT").to_string()]);
+    }
+
+    #[test]
+    fn runtime_path_keeps_inherited_order_and_appends_only_a_fallback() {
+        for (inherited, fallback, separator, expected) in [
+            (Some(r"C:\Scoop\shims;C:\Windows\System32"), r"C:\App\bin", ';',
+                r"C:\Scoop\shims;C:\Windows\System32;C:\App\bin"),
+            (Some("/opt/user tools/bin::/usr/bin:"), "/app/bin", ':', "/opt/user tools/bin::/usr/bin::/app/bin"),
+            (Some(""), "/app/bin", ':', "/app/bin"),
+            (None, "/app/bin", ':', "/app/bin"),
+            (Some("/user/bin"), "", ':', "/user/bin"),
+            (None, "", ':', ""),
+        ] {
+            assert_eq!(runtime_path(inherited.map(str::to_owned), fallback, separator), expected);
+        }
     }
 
     #[test]
@@ -1553,16 +1641,138 @@ mod tests {
         let runtime = fake_runtime("runtime-bundled", true);
         let spec = launch_spec(env_of(&[]), false, Some(&runtime));
         let root = runtime.display().to_string();
-        assert_eq!(spec.program, format!("{root}/node/bin/node"));
-        assert_eq!(spec.args, vec![format!("{root}/daemon/cli.mjs")]);
-        assert_eq!(
-            env_value(&spec, "PATH"),
-            Some(format!("{root}/bin:{root}/node/bin:/usr/bin:/bin:/usr/sbin:/sbin").as_str())
-        );
+        let (program, script, path) = if cfg!(windows) {
+            (
+                runtime.join("node").join("node.exe").display().to_string(),
+                runtime.join("daemon").join("cli.mjs").display().to_string(),
+                format!("{};{}", runtime.join("bin").display(), runtime.join("node").display()),
+            )
+        } else {
+            (
+                format!("{root}/node/bin/node"),
+                format!("{root}/daemon/cli.mjs"),
+                format!("{root}/bin:{root}/node/bin:/usr/bin:/bin:/usr/sbin:/sbin"),
+            )
+        };
+        assert_eq!(spec.program, program);
+        assert_eq!(spec.args, vec![script]);
+        assert_eq!(env_value(&spec, "PATH"), Some(path.as_str()));
         assert_eq!(env_value(&spec, "GENTLE_DOT_RUNTIME"), Some(root.as_str()));
         assert_eq!(env_value(&spec, "GENTLE_DOT_ALLOWED_ORIGINS"), None);
+        let empty_path = launch_spec(env_of(&[("PATH", "")]), false, Some(&runtime));
+        assert_eq!(env_value(&empty_path, "PATH"), Some(path.as_str()),
+            "empty PATH keeps runtime Node/bin fallbacks without bundled Git");
+        let inherited = r"C:\External Git\cmd";
+        let private = launch_spec(env_of(&[("PATH", r"C:\External Git\cmd")]), false, Some(&runtime));
+        let separator = if cfg!(windows) { ';' } else { ':' };
+        assert_eq!(env_value(&private, "PATH"), Some(format!("{inherited}{separator}{path}").as_str()),
+            "preserve inherited tools before bundled fallbacks");
         let spec = launch_spec(env_of(&[]), true, Some(&runtime));
         assert_eq!(env_value(&spec, "GENTLE_DOT_ALLOWED_ORIGINS"), Some(DEV_ALLOWED_ORIGINS));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundled_node_script_argument_converts_only_verbatim_filesystem_paths() {
+        for (input, expected) in [
+            (r"\\?\C:\Gentle Dot\daemon\cli.mjs", r"C:\Gentle Dot\daemon\cli.mjs"),
+            (r"\\?\z:\Gentle Dot\daemon\cli.mjs", r"z:\Gentle Dot\daemon\cli.mjs"),
+            (r"\\?\UNC\server\share\Gentle Dot\cli.mjs", r"\\server\share\Gentle Dot\cli.mjs"),
+            (r"C:\Gentle Dot\daemon\cli.mjs", r"C:\Gentle Dot\daemon\cli.mjs"),
+            (r"\\server\share\Gentle Dot\cli.mjs", r"\\server\share\Gentle Dot\cli.mjs"),
+            (r"\\?\Volume{example}\cli.mjs", r"\\?\Volume{example}\cli.mjs"),
+            (r"\\.\pipe\example", r"\\.\pipe\example"),
+            (r"C:daemon\cli.mjs", r"C:daemon\cli.mjs"),
+        ] {
+            assert_eq!(bundled_node_script_argument(Path::new(input)), expected, "input: {input}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundled_verbatim_runtime_launch_uses_native_windows_paths() {
+        let resources = scratch_dir("verbatim Gentle Dot");
+        let runtime = runtime_dir(env_of(&[]), Some(resources)).unwrap();
+        // Only the discovery sentinel is needed; no Node or daemon process is launched.
+        fs::create_dir_all(runtime.join("daemon")).unwrap();
+        fs::write(runtime.join("daemon").join("cli.mjs"), "").unwrap();
+        let runtime = fs::canonicalize(runtime).unwrap();
+        let root = runtime.to_str().unwrap();
+        assert!(root.starts_with(r"\\?\"), "fixture must have a real verbatim prefix: {root}");
+        assert!(root.contains("Gentle Dot"), "fixture must retain spaces: {root}");
+
+        let spec = launch_spec(env_of(&[]), false, Some(&runtime));
+        assert_eq!(env_value(&spec, "GENTLE_DOT_RUNTIME"), Some(root), "must select the bundled fixture");
+        // Compare strings, not Paths: separator normalization must not mask the launch failure.
+        assert_eq!(spec.program, format!(r"{root}\node\node.exe"));
+        // Independently spell the ordinary script path; do not normalize via Path equality.
+        let script_root = if let Some(unc) = root.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{unc}")
+        } else {
+            root.strip_prefix(r"\\?\").unwrap().to_string()
+        };
+        assert_eq!(spec.args, vec![format!(r"{script_root}\daemon\cli.mjs")]);
+        let path = env_value(&spec, "PATH").expect("bundled PATH");
+        let components: Vec<_> = path.split(';').collect();
+        assert_eq!(components, vec![format!(r"{root}\bin"), format!(r"{root}\node")]);
+        for value in std::iter::once(spec.program.as_str())
+            .chain(spec.args.iter().map(String::as_str))
+            .chain(components.iter().copied())
+        {
+            assert!(!value.contains('/'), "verbatim launch paths must not contain forward slashes: {value}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires GENTLE_DOT_TEST_NODE naming the actual installed runtime\\node\\node.exe (ordinary absolute path)"]
+    fn bundled_verbatim_runtime_script_resolves_in_real_node() {
+        // Do not execute inherited preloads, or change the environment to suppress them.
+        // Conservatively require review of any nonempty NODE_OPTIONS without exposing its value.
+        assert!(std::env::var_os("NODE_OPTIONS").is_none_or(|value| value.is_empty()),
+            "blocked: inherited NODE_OPTIONS requires preload safety review; environment left unchanged");
+        let node = PathBuf::from(std::env::var_os("GENTLE_DOT_TEST_NODE")
+            .expect("set GENTLE_DOT_TEST_NODE to the actual installed standalone node.exe"));
+        assert!(node.is_absolute() && node.is_file(), "installed Node must be an existing absolute regular file");
+        assert!(!node.to_str().expect("installed Node path must be Unicode").starts_with(r"\\?\"),
+            "GENTLE_DOT_TEST_NODE must use the ordinary absolute path for the control");
+        assert_eq!(node.file_name().unwrap(), "node.exe", "requires the installed Node executable");
+        let node_dir = node.parent().expect("installed Node directory");
+        assert_eq!(node_dir.file_name().unwrap(), "node", "requires runtime\\node\\node.exe layout");
+        let installed_runtime = node_dir.parent().expect("installed runtime directory");
+        let ordinary_script = installed_runtime.join("daemon").join("cli.mjs");
+        assert!(ordinary_script.is_absolute() && ordinary_script.is_file(),
+            "installed cli.mjs must be an existing absolute regular file");
+        let runtime = fs::canonicalize(installed_runtime).expect("canonicalize existing installed runtime");
+        let root = runtime.to_str().expect("installed runtime path must be Unicode");
+        assert!(root.starts_with(r"\\?\"), "installed runtime must have a real verbatim prefix");
+
+        // Preserve actual launcher overrides, but never execute a different program or script.
+        let spec = launch_spec(|key| std::env::var(key).ok(), false, Some(&runtime));
+        assert_eq!(env_value(&spec, "GENTLE_DOT_RUNTIME"), Some(root), "must select installed runtime");
+        let verbatim_node = runtime.join("node").join("node.exe");
+        assert!(spec.program == node.to_str().unwrap() || spec.program == verbatim_node.to_str().unwrap(),
+            "blocked: launcher override selects a different executable; environment left unchanged");
+        assert_eq!(spec.args.len(), 1, "exactly one generated entrypoint argument");
+        let ordinary_script = ordinary_script.to_str().unwrap();
+        let verbatim_script = format!(r"{root}\daemon\cli.mjs");
+        assert!(spec.args[0] == ordinary_script || spec.args[0] == verbatim_script,
+            "blocked: launcher override selects a different script; environment left unchanged");
+
+        // Same real executable and inherited environment for both checks. --check never runs cli.mjs.
+        for (case, script) in [("ordinary-path control", ordinary_script), ("generated script", spec.args[0].as_str())] {
+            let output = Command::new(&spec.program)
+                .arg("--check")
+                .arg(script)
+                .stdin(Stdio::null())
+                .output()
+                .expect("start installed Node for read-only script syntax check");
+            assert_eq!(output.status.code(), Some(0),
+                "{case}: Node --check must resolve the script: stdout={:?}, stderr={:?}",
+                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            assert_eq!(output.stdout, b"", "{case}: syntax checking must produce no stdout");
+            assert_eq!(output.stderr, b"", "{case}: syntax checking must produce no stderr");
+        }
     }
 
     #[test]
@@ -1590,7 +1800,12 @@ mod tests {
         assert_eq!(spec.args, vec!["/srv/cli.ts".to_string()]);
         assert_eq!(env_value(&spec, "GENTLE_DOT_RUNTIME"), Some(runtime.display().to_string().as_str()));
         let spec = launch_spec(env_of(&[("GENTLE_DOT_NODE", "")]), false, Some(&runtime));
-        assert_eq!(spec.program, runtime.join("node/bin/node").display().to_string());
+        let node = if cfg!(windows) {
+            runtime.join("node/node.exe")
+        } else {
+            runtime.join("node/bin/node")
+        };
+        assert_eq!(Path::new(&spec.program), node);
     }
 
     #[test]
@@ -1615,10 +1830,12 @@ mod tests {
         std::env::temp_dir().join(format!("gentle-dot-{name}-{}-{nanos}", std::process::id()))
     }
 
+    #[cfg(unix)]
     fn mode_of(path: &Path) -> u32 {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
+    #[cfg(unix)]
     #[test]
     fn daemon_log_is_private_when_created() {
         let dir = scratch_dir("log-new").join("data");
@@ -1627,6 +1844,7 @@ mod tests {
         assert_eq!(mode_of(&dir.join("daemon.log")), 0o600);
     }
 
+    #[cfg(unix)]
     #[test]
     fn daemon_log_repairs_looser_modes() {
         let dir = scratch_dir("log-old");
@@ -1645,6 +1863,7 @@ mod tests {
         LaunchSpec { program: "/bin/sh".into(), args: vec!["-c".into(), script.into()], envs: vec![] }
     }
 
+    #[cfg(unix)]
     fn read_line(stream: &UnixStream) -> String {
         // macOS refuses socket options (EINVAL) once the other end has closed; reading still works.
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -1653,6 +1872,7 @@ mod tests {
         line
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_daemon_gets_its_end_of_the_channel_on_fd_3() {
         let dir = scratch_dir("channel-fd");
@@ -1669,12 +1889,14 @@ IFS= read -r line <&3; printf '%s %s\\n' \"$kind\" \"$line\" >&3";
         assert_eq!(read_line(&app), "");
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_channel_end_is_never_one_the_daemon_could_clobber() {
         let (_app, daemon_end) = channel_pair().unwrap();
         assert!(daemon_end.as_raw_fd() > APP_FD, "{}", daemon_end.as_raw_fd());
     }
 
+    #[cfg(unix)]
     #[test]
     fn without_a_channel_fd_3_is_closed_in_the_daemon() {
         let dir = scratch_dir("channel-none");
@@ -1684,6 +1906,7 @@ IFS= read -r line <&3; printf '%s %s\\n' \"$kind\" \"$line\" >&3";
         assert_eq!(fs::read_to_string(dir.join("daemon.log")).unwrap(), "none\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn no_other_descriptor_of_the_app_reaches_the_daemon() {
         let dir = scratch_dir("channel-only");
@@ -1706,6 +1929,7 @@ IFS= read -r line <&3; printf '%s %s\\n' \"$kind\" \"$line\" >&3";
     /// stand-in (packages/daemon/test/fixtures/app-channel-child.ts), which opens the channel the way
     /// the daemon does and reports what the children it spawns see on fd 3. Needs Node 24 on PATH
     /// (or `GENTLE_DOT_TEST_NODE`): `cargo test a_node_daemon -- --ignored`.
+    #[cfg(unix)]
     #[test]
     #[ignore = "needs Node 24 and the repository's daemon sources"]
     fn a_node_daemon_keeps_the_channel_from_its_children() {
@@ -1766,6 +1990,7 @@ id=$(printf '%s' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
 printf '{"kind":"response","id":%s,"result":{"echo":%s}}\n' "$id" "$id" >&3
 done"#;
 
+    #[cfg(unix)]
     #[test]
     fn a_daemon_this_app_spawned_gets_a_channel_until_it_stops() {
         let handler = Arc::new(Opened::default());
@@ -1905,6 +2130,7 @@ while :; do sleep 0.01; done
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_app_that_wants_a_channel_never_attaches_to_a_daemon_it_did_not_launch() {
         let port = foreign_daemon();
@@ -1933,6 +2159,7 @@ while :; do sleep 0.01; done
         assert_eq!(daemon.wait_ready(Duration::from_millis(300)), Ok(()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_pid_file_names_only_the_process_it_recorded() {
         let dir = scratch_dir("pid-file");
@@ -1958,11 +2185,103 @@ while :; do sleep 0.01; done
         assert_eq!(recorded_launch(&dir), None);
     }
 
+    /// Set on a child of this very test binary that has to stay alive while the pid file names it.
+    #[cfg(windows)]
+    const PID_HOLDER: &str = "GENTLE_DOT_TEST_PID_HOLDER";
+
+    /// A live process with a readable creation time, without a shell: a copy of this test binary
+    /// that sleeps. The harness runs [`the_pid_holder_waits_until_it_is_killed`] when a pid-file
+    /// test asks for one, and that test returns at once in an ordinary run.
+    #[cfg(windows)]
+    fn sleeper() -> std::process::Child {
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "daemon::tests::the_pid_holder_waits_until_it_is_killed", "--nocapture"])
+            .env(PID_HOLDER, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    /// Not a test of its own: it is the body of the process [`sleeper`] starts.
+    #[cfg(windows)]
+    #[test]
+    fn the_pid_holder_waits_until_it_is_killed() {
+        if std::env::var_os(PID_HOLDER).is_none() {
+            return;
+        }
+        thread::sleep(Duration::from_secs(120));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_live_process_has_a_start_time_and_a_dead_one_does_not() {
+        let mut child = sleeper();
+        let started = process_started(child.id()).expect("a live process has a start time");
+        assert_eq!(process_started(child.id()), Some(started), "the start time is stable while it runs");
+        assert!(process_started(std::process::id()).is_some(), "this process is live");
+        assert_eq!(process_started(0), None);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(process_started(child.id()), None, "a process that ended has no start time");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_pid_file_names_a_live_process_and_drops_it_when_it_dies() {
+        let dir = scratch_dir("pid-file-windows");
+        fs::create_dir_all(&dir).unwrap();
+        assert_eq!(recorded_launch(&dir), None);
+        let mut child = sleeper();
+        record_launch(&dir, child.id()).unwrap();
+        let recorded = recorded_launch(&dir).expect("a recorded launch");
+        assert_eq!(recorded.pid, child.id());
+        assert_eq!(live_orphan(&dir), Some(recorded));
+        // Another start time under that number names a different process: never taken for it.
+        fs::write(dir.join(PID_FILE), format!("{} {}\n", child.id(), recorded.started + 1)).unwrap();
+        assert_eq!(live_orphan(&dir), None);
+        fs::write(dir.join(PID_FILE), format!("{} {}\n", child.id(), recorded.started)).unwrap();
+        assert_eq!(live_orphan(&dir), Some(recorded));
+        // The app itself is never a daemon it may stop.
+        fs::write(dir.join(PID_FILE), format!("{} {}\n", std::process::id(), 1)).unwrap();
+        assert_eq!(recorded_launch(&dir), None);
+        fs::write(dir.join(PID_FILE), format!("{} {}\n", child.id(), recorded.started)).unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(live_orphan(&dir), None, "the record is dropped once the process is gone");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stopping_a_recorded_orphan_terminates_only_the_process_it_recorded() {
+        let dir = scratch_dir("stop-orphan-windows");
+        fs::create_dir_all(&dir).unwrap();
+        let mut orphan = sleeper();
+        record_launch(&dir, orphan.id()).unwrap();
+        let recorded = recorded_launch(&dir).unwrap();
+        // A pid whose live start time is not the recorded one is left alone.
+        stop_orphan(Launched { pid: recorded.pid, started: recorded.started + 1 }, Duration::from_secs(2));
+        assert_eq!(orphan.try_wait().unwrap(), None, "a different start time was terminated");
+        // The recorded process is terminated and stops running.
+        stop_orphan(recorded, Duration::from_secs(5));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while orphan.try_wait().unwrap().is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(orphan.try_wait().unwrap().is_some(), "the recorded orphan is still running");
+        assert_eq!(process_started(recorded.pid), None);
+        // Never this app, whatever the record says.
+        stop_orphan(Launched { pid: std::process::id(), started: 1 }, Duration::from_secs(1));
+    }
+
     /// A pid file naming `pid` with its real start time, as `record_launch` would write it.
+    #[cfg(unix)]
     fn launch_line(pid: u32) -> String {
         format!("{pid} {}\n", process_started(pid).expect("a live process"))
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_pid_file_never_names_the_app_its_parent_or_the_system() {
         let dir = scratch_dir("pid-self");
@@ -1981,6 +2300,7 @@ while :; do sleep 0.01; done
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_pid_file_that_is_a_symlink_is_not_read_and_its_target_is_untouched() {
         let dir = scratch_dir("pid-symlink-read");
@@ -1997,6 +2317,7 @@ while :; do sleep 0.01; done
         child.wait().unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn recording_a_launch_never_writes_through_a_symlink() {
         let dir = scratch_dir("pid-symlink-write");
@@ -2015,6 +2336,7 @@ while :; do sleep 0.01; done
         child.wait().unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn recording_a_launch_replaces_the_pid_file_whole() {
         use std::os::unix::fs::MetadataExt;
@@ -2036,6 +2358,7 @@ while :; do sleep 0.01; done
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_pid_file_that_is_not_a_small_regular_file_is_not_read() {
         let dir = scratch_dir("pid-odd");
@@ -2054,6 +2377,7 @@ while :; do sleep 0.01; done
         child.wait().unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_refused_app_announces_its_assistant_once_a_restart_starts_it() {
         let dir = scratch_dir("ready-after-restart");
@@ -2084,6 +2408,7 @@ while :; do sleep 0.01; done
         daemon.stop();
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_relaunched_app_after_a_crashed_one_gets_a_channel() {
         let dir = scratch_dir("relaunch");
@@ -2125,6 +2450,7 @@ while :; do sleep 0.01; done
         assert!(!dir.join(PID_FILE).exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn stop_child_terminates_with_sigterm() {
         let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
@@ -2136,6 +2462,7 @@ while :; do sleep 0.01; done
         assert_eq!(status.signal(), Some(libc::SIGTERM));
     }
 
+    #[cfg(unix)]
     #[test]
     fn stop_child_kills_after_the_grace_period() {
         let mut child = Command::new("/bin/sh").args(["-c", "trap '' TERM; sleep 30"]).spawn().unwrap();
@@ -2144,5 +2471,47 @@ while :; do sleep 0.01; done
         let status = child.try_wait().unwrap().expect("child has exited");
         use std::os::unix::process::ExitStatusExt;
         assert_eq!(status.signal(), Some(libc::SIGKILL));
+    }
+
+    /// The app's kill-tree: `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` ends every process the job holds
+    /// when its last handle closes, which is what the system does to the app's job when the app
+    /// exits. This observes a directly assigned child; descendants created after it joins the job
+    /// are in the job by Windows' own rule. The sleeper is the long-lived child the pid-file tests
+    /// use.
+    #[cfg(windows)]
+    #[test]
+    fn the_daemons_job_kills_its_tree_when_the_apps_last_handle_closes() {
+        let job = create_daemon_job().expect("a job object");
+        let mut child = sleeper();
+        assign_to_job(&job, child.id()).expect("the child joins the job");
+        assert_eq!(child.try_wait().unwrap(), None, "the child runs while the job is open");
+        drop(job);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(50));
+        }
+        let exited = child.try_wait().unwrap().is_some();
+        // Whether or not the job ended it, the sleeper never outlives the test.
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(exited, "the child survived the job's last handle closing");
+    }
+
+    /// `stop_child` on Windows has no signal to send, so the caller asks first (the daemon's
+    /// channel close) and `stop_child` waits out the grace before terminating. A child that would
+    /// exit on its own inside the grace must be allowed to: a terminated one is not a success.
+    #[cfg(windows)]
+    #[test]
+    fn stop_child_waits_out_the_grace_before_terminating() {
+        let mut child = Command::new("cmd.exe")
+            .args(["/C", "ping -n 2 127.0.0.1 > nul"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        stop_child(&mut child, Duration::from_secs(8));
+        let status = child.try_wait().unwrap().expect("the child exited");
+        assert!(status.success(), "the child was terminated instead of waited out: {status:?}");
     }
 }

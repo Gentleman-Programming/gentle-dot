@@ -73,9 +73,150 @@ impl Resampler {
     }
 }
 
+/// Interleaved little-endian device samples. Extensible integer PCM must be left-aligned
+/// in its container (including 24 valid bits in a 32-bit container), as WASAPI specifies.
+#[cfg(any(target_os = "windows", test))]
+#[derive(Clone, Copy)]
+pub(crate) enum PcmEncoding {
+    Unsigned8,
+    Signed16,
+    Signed24,
+    Signed32,
+    Float32,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl PcmEncoding {
+    fn bytes(self) -> usize {
+        match self {
+            Self::Unsigned8 => 1,
+            Self::Signed16 => 2,
+            Self::Signed24 => 3,
+            Self::Signed32 | Self::Float32 => 4,
+        }
+    }
+
+    fn sample(self, bytes: &[u8]) -> f32 {
+        let value = match self {
+            Self::Unsigned8 => (f32::from(bytes[0]) - 128.0) / 128.0,
+            Self::Signed16 => f32::from(i16::from_le_bytes([bytes[0], bytes[1]])) / 32768.0,
+            Self::Signed24 => {
+                let signed = i32::from_le_bytes([0, bytes[0], bytes[1], bytes[2]]);
+                signed as f32 / 2147483648.0
+            }
+            Self::Signed32 => i32::from_le_bytes(bytes.try_into().unwrap()) as f32 / 2147483648.0,
+            Self::Float32 => f32::from_le_bytes(bytes.try_into().unwrap()),
+        };
+        if value.is_finite() { value.clamp(-1.0, 1.0) } else { 0.0 }
+    }
+}
+
+/// Bound both native pointer slices and silence allocations, even for a malformed driver.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) const MAX_CAPTURE_BYTES: usize = 1_048_576;
+#[cfg(any(target_os = "windows", test))]
+pub(crate) const MAX_CAPTURE_FRAMES: u32 = 65_536;
+
+/// One device stream's packet converter. Silence is represented by `None`, not a read from
+/// WASAPI's possibly null buffer. A malformed packet leaves the resampler untouched.
+/// Format negotiation must reject unsupported encodings before constructing this converter.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) struct CapturePcm {
+    channels: usize,
+    encoding: PcmEncoding,
+    resampler: Resampler,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl CapturePcm {
+    pub(crate) fn new(rate: u32, channels: u16, encoding: PcmEncoding) -> Result<Self, &'static str> {
+        if !(8_000..=384_000).contains(&rate) || !(1..=32).contains(&channels) {
+            return Err("The microphone reported an unsupported sample rate or channel count.");
+        }
+        Ok(Self { channels: usize::from(channels), encoding, resampler: Resampler::new(f64::from(rate)) })
+    }
+
+    pub(crate) fn packet(&mut self, bytes: Option<&[u8]>, frames: u32) -> Result<Vec<f32>, &'static str> {
+        let frame_bytes = self.channels * self.encoding.bytes();
+        let expected = (frames as usize).checked_mul(frame_bytes)
+            .ok_or("The microphone packet is too large.")?;
+        if frames > MAX_CAPTURE_FRAMES || expected > MAX_CAPTURE_BYTES {
+            return Err("The microphone packet is too large.");
+        }
+        if bytes.is_some_and(|bytes| bytes.len() != expected) {
+            return Err("The microphone packet does not contain complete frames.");
+        }
+        let mono = match bytes {
+            None => vec![0.0; frames as usize],
+            Some(bytes) => bytes.chunks_exact(frame_bytes).map(|frame| {
+                frame.chunks_exact(self.encoding.bytes())
+                    .map(|sample| self.encoding.sample(sample) / self.channels as f32).sum()
+            }).collect(),
+        };
+        Ok(self.resampler.process(&mono))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_packets_mix_pcm_and_preserve_resampling_across_packets() {
+        let mut capture = CapturePcm::new(48_000, 2, PcmEncoding::Signed16).unwrap();
+        let frame = [0, 64, 0, 0]; // stereo: 0.5 and 0.0
+        assert!(capture.packet(Some(&frame), 1).unwrap().is_empty());
+        assert_eq!(capture.packet(Some(&frame.repeat(2)), 2).unwrap(), vec![0.25]);
+        assert_eq!(capture.packet(None, 3).unwrap(), vec![0.0]);
+    }
+
+    #[test]
+    fn capture_formats_decode_full_scale_and_sanitize_float() {
+        for (encoding, bytes) in [
+            (PcmEncoding::Unsigned8, vec![0]),
+            (PcmEncoding::Signed16, i16::MIN.to_le_bytes().to_vec()),
+            (PcmEncoding::Signed24, vec![0, 0, 128]),
+            (PcmEncoding::Signed32, i32::MIN.to_le_bytes().to_vec()),
+        ] {
+            let mut capture = CapturePcm::new(16_000, 1, encoding).unwrap();
+            assert_eq!(capture.packet(Some(&bytes), 1).unwrap(), vec![-1.0]);
+        }
+        let bytes: Vec<u8> = [0.5f32, f32::NAN, f32::INFINITY, -2.0]
+            .into_iter().flat_map(f32::to_le_bytes).collect();
+        let mut capture = CapturePcm::new(16_000, 1, PcmEncoding::Float32).unwrap();
+        assert_eq!(capture.packet(Some(&bytes), 4).unwrap(), vec![0.5, 0.0, 0.0, -1.0]);
+    }
+
+    #[test]
+    fn capture_rejects_invalid_formats_and_incomplete_packets_without_advancing() {
+        assert!(CapturePcm::new(0, 1, PcmEncoding::Float32).is_err());
+        assert!(CapturePcm::new(16_000, 0, PcmEncoding::Float32).is_err());
+        let mut capture = CapturePcm::new(16_000, 1, PcmEncoding::Float32).unwrap();
+        assert!(capture.packet(Some(&[0; 3]), 1).is_err());
+        assert!(capture.packet(Some(&[0; 8]), 1).is_err());
+        assert_eq!(capture.packet(None, 1).unwrap(), vec![0.0]);
+        assert!(capture.packet(None, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn capture_limits_reject_unbounded_allocations_before_touching_pcm() {
+        assert!(CapturePcm::new(1, 1, PcmEncoding::Float32).is_err());
+        assert!(CapturePcm::new(384_001, 1, PcmEncoding::Float32).is_err());
+        assert!(CapturePcm::new(16_000, 33, PcmEncoding::Float32).is_err());
+        let mut capture = CapturePcm::new(16_000, 1, PcmEncoding::Float32).unwrap();
+        assert!(capture.packet(None, u32::MAX).is_err());
+        assert!(capture.packet(None, MAX_CAPTURE_FRAMES + 1).is_err());
+        assert_eq!(capture.packet(None, 1).unwrap(), vec![0.0]);
+        let mut wide = CapturePcm::new(384_000, 32, PcmEncoding::Float32).unwrap();
+        assert!(wide.packet(None, 8193).is_err()); // 8192 * 32 * 4 is the byte cap.
+        assert_eq!(wide.packet(None, 0).unwrap(), Vec::<f32>::new());
+        assert!(CapturePcm::new(8_000, 1, PcmEncoding::Unsigned8).is_ok());
+        let mut partial = CapturePcm::new(48_000, 1, PcmEncoding::Float32).unwrap();
+        let sample = 0.75f32.to_le_bytes();
+        assert!(partial.packet(Some(&sample), 1).unwrap().is_empty());
+        assert!(partial.packet(None, MAX_CAPTURE_FRAMES + 1).is_err());
+        assert_eq!(partial.packet(Some(&sample.repeat(2)), 2).unwrap(), vec![0.75]);
+    }
 
     #[test]
     fn rms_of_a_constant_signal_is_its_magnitude() {

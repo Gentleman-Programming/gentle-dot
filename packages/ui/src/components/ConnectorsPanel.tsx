@@ -5,6 +5,8 @@ import {
 	type ImportCandidate,
 } from "@gentle-dot/protocol";
 import { useState } from "react";
+import { useLocale } from "../i18n.tsx";
+import type { MessageKey } from "../i18n-messages.ts";
 import type { ConnectorsState, DotAction } from "../store.ts";
 import "../accounts.css";
 import { FlowEvent, FlowPrompt } from "./AccountsPanel.tsx";
@@ -28,12 +30,12 @@ interface ConnectorsPanelProps {
 	voiceModel?: boolean;
 }
 
-const STATUS_LABELS: Record<ConnectorStatus, string> = {
-	off: "Off",
-	needs_setup: "Needs setup",
-	needs_signin: "Needs sign-in",
-	connected: "Connected",
-	error: "Sign-in failed",
+const STATUS_LABELS: Record<ConnectorStatus, MessageKey> = {
+	off: "connector.off",
+	needs_setup: "connector.needsSetup",
+	needs_signin: "connector.needsSignin",
+	connected: "connector.connected",
+	error: "connector.error",
 };
 
 /** What the chat says for "Add another connector"; the assistant answers with a draft to review. */
@@ -50,6 +52,7 @@ export function ConnectorsPanel({
 	computer,
 	voiceModel,
 }: ConnectorsPanelProps) {
+	const { t } = useLocale();
 	const [guideFor, setGuideFor] = useState<string>();
 	const [adding, setAdding] = useState(false);
 	const flow = connectors.flow;
@@ -69,39 +72,39 @@ export function ConnectorsPanel({
 	const settingUp = flow?.flowId?.startsWith("connector-setup-") && flow.events.length === 0;
 
 	return (
-		<section className="accounts connectors" aria-label="Connectors">
+		<section className="accounts connectors" aria-label={t("connector.title")}>
 			<header className="accounts-header">
-				<h2>Connectors</h2>
+				<h2>{t("connector.title")}</h2>
 				<button
 					type="button"
 					className="icon"
-					aria-label="Close connectors"
+					aria-label={t("connector.close")}
 					onClick={() => dispatch({ type: "connectors", open: false })}
 				>
 					×
 				</button>
 			</header>
-			<p className="muted">
-				Let the assistant use your other apps. It always asks you before it sends or changes anything.
-			</p>
+			<p className="muted">{t("connector.intro")}</p>
 			{appSend ? null : <p className="connector-note">{APP_REQUIRED}</p>}
 
 			{flow ? (
 				<div className="auth-flow">
 					<p className="auth-flow-title">
-						{settingUp ? "Setting up" : "Signing in to"} {name(flow.providerId)}
+						{t(settingUp ? "connector.settingUp" : "connector.signingIn")} {name(flow.providerId)}
 					</p>
 					{flow.events.map((event, i) => (
 						// biome-ignore lint/suspicious/noArrayIndexKey: events are append-only and never reordered
 						<FlowEvent key={`${event.kind}-${i}`} event={event} openUrl={openUrl} />
 					))}
 					{flow.prompt ? <FlowPrompt key={flow.prompt.message} prompt={flow.prompt} send={send} /> : null}
-					{busy && !flow.prompt && flow.events.length === 0 ? <p className="muted">Starting…</p> : null}
+					{busy && !flow.prompt && flow.events.length === 0 ? (
+						<p className="muted">{t("connector.starting")}</p>
+					) : null}
 					{flow.done ? (
 						<p className={`auth-result ${flow.done.ok ? "ok" : "failed"}`} role="status">
 							{flow.done.ok
-								? `Connected to ${name(flow.providerId)}.`
-								: (flow.done.message ?? "Sign-in did not finish.")}
+								? `${t("connector.connectedTo")} ${name(flow.providerId)}.`
+								: (flow.done.message ?? t("connector.failed"))}
 						</p>
 					) : null}
 					<div className="auth-actions">
@@ -110,12 +113,12 @@ export function ConnectorsPanel({
 								type="button"
 								onClick={() => send({ type: "auth_reply", flowId: flow.flowId ?? "", cancelled: true })}
 							>
-								Cancel
+								{t("connector.cancel")}
 							</button>
 						) : null}
 						{flow.done ? (
 							<button type="button" onClick={() => dispatch({ type: "connectors", open: true })}>
-								Back to connectors
+								{t("connector.backToList")}
 							</button>
 						) : null}
 					</div>
@@ -132,10 +135,10 @@ export function ConnectorsPanel({
 				<>
 					<div className="connector-actions">
 						<button type="button" onClick={() => setAdding(!adding)} aria-expanded={adding}>
-							Add another connector
+							{t("connector.add")}
 						</button>
 						<button type="button" onClick={() => send({ type: "connectors_scan" })}>
-							Import my MCP servers
+							{t("connector.scan")}
 						</button>
 					</div>
 					{adding ? (
@@ -202,11 +205,14 @@ interface ConnectorGuideViewProps {
 
 /** The steps to create the app or bot the connector signs in with, before "Connect". */
 function ConnectorGuideView({ connector: c, openUrl, back, next, canChange }: ConnectorGuideViewProps) {
+	const { t } = useLocale();
 	const guide = c.guide;
 	if (!guide) return null;
 	return (
-		<section className="connector-guide" aria-label={`Set up ${c.name}`}>
-			<h3>Set up {c.name}</h3>
+		<section className="connector-guide" aria-label={`${t("connector.setup")} ${c.name}`}>
+			<h3>
+				{t("connector.setup")} {c.name}
+			</h3>
 			<ol>
 				{guide.steps.map((step) => (
 					<li key={step} className="connector-step">
@@ -216,24 +222,24 @@ function ConnectorGuideView({ connector: c, openUrl, back, next, canChange }: Co
 			</ol>
 			{guide.redirectUrl ? (
 				<div className="connector-redirect">
-					<span>Redirect URL to add</span>
+					<span>{t("connector.redirect")}</span>
 					<code>{guide.redirectUrl}</code>
 				</div>
 			) : null}
 			<div className="connector-links">
 				{guide.links.map((link) => (
 					<button key={link.url} type="button" className="link" onClick={() => openUrl(link.url)}>
-						Open {link.label}
+						{t("connector.open")} {link.label}
 					</button>
 				))}
 			</div>
 			{guide.note ? <p className="connector-note">{guide.note}</p> : null}
 			<div className="auth-actions">
 				<button type="button" onClick={back}>
-					Back
+					{t("connector.back")}
 				</button>
 				<button type="button" className="primary" disabled={!canChange} onClick={next}>
-					Continue
+					{t("connector.continue")}
 				</button>
 			</div>
 		</section>
@@ -241,6 +247,7 @@ function ConnectorGuideView({ connector: c, openUrl, back, next, canChange }: Co
 }
 
 function AddAnother({ ask, cancel }: { ask: (what: string) => void; cancel: () => void }) {
+	const { t } = useLocale();
 	const [what, setWhat] = useState("");
 	return (
 		<form
@@ -251,24 +258,22 @@ function AddAnother({ ask, cancel }: { ask: (what: string) => void; cancel: () =
 			}}
 		>
 			<label>
-				<span>What do you want to connect?</span>
+				<span>{t("connector.question")}</span>
 				<input
 					type="text"
 					autoComplete="off"
-					placeholder="For example GitHub or Jira"
+					placeholder={t("connector.example")}
 					value={what}
 					onChange={(event) => setWhat(event.target.value)}
 				/>
 			</label>
-			<p className="connector-note">
-				The assistant looks for its server and sends you a draft. Nothing is added until you approve it.
-			</p>
+			<p className="connector-note">{t("connector.draftNote")}</p>
 			<div className="auth-actions">
 				<button type="submit" className="primary" disabled={!what.trim()}>
-					Ask the assistant
+					{t("connector.ask")}
 				</button>
 				<button type="button" onClick={cancel}>
-					Cancel
+					{t("connector.cancel")}
 				</button>
 			</div>
 		</form>
@@ -284,21 +289,19 @@ interface ImportListProps {
 
 /** What the scan found in the user's other apps: names only, one checkbox each. */
 function ImportList({ found, importServers, close }: ImportListProps) {
+	const { t } = useLocale();
 	const [chosen, setChosen] = useState<string[]>([]);
 	const toggle = (id: string) =>
 		setChosen((current) => (current.includes(id) ? current.filter((c) => c !== id) : [...current, id]));
 	const count = chosen.length;
 	return (
-		<section className="connector-imports" aria-label="Found these servers">
-			<h3>Found these servers</h3>
+		<section className="connector-imports" aria-label={t("connector.found")}>
+			<h3>{t("connector.found")}</h3>
 			{found.length === 0 ? (
-				<p className="muted">No MCP servers were found in your other apps.</p>
+				<p className="muted">{t("connector.none")}</p>
 			) : (
 				<>
-					<p className="connector-note">
-						Imported servers start read only, with all of their tools hidden. Their keys stay on this
-						computer; your other apps are not changed.
-					</p>
+					<p className="connector-note">{t("connector.importNote")}</p>
 					<ul>
 						{found.map((candidate) => (
 							<li key={candidate.id} className="connector-found">
@@ -311,18 +314,25 @@ function ImportList({ found, importServers, close }: ImportListProps) {
 										onChange={() => toggle(candidate.id)}
 									/>
 									<b>{candidate.name}</b>
-									<span className="muted">From {candidate.sources.join(", ")}</span>
+									<span className="muted">
+										{t("connector.from")} {candidate.sources.join(", ")}
+									</span>
 								</label>
 								{candidate.summary ? <code>{candidate.summary}</code> : null}
-								<ImportNames label="Keys" names={[...candidate.envNames, ...candidate.headerNames]} />
-								<ImportNames label="You will type" names={candidate.inputs} />
+								<ImportNames
+									label={t("connector.keys")}
+									names={[...candidate.envNames, ...candidate.headerNames]}
+								/>
+								<ImportNames label={t("connector.inputs")} names={candidate.inputs} />
 								{candidate.notes?.map((note) => (
 									<p key={note} className="connector-note">
 										{note}
 									</p>
 								))}
 								{candidate.duplicateOf ? (
-									<p className="connector-note">Already in your connectors as {candidate.duplicateOf}.</p>
+									<p className="connector-note">
+										{t("connector.duplicate")} {candidate.duplicateOf}.
+									</p>
 								) : candidate.reason ? (
 									<p className="connector-note">{candidate.reason}</p>
 								) : null}
@@ -339,11 +349,13 @@ function ImportList({ found, importServers, close }: ImportListProps) {
 						disabled={count === 0 || !importServers}
 						onClick={() => importServers?.(chosen)}
 					>
-						{count === 0 ? "Import" : `Import ${count} server${count === 1 ? "" : "s"}`}
+						{count === 0
+							? t("connector.import")
+							: `${t("connector.import")} ${count} ${t(count === 1 ? "connector.server" : "connector.servers")}`}
 					</button>
 				) : null}
 				<button type="button" onClick={close}>
-					Close the list
+					{t("connector.closeList")}
 				</button>
 			</div>
 		</section>
@@ -374,17 +386,16 @@ interface ConnectorRowProps {
 }
 
 function ConnectorRow({ connector: c, appSend, connect, signIn, setUp }: ConnectorRowProps) {
+	const { t } = useLocale();
 	const locked = !appSend;
 	const nameId = `connector-${c.id}`;
-	const readOnlyNote = c.custom
-		? "Its tools stay hidden until you choose Read and send. Then it asks you before every action."
-		: "It cannot send or change anything.";
+	const readOnlyNote = c.custom ? t("connector.hiddenTools") : t("connector.cannotSend");
 	const canSignIn = c.enabled && !c.noSignIn && c.status !== "needs_setup";
 	return (
 		<li aria-labelledby={nameId}>
 			<div className="provider-name">
 				<b id={nameId}>{c.name}</b>
-				{c.added ? <span className={`chip connector-${c.status}`}>{STATUS_LABELS[c.status]}</span> : null}
+				{c.added ? <span className={`chip connector-${c.status}`}>{t(STATUS_LABELS[c.status])}</span> : null}
 			</div>
 			{c.custom ? (
 				<p className="connector-origin">
@@ -396,11 +407,11 @@ function ConnectorRow({ connector: c, appSend, connect, signIn, setUp }: Connect
 			<p className="connector-note">{c.mode === "read_write" ? c.sends : readOnlyNote}</p>
 			{c.enabled ? (
 				<fieldset className="connector-mode">
-					<legend>What {c.name} may do</legend>
+					<legend>{t("connector.mayDo").replace("{name}", () => c.name)}</legend>
 					{(
 						[
-							["read_only", "Read only"],
-							["read_write", "Read and send"],
+							["read_only", t("connector.readOnly")],
+							["read_write", t("connector.readWrite")],
 						] as const
 					).map(([mode, label]) => (
 						<label key={mode}>
@@ -421,59 +432,64 @@ function ConnectorRow({ connector: c, appSend, connect, signIn, setUp }: Connect
 					<button
 						type="button"
 						className="primary"
-						aria-label={`Connect ${c.name}`}
+						aria-label={`${t("connector.connect")} ${c.name}`}
 						disabled={locked}
 						onClick={connect}
 					>
-						Connect
+						{t("connector.connect")}
 					</button>
 				)}
 				{c.enabled && c.status === "needs_setup" ? (
 					<button
 						type="button"
 						className="primary"
-						aria-label={`Set up ${c.name}`}
+						aria-label={`${t("connector.setup")} ${c.name}`}
 						disabled={locked}
 						onClick={setUp}
 					>
-						Set up
+						{t("connector.setup")}
 					</button>
 				) : null}
 				{canSignIn && c.status !== "connected" ? (
 					<button
 						type="button"
 						className="primary"
-						aria-label={`Sign in to ${c.name}`}
+						aria-label={`${t("connector.signinTo")} ${c.name}`}
 						disabled={locked}
 						onClick={signIn}
 					>
-						Sign in
+						{t("connector.signin")}
 					</button>
 				) : null}
 				{canSignIn && c.status === "connected" ? (
-					<button type="button" aria-label={`Sign in to ${c.name} again`} disabled={locked} onClick={signIn}>
-						Sign in again
+					<button
+						type="button"
+						aria-label={t("connector.signinAgainLabel").replace("{name}", () => c.name)}
+						disabled={locked}
+						onClick={signIn}
+					>
+						{t("connector.signinAgain")}
 					</button>
 				) : null}
 				{c.enabled ? (
 					<button
 						type="button"
-						aria-label={`Disconnect ${c.name}`}
+						aria-label={`${t("connector.disconnect")} ${c.name}`}
 						disabled={locked}
 						onClick={() => appSend?.({ type: "connector_disconnect", connectorId: c.id })}
 					>
-						Disconnect
+						{t("connector.disconnect")}
 					</button>
 				) : null}
 				{c.added ? (
 					<button
 						type="button"
 						className="link"
-						aria-label={`Remove ${c.name}`}
+						aria-label={`${t("connector.remove")} ${c.name}`}
 						disabled={locked}
 						onClick={() => appSend?.({ type: "connector_remove", connectorId: c.id })}
 					>
-						Remove
+						{t("connector.remove")}
 					</button>
 				) : null}
 			</div>

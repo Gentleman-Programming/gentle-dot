@@ -18,15 +18,14 @@
 mod memory;
 #[cfg(any(windows, test))]
 mod windows_codec;
+#[cfg(any(windows, test))]
+mod windows_legacy;
 #[cfg(windows)]
 mod windows;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
-mod memory;
-#[cfg(windows)]
-mod windows;
 
 pub use memory::MemoryStore;
 #[cfg(windows)]
@@ -35,7 +34,6 @@ pub use windows::WindowsDpapiStore;
 pub use linux::SecretServiceStore;
 #[cfg(target_os = "macos")]
 pub use macos::Keychain;
-pub use memory::MemoryStore;
 
 /// The keychain service (macOS) or `service` attribute (Linux) of every connector secret.
 pub const SERVICE: &str = "dev.gentleman.gentle-dot.connectors";

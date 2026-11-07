@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
+import { useLocale } from "../i18n.tsx";
+import type { voiceEn } from "../i18n-voice-messages.ts";
 import {
 	cancelVoiceModel,
 	downloadVoiceModel,
@@ -12,28 +14,32 @@ import {
 /** The archive's size (pinned in the desktop app), shown before anything downloads. */
 const DOWNLOAD_BYTES = 487_170_055;
 
-const ENGINES: Record<VoiceModelStatus["engine"], string> = {
-	parakeet: "Using: local model (Parakeet), works offline",
-	apple: "Using: macOS speech",
-	none: "Voice input needs the local model on this computer",
+const ENGINES: Record<VoiceModelStatus["engine"], keyof typeof voiceEn> = {
+	parakeet: "voice.modelParakeet",
+	apple: "voice.modelApple",
+	none: "voice.modelNeeded",
 };
 
 /** The chip names the engine that listens now. */
-const CHIPS: Record<VoiceModelStatus["engine"], string> = {
-	parakeet: "Offline",
-	apple: "macOS",
-	none: "Off",
+const CHIPS: Record<VoiceModelStatus["engine"], keyof typeof voiceEn> = {
+	parakeet: "voice.modelOffline",
+	apple: "voice.modelMac",
+	none: "voice.modelOff",
 };
 
 const megabytes = (bytes: number) => `${Math.round(bytes / 1_000_000)} MB`;
 
 type Progress = { kind: "downloading"; percent: number } | { kind: "verifying" };
 
+// Only an absent event message owns fallback copy; supplied messages are always raw.
+type ModelError = { kind: "raw"; text: string } | { kind: "incomplete" };
+
 /** The Voice entry in Connectors (desktop only): which engine listens, and the optional local model. */
 export function VoiceModelEntry() {
+	const { t } = useLocale();
 	const [status, setStatus] = useState<VoiceModelStatus>();
 	const [progress, setProgress] = useState<Progress>();
-	const [error, setError] = useState<string>();
+	const [error, setError] = useState<ModelError>();
 
 	const refresh = useCallback(() => {
 		voiceModelStatus().then(
@@ -66,7 +72,9 @@ export function VoiceModelEntry() {
 				setProgress({ kind: "verifying" });
 			} else {
 				setProgress(undefined);
-				if (event.state === "failed") setError(event.message ?? "The download did not finish.");
+				if (event.state === "failed") {
+					setError(event.message == null ? { kind: "incomplete" } : { kind: "raw", text: event.message });
+				}
 				refresh();
 			}
 		};
@@ -85,42 +93,48 @@ export function VoiceModelEntry() {
 
 	const act = (action: () => Promise<void>) => {
 		setError(undefined);
-		action().catch((reason: unknown) => setError(typeof reason === "string" ? reason : String(reason)));
+		action().catch((reason: unknown) =>
+			setError({
+				kind: "raw",
+				text: typeof reason === "string" ? reason : String(reason),
+			}),
+		);
 	};
+
+	const errorText = error?.kind === "incomplete" ? t("voice.modelIncomplete") : error?.text;
 
 	return (
 		<li className="computer-entry" aria-labelledby="connector-voice">
 			<div className="provider-name">
-				<b id="connector-voice">Voice</b>
-				{status ? <span className="chip connector-connected">{CHIPS[status.engine]}</span> : null}
+				<b id="connector-voice">{t("voice.modelTitle")}</b>
+				{status ? <span className="chip connector-connected">{t(CHIPS[status.engine])}</span> : null}
 			</div>
-			{status ? <p className="connector-note">{ENGINES[status.engine]}</p> : null}
-			<p className="connector-note">
-				The local model (NVIDIA Parakeet) understands 25 languages, including Spanish, and never sends your
-				voice anywhere. It is optional: nothing downloads until you ask.
-			</p>
+			{status ? <p className="connector-note">{t(ENGINES[status.engine])}</p> : null}
+			<p className="connector-note">{t("voice.modelHelp")}</p>
 			{progress?.kind === "downloading" ? (
 				<div className="voice-model-progress">
-					<progress aria-label="Downloading the local voice model" max={100} value={progress.percent} />
-					<span>Downloading… {progress.percent}%</span>
+					<progress aria-label={t("voice.modelProgress")} max={100} value={progress.percent} />
+					<span>
+						{t("voice.modelDownloading")} {progress.percent}%
+					</span>
 					<button type="button" onClick={() => act(cancelVoiceModel)}>
-						Cancel
+						{t("voice.modelCancel")}
 					</button>
 				</div>
 			) : progress?.kind === "verifying" ? (
-				<p className="connector-note">Checking and unpacking…</p>
+				<p className="connector-note">{t("voice.modelVerifying")}</p>
 			) : status?.installed ? (
 				<button type="button" onClick={() => act(removeVoiceModel)}>
-					Remove local model ({megabytes(status.bytes ?? 0)})
+					{t("voice.modelRemove")} ({megabytes(status.bytes ?? 0)})
 				</button>
 			) : status ? (
 				<button type="button" className="primary" onClick={() => act(downloadVoiceModel)}>
-					Download local voice model ({megabytes(DOWNLOAD_BYTES)})
+					{t("voice.modelDownload")} ({megabytes(DOWNLOAD_BYTES)})
 				</button>
 			) : null}
-			{error ? (
+			{errorText ? (
 				<p className="connector-note voice-model-error" role="alert">
-					{error}
+					{errorText}
 				</p>
 			) : null}
 		</li>

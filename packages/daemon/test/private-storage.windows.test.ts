@@ -1,25 +1,18 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import {
-	existsSync,
-	linkSync,
-	mkdirSync,
-	readFileSync,
-	rmSync,
-	symlinkSync,
-} from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { ConnectorStore } from "../src/connectors.ts";
 import { ensurePrivateDir } from "../src/isolation.ts";
 import { securePrivateFile, writePrivateFile } from "../src/private-file.ts";
-import { FileSecretSource } from "../src/secret-file.ts";
-import { ConnectorStore } from "../src/connectors.ts";
-import { PinGate } from "../src/web-pin.ts";
-import { AgentSupervisor } from "../src/supervisor.ts";
 import { runtimeDir } from "../src/runtime.ts";
 import { SOURCE_PRIVATE_STORAGE_HELPER } from "../src/runtime-build.ts";
+import { FileSecretSource } from "../src/secret-file.ts";
+import { AgentSupervisor } from "../src/supervisor.ts";
+import { PinGate } from "../src/web-pin.ts";
 import { windowsPrivateStorageExecutable } from "../src/windows-private-storage.ts";
 import { inspectWindowsAcl } from "./windows-acl-oracle.ts";
 
@@ -268,8 +261,7 @@ $directory.SetAccessControl($acl)`,
 		if (identity === undefined) {
 			expect(executable).toBe(SOURCE_PRIVATE_STORAGE_HELPER);
 			expect(executable).toContain("build\\windows\\local-tools\\bin\\private-storage.exe");
-		}
-		else expect(executable).toBe(join(identity, "bin", "private-storage.exe"));
+		} else expect(executable).toBe(join(identity, "bin", "private-storage.exe"));
 		expect(existsSync(executable)).toBe(true);
 		ensurePrivateDir(join(root, "private"));
 		expect(runtimeDir()).toBe(identity);

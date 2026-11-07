@@ -2,9 +2,10 @@ import { execFile } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { bundledGentleShell } from "./config.ts";
 import { directAccess, type EngineAccess } from "./engine-access.ts";
+import { environmentPath } from "./environment-path.ts";
 import { resolveEngramBin, runtimeDir } from "./runtime.ts";
 import { windowsUserHome } from "./windows-runtime.ts";
 import { windowsPrivateStorage } from "./windows-private-storage.ts";
@@ -143,8 +144,9 @@ export function ensureMemoryProject(workspace: string, access: EngineAccess = di
  * (by default under HOME), so `ENGRAM_DATA_DIR` points at the user's real one
  * (`GENTLE_DOT_ENGRAM_DATA_DIR` overrides it) and the memory plugin accepts the
  * user's server. The user's own `ENGRAM_PORT` and `ENGRAM_URL` are kept.
- * `GENTLE_DOT_ENGRAM=private` instead runs a memory of its own under the
- * engine's home, on port 7438 (`GENTLE_DOT_ENGRAM_PORT` overrides it).
+ * `GENTLE_DOT_ENGRAM=private` instead runs a memory of its own under
+ * the engine's home, on port 7438 (`GENTLE_DOT_ENGRAM_PORT` overrides it), with the store named
+ * (`ENGRAM_DATA_DIR=<dataDir>/home/.engram`) rather than left to Engram's default.
  * The server's connector secrets key (`GENTLE_DOT_SECRETS_KEY`, S25.8) is never passed on.
  * Subagents are on (`GENTLE_PI_AGENTS=1`) unless `GENTLE_DOT_SUBAGENTS=off`: their child engines
  * reach connectors only through the daemon's proxy, like the engine itself (S25.4).
@@ -167,7 +169,7 @@ export function isolatedAgentEnv(
 	access(() => ensurePrivateDir(home));
 	const realHome = base.HOME || (platform === "win32" && base.USERPROFILE) || homedir();
 	const env: NodeJS.ProcessEnv = {
-		...base,
+		...environmentPath(base, bundledBinDir(base, options), platform),
 		HOME: home,
 		XDG_CONFIG_HOME: join(home, ".config"),
 		XDG_DATA_HOME: join(home, ".local", "share"),
@@ -192,34 +194,16 @@ export function isolatedAgentEnv(
 		env.TMPDIR = tmp;
 		access(() => ensurePrivateDir(tmp));
 	}
-	// Windows spells the variable `Path`, and a copy of its environment keeps that key: reading
-	// `PATH` found nothing, and a second `PATH` key beside it won, leaving the engine only the bundled
-	// folder (found by Row0902). On Windows it is read whatever its spelling and kept as one `PATH`.
-	let path = base.PATH;
-	if (platform === "win32") {
-		const keys = Object.keys(env).filter((key) => key.toUpperCase() === "PATH");
-		path = keys.map((key) => env[key]).find((value) => value !== undefined);
-		for (const key of keys) delete env[key];
-		if (path !== undefined) env.PATH = path;
-	}
-	const bin = bundledBinDir(base, options);
-	if (bin) {
-		const windows = platform === "win32";
-		const separator = windows ? ";" : delimiter;
-		// Windows paths ignore case and a trailing separator, so the bundled folder is not kept twice.
-		const same = (part: string) =>
-			windows
-				? part.replace(/[\\/]+$/, "").toLowerCase() === bin.replace(/[\\/]+$/, "").toLowerCase()
-				: part === bin;
-		const rest = (path ?? "").split(separator).filter((part) => part && !same(part));
-		env.PATH = [bin, ...rest].join(separator);
-	}
 	// The user's own Gentle Shell setting is not the assistant's.
 	env.GENTLE_PI_AGENTS = subagentsEnabled(base) ? "1" : "0";
 	if (base.GENTLE_DOT_ENGRAM === "private") {
 		env.ENGRAM_PORT = base.GENTLE_DOT_ENGRAM_PORT || PRIVATE_ENGRAM_PORT;
 		delete env.ENGRAM_URL;
-		delete env.ENGRAM_DATA_DIR;
+		// The store is **named**, not left to Engram's default: that default follows `HOME`, which is a
+		// POSIX convention, and on Windows Engram resolves the user profile instead — measured, the
+		// "private" server opened the user's own store there (W25). It is also the path `privateMemory`
+		// already reads when it decides whether the server on the private port is ours to stop.
+		env.ENGRAM_DATA_DIR = join(home, ".engram");
 	} else {
 		env.ENGRAM_DATA_DIR =
 			base.GENTLE_DOT_ENGRAM_DATA_DIR || base.ENGRAM_DATA_DIR || join(realHome, ".engram");

@@ -122,12 +122,22 @@ fn node_runtime_path(dir: &Path) -> PathBuf {
     dir.to_path_buf()
 }
 
+/// Preserve inherited tool order and bytes; bundled tools are fallbacks only.
+pub(super) fn runtime_path(inherited: Option<String>, fallback: &str, separator: char) -> String {
+    match inherited.filter(|path| !path.is_empty()) {
+        Some(path) if fallback.is_empty() => path,
+        Some(path) => format!("{path}{separator}{fallback}"),
+        None => fallback.to_string(),
+    }
+}
+
 /// `<node> <daemon script>` (S29.5). With a bundled runtime (`<runtime>/daemon/cli.mjs`
 /// exists) that is the runtime's own Node and daemon, a PATH of the runtime plus the
 /// system folders, and `GENTLE_DOT_RUNTIME`; otherwise the build-time paths and PATH.
 /// `GENTLE_DOT_NODE` and `GENTLE_DOT_DAEMON_SCRIPT` override the program and script in both.
 pub fn launch_spec(env: impl Fn(&str) -> Option<String>, dev: bool, runtime: Option<&Path>) -> LaunchSpec {
     let pick = |key: &str, fallback: String| env(key).filter(|v| !v.is_empty()).unwrap_or(fallback);
+    let separator = if cfg!(windows) { ';' } else { ':' };
     let bundled = runtime.filter(|dir| dir.join("daemon/cli.mjs").is_file());
     let (node, script, mut envs) = match bundled {
         Some(dir) => {
@@ -156,13 +166,13 @@ pub fn launch_spec(env: impl Fn(&str) -> Option<String>, dev: bool, runtime: Opt
             (
                 node,
                 script,
-                vec![("PATH".to_string(), path), ("GENTLE_DOT_RUNTIME".to_string(), root)],
+                vec![("PATH".to_string(), runtime_path(env("PATH"), &path, separator)), ("GENTLE_DOT_RUNTIME".to_string(), root)],
             )
         }
         None => (
             env!("GENTLE_DOT_BUILD_NODE").to_string(),
             env!("GENTLE_DOT_BUILD_DAEMON_SCRIPT").to_string(),
-            vec![("PATH".to_string(), env!("GENTLE_DOT_BUILD_PATH").to_string())],
+            vec![("PATH".to_string(), runtime_path(env("PATH"), env!("GENTLE_DOT_BUILD_PATH"), separator))],
         ),
     };
     if dev {
@@ -258,6 +268,20 @@ mod packaged_runtime_tests {
         assert_eq!(overridden.args, vec!["explicit-entry"]);
         let absent = extended.join("missing");
         assert_eq!(launch_spec(|_| None, false, Some(&absent)), launch_spec(|_| None, false, None));
+    }
+
+    #[test]
+    fn inherited_tool_paths_survive_source_and_bundled_launches_verbatim() {
+        let inherited = if cfg!(windows) { r"C:\User tools;;C:\Git\cmd;" } else { "/user tools::/git/bin:" };
+        let values = [("PATH", inherited)];
+        let env = env_of(&values);
+        let source = launch_spec(&env, false, None);
+        let bundled = launch_spec(&env, false, Some(&fixture("inherited-tools")));
+        let separator = if cfg!(windows) { ';' } else { ':' };
+        for spec in [source, bundled] {
+            let path = &spec.envs.iter().find(|(key, _)| key == "PATH").unwrap().1;
+            assert!(path.starts_with(&format!("{inherited}{separator}")));
+        }
     }
 
     fn fixture(name: &str) -> PathBuf {

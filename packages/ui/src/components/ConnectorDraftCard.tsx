@@ -1,5 +1,6 @@
 import { APP_REQUIRED, type ConnectorDraft } from "@gentle-dot/protocol";
 import { useEffect, useRef } from "react";
+import { useLocale } from "../i18n.tsx";
 import type { Send } from "./types.ts";
 
 /**
@@ -18,6 +19,8 @@ export function ConnectorDraftCard({
 	appSend?: Send;
 	approved: () => void;
 }) {
+	const { t } = useLocale();
+	const title = t("connector.draftTitle").replace("{name}", () => draft.name);
 	const card = useRef<HTMLElement>(null);
 	useEffect(() => {
 		card.current?.scrollIntoView?.({ block: "nearest" });
@@ -26,16 +29,16 @@ export function ConnectorDraftCard({
 	const runs = draft.transport === "http" ? draft.url : [draft.command, ...(draft.args ?? [])].join(" ");
 
 	return (
-		<section ref={card} className="ask-card connector-draft" aria-label={`Add ${draft.name}?`}>
-			<p className="eyebrow">New connector</p>
-			<p className="ask-title">Add {draft.name}?</p>
+		<section ref={card} className="ask-card connector-draft" aria-label={title}>
+			<p className="eyebrow">{t("connector.draftNew")}</p>
+			<p className="ask-title">{title}</p>
 			{draft.description ? <p className="connector-note">{draft.description}</p> : null}
 			<dl className="connector-draft-details">
-				<dt>{draft.transport === "http" ? "Address" : "Runs on this computer"}</dt>
+				<dt>{t(draft.transport === "http" ? "connector.draftAddress" : "connector.draftRuns")}</dt>
 				<dd>
 					<code>{runs}</code>
 				</dd>
-				<dt>Secrets it needs</dt>
+				<dt>{t("connector.draftSecrets")}</dt>
 				<dd>
 					{draft.envNames.length > 0
 						? draft.envNames.map((name) => (
@@ -43,18 +46,16 @@ export function ConnectorDraftCard({
 									{name}
 								</span>
 							))
-						: "None"}
+						: t("connector.draftNone")}
 				</dd>
 				{draft.needsOAuth ? (
 					<>
-						<dt>Sign-in</dt>
-						<dd>You sign in on the service's own page.</dd>
+						<dt>{t("connector.draftSignin")}</dt>
+						<dd>{t("connector.draftSigninHelp")}</dd>
 					</>
 				) : null}
 			</dl>
-			<p className="connector-note">
-				You type each secret in the app, never in the chat. It starts read only, with all of its tools hidden.
-			</p>
+			<p className="connector-note">{t("connector.draftPrivacy")}</p>
 			{appSend ? null : <p className="connector-note">{APP_REQUIRED}</p>}
 			<div className="ask-options">
 				<button
@@ -66,10 +67,10 @@ export function ConnectorDraftCard({
 						approved();
 					}}
 				>
-					Add {draft.name}
+					{t("connector.draftAdd").replace("{name}", () => draft.name)}
 				</button>
 				<button type="button" onClick={decline}>
-					Decline
+					{t("connector.draftDecline")}
 				</button>
 			</div>
 		</section>

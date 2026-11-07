@@ -1,5 +1,7 @@
 import { type ClientMessage, type ConnectorInfo, PIN_PATTERN, type PinStatus } from "@gentle-dot/protocol";
 import { type ReactNode, useState } from "react";
+import { useLocale } from "../i18n.tsx";
+import { controlEn } from "../i18n-control-messages.ts";
 
 interface PinFormProps {
 	pin: PinStatus;
@@ -16,6 +18,7 @@ interface PinFormProps {
  * each connector change or allowed action. It goes to the daemon only; the assistant never sees it.
  */
 export function PinForm({ pin, action, onPin, children }: PinFormProps) {
+	const { t } = useLocale();
 	const [value, setValue] = useState("");
 	const [repeat, setRepeat] = useState("");
 	const [problem, setProblem] = useState<string>();
@@ -38,22 +41,17 @@ export function PinForm({ pin, action, onPin, children }: PinFormProps) {
 			className="ask-form pin-form"
 			onSubmit={(event) => {
 				event.preventDefault();
-				if (!PIN_PATTERN.test(value)) return setProblem("Use 6 to 12 digits.");
-				if (!pin.set && repeat !== value) return setProblem("The two PINs are different.");
+				if (!PIN_PATTERN.test(value)) return setProblem(t("pinFormat"));
+				if (!pin.set && repeat !== value) return setProblem(t("pinMismatch"));
 				onPin(value, !pin.set);
 				setValue("");
 				setRepeat("");
 			}}
 		>
-			{pin.set ? null : (
-				<p className="connector-note">
-					Choose a PIN of 6 to 12 digits. You will need it to change connectors and to allow actions. The
-					assistant never sees it.
-				</p>
-			)}
-			{pin.locked ? <p className="connector-note">Too many wrong PINs. Try again later.</p> : null}
-			{pin.set ? field("PIN", value, setValue) : field("New PIN", value, setValue)}
-			{pin.set ? null : field("Repeat the PIN", repeat, setRepeat)}
+			{pin.set ? null : <p className="connector-note">{t("pinHelp")}</p>}
+			{pin.locked ? <p className="connector-note">{t("pinLocked")}</p> : null}
+			{pin.set ? field(t("pinLabel"), value, setValue) : field(t("pinNew"), value, setValue)}
+			{pin.set ? null : field(t("pinRepeat"), repeat, setRepeat)}
 			{problem ? <p role="alert">{problem}</p> : null}
 			<button type="submit" className="primary">
 				{action}
@@ -64,24 +62,37 @@ export function PinForm({ pin, action, onPin, children }: PinFormProps) {
 }
 
 /** What a connector change confirmed with the PIN will do, in the user's words. */
-export function describePinCommand(message: ClientMessage, connectors: ConnectorInfo[] = []): string {
-	const name = (id: string) => connectors.find((c) => c.id === id)?.name ?? id;
+export function describePinCommand(
+	message: ClientMessage,
+	connectors: ConnectorInfo[] = [],
+	t: (key: keyof typeof controlEn) => string = (key) => controlEn[key],
+): string {
+	// Insert supplied names last, so their contents are never interpreted as template tokens.
+	const named = (key: keyof typeof controlEn, id: string) =>
+		t(key).replace("{name}", () => connectors.find((c) => c.id === id)?.name ?? id);
 	switch (message.type) {
 		case "connector_mode":
-			return `Switch ${name(message.connectorId)} to ${message.mode === "read_write" ? "read and send" : "read only"}?`;
+			return t("pinMode")
+				.replace("{mode}", () => t(message.mode === "read_write" ? "pinReadWrite" : "pinReadOnly"))
+				.replace(
+					"{name}",
+					() => connectors.find((c) => c.id === message.connectorId)?.name ?? message.connectorId,
+				);
 		case "connector_connect":
 		case "connector_signin":
 		case "connector_setup":
-			return `Connect ${name(message.connectorId)}?`;
+			return named("pinConnect", message.connectorId);
 		case "connector_disconnect":
-			return `Disconnect ${name(message.connectorId)}?`;
+			return named("pinDisconnect", message.connectorId);
 		case "connector_remove":
-			return `Remove ${name(message.connectorId)}?`;
+			return named("pinRemove", message.connectorId);
 		case "connector_draft_reply":
-			return "Add the connector the assistant drafted?";
+			return t("pinDraft");
 		case "connector_import":
-			return `Import ${message.ids.length} ${message.ids.length === 1 ? "server" : "servers"}?`;
+			return t(message.ids.length === 1 ? "pinImportOne" : "pinImportMany").replace("{count}", () =>
+				String(message.ids.length),
+			);
 		default:
-			return "Change your connectors?";
+			return t("pinChange");
 	}
 }

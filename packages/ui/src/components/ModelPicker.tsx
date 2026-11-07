@@ -1,5 +1,6 @@
 import type { ModelChoice, ProfilePick, ThinkingLevel } from "@gentle-dot/protocol";
 import { type KeyboardEvent, useEffect, useId, useRef, useState } from "react";
+import { useLocale } from "../i18n.tsx";
 import type { DotAction, ModelsState } from "../store.ts";
 import type { Send } from "./types.ts";
 
@@ -39,6 +40,7 @@ function visibleItems(models: ModelsState, query: string): Item[] {
  * closes it without reaching the panel's own Esc (App.tsx).
  */
 export function ModelPicker({ model, models, send, dispatch, disabled }: ModelPickerProps) {
+	const { t } = useLocale();
 	const [open, setOpen] = useState(false);
 	const [query, setQuery] = useState("");
 	const [active, setActive] = useState(0);
@@ -143,7 +145,7 @@ export function ModelPicker({ model, models, send, dispatch, disabled }: ModelPi
 				{item.kind === "profile" && item.pick.model ? (
 					<span className="model-option-detail">{item.pick.model}</span>
 				) : null}
-				{isCurrent ? <span className="model-option-detail">In use</span> : null}
+				{isCurrent ? <span className="model-option-detail">{t("model.inUse")}</span> : null}
 			</div>
 		);
 	};
@@ -163,23 +165,23 @@ export function ModelPicker({ model, models, send, dispatch, disabled }: ModelPi
 				ref={chip}
 				type="button"
 				className="model-chip"
-				aria-label={`Model: ${shown ?? "not chosen"}`}
-				title="Change the model"
+				aria-label={t("model.chip").replace("{model}", () => shown ?? t("model.notChosen"))}
+				title={t("model.change")}
 				aria-haspopup="dialog"
 				aria-expanded={open}
 				disabled={disabled}
 				onClick={toggle}
 			>
-				<span className="model-chip-name">{shown ?? "Choose a model"}</span>
+				<span className="model-chip-name">{shown ?? t("model.choose")}</span>
 				<span aria-hidden="true">▾</span>
 			</button>
 			{open ? (
-				<div className="model-popover" role="dialog" aria-label="Choose a model" onKeyDown={onKeyDown}>
+				<div className="model-popover" role="dialog" aria-label={t("model.choose")} onKeyDown={onKeyDown}>
 					<input
 						type="search"
 						className="model-search"
-						aria-label="Search models"
-						placeholder="Search models"
+						aria-label={t("model.search")}
+						placeholder={t("model.search")}
 						aria-controls={`${id}-list`}
 						aria-activedescendant={items.length > 0 ? optionId(highlighted) : undefined}
 						// biome-ignore lint/a11y/noAutofocus: the popover opens for typing
@@ -196,24 +198,26 @@ export function ModelPicker({ model, models, send, dispatch, disabled }: ModelPi
 						</p>
 					) : null}
 					{models.next ? (
-						<p className="model-note">{models.next.name} is used from your next message.</p>
+						<p className="model-note">
+							{t("model.deferred").replace("{model}", () => models.next?.name ?? "")}
+						</p>
 					) : null}
-					{!loaded ? <p className="model-note">Loading models…</p> : null}
-					{loaded && items.length === 0 ? <p className="model-note">No models match.</p> : null}
-					<div className="model-list" id={`${id}-list`} role="listbox" aria-label="Models">
+					{!loaded ? <p className="model-note">{t("model.loading")}</p> : null}
+					{loaded && items.length === 0 ? <p className="model-note">{t("model.empty")}</p> : null}
+					<div className="model-list" id={`${id}-list`} role="listbox" aria-label={t("model.list")}>
 						{groups.map((group) =>
 							renderGroup(
 								group,
 								items.filter((i) => i.kind === "model" && i.group === group),
 							),
 						)}
-						{profiles.length > 0 ? renderGroup("Profiles", profiles) : null}
+						{profiles.length > 0 ? renderGroup(t("model.profiles"), profiles) : null}
 					</div>
 					{current && thinking ? (
 						<label className="model-thinking">
-							<span>Thinking</span>
+							<span>{t("model.thinking")}</span>
 							<select
-								aria-label="Thinking"
+								aria-label={t("model.thinking")}
 								value={current.thinking ?? ""}
 								onChange={(event) =>
 									send({
@@ -226,7 +230,7 @@ export function ModelPicker({ model, models, send, dispatch, disabled }: ModelPi
 							>
 								{thinking.map((level) => (
 									<option key={level} value={level}>
-										{level}
+										{t(`model.thinking.${level}`)}
 									</option>
 								))}
 							</select>

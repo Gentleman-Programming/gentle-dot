@@ -18,7 +18,11 @@ export function runtimeModules(runtime: string): string {
 	return join(runtime, "daemon", "node_modules");
 }
 
-/** Where a user's own Engram usually lives, after the login PATH on Unix. */
+export function engramBinaryName(platform: NodeJS.Platform = process.platform): string {
+	return platform === "win32" ? "engram.exe" : "engram";
+}
+
+/** Usual user installations, after the login PATH on Unix. */
 export function engramKnownDirs(home: string, platform: NodeJS.Platform = process.platform): string[] {
 	if (platform === "win32") {
 		return [
@@ -41,11 +45,12 @@ function isExecutableFile(path: string, platform: NodeJS.Platform = process.plat
 	}
 }
 
-/**
- * The `engram` the user's login shell finds. The app starts with a fixed PATH,
- * so the shell builds the user's own from their profile, starting from the system one.
- */
-function loginShellEngram(env: NodeJS.ProcessEnv, home: string): string | undefined {
+function loginShellEngram(
+	env: NodeJS.ProcessEnv,
+	home: string,
+	platform: NodeJS.Platform,
+): string | undefined {
+	if (platform === "win32") return undefined;
 	try {
 		const output = execFileSync(env.SHELL || "/bin/sh", ["-l", "-c", "command -v engram"], {
 			env: { ...env, HOME: home, PATH: SYSTEM_PATH },
@@ -54,18 +59,13 @@ function loginShellEngram(env: NodeJS.ProcessEnv, home: string): string | undefi
 			timeout: 5000,
 		});
 		const found = output.trim().split("\n").at(-1)?.trim() ?? "";
-		return isAbsolute(found) && isExecutableFile(found) ? found : undefined;
+		return isAbsolute(found) && isExecutableFile(found, platform) ? found : undefined;
 	} catch {
 		return undefined;
 	}
 }
 
-/**
- * The Engram binary of an installed app: `ENGRAM_BIN`, then an `engram` on the
- * user's login PATH (Unix only) or in the usual folders, so the user's own version
- * keeps serving `~/.engram`, and only then the one the runtime carries.
- * Windows uses `engram.exe`, skips login shells and accepts readable executable files.
- */
+/** Explicit override, login PATH (Unix), known user folders, then the bundled executable. */
 export function resolveEngramBin(
 	env: NodeJS.ProcessEnv,
 	runtime: string,
@@ -75,8 +75,8 @@ export function resolveEngramBin(
 	if (env.ENGRAM_BIN) return env.ENGRAM_BIN;
 	const platform = options.platform ?? process.platform;
 	const home = options.home ?? (env.HOME || (platform === "win32" && env.USERPROFILE) || homedir());
-	const name = platform === "win32" ? "engram.exe" : "engram";
-	const fromLogin = platform === "win32" ? undefined : loginShellEngram(env, home);
+	const name = engramBinaryName(platform);
+	const fromLogin = loginShellEngram(env, home, platform);
 	if (fromLogin) return fromLogin;
 	for (const dir of options.knownDirs ?? engramKnownDirs(home, platform)) {
 		const bin = join(dir, name);

@@ -40,6 +40,7 @@ import {
 	pnpmInvocation,
 	renameWhenReleased,
 	symlinksIn,
+	TARGETS,
 	treeSize,
 	verifyChecksum,
 	versionFromReleaseUrl,
@@ -51,6 +52,14 @@ const CACHE = join(REPO, ".cache", "package");
 const ENGRAM_RELEASES = "https://github.com/Gentleman-Programming/engram/releases";
 
 const say = (line) => process.stdout.write(`${line}\n`);
+
+function readJson(path) {
+	try {
+		return JSON.parse(readFileSync(path, "utf8"));
+	} catch (cause) {
+		throw new Error(`Cannot read staging metadata: ${path}`, { cause });
+	}
+}
 
 function run(command, args, options = {}) {
 	const result = spawnSync(command, args, { stdio: "inherit", ...options });
@@ -103,7 +112,7 @@ async function verifiedDownload(url, name, expected) {
 function prepareOut(out) {
 	if (existsSync(out) && readdirSync(out).length > 0) {
 		const manifest = join(out, "MANIFEST.json");
-		const previous = existsSync(manifest) && JSON.parse(readFileSync(manifest, "utf8")).name;
+		const previous = existsSync(manifest) && readJson(manifest).name;
 		if (previous !== "gentle-dot-runtime")
 			throw new Error(`${out} is not empty and holds no staged runtime; choose an empty folder.`);
 		rmSync(out, { recursive: true });
@@ -144,16 +153,19 @@ async function stageNode(out, target) {
 function openGentleAi(daemon) {
 	const dir = join(daemon, "node_modules", "gentle-pi", ".gentle-ai");
 	if (!existsSync(dir)) throw new Error(`gentle-pi's postinstall left no ${dir}.`);
+	// Windows carries no execute bit, so a `.exe` there must not read as "not a binary";
+	// `chmod` is a no-op anyway and the file's extension is what makes it runnable.
+	const windows = process.platform === "win32";
 	const open = (path) => {
 		const stat = lstatSync(path);
 		if (stat.isDirectory()) {
 			chmodSync(path, 0o755);
 			for (const name of readdirSync(path)) open(join(path, name));
-		} else if (stat.isFile()) chmodSync(path, stat.mode & 0o111 ? 0o755 : 0o644);
+		} else if (stat.isFile()) chmodSync(path, windows || (stat.mode & 0o111) !== 0 ? 0o755 : 0o644);
 	};
 	open(dir);
 	const versions = readdirSync(dir);
-	const integrity = JSON.parse(readFileSync(join(dir, versions[0] ?? "", "integrity.json"), "utf8"));
+	const integrity = readJson(join(dir, versions[0] ?? "", "integrity.json"));
 	return integrity;
 }
 
@@ -164,13 +176,14 @@ function installDaemonModules(out, target, goExecutable) {
 	const npmrc = join(CACHE, "npmrc");
 	writeFileSync(npmrc, "");
 	say("Daemon dependencies (npm install --omit=dev)");
+	const windows = TARGETS[target].platform === "win32";
 	// A clean npm setup: no user npmrc, a cache of its own, and a scratch HOME for install scripts.
 	const env = installerEnv(out, CACHE, target, process.env, goExecutable);
 	if (target === "windows-x64")
 		for (const path of [env.LOCALAPPDATA, env.APPDATA, env.TEMP, env.TMP])
 			mkdirSync(path, { recursive: true });
 	const result = spawnSync(
-		join(out, "node", "bin", target === "windows-x64" ? "node.exe" : "node"),
+		join(out, "node", "bin", windows ? "node.exe" : "node"),
 		[
 			join(out, "node", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
 			"install",
@@ -196,8 +209,7 @@ function installDaemonModules(out, target, goExecutable) {
 	const gentleAi = openGentleAi(daemon);
 	say(`  gentle-pi postinstall: ${postinstall.join(" | ") || "(no output)"}`);
 	say(`  ${gentleAiIntegritySummary(gentleAi)}`);
-	const pkg = (name) =>
-		JSON.parse(readFileSync(join(daemon, "node_modules", name, "package.json"), "utf8")).version;
+	const pkg = (name) => readJson(join(daemon, "node_modules", name, "package.json")).version;
 	return {
 		gentlePi: pkg("gentle-pi"),
 		engine: pkg("@earendil-works/pi-coding-agent"),
@@ -266,6 +278,13 @@ async function main() {
 					}
 				})
 			: undefined;
+	// Missing platform compatibility must fail before replacing output or downloading.
+	let applyConsole;
+	if (target === "windows-x64") {
+		const compatibility = await import("./windows-console.mjs");
+		await compatibility.preflightWindowsConsole();
+		applyConsole = compatibility.applyWindowsConsole;
+	}
 	const out = resolve(
 		process.env.INIT_CWD ?? process.cwd(),
 		options.out ?? join(REPO, "build", "runtime", target),
@@ -279,6 +298,10 @@ async function main() {
 	const daemonBuild = pnpmInvocation(["--filter", "@gentle-dot/daemon", "build:runtime", "--", "--out", out]);
 	run(daemonBuild.command, daemonBuild.args, { cwd: REPO });
 	const modules = installDaemonModules(out, target, goExecutable);
+	if (applyConsole) {
+		const compatibility = await applyConsole(out);
+		say(`  gentle-shell Windows console compatibility: ${JSON.stringify(compatibility)}`);
+	}
 	const engram = await stageEngram(out, target, options.engramVersion);
 	say("Web UI");
 	const uiBuild = pnpmInvocation(["--filter", "@gentle-dot/ui", "build"]);

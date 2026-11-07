@@ -1,11 +1,12 @@
 //! The app side of voice input (S30.1, L88) and of the optional local model (S30.5): the
 //! `voice_*` commands and the `voice://*` events. Recording events go only to the webview that
 //! started the recording; `voice://model` events go to the panel. On macOS, Apple Speech records
-//! until the local model is installed; on Linux, the local model is the only engine; elsewhere
+//! until the local model is installed; on Linux and Windows, the local model is the only engine; elsewhere
 //! `voice_status` answers "unavailable" and the other recording commands fail. Every command
 //! runs on a blocking thread: starting may wait on a permission prompt, stopping waits for the
 //! final transcript, and removing the model deletes files.
 
+pub use super::device_bridge::SynthesisRequests;
 use super::engine::{fallback_engine, Preferred};
 use super::model::{HttpFetcher, ModelError, ModelEvent, ModelEvents, ModelManager, ModelSpec, ModelStatus, MODEL_EVENT};
 use super::parakeet::{self, Loader, Locate, Parakeet};
@@ -16,7 +17,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, EventTarget, Manager};
 
 /// The commands, as registered in `build.rs` and granted to the panel.
-pub const COMMANDS: [&str; 8] = [
+pub const COMMANDS: [&str; 11] = [
     "voice_status",
     "voice_start",
     "voice_stop",
@@ -25,6 +26,9 @@ pub const COMMANDS: [&str; 8] = [
     "voice_model_download",
     "voice_model_cancel",
     "voice_model_remove",
+    "voice_input_devices",
+    "voice_synthesize",
+    "voice_synthesize_cancel",
 ];
 
 /// Voice input, when this platform has a backend.
@@ -51,6 +55,15 @@ impl VoiceInput {
 
     pub fn start(&self, locale: Option<&str>, events: Events) -> Result<(), VoiceError> {
         self.voice()?.start(locale, events)
+    }
+
+    pub fn start_selected(&self, locale: Option<&str>, events: Events, device_id: Option<String>) -> Result<(), VoiceError> {
+        self.voice()?.start_selected(locale, events, device_id)
+    }
+
+    pub fn start_diagnostic(&self, locale: Option<&str>, events: Events, device_id: Option<String>, diagnostic_token: Option<String>) -> Result<(), VoiceError> {
+        super::diagnostic::validate_token(diagnostic_token.as_deref())?;
+        self.voice()?.start_diagnostic(locale, events, device_id, diagnostic_token)
     }
 
     pub fn stop(&self) -> Result<Transcript, VoiceError> {
@@ -118,7 +131,7 @@ pub fn start(app: &AppHandle) -> (VoiceInput, VoiceModel) {
 }
 
 /// macOS: the native microphone, Parakeet when installed, else Apple Speech. Linux: a
-/// command-line recorder and Parakeet. Elsewhere: nothing.
+/// command-line recorder and Parakeet. Windows: WASAPI and Parakeet. Elsewhere: nothing.
 fn platform_input(local: Arc<Parakeet>) -> VoiceInput {
     #[cfg(target_os = "macos")]
     return VoiceInput::new(Voice::new(
@@ -132,7 +145,13 @@ fn platform_input(local: Arc<Parakeet>) -> VoiceInput {
         Arc::new(Preferred::new(local, None)),
         Arc::new(SystemClock),
     ));
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    return VoiceInput::new(Voice::new(
+        Arc::new(super::wasapi::WasapiMicrophone),
+        Arc::new(Preferred::new(local, None)),
+        Arc::new(SystemClock),
+    ));
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = local;
         VoiceInput::unsupported()
@@ -155,7 +174,7 @@ pub async fn voice_status(app: AppHandle) -> Result<VoiceStatus, String> {
 }
 
 #[tauri::command]
-pub async fn voice_start(app: AppHandle, webview: tauri::WebviewWindow, locale: Option<String>) -> Result<(), String> {
+pub async fn voice_start(app: AppHandle, webview: tauri::WebviewWindow, locale: Option<String>, device_id: Option<String>, diagnostic_token: Option<String>) -> Result<(), String> {
     let target = EventTarget::webview_window(webview.label());
     let emitter = app.clone();
     let events: Events = Arc::new(move |event: VoiceEvent| {
@@ -163,7 +182,7 @@ pub async fn voice_start(app: AppHandle, webview: tauri::WebviewWindow, locale: 
             eprintln!("gentle-dot: cannot send a voice event: {error}");
         }
     });
-    blocking(app, move |input| input.start(locale.as_deref(), events)).await
+    blocking(app, move |input| input.start_diagnostic(locale.as_deref(), events, device_id, diagnostic_token)).await
 }
 
 #[tauri::command]
@@ -228,7 +247,25 @@ mod tests {
         assert_eq!(input.start(None, Arc::new(|_| {})), Err(VoiceError::Unsupported));
         assert_eq!(input.stop(), Err(VoiceError::Unsupported));
         assert_eq!(input.cancel(), Err(VoiceError::Unsupported));
-        assert_eq!(String::from(VoiceError::Unsupported), "Voice input is available on macOS and Linux.");
+        assert_eq!(String::from(VoiceError::Unsupported), "Voice input is available on macOS, Linux and Windows.");
+    }
+
+    // Construction/status must neither request microphone access nor load a model.
+    // Synthetic locators exercise both installed states without files or hardware.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_status_uses_local_model_availability_without_opening_capture() {
+        for installed in [false, true] {
+            let locate: Locate = Arc::new(move || installed.then(|| PathBuf::from("synthetic-parakeet")));
+            let loader: Loader = Arc::new(|_| panic!("status must not load a model"));
+            let input = platform_input(Arc::new(Parakeet::new(locate, loader)));
+            let expected = if installed {
+                VoiceStatus::available()
+            } else {
+                VoiceStatus::unavailable(VoiceError::NoModel.to_string())
+            };
+            assert_eq!(input.status(), expected);
+        }
     }
 
     #[test]
@@ -244,8 +281,30 @@ mod tests {
                 "voice_model_download",
                 "voice_model_cancel",
                 "voice_model_remove",
+                "voice_input_devices",
+                "voice_synthesize",
+                "voice_synthesize_cancel",
             ]
         );
+    }
+
+    #[test]
+    fn additive_commands_are_in_build_handler_and_panel_only_acl() {
+        let build = include_str!("../../build.rs");
+        let shell = include_str!("../shell.rs");
+        let acl: serde_json::Value = serde_json::from_str(include_str!("../../capabilities/default.json")).unwrap();
+        for command in ["voice_input_devices", "voice_synthesize", "voice_synthesize_cancel"] {
+            assert!(COMMANDS.contains(&command));
+            assert!(build.contains(&format!("\"{command}\"")));
+            assert!(shell.contains(&format!("device_bridge::{command}")));
+            let permission = format!("allow-{}", command.replace('_', "-"));
+            let grants: Vec<_> = acl["capabilities"].as_array().unwrap().iter()
+                .filter(|cap| cap["permissions"].as_array().unwrap().iter().any(|p| p.as_str() == Some(permission.as_str())))
+                .collect();
+            assert_eq!(grants.len(), 1);
+            assert_eq!(grants[0]["identifier"], "voice");
+            assert_eq!(grants[0]["windows"], serde_json::json!(["panel"]));
+        }
     }
 
     #[test]

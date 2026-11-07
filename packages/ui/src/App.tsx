@@ -16,6 +16,7 @@ import {
 	startDragging,
 	togglePanel,
 } from "./desktop.ts";
+import { LocaleProvider, useLocale } from "./i18n.tsx";
 import { createUploader } from "./uploads.ts";
 import { useComputerAvailable, useComputerState } from "./useComputer.ts";
 import { useDot } from "./useDot.ts";
@@ -57,10 +58,13 @@ function isFullscreenShortcut(event: KeyboardEvent): boolean {
 /** The desktop's glow overlay (S28) is its own surface: it never connects to the assistant. */
 export function App() {
 	const surface = currentSurface();
-	return surface === "glow" ? <GlowSurface /> : <Assistant surface={surface} />;
+	return (
+		<LocaleProvider>{surface === "glow" ? <GlowSurface /> : <Assistant surface={surface} />}</LocaleProvider>
+	);
 }
 
 function Assistant({ surface }: { surface: Surface }) {
+	const { t } = useLocale();
 	const [info, setInfo] = useState<ConnectionInfo | undefined>(undefined);
 	const [missingToken, setMissingToken] = useState(false);
 	/** Why the desktop app could not reach its assistant, in the app's own words (S35.2). */
@@ -86,6 +90,20 @@ function Assistant({ surface }: { surface: Surface }) {
 		},
 		[clientId, dispatch],
 	);
+	// Keep native hide failures visible through the chat's existing notice path.
+	const hide = useCallback(async () => {
+		try {
+			await hidePanel();
+		} catch (error) {
+			const reason = String(error);
+			dispatch({
+				type: "notice",
+				level: "error",
+				message: `${t("chatHideFailed")} ${reason}`,
+				display: { kind: "hideFailed", reason },
+			});
+		}
+	}, [dispatch, t]);
 	// The panel's own window (S26): hide the rose, full screen.
 	const panel = usePanelWindow(desktop && surface === "panel");
 	const fullscreenNow = panel.fullscreenNow;
@@ -157,7 +175,7 @@ function Assistant({ surface }: { surface: Surface }) {
 			if (event.defaultPrevented) return;
 			if (event.key === "Escape") {
 				if (fullscreenNow.current) setFullscreen(false);
-				else hidePanel();
+				else void hide();
 				return;
 			}
 			if (isFullscreenShortcut(event)) {
@@ -170,7 +188,7 @@ function Assistant({ surface }: { surface: Surface }) {
 			window.removeEventListener("keydown", onKey);
 			for (const s of subscriptions) void s.then((unlisten) => unlisten());
 		};
-	}, [surface, send, fullscreenNow, setFullscreen]);
+	}, [surface, send, fullscreenNow, setFullscreen, hide]);
 
 	useEffect(() => {
 		document.documentElement.dataset.surface = surface;
@@ -193,8 +211,7 @@ function Assistant({ surface }: { surface: Surface }) {
 		return (
 			<div className="chat chat-web">
 				<div className="status" role="status">
-					{unreachable ??
-						"This page needs your access key. On your computer, open it from the Gentle Dot menu (Open in browser); on a server, open the link with #token=<your access key>."}
+					{unreachable ?? t("chatMissingTokenWithServer")}
 				</div>
 			</div>
 		);
@@ -207,7 +224,7 @@ function Assistant({ surface }: { surface: Surface }) {
 			dismiss={dismiss}
 			dispatch={dispatch}
 			focusKey={focusKey}
-			{...(surface === "panel" ? { onHide: hidePanel } : {})}
+			{...(surface === "panel" ? { onHide: hide } : {})}
 			{...(desktop && surface === "panel" ? { appSend } : {})}
 			{...(computer ? { computer } : {})}
 			{...(desktop && surface === "panel" ? { voiceModel: true } : {})}

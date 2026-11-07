@@ -36,13 +36,57 @@ sha2 = "0.10"
 tar = { version = "0.4", default-features = false }
 bzip2 = "0.6"
 
-# Private daemon transport/lifecycle (T1); pinned to the version already in Cargo.lock.
+# Windows transport, DPAPI, voice and computer-control bindings share one target table.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Diagnostics_ToolHelp", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_IO", "Win32_System_Registry", "Win32_UI_Controls", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
-# Voice capture through WASAPI and computer control through UI Automation, shell links, and window
-# properties (a minimized Store app's name): COM interfaces windows-sys does not bind; the version
-# Tauri already uses.
-windows = { version = "=0.62.2", features = ["Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_Storage_FileSystem", "Win32_System_Variant", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem"] }
+windows = { version = "=0.62.2", features = [
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_Multimedia",
+    "Win32_Media_Speech",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Ole",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Accessibility",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-sys = { version = "=0.61.2", features = [
+    "Wdk_System_SystemServices",
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 # The computer-control helper (S24) is macOS only.
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -70,9 +114,6 @@ dbus-secret-service = "4.1"
 # The store's tests build D-Bus errors (the same `dbus` that dbus-secret-service uses).
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 dbus = "0.9"
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 # Debug builds encode screenshots fast too (S24.8): `image` holds the JPEG encoder and `zune-*`
 # decode JPEGs (tests). The encoder is generic, so most of its code is compiled in this crate,

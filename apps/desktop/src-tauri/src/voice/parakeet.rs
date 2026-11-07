@@ -299,6 +299,9 @@ impl Recognition for ParakeetRecognition {
     fn finish(&mut self) {
         self.done.store(true, Ordering::SeqCst);
         let samples = self.samples.take();
+        let sample_count = samples.len();
+        use super::diagnostic::Stage;
+        self.sink.diagnostic(Stage::FinalBuffer, Some(sample_count));
         let (dir, sink, cache, idle, cancelled, decoding) = (
             self.dir.clone(),
             self.sink.clone(),
@@ -308,15 +311,26 @@ impl Recognition for ParakeetRecognition {
             self.decoding.clone(),
         );
         let decode = move || {
-            let result = cache.get(&dir, idle).and_then(|engine| {
+            sink.diagnostic(Stage::Loading, Some(sample_count));
+            let result = cache.get(&dir, idle).map_err(|error| {
+                sink.diagnostic(Stage::LoadFailed, Some(sample_count));
+                error
+            }).and_then(|engine| {
                 let _turn = lock(&decoding);
                 if cancelled.load(Ordering::SeqCst) {
                     return Ok(None);
                 }
-                engine.transcribe(&samples).map(Some)
+                sink.diagnostic(Stage::Decoding, Some(sample_count));
+                engine.transcribe(&samples).map(Some).map_err(|error| {
+                    sink.diagnostic(Stage::DecodeFailed, Some(sample_count));
+                    error
+                })
             });
             match result {
-                Ok(Some(text)) => sink.finished(text.trim()),
+                Ok(Some(text)) => {
+                    sink.diagnostic(Stage::Complete, Some(sample_count));
+                    sink.finished(text.trim());
+                },
                 Ok(None) => {}
                 Err(error) => {
                     eprintln!("gentle-dot: {error}");
@@ -326,6 +340,7 @@ impl Recognition for ParakeetRecognition {
         };
         if let Err(error) = std::thread::Builder::new().name("voice-model-decode".into()).spawn(decode) {
             // `finish` runs while stopping, where a failure only resolves `stop`.
+            self.sink.diagnostic(Stage::WorkerFailed, Some(sample_count));
             self.sink.failed(&format!("The local voice model could not start: {error}"));
         }
     }
@@ -488,6 +503,11 @@ mod tests {
         let (stop_thread, result) = stopping.join().unwrap();
         assert_eq!(result, Ok(Transcript { text: "2400 samples".into() }));
         assert_ne!(setup.threads.lock().unwrap()[0], stop_thread, "decoding runs on its own thread");
+        use crate::voice::diagnostic::Stage;
+        let metadata = recorder.diagnostics();
+        assert_eq!(metadata.iter().map(|m| m.stage).collect::<Vec<_>>(),
+            vec![Stage::FinalBuffer, Stage::Loading, Stage::Decoding, Stage::Complete]);
+        assert!(metadata.iter().all(|m| m.pcm_samples == Some(2_400) && m.sample_rate == Some(16_000)));
         assert!(recorder.seen().iter().all(|e| !matches!(e, crate::voice::VoiceEvent::Partial(_))), "no partials");
     }
 
@@ -584,6 +604,24 @@ mod tests {
         voice.start(None, Recorder::default().events()).unwrap();
         mic.sink().audio(&[0.0; 160]);
         assert_eq!(voice.stop(), Ok(Transcript { text: String::new() }));
+    }
+
+    #[test]
+    fn final_metadata_reports_real_buffer_before_a_masked_load_failure() {
+        use crate::voice::diagnostic::Stage;
+        let setup = Setup::new(None);
+        setup.fail_load.store(true, Ordering::SeqCst);
+        let (voice, mic) = voice(Arc::new(setup.parakeet()));
+        let recorder = Recorder::default();
+        voice.start(None, recorder.events()).unwrap();
+        mic.sink().audio(&[0.25; 37]);
+        assert_eq!(voice.stop().unwrap().text, ""); // Existing failure policy is unchanged.
+        let metadata = recorder.diagnostics();
+        assert_eq!(metadata.iter().map(|m| m.stage).collect::<Vec<_>>(),
+            vec![Stage::FinalBuffer, Stage::Loading, Stage::LoadFailed, Stage::LoadFailed]);
+        assert!(metadata.iter().all(|m| m.pcm_samples == Some(37) && m.sample_rate == Some(16_000)));
+        mic.sink().diagnostic(Stage::Complete, Some(999));
+        assert_eq!(recorder.diagnostics(), metadata, "retired recording cannot publish");
     }
 
     #[test]

@@ -13,8 +13,15 @@ import {
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
-import { lockedEnginePackages, piWrapper } from "../src/runtime-build.ts";
+import {
+	lockedEnginePackages,
+	piCmdWrapper,
+	piWrapper,
+	runtimeWindowsStopArtifact,
+} from "../src/runtime-build.ts";
 import { tempDir } from "./helpers.ts";
+import { directoryLinkType, symlinkDirectory } from "./support/fixture-capabilities.ts";
+import { expectPosixExecutable } from "./support/posix-modes.ts";
 import { WINDOWS_STOP_ADDON } from "./support/windows.ts";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
@@ -32,13 +39,37 @@ const skipBuild =
 	!existsSync(join(PACKAGE, "native", "windows-stop.node"));
 if (skipBuild) console.info(`Windows-only test skip: ${WINDOWS_STOP_ADDON}`);
 
-beforeAll(() => {
-	if (skipBuild) return;
-	out = tempDir();
-	const build = spawnSync(process.execPath, [BUILD, "--out", out], { encoding: "utf8" });
-	expect(build.stderr).toBe("");
-	expect(build.status).toBe(0);
-}, 60_000);
+/**
+ * Puts `PACKAGE/node_modules` beside the output's `cli.mjs` so the self-check resolves the engine.
+ * One directory link does not port: on a plain Windows install `symlinkSync` needs the symlink
+ * privilege, and a **junction** to this pnpm layout does not resolve either — Node cannot follow a
+ * dependency that is itself a symlink when it is reached through a junction (measured on Windows
+ * 11, Node 24). Windows therefore gets a real folder holding one junction per dependency, each
+ * pointing at the dependency's real path, so nothing under the output is a symlink to follow.
+ */
+function linkNodeModules(out: string): void {
+	const link = join(out, "daemon", "node_modules");
+	const source = join(PACKAGE, "node_modules");
+	if (process.platform !== "win32") {
+		symlinkDirectory(source, link);
+		return;
+	}
+	mkdirSync(link, { recursive: true });
+	for (const entry of readdirSync(source, { withFileTypes: true })) {
+		if (entry.name === ".bin") continue;
+		const from = join(source, entry.name);
+		if (entry.name.startsWith("@")) {
+			mkdirSync(join(link, entry.name));
+			for (const sub of readdirSync(from)) {
+				const real = realpathSync(join(from, sub));
+				if (statSync(real).isDirectory()) symlinkSync(real, join(link, entry.name, sub), directoryLinkType());
+			}
+		} else {
+			const real = realpathSync(from);
+			if (statSync(real).isDirectory()) symlinkSync(real, join(link, entry.name), directoryLinkType());
+		}
+	}
+}
 
 function listFiles(dir: string, prefix = ""): string[] {
 	return readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
@@ -49,6 +80,19 @@ function listFiles(dir: string, prefix = ""): string[] {
 }
 
 describe("piWrapper", () => {
+	it("retains the Windows public helper and refuses a missing mandatory addon before staging", () => {
+		expect(piCmdWrapper("engine/cli.js")).toBe(piWrapper("engine/cli.js", "win32"));
+		expect(() => runtimeWindowsStopArtifact("win32", "synthetic.node", () => false)).toThrow(
+			/addon is missing/,
+		);
+		expect(runtimeWindowsStopArtifact("win32", "synthetic.node", () => true)).toBe("synthetic.node");
+		for (const platform of ["linux", "darwin"] as const)
+			expect(
+				runtimeWindowsStopArtifact(platform, "synthetic.node", () => {
+					throw Error("unexpected read");
+				}),
+			).toBeUndefined();
+	});
 	it("emits a relocatable Windows cmd wrapper without relying on sh or ambient Node", () => {
 		expect(piWrapper("@earendil-works/pi-coding-agent/dist/bundle/cli.js", "win32")).toBe(
 			'@echo off\r\nsetlocal DisableDelayedExpansion\r\n"%~dp0..\\node\\bin\\node.exe" "%~dp0..\\daemon\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js" %*\r\nexit /b %errorlevel%\r\n',
@@ -66,6 +110,12 @@ describe("piWrapper", () => {
 });
 
 describe.skipIf(skipBuild)("build:runtime", () => {
+	beforeAll(() => {
+		out = tempDir();
+		const build = spawnSync(process.execPath, [BUILD, "--out", out], { encoding: "utf8" });
+		expect(build.stderr).toBe("");
+		expect(build.status).toBe(0);
+	}, 60_000);
 	it("emits the daemon part of the runtime layout, without node_modules", () => {
 		const windows = process.platform === "win32";
 		expect(listFiles(out).sort()).toEqual(
@@ -74,8 +124,12 @@ describe.skipIf(skipBuild)("build:runtime", () => {
 				"daemon/cli.mjs",
 				"daemon/extensions/approval-guard.ts",
 				"daemon/extensions/screenshot-context.ts",
+				"daemon/extensions/windows-powershell.ts",
+				"daemon/extensions/powershell-operations.ts",
+				"daemon/extensions/review-status.ts",
+				"daemon/extensions/diagnostic-guidance.ts",
 				"daemon/identity.md",
-				...(windows ? ["daemon/native/windows-stop.node"] : []),
+				...(windows ? ["bin/private-storage.exe", "daemon/native/windows-stop.node"] : []),
 				"daemon/package.json",
 			].sort(),
 		);
@@ -163,7 +217,7 @@ describe.skipIf(skipBuild)("build:runtime", () => {
 	});
 
 	it("runs its self-check from the output with the engine resolved inside it", () => {
-		symlinkSync(join(PACKAGE, "node_modules"), join(out, "daemon", "node_modules"));
+		linkNodeModules(out);
 		const engramBin = join(tempDir(), "engram.exe");
 		writeFileSync(engramBin, "fixture executable");
 		const check = spawnSync(process.execPath, [join(out, "daemon", "cli.mjs"), "--self-check"], {
@@ -224,7 +278,7 @@ describe.skipIf(skipBuild)("build:runtime", () => {
 	it.skipIf(process.platform === "win32")(
 		"emits a `pi` wrapper that runs the runtime's node and engine wherever the runtime is",
 		() => {
-			expect(statSync(join(out, "bin", "pi")).mode & 0o111).toBe(0o111);
+			expectPosixExecutable(join(out, "bin", "pi"));
 			const moved = tempDir();
 			mkdirSync(join(moved, "bin"));
 			mkdirSync(join(moved, "node", "bin"), { recursive: true });

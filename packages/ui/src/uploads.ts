@@ -1,5 +1,15 @@
 import type { UploadedFile } from "@gentle-dot/protocol";
 import type { ConnectionInfo } from "./client.ts";
+import type { AttachmentDisplay } from "./i18n-attachment-messages.ts";
+
+/** Only known renderer-authored upload defaults carry display provenance. */
+export class UploadFailure extends Error {
+	readonly display: AttachmentDisplay;
+	constructor(message: string, display: AttachmentDisplay) {
+		super(message);
+		this.display = display;
+	}
+}
 
 /** Uploads one file to the daemon; `uploadId` adds it to the message folder of an earlier file. */
 export type Uploader = (
@@ -38,9 +48,19 @@ export function createUploader(info: ConnectionInfo, Xhr: typeof XMLHttpRequest 
 					body = undefined;
 				}
 				if (xhr.status === 200 && body) resolve(body as unknown as UploadedFile);
-				else reject(new Error(typeof body?.message === "string" ? body.message : "The upload did not work."));
+				else
+					reject(
+						typeof body?.message === "string"
+							? new Error(body.message)
+							: new UploadFailure("The upload did not work.", { key: "attachment.uploadFailed" }),
+					);
 			};
-			xhr.onerror = () => reject(new Error("The upload did not work. Check the connection and try again."));
+			xhr.onerror = () =>
+				reject(
+					new UploadFailure("The upload did not work. Check the connection and try again.", {
+						key: "attachment.uploadNetwork",
+					}),
+				);
 			xhr.send(file);
 		});
 }

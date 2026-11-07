@@ -1,4 +1,6 @@
 import { type ClipboardEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
+import { useLocale } from "../i18n.tsx";
+import { recordingNoteKeys, sourceReasonKeys } from "../i18n-voice-messages.ts";
 import { formatSize } from "../uploads.ts";
 import type { AttachmentControls, PendingFile } from "../useAttachments.ts";
 import type { VoiceControls } from "../useVoice.ts";
@@ -28,12 +30,14 @@ export function Composer({
 	voice,
 	attachments,
 }: ComposerProps) {
+	const { t } = useLocale();
 	const [text, setText] = useState("");
 	/** The last message could not go out; its text and files stay for another try (#21). */
 	const [refused, setRefused] = useState(false);
 	const box = useRef<HTMLTextAreaElement>(null);
 	const recording = voice?.phase === "recording";
-	const voiceStatus = voice?.phase === "transcribing" ? "Transcribing…" : voice?.note;
+	const voiceNote = voice?.note && voice.noteDisplay ? t(recordingNoteKeys[voice.noteDisplay]) : voice?.note;
+	const voiceStatus = voice?.phase === "transcribing" ? t("composerTranscribing") : voiceNote;
 
 	// A dictation to review joins what was already typed, and the cursor waits at its end.
 	const draft = voice?.draft;
@@ -94,17 +98,17 @@ export function Composer({
 	return (
 		<>
 			{refused ? (
-				<p className="voice-status" role="alert" aria-label="Not sent">
-					Not connected, so the message was not sent. It is kept here to send again.
+				<p className="voice-status" role="alert" aria-label={t("composerNotSent")}>
+					{t("composerSendFailed")}
 				</p>
 			) : null}
 			{voiceStatus ? (
-				<p className="voice-status" role="status" aria-label="Voice">
+				<p className="voice-status" role="status" aria-label={t("composerVoice")}>
 					{voiceStatus}
 				</p>
 			) : null}
 			{attachments && files.length > 0 ? (
-				<ul className="attachment-chips" aria-label="Files to send">
+				<ul className="attachment-chips" aria-label={t("composerFiles")}>
 					{files.map((file) => (
 						<FileChip
 							key={file.id}
@@ -123,12 +127,12 @@ export function Composer({
 				}}
 			>
 				{attachments && !recording ? (
-					<label className="composer-attach" title="Attach files">
+					<label className="composer-attach" title={t("composerAttach")}>
 						<PaperclipIcon />
 						<input
 							type="file"
 							multiple
-							aria-label="Attach files"
+							aria-label={t("composerAttach")}
 							className="visually-hidden"
 							disabled={disabled || uploading}
 							onChange={(event) => {
@@ -141,17 +145,17 @@ export function Composer({
 				) : null}
 				{recording ? (
 					<div className="voice-recording">
-						<span className="voice-time" role="timer" aria-label="Recording time">
+						<span className="voice-time" role="timer" aria-label={t("composerRecordingTime")}>
 							{formatElapsed(voice.elapsed)}
 						</span>
 						<meter
 							className="voice-meter"
-							aria-label="Microphone level"
+							aria-label={t("composerMicrophoneLevel")}
 							min={0}
 							max={1}
 							value={voice.level}
 						/>
-						<span className="voice-partial">{voice.partial || "Listening…"}</span>
+						<span className="voice-partial">{voice.partial || t("composerListening")}</span>
 						<button
 							type="button"
 							role="switch"
@@ -159,13 +163,13 @@ export function Composer({
 							className={`voice-send-option${voice.sendOnStop ? " on" : ""}`}
 							onClick={() => voice.setSendOnStop(!voice.sendOnStop)}
 						>
-							Send when I stop
+							{t("composerSendOnStop")}
 						</button>
 						<button
 							type="button"
 							className="voice-cancel"
-							aria-label="Cancel recording"
-							title="Cancel (Esc)"
+							aria-label={t("composerCancelRecording")}
+							title={t("composerCancelHint")}
 							onClick={voice.cancel}
 						>
 							✕
@@ -174,8 +178,8 @@ export function Composer({
 				) : (
 					<textarea
 						ref={box}
-						aria-label="Message"
-						placeholder={busy ? "Add to what I'm doing…" : "Ask me anything…"}
+						aria-label={t("composerMessage")}
+						placeholder={busy ? t("composerBusyPlaceholder") : t("composerIdlePlaceholder")}
 						rows={1}
 						value={text}
 						disabled={disabled}
@@ -196,20 +200,28 @@ export function Composer({
 							voice?.stopSpeaking();
 						}}
 					>
-						Stop
+						{t("composerStop")}
 					</button>
 				) : null}
 				{voice?.mic ? (
 					<button
 						type="button"
 						className={`composer-mic${recording ? " composer-mic-on" : ""}`}
-						aria-label={recording ? (voice.sendOnStop ? "Stop and send" : "Stop and review") : "Talk"}
+						aria-label={
+							recording
+								? voice.sendOnStop
+									? t("composerStopAndSend")
+									: t("composerStopAndReview")
+								: t("composerTalk")
+						}
 						title={
 							voice.mic.available
 								? voice.sendOnStop
-									? "Tap to talk, tap again to send"
-									: "Tap to talk, tap again to review before sending"
-								: voice.mic.reason
+									? t("composerTalkSendHint")
+									: t("composerTalkReviewHint")
+								: voice.mic.reason && voice.mic.reasonDisplay
+									? t(sourceReasonKeys[voice.mic.reasonDisplay])
+									: voice.mic.reason
 						}
 						disabled={disabled || !voice.mic.available || voice.phase === "transcribing"}
 						onClick={recording ? voice.stop : voice.start}
@@ -222,8 +234,8 @@ export function Composer({
 						type="submit"
 						className="composer-send"
 						disabled={disabled || uploading || blocked || (text.trim() === "" && files.length === 0)}
-						aria-label="Send"
-						title="Send"
+						aria-label={t("composerSend")}
+						title={t("composerSend")}
 					>
 						<SendIcon />
 					</button>
@@ -235,8 +247,13 @@ export function Composer({
 
 /** One attached file: name, size, upload progress, and why it cannot be sent. */
 function FileChip({ file, locked, remove }: { file: PendingFile; locked: boolean; remove: () => void }) {
+	const { t } = useLocale();
 	const name = file.file.name;
 	const problem = file.refused ?? file.error;
+	const display = file.refused !== undefined ? file.refusedDisplay : file.errorDisplay;
+	const problemText = display
+		? t(display.key).replace("{limit}", "limit" in display ? String(display.limit) : "")
+		: problem;
 	return (
 		<li className={`attachment-chip${problem ? " attachment-chip-error" : ""}`}>
 			<span className="chip-name" title={name}>
@@ -244,17 +261,22 @@ function FileChip({ file, locked, remove }: { file: PendingFile; locked: boolean
 			</span>
 			<span className="chip-size">{formatSize(file.file.size)}</span>
 			{file.progress !== undefined ? (
-				<progress className="chip-progress" aria-label={`Uploading ${name}`} max={1} value={file.progress} />
+				<progress
+					className="chip-progress"
+					aria-label={`${t("composerUploading")} ${name}`}
+					max={1}
+					value={file.progress}
+				/>
 			) : null}
 			{problem ? (
 				<span className="chip-error" role="alert">
-					{problem}
+					{problemText}
 				</span>
 			) : null}
 			<button
 				type="button"
 				className="chip-remove"
-				aria-label={`Remove ${name}`}
+				aria-label={`${t("composerRemove")} ${name}`}
 				disabled={locked}
 				onClick={remove}
 			>

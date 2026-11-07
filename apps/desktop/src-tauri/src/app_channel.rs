@@ -1,9 +1,9 @@
 //! The private channel to the daemon this app launched (S25.1–S25.3). When the app spawns the
-//! daemon it creates a connected pair of Unix sockets and hands one end to the daemon as fd 3
-//! (`daemon::spawn_daemon`); it keeps the other. That connection is the authentication: nothing is
-//! written to a file or an environment variable and nothing listens, so another process (the agent
-//! included) cannot reach it. A daemon the app only attached to gets no channel.
-//!
+//! daemon it creates a connected pair and hands one end to the daemon as fd 3
+//! (`daemon::spawn_daemon`); it keeps the other. Windows uses an owner-SID-only, already connected
+//! overlapped pipe, transferred by the explicit launch handle list, never a child-visible name.
+//! The frame, pending and secret logic below is one rule both platforms share; only the transport differs
+//! (`windows`). A daemon the app only attached to gets no channel.
 //! Frames are line-delimited JSON in both directions; each side numbers its own requests:
 //!   {"kind":"request","id":1,"method":"command","params":{"clientId":"…","message":{…}}}
 //!   {"kind":"response","id":1,"result":{}}  or  {"kind":"response","id":1,"error":"…"}
@@ -20,8 +20,6 @@
 
 use crate::approvals::ApprovalRequest;
 use crate::secure_store::{check_id, Secret, SecretStore};
-#[cfg(windows)]
-use crate::windows_process::ChannelStream as UnixStream;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -155,13 +153,15 @@ pub(crate) fn serve_secret(store: &dyn SecretStore, method: &str, params: &Value
 
 type Reply = mpsc::Sender<Result<Value, String>>;
 
+/// The app's end of the channel, over either transport. The frame, pending and secret rules are
+/// shared; only the transport (`start`) and the way `close` unblocks in-flight I/O differ.
 pub struct AppChannel {
     writer: Mutex<ChannelStream>,
-    #[cfg(windows)]
     closer: ChannelStream,
     pending: Mutex<HashMap<u64, Reply>>,
     next: AtomicU64,
     open: AtomicBool,
+
 }
 
 impl AppChannel {
@@ -170,8 +170,6 @@ impl AppChannel {
         let reader = stream.try_clone()?;
         let closer = stream.try_clone()?;
         let channel = Arc::new(AppChannel {
-            #[cfg(windows)]
-            closer: stream.try_clone()?,
             writer: Mutex::new(stream),
             closer,
             pending: Mutex::new(HashMap::new()),
@@ -365,7 +363,7 @@ impl AppChannel {
 }
 
 #[cfg(all(test, windows))]
-mod windows_tests {
+mod windows_admission_tests {
     use super::*;
 
     #[test]
@@ -801,5 +799,170 @@ mod tests {
         let mut line = String::new();
         assert_eq!(daemon.reader.read_line(&mut line).unwrap(), 0);
         assert!(!channel.is_open());
+    }
+}
+
+/// Additional Windows frame and cancellation regressions over the connected transport.
+/// Ownership, ACL and first-instance collision are tested in windows::tests.
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use crate::approvals::ApprovalRequest;
+
+    /// Records every approval the daemon asks for; always allows.
+    #[derive(Default)]
+    struct Recording {
+        asked: Mutex<Vec<ApprovalRequest>>,
+    }
+
+    impl Handler for Recording {
+        fn approve(&self, request: &ApprovalRequest) -> bool {
+            self.asked.lock().unwrap().push(request.clone());
+            true
+        }
+    }
+
+    fn read_frame<R: BufRead>(reader: &mut R) -> Frame {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap_or_else(|error| panic!("{error}: {line:?}"))
+    }
+
+    fn write_frame<W: Write>(writer: &mut W, frame: &Frame) {
+        writeln!(writer, "{}", serde_json::to_string(frame).unwrap()).unwrap();
+    }
+
+    fn same_process_connected() -> (ChannelStream, ChannelStream) {
+        let (parent, child) = windows::channel_pair().unwrap();
+        (parent, child.into_test_stream())
+    }
+
+    #[test]
+    fn a_connected_channel_round_trips_requests_and_responses() {
+        let (connected, client) = same_process_connected();
+        let handler = Arc::new(Recording::default());
+        let channel = AppChannel::start(connected, handler.clone()).unwrap();
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        let mut writer = client;
+
+        // App to daemon: a request, answered by the fake daemon.
+        let waiting = std::thread::spawn({
+            let channel = channel.clone();
+            move || channel.request("ping", json!({}), Duration::from_secs(5))
+        });
+        let Frame::Request { id, method, .. } = read_frame(&mut reader) else { panic!("expected a request") };
+        assert_eq!(method, "ping");
+        write_frame(&mut writer, &Frame::Response { id, result: Some(json!({"ok": true})), error: None });
+        assert_eq!(waiting.join().unwrap(), Ok(json!({"ok": true})));
+
+        // Daemon to app: a request, answered by the channel's handler.
+        let request = json!({"connector": "Notion", "action": "create pages", "preview": [{"name": "title", "value": "Plan"}]});
+        write_frame(&mut writer, &Frame::Request { id: 9, method: "approve".into(), params: request });
+        let Frame::Response { id, result, error } = read_frame(&mut reader) else { panic!("expected a response") };
+        assert_eq!(id, 9);
+        assert_eq!(result, Some(json!({"approved": true})));
+        assert_eq!(error, None);
+        assert_eq!(handler.asked.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_frame_over_the_cap_is_never_written() {
+        let (connected, client) = same_process_connected();
+        let channel = AppChannel::start(connected, Arc::new(Recording::default())).unwrap();
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        let mut writer = client;
+        let huge = json!({"type": "connector_setup", "connectorId": "slack", "pad": "x".repeat(MAX_FRAME as usize)});
+        let refused = channel.command("w", huge).unwrap_err();
+        assert!(refused.contains("too large"), "{refused}");
+        assert!(channel.is_open());
+        // The first frame the daemon reads is the next small request, not a piece of the large one.
+        let waiting = std::thread::spawn({
+            let channel = channel.clone();
+            move || channel.request("ping", json!({}), Duration::from_secs(5))
+        });
+        let Frame::Request { id, method, .. } = read_frame(&mut reader) else { panic!("expected a request") };
+        assert_eq!(method, "ping");
+        write_frame(&mut writer, &Frame::Response { id, result: Some(json!({})), error: None });
+        assert_eq!(waiting.join().unwrap(), Ok(json!({})));
+    }
+
+    #[test]
+    fn close_wakes_a_request_blocked_on_a_full_pipe() {
+        let (connected, _client) = same_process_connected();
+        let channel = AppChannel::start(connected, Arc::new(Recording::default())).unwrap();
+        // 200 KiB is under the cap but far past the 4 KiB pipe buffer, and nobody reads it.
+        let waiting = std::thread::spawn({
+            let channel = channel.clone();
+            move || channel.request("ping", json!({"pad": "x".repeat(200_000)}), Duration::from_secs(30))
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        channel.close().unwrap();
+        assert!(waiting.join().unwrap().is_err());
+    }
+
+    #[test]
+    fn a_blocked_read_is_woken_by_its_cancellation() {
+        let (connected, _client) = same_process_connected();
+        let mut reader = connected.try_clone().unwrap();
+        let _keep = _client;
+        let (done, wait) = std::sync::mpsc::channel();
+        let reading = std::thread::spawn(move || {
+            let mut buffer = [0u8; 16];
+            let _ = done.send(reader.read(&mut buffer));
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        connected.shutdown().unwrap();
+        let result = wait.recv_timeout(Duration::from_secs(5)).expect("the read was not woken");
+        assert!(result.is_err() || result.unwrap() == 0);
+        reading.join().unwrap();
+    }
+
+    // The old accept-by-name/PID fixture is superseded by the connected transport:
+    // no listener name crosses the launch boundary. ACL, first-instance collision,
+    // explicit handle inheritance and exact-launch witnesses have native regressions
+    // in windows::tests and daemon::windows; no text check proves their execution.
+
+    /// The reported Windows defect: the direction's `OVERLAPPED` event is manual-reset and reused
+    /// for every transfer without `ResetEvent`, so a read issued after an earlier completion could
+    /// see the leftover signal, return `ERROR_IO_INCOMPLETE` immediately, and tear the direction
+    /// down after its first frame. This pins the invariant that claim denies, with the second read
+    /// *genuinely* pending (nothing is written for a while, so it cannot complete synchronously).
+    #[test]
+    fn a_second_pending_read_on_one_direction_still_waits_for_its_data() {
+        let (connected, client) = same_process_connected();
+        let channel = AppChannel::start(connected, Arc::new(Recording::default())).unwrap();
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        let mut writer = client;
+
+        // Transfer 1: the daemon answers, completing one read and signalling the shared event.
+        let waiting = std::thread::spawn({
+            let channel = channel.clone();
+            move || channel.request("ping", json!({}), Duration::from_secs(10))
+        });
+        let Frame::Request { id, .. } = read_frame(&mut reader) else { panic!("expected a request") };
+        write_frame(&mut writer, &Frame::Response { id, result: Some(json!({"ok": true})), error: None });
+        assert_eq!(waiting.join().unwrap(), Ok(json!({"ok": true})));
+
+        // Transfer 2: the next read is submitted with nothing to read, so it is pending while the
+        // event still carries the previous completion's signal.
+        std::thread::sleep(Duration::from_millis(250));
+        write_frame(
+            &mut writer,
+            &Frame::Request {
+                id: 77,
+                method: "approve".into(),
+                params: json!({"connector": "x", "action": "y", "preview": []}),
+            },
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(read_frame(&mut reader));
+        });
+        let frame = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the direction never answered the second request after its first frame");
+        let Frame::Response { id, result, .. } = frame else { panic!("expected a response") };
+        assert_eq!(id, 77);
+        assert_eq!(result, Some(json!({"approved": true})));
     }
 }

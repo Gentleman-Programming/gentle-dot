@@ -172,9 +172,13 @@ describe("connectors over the protocol", () => {
 		await find("auth_done");
 		// The sign-in is quick: let the restart for connecting finish before the next change.
 		await waitFor(() => d.supervisor.pid !== started && d.supervisor.state === "ready");
+		const connected = d.supervisor.pid;
 		send({ type: "connector_disconnect", connectorId: "notion" });
+		// Startup rewrites the captures; wait for the replacement's get_state before reading them.
+		await waitFor(
+			() => d.supervisor.pid !== connected && d.supervisor.state === "ready" && !d.supervisor.busy,
+		);
 		await waitFor(() => !JSON.parse(agentEnv().GENTLE_DOT_CONNECTOR_POLICY ?? "{}").connectors?.notion);
-		await waitFor(() => d.supervisor.state === "ready" && !d.supervisor.busy);
 		const approved = {
 			connectors: readFileSync(join(dataDir, "connectors.json"), "utf8"),
 			mcp: readFileSync(join(agentHome, "mcp.json"), "utf8"),

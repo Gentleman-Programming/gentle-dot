@@ -23,13 +23,10 @@ export function useDot(info: ConnectionInfo | undefined) {
 	const send = useCallback((message: ClientMessage): boolean => {
 		if (client.current?.send(message)) return true;
 		dispatch({
-			type: "server",
-			message: {
-				type: "error",
-				code: "offline",
-				message: "Not connected yet. Try again in a moment.",
-				seq: 0,
-			},
+			type: "notice",
+			level: "error",
+			message: "Not connected yet. Try again in a moment.",
+			display: { kind: "offline" },
 		});
 		return false;
 	}, []);

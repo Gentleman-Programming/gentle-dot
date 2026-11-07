@@ -53,9 +53,9 @@ export const SET_ASIDE_NOTICE =
 /** The app is there but the integrity key could not be read or stored: nothing that needs a secret runs (A1, L120). */
 export const INTEGRITY_UNCHECKED =
 	"Gentle Dot could not check your connectors, so the ones that need a secret stay locked. Restart Gentle Dot to try again.";
-/** A signed `connectors.json` was deleted while Gentle Dot was closed (A3, L120). */
+/** An existing integrity-key entry accompanies an unavailable connectors record (A3, L120). */
 export const MISSING_NOTICE =
-	"Your connectors file was removed while Gentle Dot was closed. Add your connectors again in Connectors.";
+	"Gentle Dot could not load the connectors file. If you previously configured connectors, review them in Connectors.";
 
 /** A value the user types in the app (a token, client credentials); kept only in the assistant's private state. */
 export interface SetupField {
@@ -355,7 +355,7 @@ const COMPUTER_INFO = {
 	name: "Computer",
 	reads: "See your screen during a session you allow in the app.",
 	sends:
-		"Click, type, and open apps on this Mac during that session. The app asks you again before risky actions.",
+		"The registered helper can click, type, and bring supported apps forward during a session you allow in the app. Registration is not consent; risky actions ask again unless you explicitly enable Yolo mode.",
 } as const;
 
 /** A server the user added from the assistant's draft or an import. */

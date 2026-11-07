@@ -17,6 +17,13 @@ apps/desktop/src-tauri/gen/
 # Declarations emitted next to sources by accident
 packages/*/src/**/*.d.ts
 
+# Engram memory exports: memory content must never be committed
+/engram-export.json
+/engram-*.json
+
+# Keep contributor development records local; existing upstream files remain tracked.
+/odd/
+
 # Explicit Windows addon build outputs
 /packages/daemon/native/*.node
 /packages/daemon/native/*.obj

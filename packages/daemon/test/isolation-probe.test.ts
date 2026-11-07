@@ -89,6 +89,10 @@ function listener(port: string): number | undefined {
 	}
 }
 
+// The retired netstat parser/command contract is intentionally not restored.
+// Structured PowerShell/lsof lookup, ambiguity/failure refusal and stable PID/data
+// ownership are covered through privateMemory in private-memory.test.ts. Keep the
+// opt-in real-agent HOME/isolation probe below unchanged and disabled by default.
 describe.skipIf(!enabled)("@real-agent isolation probe", () => {
 	it("leaves HOME untouched and keeps memory in the global Engram, project gentle-dot", {
 		timeout: 300_000,

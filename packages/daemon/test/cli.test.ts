@@ -1,10 +1,10 @@
 import { spawn } from "node:child_process";
 import { readFileSync, statSync } from "node:fs";
-import { createServer, type Socket, connect as unixConnect } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { socketPair } from "./support/socket-pair.ts";
 import { itWithInheritedAppChannel, itWithUnmanagedCli } from "./support/windows.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
@@ -96,26 +96,14 @@ describe("gentle-dot command", () => {
 			try {
 				// The daemon is up once it asks the app for something (the connectors' integrity key).
 				await new Promise((resolve) => app.once("data", resolve));
-				// The app quits, crashes, or is killed: the kernel closes its end of the pair.
 				app.destroy();
 				expect(await exited).toBe(0);
 			} finally {
+				app.destroy();
+				daemon.destroy();
 				child.kill("SIGKILL");
 			}
 			expect(output).toContain("the desktop app's channel closed; stopping the assistant");
 		},
 	);
 });
-
-/** A connected pair of Unix sockets (Node has no socketpair): the app's end and the daemon's. */
-async function socketPair(): Promise<{ app: Socket; daemon: Socket }> {
-	const path = join(tempDir(), "pair.sock");
-	const server = createServer();
-	await new Promise<void>((done) => server.listen(path, done));
-	const accepted = new Promise<Socket>((resolve) => server.once("connection", resolve));
-	const daemon = unixConnect(path);
-	await new Promise((resolve) => daemon.once("connect", resolve));
-	const app = await accepted;
-	server.close();
-	return { app, daemon };
-}

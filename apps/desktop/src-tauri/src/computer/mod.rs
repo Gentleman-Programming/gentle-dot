@@ -22,6 +22,11 @@ pub mod risk;
 pub mod server;
 pub mod session;
 pub mod windows;
+// The accepted active backend; do not route startup through the upstream adapter.
+#[cfg(target_os = "windows")]
+pub mod win32;
+// Retained upstream helpers used by alert::WindowChange (including capture hold-off).
+// This module is not selected as the active Desktop.
 #[cfg(windows)]
 pub(crate) mod win;
 // The Windows desktop's pure parts, tested everywhere: UI Automation element mapping, which
@@ -165,6 +170,8 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(target_os = "macos")]
 pub use macos::{request_permission, MacDesktop};
+#[cfg(target_os = "windows")]
+pub use win32::WindowsDesktop;
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

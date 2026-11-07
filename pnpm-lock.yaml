@@ -17,6 +17,9 @@ importers:
       '@types/node':
         specifier: ^26.6.4
         version: 26.6.4
+      cross-spawn:
+        specifier: ^7.0.6
+        version: 7.0.6
       typescript:
         specifier: ^7.0.2
         version: 7.0.2

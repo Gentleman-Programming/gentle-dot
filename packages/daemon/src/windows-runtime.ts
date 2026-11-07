@@ -57,7 +57,11 @@ export function resolveWindowsEngram(
 		return value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : value;
 	});
 	if (home && absolute(home))
-		directories.push(win32.join(home, "go", "bin"), win32.join(home, ".local", "bin"));
+		directories.push(
+			win32.join(home, "go", "bin"),
+			win32.join(home, "AppData", "Local", "engram", "bin"),
+			win32.join(home, ".local", "bin"),
+		);
 	directories.push(win32.join(runtime, "bin"));
 	const seen = new Set<string>();
 	for (const directory of directories) {

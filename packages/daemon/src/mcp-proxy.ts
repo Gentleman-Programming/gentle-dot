@@ -23,6 +23,7 @@ import {
 	type AuthProvider,
 	JSON_RPC_ERROR_CODES,
 	LATEST_PROTOCOL_VERSION,
+	McpAbortError,
 	McpAuthRequiredError,
 	McpClient,
 	McpError,
@@ -34,8 +35,10 @@ import {
 } from "@earendil-works/pi-mcp";
 import { McpOAuthAuthorizationRequiredError } from "@earendil-works/pi-mcp/oauth";
 import { type ConnectorMode, isReadOnlyTool } from "./extensions/approval-guard.ts";
+import { ProxyDiagnostics, type ProxySnapshot, type ProxyTrace } from "./mcp-diagnostics.ts";
 import { NO_APP, SecretsUnavailableError } from "./secret-source.ts";
 import { type OsUser, stdioCommand } from "./vps.ts";
+import { DISCORD_CACHE_UNAVAILABLE, discordStdioLaunch } from "./windows-discord-launch.ts";
 
 /** Where the engine reaches a connector: `/mcp/<id>`. */
 export const MCP_PREFIX = "/mcp/";
@@ -114,6 +117,7 @@ interface Upstream {
 	client: McpClient;
 	revision: string;
 	connecting: Promise<void>;
+	stopObserving?: () => void;
 	/** The tools from the last list, for their annotations. */
 	tools?: Tool[];
 }
@@ -126,13 +130,26 @@ export class McpProxy {
 	/** Requests being answered, by connector and request id, so a `notifications/cancelled` stops them. */
 	private readonly running = new Map<string, AbortController>();
 	private readonly options: McpProxyOptions;
+	private readonly evidence: ProxyDiagnostics;
 
 	constructor(options: McpProxyOptions) {
 		this.options = options;
+		this.evidence = new ProxyDiagnostics(options.connector);
+	}
+
+	/** Owned proxy history only; never probes upstreams or asks for credentials. */
+	diagnostics(): ProxySnapshot {
+		return this.evidence.snapshot();
+	}
+
+	/** Exact-Discord finite origin history, never an upstream operation. */
+	discordFailure() {
+		return this.evidence.discordFailure();
 	}
 
 	/** A fresh key for the next engine launch; the previous one stops working at once. */
 	rotateKey(): string {
+		this.evidence.clear();
 		this.key = randomBytes(32).toString("base64url");
 		return this.key;
 	}
@@ -147,15 +164,23 @@ export class McpProxy {
 
 	/** Closes the connection of every connector that is gone, turned off, or whose server changed. */
 	sync(): void {
+		// Invalidate all diagnostic tickets, even preflight attempts without an upstream yet.
+		// A reversible revision or off/on transition must not resurrect launch-local history.
+		this.evidence.clear();
 		for (const [id, upstream] of this.upstreams) {
+			upstream.stopObserving?.();
 			const connector = this.options.connector(id);
 			if (!connector?.enabled || connector.revision !== upstream.revision) this.drop(id, upstream);
 		}
 	}
 
 	async close(): Promise<void> {
+		this.evidence.clear();
 		for (const controller of this.running.values()) controller.abort();
-		const closing = [...this.upstreams.values()].map((upstream) => upstream.client.close().catch(() => {}));
+		const closing = [...this.upstreams.values()].map((upstream) => {
+			upstream.stopObserving?.();
+			return upstream.client.close().catch(() => {});
+		});
 		this.upstreams.clear();
 		await Promise.all(closing);
 	}
@@ -165,8 +190,10 @@ export class McpProxy {
 		res.setHeader("X-Content-Type-Options", "nosniff");
 		// Only the engine calls here; a page in a browser never may, even with the key.
 		if (req.headers.origin !== undefined) return this.empty(req, res, 403);
-		if (!this.authorized(req.headers.authorization))
+		if (!this.authorized(req.headers.authorization)) {
 			return this.reply(req, res, 401, null, { error: { code: UNAUTHORIZED, message: "Unauthorized" } });
+		}
+		const diagnosticTicket = this.evidence.ticket();
 		const url = new URL(req.url ?? "/", "http://localhost");
 		const id = url.pathname.slice(MCP_PREFIX.length);
 		if (req.method !== "POST") return this.empty(req, res, 405);
@@ -206,15 +233,18 @@ export class McpProxy {
 		res.on("close", () => {
 			if (!res.writableFinished) controller.abort();
 		});
+		const attempt = this.evidence.attempt(connector.id, connector.revision, diagnosticTicket);
 		try {
 			const result = await this.dispatch(
 				connector,
 				message.method,
 				asRecord(message.params),
 				controller.signal,
+				attempt.trace,
 			);
 			this.reply(req, res, 200, rpcId, { result });
 		} catch (error) {
+			if (error instanceof ProxyError) attempt.refusal(connector.enabled && !!connector.unavailable);
 			this.reply(req, res, 200, rpcId, { error: this.rpcError(connector, error) });
 		} finally {
 			if (this.running.get(key) === controller) this.running.delete(key);
@@ -226,6 +256,7 @@ export class McpProxy {
 		method: string,
 		params: Record<string, unknown>,
 		signal: AbortSignal,
+		trace: ProxyTrace,
 	): Promise<unknown> {
 		if (method === "ping") return {};
 		if (!connector.enabled)
@@ -251,27 +282,29 @@ export class McpProxy {
 				};
 			}
 			case "tools/list": {
-				const tools = await this.listTools(connector, signal);
+				const tools = await this.listTools(connector, signal, trace);
 				return { tools: tools.filter((tool) => visible(connector, tool)) };
 			}
 			case "tools/call":
-				return this.callTool(connector, params, signal);
+				return this.callTool(connector, params, signal, trace);
 			case "resources/list":
 				if (!reads) return { resources: [] };
-				return { resources: await this.all(connector, (c) => c.listResources({ signal })) };
+				return { resources: await this.all(connector, (c) => c.listResources({ signal }), trace) };
 			case "resources/templates/list":
 				if (!reads) return { resourceTemplates: [] };
 				return {
-					resourceTemplates: await this.all(connector, (c) => c.listResourceTemplates({ signal })),
+					resourceTemplates: await this.all(connector, (c) => c.listResourceTemplates({ signal }), trace),
 				};
 			case "prompts/list":
 				if (!reads) return { prompts: [] };
-				return { prompts: await this.all(connector, (c) => listPrompts(c, signal)) };
+				return { prompts: await this.all(connector, (c) => listPrompts(c, signal), trace) };
 			case "resources/read":
 			case "prompts/get": {
 				if (!reads) throw new ProxyError(JSON_RPC_ERROR_CODES.invalidParams, notAvailable(connector));
-				const upstream = await this.upstream(connector);
-				return await upstream.client.request(method, params, { signal, timeoutMs: REQUEST_TIMEOUT_MS });
+				const upstream = await this.upstream(connector, trace);
+				return await trace("upstream_request", () =>
+					upstream.client.request(method, params, { signal, timeoutMs: REQUEST_TIMEOUT_MS }),
+				);
 			}
 			default:
 				throw new ProxyError(JSON_RPC_ERROR_CODES.methodNotFound, `Method not found: ${method}`);
@@ -282,15 +315,16 @@ export class McpProxy {
 		connector: ProxiedConnector,
 		params: Record<string, unknown>,
 		signal: AbortSignal,
+		trace: ProxyTrace,
 	): Promise<unknown> {
 		const name = params.name;
 		if (typeof name !== "string")
 			throw new ProxyError(JSON_RPC_ERROR_CODES.invalidParams, "Invalid params: `name` is required");
 		const args = asRecord(params.arguments);
-		const upstream = await this.upstream(connector);
+		const upstream = await this.upstream(connector, trace);
 		// The annotations come from the server's own list, never from the caller.
 		let tool = upstream.tools?.find((t) => t.name === name);
-		if (!tool) tool = (await this.listTools(connector, signal)).find((t) => t.name === name);
+		if (!tool) tool = (await this.listTools(connector, signal, trace)).find((t) => t.name === name);
 		if (!tool) throw new ProxyError(JSON_RPC_ERROR_CODES.invalidParams, `Unknown tool: ${name}`);
 		refuseHidden(connector, tool);
 		if (!isReadOnlyTool(tool.name, tool.annotations?.readOnlyHint, connector.readOnlyTools)) {
@@ -325,22 +359,34 @@ export class McpProxy {
 				);
 			refuseHidden(now, tool);
 		}
-		const current = await this.upstream(connector);
-		return await current.client.callTool(name, args, { signal, timeoutMs: CALL_TIMEOUT_MS });
+		const current = await this.upstream(connector, trace);
+		return await trace("upstream_request", () =>
+			current.client.callTool(name, args, { signal, timeoutMs: CALL_TIMEOUT_MS }),
+		);
 	}
 
-	private async listTools(connector: ProxiedConnector, signal: AbortSignal): Promise<Tool[]> {
-		const upstream = await this.upstream(connector);
-		const tools = await upstream.client.listTools({ signal, timeoutMs: REQUEST_TIMEOUT_MS });
+	private async listTools(
+		connector: ProxiedConnector,
+		signal: AbortSignal,
+		trace: ProxyTrace,
+	): Promise<Tool[]> {
+		const upstream = await this.upstream(connector, trace);
+		const tools = await trace("upstream_request", () =>
+			upstream.client.listTools({ signal, timeoutMs: REQUEST_TIMEOUT_MS }),
+		);
 		upstream.tools = tools;
 		return tools;
 	}
 
 	/** A list method; a server that does not have it has an empty list. */
-	private async all<T>(connector: ProxiedConnector, list: (client: McpClient) => Promise<T[]>): Promise<T[]> {
-		const upstream = await this.upstream(connector);
+	private async all<T>(
+		connector: ProxiedConnector,
+		list: (client: McpClient) => Promise<T[]>,
+		trace: ProxyTrace,
+	): Promise<T[]> {
+		const upstream = await this.upstream(connector, trace);
 		try {
-			return await list(upstream.client);
+			return await trace("upstream_request", () => list(upstream.client));
 		} catch (error) {
 			if (error instanceof McpError && error.code === JSON_RPC_ERROR_CODES.methodNotFound) return [];
 			throw error;
@@ -348,7 +394,7 @@ export class McpProxy {
 	}
 
 	/** The connection to the connector's server, made when it is first needed and again after it failed. */
-	private async upstream(connector: ProxiedConnector): Promise<Upstream> {
+	private async upstream(connector: ProxiedConnector, trace: ProxyTrace): Promise<Upstream> {
 		let upstream = this.upstreams.get(connector.id);
 		if (
 			upstream &&
@@ -363,15 +409,28 @@ export class McpProxy {
 				version: "1.0.0",
 				requestTimeoutMs: REQUEST_TIMEOUT_MS,
 			});
-			const created: Upstream = {
-				client,
-				revision: connector.revision,
-				connecting: (async () => {
-					const credentials = await this.options.credentials(connector.id);
-					await client.connect(this.transport(connector, credentials));
-				})(),
-			};
+			const generation = trace.generation;
+			const created: Upstream = { client, revision: connector.revision, connecting: Promise.resolve() };
+			created.connecting = (async () => {
+				const credentials = await trace("credentials", () => this.options.credentials(connector.id));
+				const transport = await trace("transport_create", () =>
+					this.transport(connector, credentials, generation),
+				);
+				if (generation === this.evidence.ticket() && this.upstreams.get(connector.id) === created) {
+					const observe = this.evidence.connection(connector.id, connector.revision, generation);
+					let active = true;
+					const dispose = transport.onError((error: Error) => {
+						if (active && this.upstreams.get(connector.id) === created) observe(error);
+					});
+					created.stopObserving = () => {
+						active = false;
+						dispose();
+					};
+				}
+				await trace("connect", () => client.connect(transport));
+			})();
 			client.onClose(() => {
+				created.stopObserving?.();
 				if (this.upstreams.get(connector.id) === created) this.upstreams.delete(connector.id);
 			});
 			this.upstreams.set(connector.id, created);
@@ -386,7 +445,11 @@ export class McpProxy {
 		return upstream;
 	}
 
-	private transport(connector: ProxiedConnector, credentials: UpstreamCredentials): McpTransport {
+	private transport(
+		connector: ProxiedConnector,
+		credentials: UpstreamCredentials,
+		generation: number,
+	): McpTransport {
 		if (this.options.transport) return this.options.transport(connector, credentials);
 		const { server } = connector;
 		if ("url" in server)
@@ -399,7 +462,23 @@ export class McpProxy {
 			});
 		const stdio = this.options.stdio;
 		const cwd = stdio?.home ?? this.options.cwd ?? process.cwd();
-		const launch = stdioCommand(stdio?.user, expandHome(server.command), (server.args ?? []).map(expandHome));
+		let target = { command: expandHome(server.command), args: (server.args ?? []).map(expandHome) };
+		if (!stdio && connector.id === "discord" && process.platform === "win32" && target.command === "npx") {
+			const env = this.options.env ?? process.env;
+			try {
+				target = discordStdioLaunch(
+					connector.id,
+					target.command,
+					target.args,
+					process.platform,
+					env.ProgramFiles ?? env.PROGRAMFILES,
+					env.LOCALAPPDATA,
+				);
+			} catch {
+				throw new ProxyError(REFUSED, DISCORD_CACHE_UNAVAILABLE);
+			}
+		}
+		const launch = stdioCommand(stdio?.user, target.command, target.args);
 		const home: Record<string, string> = stdio
 			? {
 					HOME: stdio.home,
@@ -410,17 +489,30 @@ export class McpProxy {
 					TMPDIR: join(stdio.home, ".cache", "tmp"),
 				}
 			: {};
-		return new StdioTransport({
+		const observe =
+			connector.id === "discord"
+				? this.evidence.startupObserver(connector.id, connector.revision, generation)
+				: undefined;
+		const transport = new StdioTransport({
 			command: launch.command,
 			...(launch.args.length > 0 ? { args: launch.args } : {}),
 			cwd: resolve(cwd, expandHome(server.cwd ?? ".")),
 			env: { ...stringEnv(this.options.env ?? process.env), ...home, ...credentials.env },
 			inheritEnv: false,
 			stderr: "pipe",
+			...(observe
+				? {
+						onStderr: (chunk: string) => {
+							observe(chunk);
+						},
+					}
+				: {}),
 		});
+		return transport;
 	}
 
 	private drop(id: string, upstream: Upstream): void {
+		upstream.stopObserving?.();
 		if (this.upstreams.get(id) === upstream) this.upstreams.delete(id);
 		void upstream.client.close().catch(() => {});
 	}
@@ -435,7 +527,9 @@ export class McpProxy {
 		// The server's own answer, passed on as it came.
 		if (error instanceof McpError) return { code: error.code, message: error.message };
 		const upstream = this.upstreams.get(connector.id);
-		if (upstream) this.drop(connector.id, upstream);
+		// Cancellation belongs to one request, not the shared connection. Closing here also
+		// rejects unrelated in-flight requests with McpConnectionClosedError.
+		if (upstream && !(error instanceof McpAbortError)) this.drop(connector.id, upstream);
 		if (error instanceof McpOAuthAuthorizationRequiredError || error instanceof McpAuthRequiredError) {
 			this.log(`connector ${connector.id} needs a new sign-in`);
 			return {
@@ -443,8 +537,7 @@ export class McpProxy {
 				message: `${connector.name} needs the user to sign in again. Ask them to sign in to ${connector.name} in Connectors.`,
 			};
 		}
-		const detail = ((error as Error)?.message ?? String(error)).replace(/https?:\/\/\S+/g, "[address]");
-		this.log(`could not reach connector ${connector.id}: ${detail.slice(0, 200)}`);
+		this.log("could not reach connector: upstream_failure");
 		return { code: REFUSED, message: `Could not reach ${connector.name} right now. Try again in a moment.` };
 	}
 

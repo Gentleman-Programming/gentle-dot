@@ -8,19 +8,23 @@
 //! - `Recognizer` turns that PCM into partial and final text. Apple's Speech framework
 //!   (`macos::AppleSpeech`) is the default on macOS; the optional local model (S30.5,
 //!   `parakeet::Parakeet`, NVIDIA Parakeet through sherpa-onnx) is preferred once the user has
-//!   downloaded it (`model`), and it is the only engine on Linux (`engine::Preferred`).
+//!   downloaded it (`model`), and it is the only engine on Linux and Windows (`engine::Preferred`).
 //!
 //! `Voice` is the pure state machine between them (idle → starting → recording → stopping,
 //! single flight, cancel, error mapping, level throttling, locale fallback), tested on every OS
 //! with fakes. The objc2 bindings live in `macos`; Linux records through a command-line recorder
-//! (`pipe`); elsewhere the commands answer "unavailable".
+//! (`pipe`); Windows captures through WASAPI (`wasapi`); elsewhere commands answer "unavailable".
 //!
 //! SpeechAnalyzer/SpeechTranscriber (macOS 26) are Swift-only, with no Objective-C interface to
 //! bind from Rust, and the app supports macOS 12.3, so `SFSpeechRecognizer` is the recognizer.
 
 pub mod app;
 pub mod audio;
+pub mod device_bridge;
+pub mod diagnostic;
 pub mod engine;
+#[cfg(target_os = "windows")]
+pub mod input_devices;
 #[cfg(test)]
 mod fake;
 pub mod locale;
@@ -31,6 +35,12 @@ pub mod model;
 pub mod parakeet;
 #[cfg(unix)]
 pub mod pipe;
+#[cfg(target_os = "windows")]
+pub(crate) mod wasapi;
+#[cfg(target_os = "windows")]
+pub(crate) mod windows;
+#[cfg(target_os = "windows")]
+pub(crate) mod windows_speech;
 
 pub use machine::{Sink, Voice};
 #[cfg(target_os = "macos")]
@@ -47,7 +57,7 @@ pub const PARTIAL_EVENT: &str = "voice://partial";
 pub const LEVEL_EVENT: &str = "voice://level";
 /// A failure while recording (permission, recognizer, interruption): `{message}`.
 pub const ERROR_EVENT: &str = "voice://error";
-pub const UNSUPPORTED: &str = "Voice input is available on macOS and Linux.";
+pub const UNSUPPORTED: &str = "Voice input is available on macOS, Linux and Windows.";
 
 /// The `voice_status` reply: `{available, reason?}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -79,6 +89,7 @@ pub enum VoiceEvent {
     Partial(String),
     Level(f32),
     Error(String),
+    Diagnostic(diagnostic::Diagnostic),
 }
 
 impl VoiceEvent {
@@ -87,6 +98,7 @@ impl VoiceEvent {
             VoiceEvent::Partial(_) => PARTIAL_EVENT,
             VoiceEvent::Level(_) => LEVEL_EVENT,
             VoiceEvent::Error(_) => ERROR_EVENT,
+            VoiceEvent::Diagnostic(_) => diagnostic::EVENT,
         }
     }
 
@@ -95,6 +107,7 @@ impl VoiceEvent {
             VoiceEvent::Partial(text) => serde_json::json!({ "text": text }),
             VoiceEvent::Level(level) => serde_json::json!({ "level": level }),
             VoiceEvent::Error(message) => serde_json::json!({ "message": message }),
+            VoiceEvent::Diagnostic(metadata) => serde_json::json!(metadata),
         }
     }
 }
@@ -193,6 +206,19 @@ pub trait Microphone: Send + Sync {
     /// Prompts when not yet determined. Blocks until the user answers: never on the main thread.
     fn request_authorization(&self) -> Authorization;
     fn open(&self, sink: Sink) -> Result<Box<dyn Stream>, VoiceError>;
+    /// Reject unsupported selections before permissions or state transitions.
+    fn validate_selection(&self, device_id: Option<&str>) -> Result<(), VoiceError> {
+        if device_id.is_some() {
+            return Err(VoiceError::Failed("Selected microphone routing is unsupported on this platform.".into()));
+        }
+        Ok(())
+    }
+    fn open_selected(&self, sink: Sink, device_id: Option<&str>) -> Result<Box<dyn Stream>, VoiceError> {
+        match device_id {
+            None => self.open(sink),
+            Some(_) => Err(VoiceError::Failed("Selected microphone routing is unsupported on this platform.".into())),
+        }
+    }
 }
 
 /// An open capture.
@@ -261,7 +287,7 @@ mod tests {
         assert_eq!(serde_json::to_value(VoiceStatus::available()).unwrap(), serde_json::json!({"available": true}));
         assert_eq!(
             serde_json::to_value(VoiceStatus::unavailable(UNSUPPORTED)).unwrap(),
-            serde_json::json!({"available": false, "reason": "Voice input is available on macOS and Linux."})
+            serde_json::json!({"available": false, "reason": "Voice input is available on macOS, Linux and Windows."})
         );
     }
 

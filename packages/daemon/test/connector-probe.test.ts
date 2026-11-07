@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import type { ServerMessage } from "@gentle-dot/protocol";
 import { describe, expect, it } from "vitest";
 import WebSocket from "ws";
-import { tempDir, waitFor } from "./helpers.ts";
+import { fixtureNodeArgs, fixtureNodeEnv, tempDir, waitFor } from "./helpers.ts";
 
 const CLI = process.env.GENTLE_DOT_PROBE_CLI ?? fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const FAKE_SERVER = fileURLToPath(new URL("./fixtures/fake-mcp-server.ts", import.meta.url));
@@ -153,16 +153,19 @@ describe.skipIf(!enabled)("@real-agent connector probe", () => {
 			JSON.stringify({ version: 1, connectors: { notion: { enabled: false, mode: "read_only" } } }),
 		);
 		const memoryPort = await freePort();
-		const child: ChildProcess = spawn(process.execPath, [CLI], {
-			env: {
-				PATH: process.env.PATH,
-				HOME: home,
-				GENTLE_DOT_DATA_DIR: dataDir,
-				GENTLE_DOT_PORT: "0",
-				GENTLE_DOT_ENGRAM: "private",
-				GENTLE_DOT_ENGRAM_PORT: String(memoryPort),
-				FAKE_MCP_SERVER_CALLS: calls,
-			},
+		const child: ChildProcess = spawn(process.execPath, fixtureNodeArgs(CLI), {
+			env: fixtureNodeEnv(
+				{
+					PATH: process.env.PATH,
+					HOME: home,
+					GENTLE_DOT_DATA_DIR: dataDir,
+					GENTLE_DOT_PORT: "0",
+					GENTLE_DOT_ENGRAM: "private",
+					GENTLE_DOT_ENGRAM_PORT: String(memoryPort),
+					FAKE_MCP_SERVER_CALLS: calls,
+				},
+				home,
+			),
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 		let output = "";

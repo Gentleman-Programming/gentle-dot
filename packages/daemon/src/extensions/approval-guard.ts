@@ -32,12 +32,15 @@
  * only after the user approves; secrets are typed in the app, never in the chat.
  * Subagents of the engine load this guard too, through a file the daemon keeps in the engine's
  * extensions folder (`child-guard.ts`), but get no `propose_connector`.
- * This file has no dependencies besides Node, so the engine loads it as is.
+ * Owned siblings ship beside this entry point; Windows uses only the pinned SDK's public tool factory.
  */
+import { createHash } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { REVIEW_STATUS_TOOL, registerReviewStatus } from "./review-status.ts";
 import { pruneScreenshots } from "./screenshot-context.ts";
+import { registerWindowsPowerShell } from "./windows-powershell.ts";
 
 export const POLICY_ENV = "GENTLE_DOT_CONNECTOR_POLICY";
 /** The status key of a connector draft; the daemon reads it, nothing shows it. */
@@ -241,6 +244,14 @@ export function parsePolicy(raw: string | undefined): ConnectorPolicy | undefine
 	};
 }
 
+/** Correlates Dot's exact command preview across the SDK's ordinary confirmation wire format.
+ * This is a presentation marker, not an approval token or permission grant.
+ */
+export function powerShellApprovalTitle(command: string): string {
+	const digest = createHash("sha256").update(command, "utf8").digest("hex");
+	return `Allow this PowerShell command? [Dot PowerShell ${digest}]`;
+}
+
 export function decide(call: GuardCall, policy: ConnectorPolicy): GuardDecision {
 	const { toolName, input } = call;
 	if (FILE_TOOLS.has(toolName)) {
@@ -257,9 +268,9 @@ export function decide(call: GuardCall, policy: ConnectorPolicy): GuardDecision 
 	if (COMMAND_TOOLS.has(toolName)) {
 		const command = typeof input.command === "string" ? input.command : "";
 		if (CONNECTOR_COMMAND.test(command)) return { action: "block", reason: USE_CONNECTORS_SCREEN };
-		return namesPrivateFile(command, policy.protectedPaths)
-			? { action: "block", reason: PRIVATE_FILE }
-			: { action: "pass" };
+		if (namesPrivateFile(command, policy.protectedPaths)) return { action: "block", reason: PRIVATE_FILE };
+		// Primary shell commands need no per-command card; private-file blocks above still apply.
+		return { action: "pass" };
 	}
 	if (!toolName.startsWith("mcp__")) return { action: "pass" };
 	if (policy.builtin?.some((id) => toolName.startsWith(toolId(id, "")))) return { action: "pass" };
@@ -442,7 +453,10 @@ function fileId(path: string): string | undefined {
 }
 
 /** `subagent`: loaded into a subagent's child engine by the daemon's file for it (`child-guard.ts`). */
-export default function approvalGuard(pi: ExtensionAPI, options: { subagent?: boolean } = {}): void {
+export default async function approvalGuard(
+	pi: ExtensionAPI,
+	options: { subagent?: boolean } = {},
+): Promise<void> {
 	const parsed = parsePolicy(process.env[POLICY_ENV]);
 	const agentDir = process.env.PI_CODING_AGENT_DIR;
 	const fallback = agentDir
@@ -466,6 +480,11 @@ export default function approvalGuard(pi: ExtensionAPI, options: { subagent?: bo
 	pi.on("context", (event) => ({ messages: pruneScreenshots(event.messages) }));
 
 	pi.on("tool_call", async (event, ctx) => {
+		if (event.toolName === REVIEW_STATUS_TOOL) {
+			if (options.subagent)
+				return { block: true, reason: "Review status is only available to the primary agent." };
+			if (ctx.signal?.aborted) return { block: true, reason: DECLINED };
+		}
 		const annotations = event.toolName.startsWith("mcp__")
 			? pi.getAllTools().find((tool) => tool.name === event.toolName)?.annotations
 			: undefined;
@@ -478,10 +497,19 @@ export default function approvalGuard(pi: ExtensionAPI, options: { subagent?: bo
 			},
 			policy,
 		);
-		if (decision.action === "pass") return undefined;
 		if (decision.action === "block") return { block: true, reason: decision.reason };
+		if (event.toolName === "powershell") {
+			// Enforce role and cancellation before the no-confirm pass, even without a UI.
+			if (options.subagent) return { block: true, reason: "PowerShell is not enabled for child agents." };
+			if (ctx.signal?.aborted) return { block: true, reason: DECLINED };
+		}
+		if (decision.action === "pass") return undefined;
 		if (!ctx.hasUI) return { block: true, reason: NO_UI };
 		const allowed = await ctx.ui.confirm(decision.title, decision.message);
 		return allowed ? undefined : { block: true, reason: DECLINED };
 	});
+
+	// Install the security hook before registering any executor. Child engines never register it.
+	registerReviewStatus(pi, options);
+	await registerWindowsPowerShell(pi, options);
 }

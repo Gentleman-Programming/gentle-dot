@@ -4,11 +4,11 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { lockedDependenciesFromLock, runtimeManifest } from "./runtime-manifest.ts";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
 const REPOSITORY = fileURLToPath(new URL("../../../", import.meta.url));
 const LOCKFILE = join(PACKAGE, "..", "..", "pnpm-lock.yaml");
-const IMPORTER = "packages/daemon";
 const PRIVATE_STORAGE_SOURCE = join(REPOSITORY, "scripts", "windows", "private-storage", "main.go");
 
 /** The explicit local-source helper output; installed runtimes never consult it. */
@@ -41,22 +41,7 @@ export function prepareWindowsPrivateStorageForSource(): void {
 export function lockedDependencies(
 	lockfile: string = readFileSync(LOCKFILE, "utf8"),
 ): Record<string, string> {
-	const versions: Record<string, string> = {};
-	let section: "importer" | "dependencies" | undefined;
-	let name: string | undefined;
-	for (const line of lockfile.split("\n")) {
-		if (/^ {2}\S/.test(line)) section = line.trim() === `${IMPORTER}:` ? "importer" : undefined;
-		else if (section && /^ {4}\S/.test(line))
-			section = line.trim() === "dependencies:" ? "dependencies" : "importer";
-		else if (section === "dependencies" && /^ {6}\S/.test(line))
-			name = line.trim().slice(0, -1).replace(/^'|'$/g, "");
-		else if (section === "dependencies" && name && /^ {8}version: /.test(line)) {
-			const version = line.trim().slice("version: ".length).split("(")[0] ?? "";
-			if (!version.startsWith("link:")) versions[name] = version;
-		}
-	}
-	if (Object.keys(versions).length === 0) throw new Error(`No ${IMPORTER} dependencies in the lockfile.`);
-	return versions;
+	return lockedDependenciesFromLock(lockfile);
 }
 
 /**
@@ -134,6 +119,11 @@ exec "$runtime/node/bin/node" "$runtime/daemon/node_modules/${engineEntry}" "$@"
 `;
 }
 
+/** Retained public helper; all Windows entrypoints use the canonical node/bin layout. */
+export function piCmdWrapper(engineEntry: string): string {
+	return piWrapper(engineEntry, "win32");
+}
+
 /** The engine's `pi` entry inside `node_modules`, from its package's `bin` (its exports hide `package.json`). */
 function engineEntry(): string {
 	const engine = join("@earendil-works", "pi-coding-agent");
@@ -141,7 +131,13 @@ function engineEntry(): string {
 	for (const dir of require.resolve.paths(engine) ?? []) {
 		const manifest = join(dir, engine, "package.json");
 		if (!existsSync(manifest)) continue;
-		const bin = (JSON.parse(readFileSync(manifest, "utf8")) as { bin?: Record<string, string> }).bin?.pi;
+		let metadata: { bin?: Record<string, string> };
+		try {
+			metadata = JSON.parse(readFileSync(manifest, "utf8"));
+		} catch (cause) {
+			throw new Error(`Cannot read engine manifest: ${manifest}`, { cause });
+		}
+		const bin = metadata.bin?.pi;
 		if (!bin) throw new Error("The engine package has no `pi` command.");
 		return `@earendil-works/pi-coding-agent/${bin.replace(/^\.\//, "")}`;
 	}
@@ -152,15 +148,24 @@ function engineEntry(): string {
  * Builds the daemon part of the installed runtime into `outDir`: `daemon/cli.mjs`
  * (the daemon and the protocol bundled; the engine and `ws` external), the files it
  * finds next to itself, a `package.json` for a flat install of the external
- * dependencies, and `bin/pi`. On Windows the wrapper is `bin/pi.cmd`, and the stop addon goes to
- * `daemon/native`. Nothing is installed.
+ * dependencies, and `bin/pi` (`bin/pi.cmd` on Windows). The mandatory Windows addon
+ * goes to `daemon/native`; the existing Go helper goes to `bin/private-storage.exe`.
+ * Nothing is installed; native addon admission precedes any output writes.
  */
-export async function buildRuntime(outDir: string): Promise<void> {
-	const nativeArtifact = runtimeWindowsStopArtifact(process.platform);
+export async function buildRuntime(
+	outDir: string,
+	platform: NodeJS.Platform = process.platform,
+): Promise<void> {
+	const lockfile = readFileSync(LOCKFILE, "utf8");
+	const dependencies = lockedDependencies(lockfile);
+	const manifest = runtimeManifest(lockfile, dependencies);
+	manifest.overrides = { ...lockedEnginePackages(dependencies, lockfile), ...manifest.overrides };
+	const nativeArtifact = runtimeWindowsStopArtifact(platform);
+	if (platform === "win32")
+		buildWindowsPrivateStorageHelper(join(outDir, "bin", "private-storage.exe"));
 	const daemon = join(outDir, "daemon");
 	mkdirSync(join(daemon, "extensions"), { recursive: true });
 	mkdirSync(join(outDir, "bin"), { recursive: true });
-	const dependencies = lockedDependencies();
 	await build({
 		entryPoints: [join(PACKAGE, "src", "cli.ts")],
 		outfile: join(daemon, "cli.mjs"),
@@ -175,24 +180,24 @@ export async function buildRuntime(outDir: string): Promise<void> {
 	// The bundle finds these through `import.meta.url`, as the sources do in `src/`.
 	copyFileSync(join(PACKAGE, "src", "identity.md"), join(daemon, "identity.md"));
 	// The engine loads the guard with -e, and the guard imports its siblings.
-	for (const name of ["approval-guard.ts", "screenshot-context.ts"]) {
+	for (const name of [
+		"approval-guard.ts",
+		"screenshot-context.ts",
+		"windows-powershell.ts",
+		"powershell-operations.ts",
+		"review-status.ts",
+		"diagnostic-guidance.ts",
+	]) {
 		copyFileSync(join(PACKAGE, "src", "extensions", name), join(daemon, "extensions", name));
 	}
 	if (nativeArtifact) {
 		mkdirSync(join(daemon, "native"), { recursive: true });
 		copyFileSync(nativeArtifact, join(daemon, "native", "windows-stop.node"));
 	}
-	const manifest = {
-		name: "gentle-dot-runtime",
-		private: true,
-		type: "module",
-		dependencies,
-		overrides: lockedEnginePackages(dependencies),
-	};
 	writeFileSync(join(daemon, "package.json"), `${JSON.stringify(manifest, null, "\t")}\n`);
 	writeFileSync(
-		join(outDir, "bin", process.platform === "win32" ? "pi.cmd" : "pi"),
-		piWrapper(engineEntry()),
+		join(outDir, "bin", platform === "win32" ? "pi.cmd" : "pi"),
+		piWrapper(engineEntry(), platform),
 		{ mode: 0o755 },
 	);
 }

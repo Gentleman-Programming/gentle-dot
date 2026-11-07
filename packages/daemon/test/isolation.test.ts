@@ -111,6 +111,19 @@ describe("isolatedAgentEnv PATH", () => {
 		expect(env.PATH).toBe([bin, "C:\\Windows\\System32", "C:\\Git\\cmd"].join(";"));
 	});
 
+	it("selects Windows PATH aliases in Node's lexicographic order, not insertion order", () => {
+		const bin = tempDir();
+		writeFileSync(join(bin, "pi.cmd"), "");
+		const env = isolatedAgentEnv(
+			{ Path: "C:\\ignored", PATH: "C:\\first;C:\\second", HOME: tempDir() },
+			tempDir(),
+			undefined,
+			{ platform: "win32", sourceBinDirs: [bin] },
+		);
+		expect(env.PATH).toBe(`${bin};C:\\first;C:\\second`);
+		expect(Object.keys(env).filter((key) => key.toUpperCase() === "PATH")).toEqual(["PATH"]);
+	});
+
 	it("does not add the bundled folder twice on Windows, whatever its case or trailing separator", () => {
 		const bin = tempDir();
 		writeFileSync(join(bin, "pi.cmd"), "");
@@ -169,8 +182,9 @@ describe("isolatedAgentEnv memory", () => {
 		const env = isolatedAgentEnv(base, dataDir);
 		expect(env.ENGRAM_PORT).toBe(PRIVATE_ENGRAM_PORT);
 		expect(PRIVATE_ENGRAM_PORT).toBe("7438");
-		// Engram then keeps its data under the engine's own home.
-		expect(env.ENGRAM_DATA_DIR).toBeUndefined();
+		// Engram then keeps its data under the engine's own home, and the path is named rather than left
+		// to Engram's default: on Windows that default follows the user profile, not `HOME` (W25).
+		expect(env.ENGRAM_DATA_DIR).toBe(join(dataDir, "home", ".engram"));
 		expect(env.ENGRAM_URL).toBeUndefined();
 		expect(isolatedAgentEnv({ ...base, GENTLE_DOT_ENGRAM_PORT: "17438" }, dataDir).ENGRAM_PORT).toBe("17438");
 	});
@@ -315,9 +329,9 @@ describe("engine memory and folders", () => {
 	});
 
 	it("keeps the private memory opt-out", async () => {
-		const { env } = await start({ env: { GENTLE_DOT_ENGRAM: "private" } });
+		const { dataDir, env } = await start({ env: { GENTLE_DOT_ENGRAM: "private" } });
 		expect(env.ENGRAM_PORT).toBe("7438");
-		expect(env.ENGRAM_DATA_DIR).toBeUndefined();
+		expect(env.ENGRAM_DATA_DIR).toBe(join(dataDir, "home", ".engram"));
 	});
 
 	it("tells the engine about a custom folder without working or writing in it", async () => {

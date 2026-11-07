@@ -17,6 +17,28 @@ export function tempDir(): string {
 	return mkdtempSync(join(tmpdir(), "gentle-dot-test-"));
 }
 
+/** Test-only Node entrypoint; --import also covers native ESM named builtin imports. */
+export function fixtureNodeArgs(entrypoint: string, ...args: string[]): string[] {
+	return [
+		"--import",
+		fileURLToPath(new URL("./fixtures/account-home-preload.mjs", import.meta.url)),
+		entrypoint,
+		...args,
+	];
+}
+
+/** Keep OS account metadata separate from a deliberately seeded HOME (privacy probes). */
+export function fixtureNodeEnv(env: NodeJS.ProcessEnv, home = tempDir()): NodeJS.ProcessEnv {
+	const accountRoot = tempDir();
+	ensurePrivateDir(join(accountRoot, `uid-${process.geteuid?.() ?? "windows"}`));
+	return {
+		...env,
+		HOME: home,
+		USERPROFILE: home,
+		GENTLE_DOT_TEST_ACCOUNT_HOME: accountRoot,
+	};
+}
+
 export function fakeSupervisor(overrides: Partial<SupervisorOptions> = {}) {
 	const dataDir = overrides.dataDir ?? tempDir();
 	const supervisor = new AgentSupervisor({

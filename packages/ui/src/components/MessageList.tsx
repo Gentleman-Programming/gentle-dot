@@ -2,32 +2,40 @@ import type { Activity, ActivityKind } from "@gentle-dot/protocol";
 import { Fragment, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useLocale } from "../i18n.tsx";
+import { messageListEn } from "../i18n-message-list-messages.ts";
+import { statusMessage } from "../i18n-status-messages.ts";
 import type { ChatMessage } from "../store.ts";
 import { formatSize } from "../uploads.ts";
 
-const VERBS: Record<ActivityKind, [string, string, string]> = {
-	read: ["Read", "file", "files"],
-	edit: ["Edited", "file", "files"],
-	run: ["Ran", "command", "commands"],
-	search: ["Searched", "time", "times"],
-	memory: ["Used memory", "time", "times"],
-	delegate: ["Asked", "helper", "helpers"],
-	other: ["Did", "step", "steps"],
+type SummaryKey = keyof typeof messageListEn;
+const VERBS: Record<ActivityKind, [SummaryKey, SummaryKey]> = {
+	read: ["messageReadOne", "messageReadMany"],
+	edit: ["messageEditOne", "messageEditMany"],
+	run: ["messageRunOne", "messageRunMany"],
+	search: ["messageSearchOne", "messageSearchMany"],
+	memory: ["messageMemoryOne", "messageMemoryMany"],
+	delegate: ["messageDelegateOne", "messageDelegateMany"],
+	other: ["messageOtherOne", "messageOtherMany"],
 };
 
 /** "Read 2 files · Ran 1 command" */
-export function summarize(activities: Activity[]): string {
+export function summarize(
+	activities: Activity[],
+	t: (key: SummaryKey) => string = (key) => messageListEn[key],
+): string {
 	const counts = new Map<ActivityKind, number>();
 	for (const activity of activities) counts.set(activity.kind, (counts.get(activity.kind) ?? 0) + 1);
 	return [...counts]
 		.map(([kind, count]) => {
-			const [verb, one, many] = VERBS[kind];
-			return `${verb} ${count} ${count === 1 ? one : many}`;
+			const [one, many] = VERBS[kind];
+			return t(count === 1 ? one : many).replace("{count}", String(count));
 		})
 		.join(" · ");
 }
 
 function Activities({ activities }: { activities: Activity[] }) {
+	const { t } = useLocale();
 	const [open, setOpen] = useState(false);
 	const running = activities.find((a) => a.status === "running");
 	return (
@@ -39,7 +47,7 @@ function Activities({ activities }: { activities: Activity[] }) {
 				onClick={() => setOpen(!open)}
 			>
 				<span className={running ? "pulse" : ""} aria-hidden="true" />
-				{running ? running.title : summarize(activities)}
+				{running ? running.title : summarize(activities, t)}
 			</button>
 			{open ? (
 				<ul>
@@ -64,6 +72,7 @@ interface MessageListProps {
 }
 
 export function MessageList({ messages, queued = [], hasEarlier = false, onShowEarlier }: MessageListProps) {
+	const { t } = useLocale();
 	const end = useRef<HTMLDivElement>(null);
 	const last = messages.at(-1);
 	const lastEarlier = messages.findLastIndex((m) => m.earlier);
@@ -76,7 +85,7 @@ export function MessageList({ messages, queued = [], hasEarlier = false, onShowE
 	if (messages.length === 0 && queued.length === 0) {
 		return (
 			<div className="empty">
-				<p>Hi! What can I do for you?</p>
+				<p>{t("messageEmpty")}</p>
 			</div>
 		);
 	}
@@ -84,7 +93,7 @@ export function MessageList({ messages, queued = [], hasEarlier = false, onShowE
 		<div className="messages" aria-live="polite">
 			{hasEarlier ? (
 				<button type="button" className="show-earlier" onClick={onShowEarlier}>
-					Show earlier
+					{t("messageShowEarlier")}
 				</button>
 			) : null}
 			{messages.map((message, index) => (
@@ -95,7 +104,7 @@ export function MessageList({ messages, queued = [], hasEarlier = false, onShowE
 							<div className="message-body message-plain">{message.text}</div>
 						) : null}
 						{message.attachments && message.attachments.length > 0 ? (
-							<ul className="message-attachments" aria-label="Attached files">
+							<ul className="message-attachments" aria-label={t("messageAttachedFiles")}>
 								{message.attachments.map((file, i) => (
 									// biome-ignore lint/suspicious/noArrayIndexKey: two files may share a name across folders
 									<li key={i} className="attachment-chip">
@@ -118,14 +127,14 @@ export function MessageList({ messages, queued = [], hasEarlier = false, onShowE
 								className={`message-note message-note-${message.note.kind}`}
 								role={message.note.kind === "error" ? "alert" : undefined}
 							>
-								{message.note.text}
+								{statusMessage(message.note.text, message.note.display, t)}
 							</p>
 						) : null}
 					</article>
 					{index === lastEarlier ? (
 						<div className="earlier-divider">
-							<hr aria-label="Earlier messages" />
-							<span aria-hidden="true">Earlier messages</span>
+							<hr aria-label={t("messageEarlier")} />
+							<span aria-hidden="true">{t("messageEarlier")}</span>
 							<span className="earlier-line" />
 						</div>
 					) : null}
@@ -136,9 +145,9 @@ export function MessageList({ messages, queued = [], hasEarlier = false, onShowE
 					// biome-ignore lint/suspicious/noArrayIndexKey: the same text can be queued twice
 					key={`${i}-${text}`}
 					className="message message-user message-queued"
-					aria-label="Queued message"
+					aria-label={t("messageQueuedName")}
 				>
-					<span className="queued-label">Queued</span>
+					<span className="queued-label">{t("messageQueued")}</span>
 					<div className="message-body message-plain">{text}</div>
 				</article>
 			))}

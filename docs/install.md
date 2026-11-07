@@ -82,32 +82,39 @@ The command stages the runtime (`build/runtime/darwin-arm64`), signs the runtime
 
 ## Windows
 
-Requirements: Windows 10 or 11, 64-bit (x64). Computer control screenshots require Windows 10 version 2004 (build 19041) or newer: excluding Gentle Dot's windows from captures requires `WDA_EXCLUDEFROMCAPTURE`.
+Requirements: Windows 10 or 11, x64. Windows 10 version 2004 (build 19041) is the minimum for excluding Gentle Dot's windows from screenshots, not a guarantee of capture eligibility: build, composition, session and owned-window checks can still refuse capture.
+
+The source includes Windows connector approvals, DPAPI migration, voice and computer control. Current reconciled native/installer/live acceptance is not complete; previous installed-build results apply only to those earlier sources. See [runtime reconciliation](windows-runtime-reconciliation.md), [computer-control limits](windows-computer-reconciliation.md) and the [tester checklist](windows-testing.md).
 
 ### Install
 
-1. Run `Gentle Dot_<version>_x64-setup.exe`.
-2. The installer is not signed yet, so Windows SmartScreen may say **Windows protected your PC**. Click **More info**, then **Run anyway**. Only do this for an installer you built yourself or got from someone you trust.
-3. Follow the installer. It installs for your user only, in `%LOCALAPPDATA%\Gentle Dot` (an update keeps the folder of the earlier install), with no administrator prompt. Where WebView2 is missing, it first runs Microsoft's WebView2 installer, which needs the internet. WebView2 ships with Windows 11 and most Windows 10 installs.
+1. Run `Gentle Dot_<version>_x64-setup.exe` (NSIS, per user), or the `.msi` for a per-machine installation requiring administrator rights.
+2. Installers are unsigned. If SmartScreen shows **Windows protected your PC**, use **More info → Run anyway** only for an installer you built or trust.
+3. Follow the installer. NSIS defaults to `%LOCALAPPDATA%\Gentle Dot`; MSI defaults to `Program Files\Gentle Dot`. The embedded WebView2 bootstrapper needs the internet if WebView2 is missing.
 
-If Gentle Dot is running, the installer says **Gentle Dot is running! Click OK to kill it**. **OK** closes it at once, without the usual orderly quit, so quit it from the tray first.
+Quit Gentle Dot from its tray before updating: accepting the NSIS **Gentle Dot is running! Click OK to kill it** prompt terminates it without an orderly quit.
 
 ### First open
 
-Open **Gentle Dot** from the Start menu. The first open needs the network once: the engine installs its companion packages. The computer-control emergency stop is **Alt+Shift+Esc**. Voice input is not available on Windows yet.
+Open **Gentle Dot** from the Start menu. The panel shortcut defaults to **Ctrl+Shift+Space**, and the computer-control emergency stop is **Alt+Shift+Esc**. Change the panel shortcut and memory mode in Settings; the interface supports English and Spanish.
+
+The bundled Windows launcher disables automatic home provisioning and companion installation. Go is a build prerequisite, not an installed-user requirement; provider/model requests and optional downloads still need a network connection. Voice and computer-control eligibility depend on the host's available capabilities; source presence is not live-device acceptance.
 
 ### Where data lives
 
 | What | Where |
 |---|---|
-| The app and its bundled runtime | the install folder, with the runtime in `runtime\` |
-| Settings, conversations, logs (`daemon.log`), the engine's own files | `%USERPROFILE%\.gentle-dot\` |
-| Connector secrets, encrypted for your Windows user (DPAPI) | `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\` |
-| The window's own data (WebView2) | `%LOCALAPPDATA%\dev.gentleman.gentle-dot\` and `%APPDATA%\dev.gentleman.gentle-dot\` |
-| Memory (Engram, project `gentle-dot`) | `%USERPROFILE%\.engram\`, shared with any other Engram user on this PC |
-| Launch at login (when turned on) | a `Gentle Dot` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` |
+| App and bundled runtime | Install folder, with the runtime in `runtime\` |
+| Settings, conversations, logs, engine home/workspace | `%USERPROFILE%\.gentle-dot\` |
+| Connector secrets, encrypted for your Windows user | `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\` |
+| Legacy connector store, retained unchanged during migration | `%LOCALAPPDATA%\Gentle Dot\secrets.dat` |
+| WebView2 data | `%LOCALAPPDATA%\dev.gentleman.gentle-dot\` and `%APPDATA%\dev.gentleman.gentle-dot\` |
+| Shared memory (Engram, project `gentle-dot`) | `%USERPROFILE%\.engram\` |
+| Launch at login, when enabled | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` |
 
-The app's install folder never changes after install; everything it writes goes to the folders above.
+Private memory uses the assistant's own data instead of your shared Engram. The setting is saved and restarts the assistant when changed.
+
+**DPAPI is user-scoped, not a same-user sandbox:** other programs running as you, including the assistant's shell, can decrypt these secrets. Migration validates legacy input, keeps the old file unchanged, refuses conflicting values and records encrypted completion receipts to prevent deleted secrets from reappearing. Isolated parser/migration fixtures do not certify real-profile migration or production long-path support.
 
 ### A connector secret that cannot be read
 
@@ -122,30 +129,39 @@ Gentle Dot never repairs, replaces or deletes such a file, and it never keeps th
 
 ### Uninstall
 
-1. Quit Gentle Dot from its tray icon (**Quit**), so the assistant and its processes stop in order.
-2. Open **Settings → Apps → Installed apps**, find **Gentle Dot**, and choose **Uninstall**, or run `uninstall.exe` in the install folder. It removes the app, its Start menu and desktop shortcuts, its launch at login, and its registry entries. Like the installer, it asks to close Gentle Dot if it is still running.
-3. Optional: tick **Delete the application data** in the uninstaller to remove the window's data (`%APPDATA%\dev.gentleman.gentle-dot\` and `%LOCALAPPDATA%\dev.gentleman.gentle-dot\`).
-4. Optional: remove `%USERPROFILE%\.gentle-dot\` to delete settings and conversations, and `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\` to delete connector secrets. The uninstaller never touches these.
+1. Quit Gentle Dot from its tray, then use **Settings → Apps → Installed apps → Gentle Dot → Uninstall**, or NSIS's `uninstall.exe` in the install folder.
+2. Optional: delete `%USERPROFILE%\.gentle-dot\` to remove conversations/settings and the WebView2 data directories above to clear window data.
+3. To remove connector credentials completely, remove both the current connector directory and the retained legacy `secrets.dat`. Removing only current entries/receipts while keeping a legacy source can allow a later fresh migration.
 
-`%USERPROFILE%\.gentle-dot\daemon.owner` stays behind after a normal quit. It records the last launch without any authority over it, and the next launch replaces it.
+Keep `%USERPROFILE%\.engram\` unless you intend to delete all shared Engram memories, not only Gentle Dot's.
 
 ### Build the installer from source
 
-On Windows 10 or 11 (x64) with Node 24, pnpm, Rust, Visual Studio's C++ build tools (for the native addon), and Go 1.25.10 or newer:
+Use Windows x64, Node 24 or newer, the declared pnpm 11.5.0, Rust with MSVC, Visual Studio's **Desktop development with C++** workload/Windows SDK, and Go 1.25.10 or newer. Run in a developer shell with the SDK's `INCLUDE` and `LIB`. The native addon's Node headers and `node.lib` must match the Node used to build it and be checked against Node's published checksums; [.github/workflows/windows.yml](../.github/workflows/windows.yml) shows provisioning. Replace the placeholder paths below.
 
 ```powershell
 pnpm install
-pnpm --filter @gentle-dot/daemon build:windows-stop -- --compiler <cl.exe> --headers <node-headers>/include/node --node-lib <node.lib>
+pnpm --filter @gentle-dot/daemon build:windows-stop -- --compiler "<full-path-to-cl.exe>" --headers "<node-headers>/include/node" --node-lib "<node.lib>"
 $env:GENTLE_DOT_BUILD_GO = "C:\Program Files\Go\bin\go.exe"
-pnpm package:runtime --target windows-x64
 pnpm package:windows
 ```
 
-- `build:windows-stop` builds `packages/daemon/native/windows-stop.node`, the native stop and app channel addon. The runtime build refuses to stage without it. `.github/workflows/windows.yml` shows the exact compiler, headers and `node.lib` it uses.
-- `GENTLE_DOT_BUILD_GO` must be the full path of the real `go.exe` in `GOROOT\bin`, not a package manager shim. gentle-pi's postinstall builds gentle-ai from source with it. Only that directory joins the installer's `PATH`, which otherwise holds the staged Node and the Windows system folders.
-- Run both commands through pnpm: on Windows, staging calls pnpm through Node instead of spawning `pnpm.cmd`.
-- `package:runtime` writes `build/runtime/windows-x64` (about 320 MB): Node from its official ZIP, Engram's `engram.exe`, the daemon with its dependencies, and the web UI, each download checked against its published checksums.
-- `package:windows` only packages a runtime staged earlier (`--runtime <dir>` names another one, on the same drive as the checkout). It builds an NSIS installer into `apps/desktop/src-tauri/target/release/bundle/nsis/`. Where WebView2 is missing, the installer runs Microsoft's bootstrapper, which needs the internet at that moment. WebView2 ships with Windows 11 and most Windows 10 installs.
+`GENTLE_DOT_BUILD_GO` must name the real `GOROOT\bin\go.exe`, not a package-manager shim. Staging uses it to build the pinned package-local Gentle AI from source, with Go module/binary provenance; it does not download an unsigned Windows release asset. The addon `daemon/native/windows-stop.node` is mandatory. The runtime also compiles
+`bin/private-storage.exe` with the existing Go helper builder; keep `go` available
+on the build shell's PATH. Neither Go nor build tools are installed-user requirements.
+
+| Command | Result |
+|---|---|
+| `pnpm package:windows` | Stage `build/runtime/windows-x64`, build NSIS + MSI |
+| `pnpm package:windows --skip-stage` | Reuse that stage, build NSIS + MSI |
+| Either above with `--check` | Verify both payloads after building |
+| `pnpm package:runtime --target windows-x64` | Stage only, without packaging |
+| `pnpm package:windows --runtime <dir>` | Package an explicit stage as NSIS only |
+| Explicit `--runtime <dir>` with `--check` | Verify NSIS only |
+
+An explicit runtime must share the checkout's volume/share so the frontend path can remain relative to `src-tauri`. Node is `node/bin/node.exe`, npm is `node/lib/node_modules/npm`; the old `win-x64` staging target and `node/node.exe` layout are not accepted.
+
+Outputs are under `apps/desktop/src-tauri/target/release/bundle/nsis/` and `bundle/msi/`. `--check` needs 7-Zip and Windows Installer: it extracts into owned temporary folders (MSI uses `msiexec /a`), compares full file lists and sample/engine hashes, and cleans the temporary extraction even on failure. It does not install or launch Gentle Dot. These commands describe intended executable behavior; an actual reconciled Windows package/extraction run remains separate verification.
 
 ## Linux
 

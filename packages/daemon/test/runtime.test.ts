@@ -1,5 +1,5 @@
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.ts";
@@ -42,14 +42,14 @@ describe("installed runtime (GENTLE_DOT_RUNTIME)", () => {
 	it("serves the runtime's web UI, and GENTLE_DOT_UI_DIR still wins", () => {
 		const runtime = fakeRuntime();
 		const dataDir = tempDir();
-		const uiDir = tempDir();
 		expect(loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_RUNTIME: runtime }).uiDir).toBe(
 			join(runtime, "ui"),
 		);
+		const override = join(dataDir, "ui");
 		expect(
-			loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_RUNTIME: runtime, GENTLE_DOT_UI_DIR: uiDir })
+			loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_RUNTIME: runtime, GENTLE_DOT_UI_DIR: override })
 				.uiDir,
-		).toBe(resolve("/ui"));
+		).toBe(override);
 	});
 
 	it("runs the launcher and the engine's command line from the runtime's node_modules", () => {
@@ -114,6 +114,12 @@ describe("installed runtime (GENTLE_DOT_RUNTIME)", () => {
 			},
 			tempDir(),
 		);
+		// Windows has no login shell and no `command -v`, so there is no probe to consult and the
+		// runtime's own copy is used (L22, option (a)); the injected-platform test below pins that.
+		if (process.platform === "win32") {
+			expect(env.ENGRAM_BIN).toBe(join(runtime, "bin", "engram.exe"));
+			return;
+		}
 		expect(env.ENGRAM_BIN).toBe(userEngram);
 	});
 });
@@ -136,9 +142,8 @@ describe("resolveEngramBin", () => {
 		const runtime = fakeRuntime();
 		const options = { home, platform: "win32" as const };
 		expect(resolveEngramBin({}, runtime, options)).toBe(windowsEngram);
-		expect(resolveEngramBin({ ENGRAM_BIN: "/explicit/engram.exe" }, runtime, options)).toBe(
-			"/explicit/engram.exe",
-		);
+		const explicit = touch(join(tempDir(), "explicit-engram.exe"), "", 0o755);
+		expect(resolveEngramBin({ ENGRAM_BIN: explicit }, runtime, options)).toBe(explicit);
 	});
 
 	it("falls back to bundled engram.exe on Windows, ignoring a login shell and non-file candidates", () => {

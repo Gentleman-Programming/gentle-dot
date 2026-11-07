@@ -90,6 +90,9 @@ function parseSnapshot(value: unknown): Snapshot {
 /** The daemon's side: one helper, started on first use and again after it exits. */
 export class AuthHelper {
 	private child: ChildProcess | undefined;
+	private closePromise: Promise<void> | undefined;
+	// An exited child can still own open stdio; retain it until Node emits close.
+	private readonly owned = new Map<ChildProcess, { closed: Promise<void>; exited: boolean }>();
 	private nextId = 0;
 	private readonly calls = new Map<
 		number,
@@ -120,11 +123,37 @@ export class AuthHelper {
 		};
 	}
 
-	close(): void {
-		const child = this.child;
+	/**
+	 * Permanently stop accepting calls, reject pending requests and promptly SIGTERM owned helpers.
+	 * Concurrent calls retain the same promise. It resolves only after every owned child's close
+	 * event (including exited children with open stdio), or immediately if none remain. A signal
+	 * exception or error event while closing rejects it; signal delivery alone is never completion.
+	 * There is no timeout success: a child that does not close keeps completion pending.
+	 * Callers needing drain proof must await it.
+	 */
+	close(): Promise<void> {
+		if (this.closePromise) return this.closePromise;
+		let complete!: () => void;
+		let fail!: (error: unknown) => void;
+		this.closePromise = new Promise<void>((resolve, reject) => {
+			complete = resolve;
+			fail = reject;
+		});
+		// Legacy callers may ignore completion; retain rejection for awaiters without an unhandled one.
+		void this.closePromise.catch(() => {});
 		this.child = undefined;
 		this.failAll(new Error("The sign-in helper stopped."));
-		child?.kill("SIGTERM");
+		const owned = [...this.owned];
+		void Promise.all(owned.map(([, state]) => state.closed)).then(complete, fail);
+		for (const [child, state] of owned) {
+			if (state.exited) continue;
+			try {
+				child.kill("SIGTERM");
+			} catch (error) {
+				fail(error);
+			}
+		}
+		return this.closePromise;
 	}
 
 	private call(
@@ -171,6 +200,7 @@ export class AuthHelper {
 	}
 
 	private ensureChild(): ChildProcess {
+		if (this.closePromise) throw new Error("The sign-in helper stopped.");
 		if (this.child) return this.child;
 		const { command, args, user, env, agentHome, cwd } = this.options;
 		const child = spawn(command, args, {
@@ -182,6 +212,20 @@ export class AuthHelper {
 			serialization: "json",
 		});
 		this.child = child;
+		let closed!: () => void;
+		let failed!: (error: Error) => void;
+		const state = {
+			closed: new Promise<void>((resolve, reject) => {
+				closed = resolve;
+				failed = reject;
+			}),
+			exited: false,
+		};
+		this.owned.set(child, state);
+		child.once("close", () => {
+			this.owned.delete(child);
+			closed();
+		});
 		child.stderr?.setEncoding("utf8");
 		child.stderr?.on("data", (chunk: string) => {
 			for (const line of chunk.split("\n"))
@@ -194,8 +238,15 @@ export class AuthHelper {
 			this.log(`the sign-in helper stopped (${why})`);
 			this.failAll(new Error("The sign-in helper stopped."));
 		};
-		child.on("error", (error) => gone(error.message));
-		child.on("exit", (code, signal) => gone(signal ?? `code ${code}`));
+		child.on("error", (error) => {
+			// kill may emit instead of throw, including for a noncurrent but still owned child.
+			if (this.closePromise) failed(error);
+			gone(error.message);
+		});
+		child.on("exit", (code, signal) => {
+			state.exited = true;
+			gone(signal ?? `code ${code}`);
+		});
 		return child;
 	}
 

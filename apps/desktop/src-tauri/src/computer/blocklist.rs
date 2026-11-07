@@ -127,7 +127,15 @@ fn blocked_reason_on(platform: Platform, app: &AppIdentity, own_pid: i32) -> Opt
         return Some(blocked[0].label);
     }
     match &app.bundle_id {
-        Some(bundle) => blocked.iter().find(|e| e.bundles.iter().any(|b| bundle_matches(bundle, b))).map(|e| e.label),
+        Some(bundle) => {
+            // Both upstream executable leaves and the active backend's verified
+            // win32:absolute-path identifiers use the same Windows denylist.
+            let identity = match platform {
+                Platform::Windows => app_name(platform, bundle),
+                Platform::MacOs => bundle,
+            };
+            blocked.iter().find(|e| e.bundles.iter().any(|b| bundle_matches(identity, b))).map(|e| e.label)
+        }
         None => blocked_name_on(platform, &app.name),
     }
 }
@@ -148,6 +156,7 @@ fn app_name(platform: Platform, name_or_bundle: &str) -> &str {
         }
         Platform::Windows => {
             let name = name_or_bundle.trim().trim_end_matches(['/', '\\']);
+            let name = name.strip_prefix("win32:").unwrap_or(name);
             let name = name.rsplit(['/', '\\']).next().unwrap_or(name).trim();
             let lower = name.to_ascii_lowercase();
             [".exe", ".lnk"]
@@ -297,6 +306,18 @@ mod tests {
         for (exe, label) in cases {
             assert_eq!(windows_reason(&app(Some(exe), "x")), Some(label), "{exe}");
         }
+    }
+
+    #[test]
+    fn active_backend_executable_identifiers_keep_the_windows_blocklist() {
+        for (leaf, label) in [("Bitwarden.exe", "Bitwarden"), ("LockApp.exe", "LockApp"),
+            ("control.exe", "Control Panel"), ("gentle-dot.exe", "Gentle Dot")] {
+            let identifier = format!(r"win32:c:\program files\fixture\{leaf}");
+            assert_eq!(windows_reason(&app(Some(&identifier), "x")), Some(label));
+            assert_eq!(windows_name(&identifier), Some(label));
+        }
+        assert_eq!(windows_reason(&app(Some(r"win32:c:\apps\chrome.exe"), "chrome")), None);
+        assert_eq!(mac_reason(&app(Some(r"win32:c:\apps\Bitwarden.exe"), "x"), OWN_PID), None);
     }
 
     #[test]

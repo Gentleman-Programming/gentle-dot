@@ -1,7 +1,9 @@
 import type { ClientMessage } from "@gentle-dot/protocol";
-import { type DragEvent, useState } from "react";
+import { type DragEvent, useEffect, useState } from "react";
 import { openUrl as openExternal } from "../desktop.ts";
-import { activeTitle, type DotAction, type DotState, isBusy, needsAccount } from "../store.ts";
+import { useLocale } from "../i18n.tsx";
+import { statusMessage } from "../i18n-status-messages.ts";
+import { type DotAction, type DotState, isBusy, needsAccount } from "../store.ts";
 import type { Uploader } from "../uploads.ts";
 import { useAttachments } from "../useAttachments.ts";
 import type { PanelWindowControls } from "../usePanelWindow.ts";
@@ -65,14 +67,14 @@ const CONTINUE_TEXT = "Continue where you left off.";
 
 type SwitchMessage = Extract<ClientMessage, { type: "new_conversation" | "open_conversation" }>;
 
-function statusText(state: DotState): string | undefined {
+function statusText(state: DotState, t: ReturnType<typeof useLocale>["t"]): string | undefined {
 	if (state.connection === "unauthorized") {
-		return "This access key is not valid anymore. Open the page again from the Gentle Dot menu (Open in browser).";
+		return t("chatUnauthorized");
 	}
-	if (state.connection === "closed") return "Reconnecting to the assistant…";
-	if (state.connection === "connecting") return "Connecting…";
-	if (state.agentState === "restarting") return "The assistant is restarting…";
-	if (state.agentState === "starting") return "Starting the assistant…";
+	if (state.connection === "closed") return t("chatReconnecting");
+	if (state.connection === "connecting") return t("chatConnecting");
+	if (state.agentState === "restarting") return t("chatRestarting");
+	if (state.agentState === "starting") return t("chatStarting");
 	return undefined;
 }
 
@@ -92,6 +94,7 @@ export function ChatSurface({
 	upload,
 	settings,
 }: ChatSurfaceProps) {
+	const { t } = useLocale();
 	const [showSettings, setShowSettings] = useState(false);
 	/** A connector change waiting for the web PIN (S25.8). */
 	const [pinPending, setPinPending] = useState<ClientMessage>();
@@ -165,7 +168,7 @@ export function ChatSurface({
 	const settingsShown = settings === true && showSettings && !covered;
 	// One continuous chat unless the daemon turns the conversations list on.
 	const conversations = state.features.conversations;
-	const status = statusText(state);
+	const status = statusText(state, t);
 	const ready =
 		state.connection === "open" && state.agentState !== "restarting" && state.agentState !== "starting";
 
@@ -179,12 +182,15 @@ export function ChatSurface({
 				<span className={`state-dot state-${state.agentState}`} aria-hidden="true" />
 				{conversations ? (
 					<>
-						<h1 className="gradient-text">{activeTitle(state)}</h1>
+						<h1 className="gradient-text">
+							{state.conversations.find((c) => c.id === state.conversationId)?.title ??
+								t("chatNewConversation")}
+						</h1>
 						<button
 							type="button"
 							className="icon"
-							aria-label="Conversations"
-							title="Conversations"
+							aria-label={t("chatConversations")}
+							title={t("chatConversations")}
 							aria-expanded={showConversations}
 							onClick={() => {
 								if (!showConversations) send({ type: "list_conversations" });
@@ -200,17 +206,29 @@ export function ChatSurface({
 						<span className="gradient-text">Gentle Dot</span>
 					</h1>
 				)}
-				<button type="button" className="icon" aria-label="Accounts" title="Accounts" onClick={openAccounts}>
+				<button
+					type="button"
+					className="icon"
+					aria-label={t("chatAccounts")}
+					title={t("chatAccounts")}
+					onClick={openAccounts}
+				>
 					<AccountsIcon />
 				</button>
-				<button type="button" className="icon" aria-label="Profiles" title="Profiles" onClick={openProfiles}>
+				<button
+					type="button"
+					className="icon"
+					aria-label={t("chatProfiles")}
+					title={t("chatProfiles")}
+					onClick={openProfiles}
+				>
 					<ProfilesIcon />
 				</button>
 				<button
 					type="button"
 					className="icon"
-					aria-label="Connectors"
-					title="Connectors"
+					aria-label={t("chatConnectors")}
+					title={t("chatConnectors")}
 					onClick={openConnectors}
 				>
 					<ConnectorsIcon />
@@ -220,8 +238,8 @@ export function ChatSurface({
 					<button
 						type="button"
 						className="icon"
-						aria-label="New conversation"
-						title="New conversation"
+						aria-label={t("chatNewConversation")}
+						title={t("chatNewConversation")}
 						disabled={!ready}
 						onClick={() => switchTo({ type: "new_conversation" })}
 					>
@@ -232,8 +250,8 @@ export function ChatSurface({
 					<button
 						type="button"
 						className="icon"
-						aria-label="Settings"
-						title="Settings"
+						aria-label={t("chatSettings")}
+						title={t("chatSettings")}
 						aria-expanded={settingsShown}
 						onClick={() => (settingsShown ? setShowSettings(false) : openSettings())}
 					>
@@ -247,7 +265,13 @@ export function ChatSurface({
 					</>
 				) : null}
 				{onHide ? (
-					<button type="button" className="icon" aria-label="Hide" title="Hide" onClick={onHide}>
+					<button
+						type="button"
+						className="icon"
+						aria-label={t("chatHide")}
+						title={t("chatHide")}
+						onClick={onHide}
+					>
 						<MinusIcon />
 					</button>
 				) : null}
@@ -258,9 +282,9 @@ export function ChatSurface({
 			) : null}
 
 			{conversations && showConversations ? (
-				<nav className="conversations" aria-label="Earlier conversations">
-					<p className="eyebrow">Conversations</p>
-					{state.conversations.length === 0 ? <p className="muted">No conversations yet.</p> : null}
+				<nav className="conversations" aria-label={t("chatEarlierConversations")}>
+					<p className="eyebrow">{t("chatConversations")}</p>
+					{state.conversations.length === 0 ? <p className="muted">{t("chatNoConversations")}</p> : null}
 					{state.conversations.map((conversation) => (
 						<button
 							key={conversation.id}
@@ -327,9 +351,9 @@ export function ChatSurface({
 				{/* In the chat's own flow, so messages start below it instead of sliding under it. */}
 				{needsAccount(state) ? (
 					<div className="onboarding">
-						<p>To start, connect the AI service you use (a subscription or an API key).</p>
+						<p>{t("chatOnboarding")}</p>
 						<button type="button" className="primary" onClick={openAccounts}>
-							Connect an AI account
+							{t("chatConnectAccount")}
 						</button>
 					</div>
 				) : null}
@@ -344,14 +368,14 @@ export function ChatSurface({
 				/>
 				{state.interrupted ? (
 					<div className="interrupted">
-						<p>I was interrupted. Continue?</p>
+						<p>{t("chatInterrupted")}</p>
 						<button
 							type="button"
 							className="primary"
 							disabled={!ready}
 							onClick={() => send({ type: "send", text: CONTINUE_TEXT, requestId: newRequestId() })}
 						>
-							Continue
+							{t("chatContinue")}
 						</button>
 					</div>
 				) : null}
@@ -374,12 +398,12 @@ export function ChatSurface({
 				<div
 					className="switch-confirm pin-dialog"
 					role="dialog"
-					aria-label={pin.set ? "Enter your PIN" : "Create a PIN"}
+					aria-label={t(pin.set ? "pinEnter" : "pinCreate")}
 				>
-					<p>{describePinCommand(pinPending, state.connectors.list)}</p>
+					<p>{describePinCommand(pinPending, state.connectors.list, t)}</p>
 					<PinForm
 						pin={pin}
-						action="Continue"
+						action={t("pinContinue")}
 						onPin={(value, created) => {
 							if (created) send({ type: "pin_set", pin: value });
 							send({ type: "pin_command", pin: value, command: pinPending });
@@ -394,18 +418,19 @@ export function ChatSurface({
 								dispatch({
 									type: "server",
 									message: { type: "error", code: "declined", message: "Nothing was changed.", seq: 0 },
+									display: { kind: "pinCancelled" },
 								});
 							}}
 						>
-							Cancel
+							{t("pinCancel")}
 						</button>
 					</PinForm>
 				</div>
 			) : null}
 
 			{pendingSwitch ? (
-				<div className="switch-confirm" role="alertdialog" aria-label="Stop and switch?">
-					<p>The assistant is still answering. Stop it and open the other conversation?</p>
+				<div className="switch-confirm" role="alertdialog" aria-label={t("chatSwitchQuestion")}>
+					<p>{t("chatSwitchExplanation")}</p>
 					<div className="switch-actions">
 						<button
 							type="button"
@@ -415,10 +440,10 @@ export function ChatSurface({
 								setPendingSwitch(undefined);
 							}}
 						>
-							Stop and switch
+							{t("chatSwitch")}
 						</button>
 						<button type="button" onClick={() => setPendingSwitch(undefined)}>
-							Cancel
+							{t("chatCancel")}
 						</button>
 					</div>
 				</div>
@@ -428,8 +453,8 @@ export function ChatSurface({
 				<div className="notices">
 					{state.notices.map((notice) => (
 						<div key={notice.id} className={`notice notice-${notice.level}`}>
-							<span>{notice.message}</span>
-							<button type="button" aria-label="Dismiss" onClick={() => dismiss(notice.id)}>
+							<span>{statusMessage(notice.message, notice.display, t)}</span>
+							<button type="button" aria-label={t("chatDismiss")} onClick={() => dismiss(notice.id)}>
 								×
 							</button>
 						</div>
@@ -459,7 +484,8 @@ export function ChatSurface({
 
 /** Spoken replies on or off (S30.3); the choice is remembered. */
 function MuteButton({ voice }: { voice: VoiceControls }) {
-	const label = voice.muted ? "Unmute spoken replies" : "Mute spoken replies";
+	const { t } = useLocale();
+	const label = t(voice.muted ? "chatUnmute" : "chatMute");
 	return (
 		<button
 			type="button"
@@ -475,7 +501,8 @@ function MuteButton({ voice }: { voice: VoiceControls }) {
 }
 
 function RoseButton({ controls }: { controls: PanelWindowControls }) {
-	const label = controls.roseHidden ? "Show the rose" : "Hide the rose";
+	const { t } = useLocale();
+	const label = t(controls.roseHidden ? "chatShowRose" : "chatHideRose");
 	return (
 		<button
 			type="button"
@@ -490,7 +517,8 @@ function RoseButton({ controls }: { controls: PanelWindowControls }) {
 }
 
 function FullscreenButton({ controls }: { controls: PanelWindowControls }) {
-	const label = controls.fullscreen ? "Exit full screen" : "Full screen";
+	const { t } = useLocale();
+	const label = t(controls.fullscreen ? "chatExitFullscreen" : "chatFullscreen");
 	return (
 		<button
 			type="button"

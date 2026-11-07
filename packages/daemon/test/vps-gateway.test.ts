@@ -4,7 +4,7 @@
 // actions only with a PIN the agent never sees. With the desktop app's channel, nothing changes.
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { createServer, type Server } from "node:http";
+import { createServer, request as httpRequest, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { McpClient, type McpError, StreamableHttpTransport, type Tool } from "@earendil-works/pi-mcp";
@@ -18,10 +18,15 @@ import { fakeApp } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { oauthOptions } from "./fake-oauth.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { hasServerMode } from "./support/platform-absence.ts";
+import { expectPosixMode } from "./support/posix-modes.ts";
 
 const PIN = "731942";
 const SIGNED_IN_TOKEN = "access-token-1";
 const own = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
+// Server mode takes the engine's user with setuid, which Windows does not have (S25.8): every suite
+// below whose subject is it skips there with a named reason on raw stderr, not a silent skip.
+const serverMode = hasServerMode("vps-gateway: server mode");
 const ENGINE_DIRS = ["agent", "home", "workspace", "sessions", "gentle-ai"];
 
 const TOOLS: Tool[] = [
@@ -31,9 +36,23 @@ const TOOLS: Tool[] = [
 
 const daemons: DotDaemon[] = [];
 const closers: (() => Promise<unknown>)[] = [];
+const notionProtocolFailures: string[] = [];
+interface NotionRequestFact {
+	method: string;
+	path: string;
+	completed: boolean;
+	aborted: boolean;
+	bodyBytes: number;
+	status?: number;
+}
+function expectNoNotionProtocolFailures(failures = notionProtocolFailures) {
+	expect(failures.splice(0)).toEqual([]);
+}
+
 afterEach(async () => {
 	await Promise.all(closers.splice(0).map((close) => close().catch(() => undefined)));
 	await Promise.all(daemons.splice(0).map((d) => d.close()));
+	expectNoNotionProtocolFailures();
 });
 
 interface Setup {
@@ -55,7 +74,8 @@ async function setup(options: Setup = {}) {
 	const engineAccesses = { count: 0 };
 	const logs: string[] = [];
 	const notionCalls: string[] = [];
-	const notionUrl = await fakeNotion(notionCalls);
+	const notionRequests: NotionRequestFact[] = [];
+	const notionUrl = await fakeNotion(notionCalls, notionRequests);
 	const app = fakeApp([], "allow");
 	const fake = fakeAuthRuntime();
 	const vps =
@@ -131,6 +151,7 @@ async function setup(options: Setup = {}) {
 		handedOver,
 		engineAccesses,
 		notionCalls,
+		notionRequests,
 		engineProcess,
 		stdin,
 		connectorsText,
@@ -141,15 +162,74 @@ async function setup(options: Setup = {}) {
 }
 
 /** Notion as far as the proxy can tell: plain JSON over HTTP, recording the tools it ran. */
-async function fakeNotion(calls: string[]) {
+async function fakeNotion(
+	calls: string[],
+	facts: NotionRequestFact[],
+	diagnostics: {
+		failures?: string[];
+		observe?: (fact: Readonly<NotionRequestFact>) => void;
+	} = {},
+) {
+	const failures = diagnostics.failures ?? notionProtocolFailures;
+	const observe = (fact: NotionRequestFact) => diagnostics.observe?.({ ...fact });
 	const server: Server = createServer((req, res) => {
-		let body = "";
+		const fact: NotionRequestFact = {
+			method: (req.method ?? "").slice(0, 12),
+			path: ((req.url ?? "").split("?")[0] ?? "").slice(0, 80),
+			completed: false,
+			aborted: false,
+			bodyBytes: 0,
+		};
+		const violate = (reason: string, status: number) => {
+			fact.status = status;
+			if (failures.length < 16) failures.push(`${reason}: ${JSON.stringify(fact)}`);
+			res.writeHead(status).end();
+		};
+		if (facts.length >= 64) {
+			violate("fixture request fact bound exceeded", 503);
+			req.resume();
+			return;
+		}
+		facts.push(fact);
+		const chunks: Buffer[] = [];
 		req.on("data", (chunk: Buffer) => {
-			body += chunk.toString("utf8");
+			fact.bodyBytes += chunk.length;
+			if (fact.bodyBytes <= 64 * 1024) chunks.push(chunk);
+			observe(fact);
+		});
+		req.on("aborted", () => {
+			fact.aborted = true;
+			observe(fact);
+		});
+		req.on("error", () => {
+			fact.aborted = req.aborted;
+			if (!fact.aborted) violate("fixture request stream failed", 400);
 		});
 		req.on("end", () => {
-			const message = JSON.parse(body) as { id?: number; method: string; params?: Record<string, unknown> };
+			fact.aborted = req.aborted;
+			fact.completed = req.complete && !fact.aborted;
+			if (fact.aborted) return;
+			// This stateless fixture supports JSON-RPC POST, not GET streams or DELETE sessions.
+			if (fact.method !== "POST") {
+				fact.status = 405;
+				res.writeHead(405, { allow: "POST" }).end();
+				return;
+			}
+			if (!fact.completed || fact.bodyBytes > 64 * 1024) {
+				violate("invalid completed fixture POST", 400);
+				return;
+			}
+			let message: { id?: number | string; method: string; params?: Record<string, unknown> };
+			try {
+				message = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+				if (!message || Array.isArray(message) || typeof message.method !== "string")
+					throw new Error("Invalid JSON-RPC fixture request");
+			} catch {
+				violate("empty or invalid completed fixture POST", 400);
+				return;
+			}
 			if (message.id === undefined) {
+				fact.status = 202;
 				res.writeHead(202).end();
 				return;
 			}
@@ -164,6 +244,7 @@ async function fakeNotion(calls: string[]) {
 					: message.method === "tools/list"
 						? { tools: TOOLS }
 						: { content: [{ type: "text", text: `notion ran ${String(message.params?.name)}` }] };
+			fact.status = 200;
 			res.writeHead(200, { "content-type": "application/json" });
 			res.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
 		});
@@ -172,6 +253,180 @@ async function fakeNotion(calls: string[]) {
 	closers.push(() => new Promise((done) => server.close(done)));
 	return `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`;
 }
+
+describe("stateless upstream HTTP fixture protocol", () => {
+	function exchange(url: string, method: string, body = "") {
+		return new Promise<{ status: number | undefined; allow: string | undefined; body: string }>(
+			(resolve, reject) => {
+				const req = httpRequest(
+					url,
+					{
+						method,
+						headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) },
+					},
+					(res) => {
+						const chunks: Buffer[] = [];
+						res.on("data", (chunk: Buffer) => chunks.push(chunk));
+						res.on("error", reject);
+						res.on("end", () =>
+							resolve({
+								status: res.statusCode,
+								allow: res.headers.allow,
+								body: Buffer.concat(chunks).toString("utf8"),
+							}),
+						);
+					},
+				);
+				req.on("error", reject);
+				closers.push(async () => {
+					req.destroy();
+				});
+				req.end(body);
+			},
+		);
+	}
+
+	it.each(["GET", "DELETE"])("rejects stateless %s with 405 and no tool calls", async (method) => {
+		const calls: string[] = [];
+		const facts: NotionRequestFact[] = [];
+		const url = await fakeNotion(calls, facts);
+		expect(await exchange(url, method)).toEqual({ status: 405, allow: "POST", body: "" });
+		expect(facts).toEqual([
+			{ method, path: "/mcp", completed: true, aborted: false, bodyBytes: 0, status: 405 },
+		]);
+		expect(calls).toEqual([]);
+	});
+
+	it("returns exact JSON-RPC results and acknowledges notifications without tool calls", async () => {
+		const calls: string[] = [];
+		const facts: NotionRequestFact[] = [];
+		const url = await fakeNotion(calls, facts);
+		const cases = [
+			{
+				message: {
+					jsonrpc: "2.0",
+					id: 1,
+					method: "initialize",
+					params: { protocolVersion: "2025-03-26" },
+				},
+				result: {
+					protocolVersion: "2025-03-26",
+					capabilities: { tools: {} },
+					serverInfo: { name: "notion", version: "1" },
+				},
+			},
+			{ message: { jsonrpc: "2.0", id: "list", method: "tools/list" }, result: { tools: TOOLS } },
+			{
+				message: { jsonrpc: "2.0", id: 0, method: "tools/call", params: { name: "notion-search" } },
+				result: { content: [{ type: "text", text: "notion ran notion-search" }] },
+			},
+		];
+		for (const { message, result } of cases) {
+			const body = JSON.stringify(message);
+			expect(await exchange(url, "POST", body)).toEqual({
+				status: 200,
+				allow: undefined,
+				body: JSON.stringify({ jsonrpc: "2.0", id: message.id, result }),
+			});
+			expect(facts.at(-1)).toEqual({
+				method: "POST",
+				path: "/mcp",
+				completed: true,
+				aborted: false,
+				bodyBytes: Buffer.byteLength(body),
+				status: 200,
+			});
+			expect(calls).toEqual(message.method === "tools/call" ? ["notion-search"] : []);
+		}
+		const notification = JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" });
+		expect(await exchange(url, "POST", notification)).toEqual({ status: 202, allow: undefined, body: "" });
+		expect(facts.at(-1)).toEqual({
+			method: "POST",
+			path: "/mcp",
+			completed: true,
+			aborted: false,
+			bodyBytes: Buffer.byteLength(notification),
+			status: 202,
+		});
+		expect(facts).toHaveLength(4);
+		expect(calls).toEqual(["notion-search"]);
+	});
+
+	it.each([
+		{ name: "empty", body: "" },
+		{ name: "malformed", body: "{" },
+	])("rejects a $name completed POST and trips the protocol failure guard", async ({ body }) => {
+		const calls: string[] = [];
+		const facts: NotionRequestFact[] = [];
+		// Intentional invalid inputs use a local sink; normal gateway fixtures keep the strict default.
+		const failures: string[] = [];
+		const url = await fakeNotion(calls, facts, { failures });
+		expect(await exchange(url, "POST", body)).toEqual({ status: 400, allow: undefined, body: "" });
+		const fact = {
+			method: "POST",
+			path: "/mcp",
+			completed: true,
+			aborted: false,
+			bodyBytes: Buffer.byteLength(body),
+			status: 400,
+		};
+		expect(facts).toEqual([fact]);
+		expect(calls).toEqual([]);
+		expect(failures).toEqual([`empty or invalid completed fixture POST: ${JSON.stringify(fact)}`]);
+		// Exercise the same assertion used by afterEach, not merely the HTTP status.
+		expect(() => expectNoNotionProtocolFailures(failures)).toThrowError();
+		expect(failures).toEqual([]);
+		expect(facts).toEqual([fact]);
+		expect(calls).toEqual([]);
+	});
+
+	it("distinguishes a causally aborted incomplete POST from a malformed completed POST", async () => {
+		const calls: string[] = [];
+		const facts: NotionRequestFact[] = [];
+		const observations: NotionRequestFact[] = [];
+		let receivedBody!: () => void;
+		let receivedAbort!: () => void;
+		const bodyReceived = new Promise<void>((resolve) => {
+			receivedBody = resolve;
+		});
+		const abortReceived = new Promise<void>((resolve) => {
+			receivedAbort = resolve;
+		});
+		const url = await fakeNotion(calls, facts, {
+			observe: (fact) => {
+				observations.push({ ...fact });
+				if (fact.aborted) receivedAbort();
+				else if (fact.bodyBytes === 1) receivedBody();
+			},
+		});
+		const responses: number[] = [];
+		const req = httpRequest(url, { method: "POST", headers: { "content-length": 2 } }, (res) => {
+			responses.push(res.statusCode ?? 0);
+			res.resume();
+		});
+		const requestError = new Promise<Error>((resolve) => req.once("error", resolve));
+		const closed = new Promise<void>((resolve) => req.once("close", resolve));
+		closers.push(async () => {
+			req.destroy();
+			await closed;
+		});
+		req.write("{");
+		// Abort only after the server has consumed the first byte, without ending the declared body.
+		await bodyReceived;
+		const abortError = new Error("intentional incomplete fixture request");
+		req.destroy(abortError);
+		const [error] = await Promise.all([requestError, abortReceived, closed]);
+		expect(error).toBe(abortError);
+		expect(observations).toEqual([
+			{ method: "POST", path: "/mcp", completed: false, aborted: false, bodyBytes: 1 },
+			{ method: "POST", path: "/mcp", completed: false, aborted: true, bodyBytes: 1 },
+		]);
+		expect(facts).toEqual([observations[1]]);
+		expect(responses).toEqual([]);
+		expect(calls).toEqual([]);
+		// The default afterEach guard still applies: an abort is not a bad completed POST.
+	});
+});
 
 async function connect(d: DotDaemon) {
 	const ws = new WebSocket(`ws://127.0.0.1:${d.port}/ws`);
@@ -214,7 +469,7 @@ async function connectNotion(s: Awaited<ReturnType<typeof setup>>) {
 	await waitFor(() => s.d.supervisor.pid !== pid && s.d.supervisor.state === "ready");
 }
 
-describe("server mode: the engine as another user (S25.8)", () => {
+describe.skipIf(!serverMode)("server mode: the engine as another user (S25.8)", () => {
 	it.skipIf(own.uid === 0)("starts the engine under the engine user's uid and gid", async () => {
 		const { d, engineProcess } = await setup();
 		await waitFor(() => d.supervisor.state === "ready");
@@ -229,10 +484,10 @@ describe("server mode: the engine as another user (S25.8)", () => {
 		const { d, dataDir, handedOver, engineAccesses, send, find } = await setup();
 		await waitFor(() => d.supervisor.state === "ready");
 		// The engine may pass through the data folder to its own folders, but not list it.
-		expect(statSync(dataDir).mode & 0o777).toBe(0o711);
-		expect(statSync(join(dataDir, "token")).mode & 0o777).toBe(0o600);
+		expectPosixMode(dataDir, 0o711);
+		expectPosixMode(join(dataDir, "token"), 0o600);
 		// The engine reads its identity prompt by name.
-		expect(statSync(join(dataDir, "identity.md")).mode & 0o777).toBe(0o644);
+		expectPosixMode(join(dataDir, "identity.md"), 0o644);
 		for (const dir of ENGINE_DIRS) expect(statSync(join(dataDir, dir)).isDirectory(), dir).toBe(true);
 		// Only at start, for files an older version left as root; from then on the engine's user makes them.
 		expect(handedOver).toHaveLength(1);
@@ -277,7 +532,7 @@ describe("server mode: the engine as another user (S25.8)", () => {
 	});
 });
 
-describe("server mode: connector secrets encrypted at rest (S25.8)", () => {
+describe.skipIf(!serverMode)("server mode: connector secrets encrypted at rest (S25.8)", () => {
 	it("keeps a sign-in only encrypted, in a daemon file the same key opens", async () => {
 		const s = await setup();
 		await waitFor(() => s.d.supervisor.state === "ready");
@@ -288,7 +543,7 @@ describe("server mode: connector secrets encrypted at rest (S25.8)", () => {
 		await waitFor(() => existsSync(file) && readFileSync(file, "utf8").includes("connector/notion"));
 		const text = readFileSync(file, "utf8");
 		expect(text).not.toContain(SIGNED_IN_TOKEN);
-		expect(statSync(file).mode & 0o777).toBe(0o600);
+		expectPosixMode(file, 0o600);
 		expect(s.mcpText()).not.toContain(SIGNED_IN_TOKEN);
 		const ids = await new FileSecretSource({ file, key: s.key }).list();
 		expect(ids).toEqual(expect.arrayContaining(["integrity/connectors"]));
@@ -331,7 +586,7 @@ describe("server mode: connector secrets encrypted at rest (S25.8)", () => {
 	});
 });
 
-describe("server mode: the web PIN (S25.8)", () => {
+describe.skipIf(!serverMode)("server mode: the web PIN (S25.8)", () => {
 	it("asks for a PIN for connector changes, sets it on first use, and stores only its hash", async () => {
 		const s = await setup();
 		await waitFor(() => s.d.supervisor.state === "ready");
@@ -348,7 +603,7 @@ describe("server mode: the web PIN (S25.8)", () => {
 		expect(await s.find("pin_status", (m) => m.pin.set)).toMatchObject({ pin: { set: true } });
 		const stored = readFileSync(join(s.dataDir, "web-pin.json"), "utf8");
 		expect(stored).not.toContain(PIN);
-		expect(statSync(join(s.dataDir, "web-pin.json")).mode & 0o777).toBe(0o600);
+		expectPosixMode(join(s.dataDir, "web-pin.json"), 0o600);
 		// A second window learns it is set; nobody can set it again.
 		const other = await connect(s.d);
 		expect(other.ready).toMatchObject({ pin: { set: true } });
@@ -393,6 +648,9 @@ describe("server mode: the web PIN (S25.8)", () => {
 		await s.find("error", (m) => m.code === "pin_locked", locked);
 		await settle();
 		expect(s.connectorsText()).toBe(changed);
+		// Configuration and restarts do not connect the lazy upstream or invoke a tool.
+		expect(s.notionRequests).toEqual([]);
+		expect(s.notionCalls).toEqual([]);
 	});
 
 	it("allows a sending action only with the PIN; a wrong PIN keeps it waiting, and declining needs none", async () => {
@@ -447,30 +705,33 @@ describe("server mode: the web PIN (S25.8)", () => {
 });
 
 describe("with the desktop app's channel, server mode changes nothing (S25.2)", () => {
-	it("keeps app_required on the WebSocket, offers no PIN, and keeps secrets in the app", async () => {
-		const s = await setup({ app: true });
-		await waitFor(() => s.d.supervisor.state === "ready");
-		expect(s.ready).toMatchObject({ type: "ready" });
-		expect(s.ready).not.toHaveProperty("pin");
-		for (const message of [
-			{ type: "pin_set", pin: PIN },
-			{ type: "pin_command", pin: PIN, command: mode("notion", "read_write") },
-			mode("notion", "read_write"),
-		])
-			s.send(message);
-		await waitFor(
-			() => s.messages.filter((m) => m.type === "error" && m.code === "app_required").length === 3,
-		);
-		expect(
-			s.messages
-				.filter((m) => m.type === "error")
-				.every((m) => m.type === "error" && m.message === APP_REQUIRED),
-		).toBe(true);
-		expect(existsSync(join(s.dataDir, "web-pin.json"))).toBe(false);
-		// Secrets stay in the app's store.
-		await waitFor(() => s.app.secretCalls.some((call) => call.includes("integrity/connectors")));
-		expect(existsSync(join(s.dataDir, "secrets.enc.json"))).toBe(false);
-	});
+	it.skipIf(!serverMode)(
+		"keeps app_required on the WebSocket, offers no PIN, and keeps secrets in the app",
+		async () => {
+			const s = await setup({ app: true });
+			await waitFor(() => s.d.supervisor.state === "ready");
+			expect(s.ready).toMatchObject({ type: "ready" });
+			expect(s.ready).not.toHaveProperty("pin");
+			for (const message of [
+				{ type: "pin_set", pin: PIN },
+				{ type: "pin_command", pin: PIN, command: mode("notion", "read_write") },
+				mode("notion", "read_write"),
+			])
+				s.send(message);
+			await waitFor(
+				() => s.messages.filter((m) => m.type === "error" && m.code === "app_required").length === 3,
+			);
+			expect(
+				s.messages
+					.filter((m) => m.type === "error")
+					.every((m) => m.type === "error" && m.message === APP_REQUIRED),
+			).toBe(true);
+			expect(existsSync(join(s.dataDir, "web-pin.json"))).toBe(false);
+			// Secrets stay in the app's store.
+			await waitFor(() => s.app.secretCalls.some((call) => call.includes("integrity/connectors")));
+			expect(existsSync(join(s.dataDir, "secrets.enc.json"))).toBe(false);
+		},
+	);
 
 	it("without server mode and without the app, a PIN opens nothing", async () => {
 		const s = await setup({ vps: false });
@@ -483,7 +744,7 @@ describe("with the desktop app's channel, server mode changes nothing (S25.2)", 
 		);
 		expect(existsSync(join(s.dataDir, "web-pin.json"))).toBe(false);
 		// The data folder stays 0700 and nothing is handed over outside server mode.
-		expect(statSync(s.dataDir).mode & 0o777).toBe(0o700);
+		expectPosixMode(s.dataDir, 0o700);
 		expect(s.handedOver).toEqual([]);
 	});
 });

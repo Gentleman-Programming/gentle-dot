@@ -24,6 +24,7 @@ export const USAGE =
 /** Parses the command line; throws with the usage on anything unexpected. */
 export function parseArgs(argv) {
 	const args = argv.filter((arg) => arg !== "--");
+	/** @type {{ target?: string, out?: string, engramVersion?: string }} */
 	const options = {};
 	const names = { "--target": "target", "--out": "out", "--engram-version": "engramVersion" };
 	for (let i = 0; i < args.length; i += 2) {
@@ -169,6 +170,7 @@ export function installerEnv(out, cache, target, source = process.env, goExecuta
 	const windows = target === "windows-x64";
 	const path = windows ? win32.join : posix.join;
 	const home = path(cache, "npm-home");
+	/** @type {Record<string, string>} */
 	const env = {
 		HOME: home,
 		PATH: `${path(out, "node", "bin")}:/usr/bin:/bin:/usr/sbin:/sbin`,
@@ -422,6 +424,103 @@ export function dmgFileName(productName, version, arch) {
 	const names = { arm64: "aarch64", x64: "x64" };
 	if (!names[arch]) throw new Error(`No DMG for arch ${arch}.`);
 	return `${productName}_${version}_${names[arch]}.dmg`;
+}
+
+// Windows installer (`package-windows.mjs`).
+
+export const WINDOWS_USAGE = "usage: package-windows [--skip-stage] [--check]";
+
+/** Parses package-windows' command line: two switches, and a bare `--` is ignored. */
+export function parseWindowsArgs(argv) {
+	const options = { skipStage: false, check: false };
+	const switches = { "--skip-stage": "skipStage", "--check": "check" };
+	for (const arg of argv.filter((value) => value !== "--")) {
+		if (!switches[arg]) throw new Error(`Unexpected argument ${arg}.\n${WINDOWS_USAGE}`);
+		options[switches[arg]] = true;
+	}
+	return options;
+}
+
+/**
+ * The configuration `tauri build --config` merges for a self-contained Windows release: the
+ * staged runtime as the app's `runtime` resource — the mapping `tauriReleaseConfig` uses for
+ * macOS, and the one `daemon::runtime_dir` looks for beside the exe. No macOS key: there is no
+ * signing identity on Windows. It carries no `longDescription`: the Windows bundlers do not
+ * emit one (measured on the built bundles — the MSI has no `Comments`/`ARPCOMMENTS` property,
+ * and the NSIS version-info block derives every key from `PRODUCTNAME`), so a description here
+ * would be config with no output.
+ */
+export function windowsReleaseConfig({ runtime }) {
+	if (!runtime) throw new Error("windowsReleaseConfig needs the staged runtime path.");
+	return { bundle: { resources: { [runtime]: "runtime" } } };
+}
+
+/** The NSIS and MSI names Tauri's bundler gives a product and version. */
+export function windowsInstallerNames(productName, version) {
+	return {
+		nsis: `${productName}_${version}_x64-setup.exe`,
+		msi: `${productName}_${version}_x64_en-US.msi`,
+	};
+}
+
+/**
+ * The 7-Zip executables to try, in order, when `--check` has to extract an NSIS
+ * payload: an explicit `SEVEN_ZIP`, the two conventional install folders, then
+ * whatever PATH resolves. The caller probes each one; this only names them.
+ */
+export function sevenZipCandidates(env = process.env) {
+	const candidates = [];
+	if (env.SEVEN_ZIP) candidates.push(env.SEVEN_ZIP);
+	for (const root of [env.ProgramFiles, env["ProgramFiles(x86)"]])
+		if (root) candidates.push(join(root, "7-Zip", "7z.exe"));
+	return [...candidates, "7z", "7za"];
+}
+
+/**
+ * What an installer payload's extracted `runtime/` tree is missing from, or holds
+ * beyond, the staged runtime. Both arguments are relative paths; Windows compares
+ * them case-insensitively and indifferently to the separator, so a payload that only
+ * differs that way is not a difference.
+ */
+export function payloadDifferences(staged, extracted) {
+	const normalize = (path) => path.replace(/\\/g, "/").toLowerCase();
+	const wanted = new Set(staged.map(normalize));
+	const found = new Set(extracted.map(normalize));
+	return {
+		missing: [...wanted].filter((path) => !found.has(path)).sort(),
+		extra: [...found].filter((path) => !wanted.has(path)).sort(),
+	};
+}
+
+/**
+ * The files whose bytes `--check` compares between the staged runtime and the payload.
+ * Not all of them: the whole tree is 300 MB of mostly Node's own distribution and
+ * dependencies, and these are the ones a dropped or repacked resource would change.
+ */
+export const RUNTIME_HASH_SAMPLE = Object.freeze([
+	"MANIFEST.json",
+	"node/bin/node.exe",
+	"daemon/native/windows-stop.node",
+	"bin/pi.cmd",
+	"bin/engram.exe",
+	"daemon/cli.mjs",
+]);
+
+/** The engine's own binary, wherever the build nested it and at whichever version. */
+export function isGentleAiBinary(relative) {
+	return /(^|\/)\.gentle-ai\/v[^/]+\/gentle-ai\.exe$/.test(relative.replace(/\\/g, "/"));
+}
+
+/**
+ * The engine's provenance for `stage-runtime`'s log, from either shape of
+ * `integrity.json`: a Darwin/Linux signed release asset records `asset` and
+ * `assetSha256`, a Windows Go SumDB source build records `method`, `binarySha256`,
+ * `goVersion` and `buildMode` instead (L54).
+ */
+export function gentleAiProvenance(integrity) {
+	if (integrity.asset) return `from ${integrity.asset} (sha256 ${integrity.assetSha256})`;
+	const sha = integrity.binarySha256 ? `${String(integrity.binarySha256).slice(0, 12)}…` : "unknown";
+	return `${integrity.method ?? "unknown method"} (${integrity.goVersion ?? "unknown Go"}, binary sha256 ${sha})`;
 }
 
 /**

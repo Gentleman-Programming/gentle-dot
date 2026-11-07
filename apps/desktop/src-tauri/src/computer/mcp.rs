@@ -53,24 +53,48 @@ const TEXT_CHUNK_UNITS: usize = 20;
 
 const STOPPED: &str = "Computer control was stopped; this action was dropped.";
 const NOT_ALLOWED: &str = "Computer control was not allowed by the user. Nothing was done.";
-const NEEDS_PERMISSION: &str = "Gentle Dot needs the";
-const GRANT_IT: &str = "Ask the user to grant it in Connectors → Computer.";
+// Presentation only: guard order and the native permission decisions stay unchanged.
+const fn platform_text(windows: &'static str, other: &'static str) -> &'static str {
+    if cfg!(target_os = "windows") {
+        windows
+    } else {
+        other
+    }
+}
+const SCREENSHOT_UNAVAILABLE: &str = platform_text(
+    "Windows screenshot prerequisites are unavailable. An ordinary desktop, healthy native ownership, UI Automation and composition are required. Check Connectors → Computer; no permission can be granted there.",
+    "Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.",
+);
+const CAPTURE_UNAVAILABLE: &str = platform_text(
+    "Windows screen capture prerequisites are currently unavailable. Check Connectors → Computer; this is not a macOS Screen Recording permission and cannot be granted there.",
+    "Gentle Dot needs the Screen Recording permission. Ask the user to grant it in Connectors → Computer.",
+);
+const INPUT_UNAVAILABLE: &str = platform_text(
+    "Windows input and UI Automation prerequisites are currently unavailable. Check Connectors → Computer; this is not a macOS Accessibility permission and cannot be granted there.",
+    "Gentle Dot needs the Accessibility permission. Ask the user to grant it in Connectors → Computer.",
+);
 const NEEDS_SCREENSHOT: &str = "Take a screenshot first: coordinates are pixels of the latest screenshot.";
 const UNKNOWN_TARGET: &str = "Cannot tell which app is under that point, so the action was refused. \
 Take a new screenshot and try again.";
 
-#[cfg(not(windows))]
-const INSTRUCTIONS: &str = "Controls this Mac. Take a screenshot first; x and y are pixels of the latest \
+const INSTRUCTIONS: &str = platform_text(
+    "Controls this Windows PC during a session explicitly allowed in the app. Current prerequisites are not \
+consent or a promise that the next action will succeed. Use list_apps then open_app with the exact identifier \
+of the user's requested verified running app before taking a screenshot. These tools need no earlier \
+screenshot. Do not substitute Chromium for Chrome; if the requested app cannot be identified, ask the user. \
+If capture refuses a protected foreground app, activate only the requested allowed app, then retry capture; \
+never capture or send input to the protected app. Before coordinate actions, take a screenshot; coordinates \
+are pixels of that latest screenshot. Actions return a fresh screenshot. Use batch only for predictable steps whose targets \
+are already visible. Only verified running apps can be brought forward; cold launch and cross-app drag are \
+unsupported. Risky actions ask for confirmation unless the user independently confirms Yolo mode. Protected, \
+unknown and higher-integrity targets are refused. Stop or Alt+Shift+Escape drops queued actions; an \
+already-inserted input batch may finish.",
+    "Controls this Mac. Take a screenshot first; x and y are pixels of the latest \
 screenshot. Every action returns a fresh screenshot. Use `batch` for a predictable sequence (click a field, \
 type, press tab, type, press return) so it runs in one call; end the batch whenever you must see the screen \
 before deciding the next step. The user must allow a session, risky actions ask the user to confirm, and \
-some apps (System Settings, password managers) are off limits.";
-#[cfg(windows)]
-const INSTRUCTIONS: &str = "Controls this PC. Take a screenshot first; x and y are pixels of the latest \
-screenshot. Every action returns a fresh screenshot. Use `batch` for a predictable sequence (click a field, \
-type, press tab, type, press return) so it runs in one call; end the batch whenever you must see the screen \
-before deciding the next step. Shortcuts use ctrl (cmd also presses Ctrl). The user must allow a session, \
-risky actions ask the user to confirm, and some apps (Settings, Windows Security, password managers) are off limits.";
+some apps (System Settings, password managers) are off limits.",
+);
 
 /// Why computer control is unavailable when the system cannot take its screenshots.
 #[cfg(not(windows))]
@@ -98,22 +122,6 @@ fn screenshots_unsupported(reason: Option<ScreenshotsUnsupported>) -> &'static s
 
 /// Why a key was not sent when the app receiving it changed after it was checked.
 const KEY_RECIPIENT_CHANGED: &str = "The app receiving the keys changed before the key was sent, so it was not sent.";
-
-/// The `key` and `open_app` tool descriptions, and the system an `open_app` confirmation names.
-#[cfg(not(windows))]
-const KEY_DESCRIPTION: &str = "Press a key combo in the frontmost app, for example `shift+cmd+t`, `return`, or `esc`.";
-#[cfg(windows)]
-const KEY_DESCRIPTION: &str =
-    "Press a key combo in the frontmost app, for example `ctrl+shift+t`, `return`, or `esc` (`cmd` presses Ctrl).";
-#[cfg(not(windows))]
-const OPEN_APP_DESCRIPTION: &str = "Open or bring forward an app by name or bundle id.";
-#[cfg(windows)]
-const OPEN_APP_DESCRIPTION: &str =
-    "Open or bring forward an app by name (as the Start menu shows it) or by the path of its program (.exe).";
-#[cfg(not(windows))]
-const SYSTEM: &str = "macOS";
-#[cfg(windows)]
-const SYSTEM: &str = "Windows";
 
 pub struct HttpRequest<'a> {
     pub method: &'a str,
@@ -215,7 +223,7 @@ fn tools() -> Value {
     let x = coordinate("Pixels from the left edge of the latest screenshot.");
     let y = coordinate("Pixels from the top edge of the latest screenshot.");
     json!([
-        {"name": "screenshot", "description": "Take a screenshot of the display under the pointer. Returns the image and its size.",
+        {"name": "screenshot", "description": platform_text("Take a screenshot of the display under the pointer. Returns the image and its size. If a protected foreground app prevents capture, use list_apps and open_app for the user\'s requested verified running app first; do not capture or send input to the protected app.", "Take a screenshot of the display under the pointer. Returns the image and its size."),
          "inputSchema": schema(json!({}), &[])},
         {"name": "click", "description": "Click at a point of the latest screenshot.",
          "inputSchema": schema(json!({"x": x, "y": y,
@@ -223,15 +231,15 @@ fn tools() -> Value {
             "count": {"type": "integer", "enum": [1, 2, 3], "default": 1, "description": "2 for a double click, 3 for a triple click."}}), &["x", "y"])},
         {"name": "move", "description": "Move the pointer to a point of the latest screenshot.",
          "inputSchema": schema(json!({"x": x, "y": y}), &["x", "y"])},
-        {"name": "drag", "description": "Press at one point, move to another, and release.",
+        {"name": "drag", "description": platform_text("Press at one point, move to another within the same app, and release. Cross-app drag is unsupported.", "Press at one point, move to another, and release."),
          "inputSchema": schema(json!({"fromX": x, "fromY": y, "toX": x, "toY": y}), &["fromX", "fromY", "toX", "toY"])},
         {"name": "scroll", "description": "Scroll at a point. dy > 0 scrolls down and dx > 0 scrolls right, in pixels.",
          "inputSchema": schema(json!({"x": x, "y": y, "dx": {"type": "integer"}, "dy": {"type": "integer"}}), &["x", "y", "dx", "dy"])},
         {"name": "type", "description": "Type text into the frontmost app. A newline presses Return.",
          "inputSchema": schema(json!({"text": {"type": "string"}}), &["text"])},
-        {"name": "key", "description": KEY_DESCRIPTION,
+        {"name": "key", "description": platform_text("Press a key combo in the frontmost app, for example `ctrl+shift+t`, `return`, or `esc`.", "Press a key combo in the frontmost app, for example `cmd+shift+t`, `return`, or `esc`."),
          "inputSchema": schema(json!({"combo": {"type": "string"}}), &["combo"])},
-        {"name": "open_app", "description": OPEN_APP_DESCRIPTION,
+        {"name": "open_app", "description": platform_text("Bring forward a verified running app by name or identifier from list_apps. Does not cold-launch apps. May run before screenshot; use the exact executable identifier to distinguish similarly named browsers and do not substitute apps.", "Open or bring forward an app by name or bundle id."),
          "inputSchema": schema(json!({"name": {"type": "string"}}), &["name"])},
         {"name": "list_apps", "description": "List the running apps.",
          "inputSchema": schema(json!({}), &[])},
@@ -553,13 +561,16 @@ impl Helper {
                 | Tool::Key { .. }
         );
         if sees && !permissions.screenshots_supported {
-            return Err(screenshots_unsupported(permissions.screenshots_unsupported).into());
+            if let Some(reason) = permissions.screenshots_unsupported {
+                return Err(screenshots_unsupported(Some(reason)).into());
+            }
+            return Err(SCREENSHOT_UNAVAILABLE.into());
         }
         if sees && !permissions.screen_recording {
-            return Err(format!("{NEEDS_PERMISSION} Screen Recording permission. {GRANT_IT}"));
+            return Err(CAPTURE_UNAVAILABLE.into());
         }
         if acts && !permissions.accessibility {
-            return Err(format!("{NEEDS_PERMISSION} Accessibility permission. {GRANT_IT}"));
+            return Err(INPUT_UNAVAILABLE.into());
         }
         Ok(())
     }
@@ -914,7 +925,7 @@ impl Helper {
                     return Err(format!("Gentle Dot does not control {label}. The app was not opened."));
                 }
                 let action = format!("Open {name}");
-                self.confirm_if_risky(assess(Act::Other, intent), &action, SYSTEM)?;
+                self.confirm_if_risky(assess(Act::Other, intent), &action, platform_text("Windows", "macOS"))?;
                 self.still_running(epoch)?;
                 self.desktop.open_app(&name)?;
                 Ok((format!("{action}: done."), OPEN_APP_SETTLE_MS))
@@ -1391,10 +1402,25 @@ mod tests {
         #[cfg(not(windows))]
         assert_eq!(first_text(&result), "Screenshots need macOS 14 or later, so computer control is unavailable on this Mac.");
         #[cfg(windows)]
-        assert_eq!(
-            first_text(&result),
-            "Screenshots need Windows 10 version 2004 or later, so computer control is unavailable on this PC."
-        );
+        assert_eq!(first_text(&result), SCREENSHOT_UNAVAILABLE);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_prerequisites_and_catalog_do_not_offer_tcc_or_cold_launch() {
+        let rig = rig();
+        rig.desktop.permissions.lock().unwrap().screenshots_supported = false;
+        let result = rig.call("screenshot", json!({}));
+        assert!(is_error(&result));
+        assert!(first_text(&result).contains("Windows screenshot prerequisites"));
+        assert!(!first_text(&result).contains("grant it"));
+        assert_eq!(rig.dialogs.grants.load(Ordering::SeqCst), 0);
+        assert!(INSTRUCTIONS.contains("Alt+Shift+Escape"));
+        assert!(INSTRUCTIONS.contains("already-inserted"));
+        let catalog = tools();
+        let open = catalog.as_array().unwrap().iter().find(|tool| tool["name"] == "open_app").unwrap();
+        assert!(open["description"].as_str().unwrap().contains("verified running app"));
+        assert!(!open["description"].as_str().unwrap().contains("bundle id"));
     }
 
     #[test]

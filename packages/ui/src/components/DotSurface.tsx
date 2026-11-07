@@ -1,17 +1,8 @@
 import type { AgentState } from "@gentle-dot/protocol";
 import { useRef } from "react";
+import { computerPlatform } from "../computer-capabilities.ts";
+import { useLocale } from "../i18n.tsx";
 import { Rose, type RoseMood } from "../rose/Rose.tsx";
-import { isWindows } from "../shortcut.ts";
-
-const LABELS: Record<AgentState, string> = {
-	starting: "starting",
-	idle: "ready",
-	thinking: "thinking",
-	working: "working",
-	needs_you: "needs your answer",
-	restarting: "restarting",
-	error: "unavailable",
-};
 
 const MOODS: Record<AgentState, RoseMood> = {
 	starting: "restarting",
@@ -47,13 +38,16 @@ export function DotSurface({
 }: DotSurfaceProps) {
 	const press = useRef<{ x: number; y: number; dragging: boolean } | undefined>(undefined);
 	const state = connected ? agentState : "restarting";
-	const label = inControl ? `controlling your ${isWindows() ? "PC" : "Mac"}` : LABELS[state];
+	const { t } = useLocale();
+	const platform = computerPlatform(navigator.userAgent);
+	const controlLabel = platform === "mac" ? "dot.control" : (`dot.${platform}.control` as const);
+	const label = t(inControl ? controlLabel : `dot.${state}`);
 
 	return (
 		<button
 			type="button"
 			className={`dot dot-${state}${inControl ? " dot-in_control" : ""}${yolo ? " dot-yolo" : ""}`}
-			aria-label={`Gentle Dot: ${label}${yolo ? ", yolo mode on" : ""}`}
+			aria-label={`Gentle Dot: ${label}${yolo ? t("dot.yolo") : ""}`}
 			onPointerDown={(event) => {
 				if (event.button !== 0) return;
 				press.current = { x: event.clientX, y: event.clientY, dragging: false };

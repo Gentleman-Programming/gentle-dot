@@ -1,10 +1,15 @@
-# Gentle Dot desktop (macOS and Linux)
+# Gentle Dot desktop (macOS, Windows, and Linux)
 
-The Tauri 2 shell around the Gentle Dot UI: a floating Dot, an expandable panel, a menu bar item, and a global shortcut. The contract between Rust and the UI is §9 of [`docs/design.md`](../../docs/design.md). Linux is covered [below](#linux).
+The Tauri 2 shell around the Gentle Dot UI: a floating Dot, an expandable panel, a menu bar item, and a global shortcut. The contract between Rust and the UI is §9 of [`docs/design.md`](../../docs/design.md). Windows is covered in [`docs/install.md`](../../docs/install.md), and its tester checklist is [`docs/windows-testing.md`](../../docs/windows-testing.md); Linux is covered [below](#linux).
 
 ## Requirements
 
-- macOS, Xcode command line tools, Node 24, pnpm.
+- For macOS: Xcode command line tools. All source builds use Node 24 or newer
+  and the declared pnpm 11.5.0.
+- For Windows x64: Rust/MSVC, Visual Studio C++ tools/Windows SDK, WebView2 and
+  Go 1.25.10 or newer. Follow the [Windows build prerequisites](../../docs/install.md#build-the-installer-from-source),
+  including the mandatory stop addon. The source/runtime and installed-app checks
+  are separate; this README does not certify a Windows build.
 - Rust stable through rustup. If another `cargo` without `rustc` (for example from Nix) comes first on `PATH`, put rustup first:
 
   ```sh

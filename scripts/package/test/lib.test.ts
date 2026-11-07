@@ -1,7 +1,8 @@
-import { mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import type { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import {
 	assertHostTarget,
 	buildManifest,
@@ -26,6 +27,11 @@ import {
 	windowsBuildGo,
 } from "../lib.mjs";
 
+const tooling = tmpdir();
+mkdirSync(tooling, { recursive: true });
+const scratch = mkdtempSync(join(tooling, "stage-runtime-"));
+afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+
 describe("parseArgs", () => {
 	it("reads the target, the output folder, and an Engram version, ignoring pnpm's --", () => {
 		expect(
@@ -35,7 +41,8 @@ describe("parseArgs", () => {
 
 	it("refuses a missing or unknown target, unknown flags, and a flag without a value", () => {
 		expect(() => parseArgs(["--out", "/tmp/r"])).toThrow(/Missing --target/);
-		expect(() => parseArgs(["--target", "windows-arm64"])).toThrow(/Unknown target windows-arm64/);
+		for (const target of ["win-x64", "win-arm64", "windows-arm64", "plan9-x64"])
+			expect(() => parseArgs(["--target", target])).toThrow(/Unknown target/);
 		expect(() => parseArgs(["--target", "linux-x64", "--force", "1"])).toThrow(/Unexpected argument --force/);
 		expect(() => parseArgs(["--target", "--out", "/tmp/r"])).toThrow(/Unexpected argument --target/);
 		expect(() => parseArgs(["--target", "linux-x64", "--engram-version", "latest"])).toThrow(/x\.y\.z/);
@@ -69,8 +76,12 @@ describe("versions and asset names", () => {
 
 	it("names the official archives", () => {
 		expect(nodeArchiveName("24.14.1", "linux-x64")).toBe("node-v24.14.1-linux-x64.tar.gz");
+		expect(nodeArchiveName("24.14.1", "windows-x64")).toBe("node-v24.14.1-win-x64.zip");
 		expect(engramArchiveName("3.2.1", "linux-x64")).toBe("engram_3.2.1_linux_amd64.tar.gz");
 		expect(engramArchiveName("3.2.1", "darwin-arm64")).toBe("engram_3.2.1_darwin_arm64.tar.gz");
+		expect(
+			engramArchiveName("3.4.0", "windows-x64", `${"a".repeat(64)}  engram_3.4.0_windows_amd64.zip`),
+		).toBe("engram_3.4.0_windows_amd64.zip");
 	});
 
 	it("takes a release version from `engram version`, not a development build", () => {
@@ -97,7 +108,7 @@ describe("checksums", () => {
 	});
 
 	it("accepts a matching file and rejects a tampered one", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "stage-runtime-"));
+		const dir = mkdtempSync(join(scratch, "checksum-"));
 		const file = join(dir, "hello.txt");
 		writeFileSync(file, "hello");
 		await expect(verifyChecksum(file, hello)).resolves.toBeUndefined();
@@ -151,8 +162,8 @@ describe("Windows staging downloads", () => {
 		it("retries a lock error until the folder is released", () => {
 			const { state, now, sleep } = clock();
 			const calls: string[][] = [];
-			const rename = (from: string, to: string) => {
-				calls.push([from, to]);
+			const rename: typeof import("node:fs").renameSync = (from, to) => {
+				calls.push([String(from), String(to)]);
 				if (calls.length <= 2) throw locked(calls.length === 1 ? "EPERM" : "EBUSY");
 			};
 			renameWhenReleased("node/node_modules", "node/lib/node_modules", { rename, sleep, now });
@@ -302,24 +313,20 @@ describe("Windows staging install", () => {
 			expect(() => daemonSourceRevision("C:\\snapshot", "win32", () => false, noGit, ci)).toThrow(
 				"CI must stage from a Git checkout: C:\\snapshot has no .git, so the runtime would have no daemon commit.",
 			);
-		for (const platform of ["linux", "darwin", "win32"]) {
+		for (const platform of ["linux", "darwin", "win32"] as const) {
 			const calls: unknown[] = [];
-			const git = (command, args, options) => {
+			const git = ((command: string, args: string[], options: object) => {
 				calls.push([command, args, options]);
 				return args[0] === "rev-parse" ? "abc123\n" : " M packages/daemon/src/cli.ts\n";
-			};
+			}) as typeof execFileSync;
 			expect(daemonSourceRevision("/repo", platform, () => true, git, "true")).toBe("abc123-dirty");
 			expect(calls).toEqual([
 				["git", ["rev-parse", "HEAD"], { cwd: "/repo", encoding: "utf8" }],
 				["git", ["status", "--porcelain", "--", "packages"], { cwd: "/repo", encoding: "utf8" }],
 			]);
 			expect(
-				daemonSourceRevision(
-					"/repo",
-					platform,
-					() => true,
-					(_cmd, args) => (args[0] === "rev-parse" ? "abc123\n" : ""),
-				),
+				daemonSourceRevision("/repo", platform, () => true, ((_cmd: string, args: string[]) =>
+					args[0] === "rev-parse" ? "abc123\n" : "") as typeof execFileSync),
 			).toBe("abc123");
 		}
 		expect(() => daemonSourceRevision("/repo", "linux", () => false, noGit)).toThrow();
@@ -328,7 +335,7 @@ describe("Windows staging install", () => {
 
 describe("tree and manifest", () => {
 	it("sizes a tree without following links, and lists the links", () => {
-		const dir = mkdtempSync(join(tmpdir(), "stage-runtime-"));
+		const dir = mkdtempSync(join(scratch, "tree-"));
 		writeFileSync(join(dir, "a"), "12345");
 		symlinkSync("a", join(dir, "link"));
 		expect(treeSize(dir)).toBe(5 + 1);
@@ -350,6 +357,7 @@ describe("tree and manifest", () => {
 				versions: { node: "24.14.1" },
 				daemonCommit: "x",
 				sizeBytes: 0,
+				stagedAt: undefined,
 			}),
 		).toThrow(/engram/);
 	});

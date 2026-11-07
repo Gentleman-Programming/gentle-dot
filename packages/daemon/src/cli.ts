@@ -43,8 +43,8 @@ function selfCheck(): void {
 
 async function main(): Promise<void> {
 	const config = loadConfig();
-	// The desktop app that launched the daemon hands over its private channel on fd 3 (S25.1); it is
-	// opened before anything is spawned, and refused if children would inherit it.
+	// Unix adopts fd 3 here. Windows validates the exact-launch record and adopts the
+	// connected endpoint below, before startDaemon can create any descendants.
 	const appChannel = process.platform === "win32" ? undefined : inheritedAppSocket({ log });
 	// Server mode only when GENTLE_DOT_VPS says so (S25.8). The secrets key is read once and removed
 	// from the process environment, so no child the daemon starts can inherit it.

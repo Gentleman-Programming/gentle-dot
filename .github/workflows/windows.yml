@@ -6,8 +6,12 @@ name: Windows
 
 on:
   push:
-    # `ci/**` branches try workflow changes before they reach `main`.
-    branches: [main, 'ci/**']
+    # Keep existing triggers and check the Windows/Spanish integration branch.
+    branches:
+      - main
+      - 'ci/**'
+      - feat/windows-port
+      - feat/windows-spanish-integration
   pull_request:
   workflow_dispatch:
 
@@ -16,9 +20,83 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  # `always` keeps cargo's diagnostics colored, so a failure in the Windows job is readable in the log.
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The daemon, the protocol, and the UI. These are platform-neutral, so this job passes on Windows:
+  # the POSIX assumptions W4 and W5 removed are gone, and the suites whose *subject* Windows does not
+  # have -- the inherited fd 3, and server mode's setuid -- skip with a named reason on raw stderr
+  # instead of failing (W27, `packages/daemon/test/support/platform-absence.ts`). The job is blocking,
+  # so a new failure in it is a real one.
+  typescript:
+    name: TypeScript (daemon, protocol, UI)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # No `version` input: package.json declares `packageManager: pnpm@11.5.0`.
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      # Not a convenience: `pnpm install` cannot succeed on Windows without it. The
+      # gentle-pi postinstall builds its package-local Gentle AI binary **from source** on
+      # Windows and requires Go 1.25.10 or newer, while the windows-latest image ships Go
+      # 1.24.13. On Darwin and Linux the same postinstall downloads a pinned release archive,
+      # so this requirement only shows up here. `stable` is the honest range: the constraint is
+      # "or newer", not an exact version.
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # The full Windows suite also requires the mandatory addon.
+      # The build takes an explicit cl.exe path and needs the SDK's INCLUDE and LIB.
+      - uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+
+      # Provision inputs here, not in the build script; match the running Node exactly.
+      - name: Build app-channel addon
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = node -p process.version
+          $inputs = Join-Path $env:RUNNER_TEMP 'node-addon-inputs'
+          New-Item -ItemType Directory -Force -Path $inputs | Out-Null
+          $release = "https://nodejs.org/download/release/$version"
+          Invoke-WebRequest "$release/node-$version-headers.tar.gz" -OutFile "$inputs/headers.tar.gz"
+          Invoke-WebRequest "$release/win-x64/node.lib" -OutFile "$inputs/node.lib"
+          # Both downloads must match the release's published SHA-256 sums.
+          $sums = (Invoke-WebRequest "$release/SHASUMS256.txt").Content -split "`n"
+          foreach ($pair in @(@("node-$version-headers.tar.gz", 'headers.tar.gz'), @('win-x64/node.lib', 'node.lib'))) {
+            $line = $sums | Where-Object { $_ -match "^[0-9a-f]{64}\s+$([regex]::Escape($pair[0]))$" }
+            if (-not $line) { throw "No published checksum for $($pair[0])" }
+            $actual = (Get-FileHash -Algorithm SHA256 (Join-Path $inputs $pair[1])).Hash.ToLowerInvariant()
+            if ($actual -ne ($line -split '\s+')[0]) { throw "Checksum mismatch for $($pair[0])" }
+          }
+          tar -xf "$inputs/headers.tar.gz" -C $inputs
+          if ($LASTEXITCODE -ne 0) { throw 'Node header extraction failed' }
+          $compiler = (Get-Command cl.exe).Source
+          pnpm --filter @gentle-dot/daemon run build:windows-stop -- --compiler "$compiler" --headers "$inputs/node-$version/include/node" --node-lib "$inputs/node.lib"
+          if ($LASTEXITCODE -ne 0) { throw 'Native addon build failed' }
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Test
+        run: pnpm test
+
   rust:
     name: Rust shell
     runs-on: windows-latest
@@ -114,4 +192,3 @@ jobs:
       # The daemon test files that run on Windows (the runtime build uses the addon built above).
       - name: Daemon tests
         run: pnpm exec vitest run packages/daemon/test/windows-stop.test.ts packages/daemon/test/windows-app-channel.test.ts packages/daemon/test/app-channel-platform.test.ts packages/daemon/test/app-channel.test.ts packages/daemon/test/app-channel-fd.test.ts packages/daemon/test/windows-app-channel-addon.test.ts packages/daemon/test/process-tree.test.ts packages/daemon/test/supervisor.test.ts packages/daemon/test/runtime.test.ts packages/daemon/test/config.test.ts packages/daemon/test/isolation.test.ts packages/daemon/test/private-memory.test.ts packages/daemon/test/lifecycle.test.ts packages/daemon/test/cli.test.ts packages/daemon/test/runtime-build.test.ts scripts/package/test/lib.test.ts scripts/package/test/package-windows.test.ts
-

@@ -29,7 +29,16 @@ describe("answer outcome", () => {
 			{ type: "message_done", messageId: "m2", text: "", error: "Something went wrong while answering." },
 		);
 		expect(s.messages.map((m) => [m.id, m.text, m.streaming, m.note])).toEqual([
-			["m1", "Half an answer", false, { kind: "stopped", text: "Stopped." }],
+			[
+				"m1",
+				"Half an answer",
+				false,
+				{
+					kind: "stopped",
+					text: "Stopped.",
+					display: { kind: "stopped" },
+				},
+			],
 			["m2", "", false, { kind: "error", text: "Something went wrong while answering." }],
 		]);
 		expect(s.notices).toEqual([]);

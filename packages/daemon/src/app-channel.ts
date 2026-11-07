@@ -27,7 +27,7 @@ export const APPROVAL_WAIT_MS = 130_000;
  * rule, and a closed channel stops the daemon (S35.2), so neither side ever sends a longer one: an
  * oversized request fails (an approval is refused) and an oversized answer becomes an error.
  */
-const MAX_FRAME = 1024 * 1024;
+export const MAX_FRAME = 1024 * 1024;
 
 /** One argument of the action, in the order shown. */
 export interface PreviewField {
@@ -143,7 +143,8 @@ export class AppChannel implements AppLink {
 	close(): Promise<void> {
 		if (this.closing) return this.closing;
 		this.open = false;
-		this.buffer = "";
+		this.buffer = [];
+		this.bufferBytes = 0;
 		const stream = this.stream;
 		const windows = isWindowsAppChannel(stream);
 		this.closing = windows
@@ -165,15 +166,35 @@ export class AppChannel implements AppLink {
 		return this.closing;
 	}
 
-	private receive(chunk: string): void {
+	private receive(chunk: Buffer): void {
 		if (!this.open) return;
-		this.buffer += chunk;
-		for (let end = this.buffer.indexOf("\n"); end >= 0; end = this.buffer.indexOf("\n")) {
-			const line = this.buffer.slice(0, end);
-			this.buffer = this.buffer.slice(end + 1);
+		let start = 0;
+		for (let end = chunk.indexOf(10, start); end >= 0; end = chunk.indexOf(10, start)) {
+			if (!this.appendBytes(chunk.subarray(start, end))) return;
+			// Decode only a complete frame: a UTF-8 character may straddle stream chunks.
+			const line = Buffer.concat(this.buffer, this.bufferBytes).toString("utf8");
+			this.buffer = [];
+			this.bufferBytes = 0;
 			if (line.trim() !== "") this.onFrame(line);
+			if (!this.open) return;
 			start = end + 1;
 		}
+		this.appendBytes(chunk.subarray(start));
+	}
+
+	/** Enforce the byte cap before retaining or concatenating an incomplete frame. */
+	private appendBytes(bytes: Buffer): boolean {
+		if (this.bufferBytes + bytes.length > MAX_FRAME) {
+			this.log("the app's channel sent a frame that is too long; closing it");
+			void this.close();
+			return false;
+		}
+		if (bytes.length) {
+			// Do not retain the backing allocation of a large, coalesced input chunk.
+			this.buffer.push(Buffer.from(bytes));
+			this.bufferBytes += bytes.length;
+		}
+		return true;
 	}
 
 	private onFrame(line: string): void {

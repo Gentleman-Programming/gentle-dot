@@ -242,7 +242,15 @@ impl Recorder {
     }
 
     pub fn seen(&self) -> Vec<VoiceEvent> {
-        self.0.lock().unwrap().clone()
+        // Legacy topic assertions remain exact; the additive topic is tested separately.
+        self.0.lock().unwrap().iter().filter(|event| !matches!(event, VoiceEvent::Diagnostic(_))).cloned().collect()
+    }
+
+    pub fn diagnostics(&self) -> Vec<super::diagnostic::Diagnostic> {
+        self.0.lock().unwrap().iter().filter_map(|event| match event {
+            VoiceEvent::Diagnostic(metadata) => Some(metadata.clone()),
+            _ => None,
+        }).collect()
     }
 
     pub fn levels(&self) -> usize {

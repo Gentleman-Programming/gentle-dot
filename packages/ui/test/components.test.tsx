@@ -1,12 +1,15 @@
-import type { ClientMessage } from "@gentle-dot/protocol";
+import type { Activity, ActivityKind, ClientMessage } from "@gentle-dot/protocol";
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AskCard } from "../src/components/AskCard.tsx";
 import { ChatSurface } from "../src/components/ChatSurface.tsx";
 import { Composer } from "../src/components/Composer.tsx";
-import { MessageList } from "../src/components/MessageList.tsx";
+import { MessageList, summarize } from "../src/components/MessageList.tsx";
 import { type DotState, initialState } from "../src/store.ts";
+
+beforeEach(() => window.localStorage.clear());
+afterEach(() => window.localStorage.clear());
 
 function state(overrides: Partial<DotState> = {}): DotState {
 	return { ...initialState, connection: "open", agentState: "idle", ...overrides };
@@ -98,7 +101,79 @@ describe("AskCard", () => {
 	});
 });
 
+describe("MessageList pure English summary", () => {
+	const rules: [ActivityKind, string, string][] = [
+		["read", "Read 1 file", "Read 2 files"],
+		["edit", "Edited 1 file", "Edited 2 files"],
+		["run", "Ran 1 command", "Ran 2 commands"],
+		["search", "Searched 1 time", "Searched 2 times"],
+		["memory", "Used memory 1 time", "Used memory 2 times"],
+		["delegate", "Asked 1 helper", "Asked 2 helpers"],
+		["other", "Did 1 step", "Did 2 steps"],
+	];
+	const item = (kind: ActivityKind, id: string): Activity => ({
+		id,
+		kind,
+		title: "Raw title",
+		status: "done",
+	});
+
+	it.each(rules)("keeps default-English %s singular and plural outside React", (kind, one, many) => {
+		const activities = [item(kind, "a")];
+		expect(summarize(activities)).toBe(one);
+		expect(summarize([...activities, item(kind, "b")])).toBe(many);
+		expect(activities).toEqual([item(kind, "a")]);
+	});
+
+	it("handles empty and mixed input with status-independent counts and first-seen order", () => {
+		expect(summarize([])).toBe("");
+		expect(summarize([item("run", "a"), item("read", "b"), { ...item("run", "c"), status: "failed" }])).toBe(
+			"Ran 2 commands · Read 1 file",
+		);
+	});
+
+	it("never reads locale storage and accepts an explicit translator", () => {
+		const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+			throw new Error("Storage denied");
+		});
+		try {
+			expect(summarize([item("read", "a")])).toBe("Read 1 file");
+			const t = vi.fn(() => "Explicit {count} item");
+			expect(summarize([item("read", "a")], t)).toBe("Explicit 1 item");
+			expect(t.mock.calls).toEqual([["messageReadOne"]]);
+			expect(getItem).not.toHaveBeenCalled();
+		} finally {
+			getItem.mockRestore();
+		}
+	});
+});
+
 describe("MessageList", () => {
+	it("keeps the default-English empty, earlier, attachment and queued chrome", () => {
+		const { rerender } = render(<MessageList messages={[]} />);
+		expect(screen.getByText("Hi! What can I do for you?")).toBeInTheDocument();
+		rerender(
+			<MessageList
+				hasEarlier
+				queued={["raw queued"]}
+				messages={[
+					{
+						id: "u",
+						role: "user",
+						text: "raw user",
+						streaming: false,
+						earlier: true,
+						activities: [],
+						attachments: [{ name: "raw.txt", size: 1, mime: "text/plain" }],
+					},
+				]}
+			/>,
+		);
+		expect(screen.getByRole("button", { name: "Show earlier" })).toBeInTheDocument();
+		expect(screen.getByRole("separator", { name: "Earlier messages" })).toBeInTheDocument();
+		expect(screen.getByRole("list", { name: "Attached files" })).toHaveTextContent("raw.txt");
+		expect(screen.getByRole("article", { name: "Queued message" })).toHaveTextContent("Queuedraw queued");
+	});
 	it("renders Markdown and summarizes activities", async () => {
 		render(
 			<MessageList

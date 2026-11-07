@@ -27,6 +27,7 @@ struct Inner {
     clock: Arc<dyn Clock>,
     state: Mutex<State>,
     changed: Condvar,
+    diagnostic_tokens: Mutex<Vec<String>>,
 }
 
 enum State {
@@ -46,6 +47,8 @@ struct Session {
     last_level_ms: Option<u64>,
     /// The loudest chunk since the last level.
     peak: f32,
+    diagnostic: Option<super::diagnostic::Diagnostic>,
+    diagnostic_token: Option<String>,
 }
 
 /// The recognition, closed once finished or cancelled so no audio follows `finish`.
@@ -132,7 +135,7 @@ fn blocked(current: Authorization, denied: VoiceError, restricted: VoiceError) -
 
 impl Voice {
     pub fn new(microphone: Arc<dyn Microphone>, recognizer: Arc<dyn Recognizer>, clock: Arc<dyn Clock>) -> Self {
-        let inner = Inner { microphone, recognizer, clock, state: Mutex::new(State::Idle { next: 0 }), changed: Condvar::new() };
+        let inner = Inner { microphone, recognizer, clock, state: Mutex::new(State::Idle { next: 0 }), changed: Condvar::new(), diagnostic_tokens: Mutex::new(Vec::new()) };
         Voice { inner: Arc::new(inner), final_timeout: FINAL_TIMEOUT }
     }
 
@@ -161,16 +164,33 @@ impl Voice {
     /// Starts recording, prompting for permissions first when they were never asked. Blocks
     /// while a prompt is open, so it runs off the main thread. `events` reach the caller.
     pub fn start(&self, requested: Option<&str>, events: Events) -> Result<(), VoiceError> {
+        self.start_selected(requested, events, None)
+    }
+
+    pub fn start_selected(&self, requested: Option<&str>, events: Events, device_id: Option<String>) -> Result<(), VoiceError> {
+        self.start_diagnostic(requested, events, device_id, None)
+    }
+
+    pub fn start_diagnostic(&self, requested: Option<&str>, events: Events, device_id: Option<String>, diagnostic_token: Option<String>) -> Result<(), VoiceError> {
+        super::diagnostic::validate_token(diagnostic_token.as_deref())?;
+        self.inner.microphone.validate_selection(device_id.as_deref())?;
         let recording = {
             let mut state = lock(&self.inner.state);
             let State::Idle { next } = *state else { return Err(VoiceError::Busy) };
+            if let Some(token) = &diagnostic_token {
+                let mut used = lock(&self.inner.diagnostic_tokens);
+                if used.iter().any(|old| old == token) || used.len() >= 1024 {
+                    return Err(VoiceError::Failed("Voice diagnostic token reused or session limit reached; restart the app.".into()));
+                }
+                used.push(token.clone());
+            }
             *state = State::Starting { recording: next, cancelled: false, failure: None };
             next
         };
         let sink = Sink { inner: Arc::downgrade(&self.inner), recording };
         let begun = self.prepare(requested, recording).and_then(|locale| {
             let mut recognition = self.inner.recognizer.begin(&locale, sink.clone())?;
-            match self.inner.microphone.open(sink) {
+            match self.inner.microphone.open_selected(sink, device_id.as_deref()) {
                 Ok(stream) => Ok((stream, recognition)),
                 Err(error) => {
                     recognition.cancel();
@@ -193,6 +213,8 @@ impl Voice {
             final_text: None,
             last_level_ms: None,
             peak: 0.0,
+            diagnostic: None,
+            diagnostic_token,
         };
         let refused = if cancelled { Some(VoiceError::Cancelled) } else { failure.map(VoiceError::Failed) };
         if let Some(error) = refused {
@@ -366,9 +388,30 @@ impl Sink {
         });
     }
 
+    /// Same recording/generation gate and unlocked dispatch as partial results.
+    pub fn diagnostic(&self, stage: super::diagnostic::Stage, samples: Option<usize>) {
+        self.update(|session| {
+            let mut metadata = super::diagnostic::Diagnostic::native(stage, samples);
+            metadata.diagnostic_token = session.diagnostic_token.clone();
+            session.diagnostic = Some(metadata.clone());
+            Some(VoiceEvent::Diagnostic(metadata))
+        });
+    }
+
     /// A failure. While recording it is reported and ends the recording; while stopping, `stop`
     /// resolves with the text so far (a recognizer that heard nothing reports an error).
     pub fn failed(&self, message: &str) {
+        // Publish before the existing Stopping policy masks the recognizer error.
+        self.update(|session| {
+            use super::diagnostic::{Diagnostic, Stage};
+            let mut metadata = session.diagnostic.clone().unwrap_or_else(|| Diagnostic::native(Stage::Failed, None));
+            if !matches!(metadata.stage, Stage::LoadFailed | Stage::DecodeFailed | Stage::WorkerFailed) {
+                metadata.stage = Stage::Failed;
+            }
+            metadata.diagnostic_token = session.diagnostic_token.clone();
+            session.diagnostic = Some(metadata.clone());
+            Some(VoiceEvent::Diagnostic(metadata))
+        });
         let Some(inner) = self.inner.upgrade() else { return };
         let mut state = lock(&inner.state);
         match &mut *state {
@@ -443,6 +486,119 @@ mod tests {
         fn start(&self) -> Result<(), VoiceError> {
             self.voice.start(None, self.recorder.events())
         }
+    }
+
+    // SOURCE ONLY / UNEXECUTED: delayed dispatch must keep the old snapshot and hold no state lock.
+    #[test]
+    fn delayed_diagnostic_keeps_its_session_token_across_cancel_and_restart() {
+        let rig = granted();
+        let (entered, waiting) = std::sync::mpsc::channel();
+        let gate = Arc::new(Gate::default());
+        let blocked = gate.clone();
+        let recorder = rig.recorder.clone();
+        let events: Events = Arc::new(move |event| {
+            if matches!(&event, VoiceEvent::Diagnostic(d) if d.diagnostic_token.as_deref() == Some("old")) {
+                entered.send(()).unwrap();
+                blocked.wait();
+            }
+            (recorder.events())(event);
+        });
+        rig.voice.start_diagnostic(None, events, None, Some("old".into())).unwrap();
+        let old = rig.mic.sink();
+        let dispatch = std::thread::spawn(move || old.diagnostic(super::super::diagnostic::Stage::LoadFailed, Some(37)));
+        waiting.recv_timeout(Duration::from_secs(1)).unwrap();
+        rig.voice.cancel().unwrap();
+        rig.voice.start_diagnostic(None, rig.recorder.events(), None, Some("new".into())).unwrap();
+        rig.mic.sink().diagnostic(super::super::diagnostic::Stage::Complete, Some(12));
+        gate.release();
+        dispatch.join().unwrap();
+        let seen = rig.recorder.diagnostics();
+        assert_eq!(seen[0].diagnostic_token.as_deref(), Some("new"));
+        assert_eq!(seen[1].diagnostic_token.as_deref(), Some("old"));
+        assert_eq!(seen[1].pcm_samples, Some(37));
+        rig.voice.cancel().unwrap();
+    }
+
+    #[test]
+    fn invalid_and_reused_diagnostic_tokens_are_inert_before_permissions_or_state() {
+        let rig = rig(FakeMicrophone::with(Authorization::NotDetermined, Authorization::Authorized),
+            FakeRecognizer::with(Authorization::NotDetermined, Authorization::Authorized));
+        for token in [String::new(), "bad token".into(), "x".repeat(129)] {
+            assert!(rig.voice.start_diagnostic(None, rig.recorder.events(), None, Some(token)).is_err());
+            assert!(matches!(*lock(&rig.voice.inner.state), State::Idle { next: 0 }));
+            assert_eq!(rig.mic.log.lock().unwrap().requests, 0);
+            assert_eq!(rig.mic.log.lock().unwrap().opened, 0);
+            assert_eq!(rig.recognizer.log.lock().unwrap().requests, 0);
+            assert!(rig.recorder.0.lock().unwrap().is_empty());
+        }
+        rig.voice.start_diagnostic(None, rig.recorder.events(), None, Some("used".into())).unwrap();
+        rig.voice.cancel().unwrap();
+        let opened = rig.mic.log.lock().unwrap().opened;
+        assert!(rig.voice.start_diagnostic(None, rig.recorder.events(), None, Some("used".into())).is_err());
+        assert!(matches!(*lock(&rig.voice.inner.state), State::Idle { next: 1 }));
+        assert_eq!(rig.mic.log.lock().unwrap().opened, opened);
+        assert!(rig.recorder.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn public_default_wrappers_keep_the_original_capture_path() {
+        let rig = granted();
+        rig.voice.start(None, rig.recorder.events()).unwrap();
+        rig.voice.cancel().unwrap();
+        let input = crate::voice::app::VoiceInput::new(rig.voice);
+        input.start(None, rig.recorder.events()).unwrap();
+        input.cancel().unwrap();
+        input.start_selected(None, rig.recorder.events(), None).unwrap();
+        assert_eq!(rig.mic.log.lock().unwrap().opened, 3);
+        input.cancel().unwrap();
+    }
+
+    #[test]
+    fn unsupported_selection_changes_no_state_permissions_events_or_backend_counters() {
+        let rig = rig(
+            FakeMicrophone::with(Authorization::NotDetermined, Authorization::Authorized),
+            FakeRecognizer::with(Authorization::NotDetermined, Authorization::Authorized),
+        );
+        assert!(rig.voice.start_selected(None, rig.recorder.events(), Some("selected".into())).is_err());
+        assert!(matches!(*lock(&rig.voice.inner.state), State::Idle { next: 0 }));
+        assert_eq!(rig.mic.log.lock().unwrap().requests, 0);
+        assert_eq!(rig.mic.log.lock().unwrap().opened, 0);
+        assert_eq!(rig.recognizer.log.lock().unwrap().requests, 0);
+        assert!(rig.recognizer.log.lock().unwrap().locales.is_empty());
+        assert!(rig.recorder.seen().is_empty());
+        rig.start().unwrap();
+    }
+
+    #[test]
+    fn selection_is_owned_by_the_start_not_later_caller_changes() {
+        struct SelectedMic { base: FakeMicrophone, selected: Mutex<Vec<Option<String>>> }
+        impl Microphone for SelectedMic {
+            fn authorization(&self) -> Authorization { self.base.authorization() }
+            fn request_authorization(&self) -> Authorization { self.base.request_authorization() }
+            fn open(&self, sink: Sink) -> Result<Box<dyn Stream>, VoiceError> { self.base.open(sink) }
+            fn validate_selection(&self, _: Option<&str>) -> Result<(), VoiceError> { Ok(()) }
+            fn open_selected(&self, sink: Sink, id: Option<&str>) -> Result<Box<dyn Stream>, VoiceError> {
+                self.selected.lock().unwrap().push(id.map(str::to_owned));
+                self.base.open(sink)
+            }
+        }
+        let gate = Arc::new(Gate::default());
+        let mut base = FakeMicrophone::with(Authorization::NotDetermined, Authorization::Authorized);
+        base.gate = Some(gate.clone());
+        let mic = Arc::new(SelectedMic { base, selected: Mutex::new(Vec::new()) });
+        let voice = Arc::new(Voice::new(mic.clone(), Arc::new(FakeRecognizer::granted()), Arc::new(FakeClock(AtomicU64::new(0)))));
+        let mut selection = String::from("first");
+        let starting = {
+            let (voice, owned) = (voice.clone(), selection.clone());
+            std::thread::spawn(move || voice.start_selected(None, Arc::new(|_| {}), Some(owned)))
+        };
+        while mic.base.log.lock().unwrap().requests == 0 { std::thread::yield_now(); }
+        selection.clear();
+        selection.push_str("later");
+        gate.release();
+        starting.join().unwrap().unwrap();
+        assert_eq!(*mic.selected.lock().unwrap(), vec![Some(String::from("first"))]);
+        voice.cancel().unwrap();
     }
 
     #[test]

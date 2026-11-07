@@ -21,8 +21,8 @@ export function togglePanel(): void {
 	void invoke("toggle_panel");
 }
 
-export function hidePanel(): void {
-	if (inDesktop()) void invoke("hide_panel");
+export async function hidePanel(): Promise<void> {
+	if (inDesktop()) await invoke("hide_panel");
 }
 
 export function setDotState(state: AgentState): void {

@@ -10,6 +10,7 @@ import {
 	type ThinkingLevel,
 } from "@gentle-dot/protocol";
 import { type FormEvent, useState } from "react";
+import { useLocale } from "../i18n.tsx";
 import type { DotAction, ProfilesState } from "../store.ts";
 import type { Send } from "./types.ts";
 import "../profiles.css";
@@ -28,42 +29,30 @@ type Mode =
 	| { kind: "name"; action: "rename" | "duplicate" | "save_current"; from?: string }
 	| { kind: "delete"; name: string };
 
-const THINKING_LABELS: Record<ThinkingLevel, string> = {
-	off: "Off",
-	minimal: "Minimal",
-	low: "Low",
-	medium: "Medium",
-	high: "High",
-	xhigh: "Extra high",
-	max: "Max",
-};
-
-const NAME_HINT =
-	"Use letters, numbers, dots, dashes, or underscores (up to 64), starting with a letter or number.";
-
 /** Names a profile, or explains why the name cannot be used. */
-function nameProblem(name: string, taken: string[]): string | undefined {
+function nameProblem(name: string, taken: string[]) {
 	if (!name) return undefined;
-	if (!isValidProfileName(name)) return NAME_HINT;
-	if (taken.includes(name)) return "A profile with that name already exists.";
+	if (!isValidProfileName(name)) return "profile.nameInvalid";
+	if (taken.includes(name)) return "profile.nameTaken";
 	return undefined;
 }
 
 /** Profiles pick the model each part of the assistant uses; managed here without a terminal. */
 export function ProfilesPanel({ profiles, providers = [], send, dispatch }: ProfilesPanelProps) {
+	const { t } = useLocale();
 	const [mode, setMode] = useState<Mode>({ kind: "list" });
 	const list = profiles.list ?? [];
 	const names = list.map((p) => p.name);
 	const back = () => setMode({ kind: "list" });
 
 	return (
-		<section className="profiles" aria-label="Profiles">
+		<section className="profiles" aria-label={t("profile.title")}>
 			<header className="profiles-header">
-				<h2>Profiles</h2>
+				<h2>{t("profile.title")}</h2>
 				<button
 					type="button"
 					className="icon"
-					aria-label="Close profiles"
+					aria-label={t("profile.close")}
 					onClick={() => dispatch({ type: "profiles", open: false })}
 				>
 					×
@@ -98,9 +87,7 @@ export function ProfilesPanel({ profiles, providers = [], send, dispatch }: Prof
 				/>
 			) : (
 				<>
-					<p className="muted">
-						A profile chooses the AI model each part of the assistant uses. Switch profiles any time.
-					</p>
+					<p className="muted">{t("profile.description")}</p>
 					{profiles.lastImport ? (
 						<ImportResult
 							result={profiles.lastImport}
@@ -110,8 +97,8 @@ export function ProfilesPanel({ profiles, providers = [], send, dispatch }: Prof
 							}}
 						/>
 					) : null}
-					{profiles.list === undefined ? <p className="muted">Loading…</p> : null}
-					{profiles.list?.length === 0 ? <p className="muted">No profiles yet.</p> : null}
+					{profiles.list === undefined ? <p className="muted">{t("profile.loading")}</p> : null}
+					{profiles.list?.length === 0 ? <p className="muted">{t("profile.empty")}</p> : null}
 					<ul className="profile-list">
 						{list.map((profile) => {
 							const inUse = profile.name === profiles.active;
@@ -120,12 +107,12 @@ export function ProfilesPanel({ profiles, providers = [], send, dispatch }: Prof
 								<li key={profile.name} className={inUse ? "in-use" : undefined}>
 									<div className="profile-name">
 										<b>{profile.name}</b>
-										{inUse ? <span className="chip ok">In use</span> : null}
+										{inUse ? <span className="chip ok">{t("profile.inUse")}</span> : null}
 									</div>
-									<p className="profile-summary">{summary(profile, profiles.roles, profiles.models)}</p>
+									<p className="profile-summary">{summary(profile, profiles.roles, profiles.models, t)}</p>
 									{deleting ? (
-										<div className="profile-confirm" role="alertdialog" aria-label="Delete profile">
-											<p>{`Delete “${profile.name}”? This cannot be undone.`}</p>
+										<div className="profile-confirm" role="alertdialog" aria-label={t("profile.deleteTitle")}>
+											<p>{t("profile.deleteConfirm").replace("{name}", () => profile.name)}</p>
 											<button
 												type="button"
 												className="primary danger"
@@ -134,10 +121,10 @@ export function ProfilesPanel({ profiles, providers = [], send, dispatch }: Prof
 													back();
 												}}
 											>
-												Delete
+												{t("profile.delete")}
 											</button>
 											<button type="button" onClick={back}>
-												Keep it
+												{t("profile.keep")}
 											</button>
 										</div>
 									) : (
@@ -148,32 +135,32 @@ export function ProfilesPanel({ profiles, providers = [], send, dispatch }: Prof
 													className="primary"
 													onClick={() => send({ type: "profile_apply", name: profile.name })}
 												>
-													Use
+													{t("profile.use")}
 												</button>
 											)}
 											<button type="button" onClick={() => setMode({ kind: "edit", profile })}>
-												Edit
+												{t("profile.edit")}
 											</button>
 											<button
 												type="button"
 												onClick={() => setMode({ kind: "name", action: "duplicate", from: profile.name })}
 											>
-												Duplicate
+												{t("profile.duplicate")}
 											</button>
 											<button
 												type="button"
 												onClick={() => setMode({ kind: "name", action: "rename", from: profile.name })}
 											>
-												Rename
+												{t("profile.rename")}
 											</button>
 											<button
 												type="button"
 												className="link"
 												disabled={inUse}
-												title={inUse ? "Switch to another profile before deleting this one." : undefined}
+												title={inUse ? t("profile.deleteGuard") : undefined}
 												onClick={() => setMode({ kind: "delete", name: profile.name })}
 											>
-												Delete
+												{t("profile.delete")}
 											</button>
 										</div>
 									)}
@@ -183,14 +170,14 @@ export function ProfilesPanel({ profiles, providers = [], send, dispatch }: Prof
 					</ul>
 					<div className="profiles-footer">
 						<button type="button" className="primary" onClick={() => setMode({ kind: "edit" })}>
-							New profile
+							{t("profile.new")}
 						</button>
 						<button type="button" onClick={() => setMode({ kind: "name", action: "save_current" })}>
-							Save my current setup
+							{t("profile.saveCurrent")}
 						</button>
 						{profiles.importable ? (
 							<button type="button" onClick={() => send({ type: "profile_import" })}>
-								Import my Gentle Shell profiles
+								{t("profile.import")}
 							</button>
 						) : null}
 					</div>
@@ -200,20 +187,22 @@ export function ProfilesPanel({ profiles, providers = [], send, dispatch }: Prof
 	);
 }
 
-function modelLabel(model: string | undefined, models: ModelOption[]): string {
-	if (!model) return "Default";
+type Translate = ReturnType<typeof useLocale>["t"];
+
+function modelLabel(model: string | undefined, models: ModelOption[], t: Translate): string {
+	if (!model) return t("profile.default");
 	return models.find((m) => `${m.provider}/${m.id}` === model)?.name ?? model;
 }
 
 /** One line per routed role the screen knows, for example "Main assistant: Fake Model · High". */
-function summary(profile: Profile, roles: ProfileRole[], models: ModelOption[]): string {
+function summary(profile: Profile, roles: ProfileRole[], models: ModelOption[], t: Translate): string {
 	const lines = roles.flatMap((role) => {
 		const route = profile.roles[role.id];
 		if (!route) return [];
-		const thinking = route.thinking ? ` · ${THINKING_LABELS[route.thinking]}` : "";
-		return [`${role.label}: ${modelLabel(route.model, models)}${thinking}`];
+		const thinking = route.thinking ? ` · ${t(`profile.thinking.${route.thinking}`)}` : "";
+		return [`${role.label}: ${modelLabel(route.model, models, t)}${thinking}`];
 	});
-	return lines.length > 0 ? lines.join(", ") : "Uses the default model everywhere.";
+	return lines.length > 0 ? lines.join(", ") : t("profile.defaultSummary");
 }
 
 function ProfileEditor({
@@ -233,6 +222,7 @@ function ProfileEditor({
 	onSave: (name: string, roles: ProfileRoles) => void;
 	onCancel: () => void;
 }) {
+	const { t } = useLocale();
 	const [name, setName] = useState("");
 	// Starts from every saved route, so roles this screen does not show are kept.
 	const [routes, setRoutes] = useState<ProfileRoles>(() => structuredClone(profile?.roles ?? {}));
@@ -259,23 +249,23 @@ function ProfileEditor({
 	return (
 		<form
 			className="profile-editor"
-			aria-label={profile ? `Edit ${profile.name}` : "New profile"}
+			aria-label={profile ? t("profile.editTitle").replace("{name}", () => profile.name) : t("profile.new")}
 			onSubmit={submit}
 		>
 			{profile ? (
 				<h3>{profile.name}</h3>
 			) : (
 				<label className="profile-field">
-					<span>Name</span>
+					<span>{t("profile.name")}</span>
 					<input
 						type="text"
-						aria-label="Profile name"
+						aria-label={t("profile.nameLabel")}
 						autoComplete="off"
-						placeholder="for example deep-work"
+						placeholder={t("profile.namePlaceholder")}
 						value={name}
 						onChange={(event) => setName(event.target.value)}
 					/>
-					{problem ? <small className="profile-problem">{problem}</small> : null}
+					{problem ? <small className="profile-problem">{t(problem)}</small> : null}
 				</label>
 			)}
 			<div className="role-routes">
@@ -286,11 +276,11 @@ function ProfileEditor({
 						<div className="role-route" key={role.id}>
 							<span className="role-label">{role.label}</span>
 							<select
-								aria-label={`${role.label} model`}
+								aria-label={t("profile.modelLabel").replace("{role}", () => role.label)}
 								value={route.model ?? ""}
 								onChange={(event) => update(role.id, { model: event.target.value })}
 							>
-								<option value="">Default</option>
+								<option value="">{t("profile.default")}</option>
 								{[...groups].map(([provider, options]) => (
 									<optgroup key={provider} label={providerName(provider)}>
 										{options.map((m) => (
@@ -300,10 +290,14 @@ function ProfileEditor({
 										))}
 									</optgroup>
 								))}
-								{known ? null : <option value={route.model}>{`${route.model} (not available)`}</option>}
+								{known ? null : (
+									<option value={route.model}>
+										{t("profile.unavailable").replace("{model}", () => route.model ?? "")}
+									</option>
+								)}
 							</select>
 							<select
-								aria-label={`${role.label} thinking`}
+								aria-label={t("profile.thinkingLabel").replace("{role}", () => role.label)}
 								value={route.thinking ?? ""}
 								onChange={(event) =>
 									update(role.id, {
@@ -311,10 +305,10 @@ function ProfileEditor({
 									})
 								}
 							>
-								<option value="">Default</option>
+								<option value="">{t("profile.default")}</option>
 								{THINKING_LEVELS.map((level) => (
 									<option key={level} value={level}>
-										{THINKING_LABELS[level]}
+										{t(`profile.thinking.${level}`)}
 									</option>
 								))}
 							</select>
@@ -324,10 +318,10 @@ function ProfileEditor({
 			</div>
 			<div className="profile-form-actions">
 				<button type="submit" className="primary" disabled={!valid}>
-					Save
+					{t("profile.save")}
 				</button>
 				<button type="button" onClick={onCancel}>
-					Cancel
+					{t("profile.cancel")}
 				</button>
 			</div>
 		</form>
@@ -335,9 +329,9 @@ function ProfileEditor({
 }
 
 const NAME_FORMS = {
-	rename: { label: "New name", submit: "Rename" },
-	duplicate: { label: "Name for the copy", submit: "Duplicate" },
-	save_current: { label: "Name for your current setup", submit: "Save" },
+	rename: { label: "profile.renameLabel", submit: "profile.rename" },
+	duplicate: { label: "profile.duplicateLabel", submit: "profile.duplicate" },
+	save_current: { label: "profile.currentLabel", submit: "profile.save" },
 } as const;
 
 function NameForm({
@@ -351,6 +345,7 @@ function NameForm({
 	onSubmit: (name: string) => void;
 	onCancel: () => void;
 }) {
+	const { t } = useLocale();
 	const initial = mode.action === "duplicate" ? `${mode.from}-copy` : (mode.from ?? "");
 	const [name, setName] = useState(initial);
 	const text = NAME_FORMS[mode.action];
@@ -359,29 +354,29 @@ function NameForm({
 	return (
 		<form
 			className="profile-editor"
-			aria-label={text.label}
+			aria-label={t(text.label)}
 			onSubmit={(event) => {
 				event.preventDefault();
 				if (valid) onSubmit(name);
 			}}
 		>
 			<label className="profile-field">
-				<span>{text.label}</span>
+				<span>{t(text.label)}</span>
 				<input
 					type="text"
-					aria-label={text.label}
+					aria-label={t(text.label)}
 					autoComplete="off"
 					value={name}
 					onChange={(event) => setName(event.target.value)}
 				/>
-				{problem ? <small className="profile-problem">{problem}</small> : null}
+				{problem ? <small className="profile-problem">{t(problem)}</small> : null}
 			</label>
 			<div className="profile-form-actions">
 				<button type="submit" className="primary" disabled={!valid}>
-					{text.submit}
+					{t(text.submit)}
 				</button>
 				<button type="button" onClick={onCancel}>
-					Cancel
+					{t("profile.cancel")}
 				</button>
 			</div>
 		</form>
@@ -395,19 +390,28 @@ function ImportResult({
 	result: NonNullable<ProfilesState["lastImport"]>;
 	openAccounts: () => void;
 }) {
+	const { t } = useLocale();
 	const renamed = result.imported.filter((i) => i.from !== i.to);
 	const count = result.imported.length;
 	return (
 		<div className="profiles-import" role="status">
-			<p>{count === 0 ? "Nothing new to import." : `Imported ${count} profile${count === 1 ? "" : "s"}.`}</p>
+			<p>
+				{t(
+					count === 0 ? "profile.importEmpty" : count === 1 ? "profile.importOne" : "profile.importMany",
+				).replace("{count}", () => String(count))}
+			</p>
 			{renamed.length > 0 ? (
-				<p>{`Renamed because the name was taken: ${renamed.map((r) => `${r.from} → ${r.to}`).join(", ")}.`}</p>
+				<p>
+					{t("profile.importRenamed").replace("{names}", () =>
+						renamed.map((r) => `${r.from} → ${r.to}`).join(", "),
+					)}
+				</p>
 			) : null}
 			{result.missingProviders.length > 0 ? (
 				<p>
-					{`Connect these accounts to use them: ${result.missingProviders.join(", ")}. `}
+					{t("profile.missingAccounts").replace("{names}", () => result.missingProviders.join(", "))}
 					<button type="button" className="link" onClick={openAccounts}>
-						Open accounts
+						{t("profile.openAccounts")}
 					</button>
 				</p>
 			) : null}

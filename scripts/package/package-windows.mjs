@@ -1,10 +1,14 @@
 #!/usr/bin/env node
-// Package an already staged native Windows x64 runtime. No staging, installs, or launch checks.
+// Native Windows packaging. All executable policy is shared with inert CLI fixtures.
 import { spawnSync } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { assertWindowsHost, parseWindowsArgs, WINDOWS_USAGE, windowsPackagePlan } from "./windows-lib.mjs";
+import { sha256File, treeSize } from "./lib.mjs";
+import { runWindowsCli } from "./windows-runtime-policy.mjs";
+
+export { runWindowsCli };
 
 function isKind(path, kind) {
 	try {
@@ -14,58 +18,55 @@ function isKind(path, kind) {
 	}
 }
 
-function main() {
-	const options = parseWindowsArgs(process.argv.slice(2));
-	if (options.help) {
-		process.stdout.write(`${WINDOWS_USAGE}\n`);
-		return;
-	}
-	// Admit the native host before reading staged files or invoking any build tools.
-	assertWindowsHost(process.platform, process.arch);
-	const repo = fileURLToPath(new URL("../..", import.meta.url));
-	const runtime = resolve(
-		process.env.INIT_CWD ?? process.cwd(),
-		options.runtime ?? resolve(repo, "build/runtime/windows-x64"),
-	);
-	let manifest;
-	try {
-		manifest = JSON.parse(readFileSync(resolve(runtime, "MANIFEST.json"), "utf8"));
-	} catch {
-		throw new Error(
-			`Missing or invalid MANIFEST.json in ${runtime}; stage the Windows runtime explicitly first.`,
-		);
-	}
-	const plan = windowsPackagePlan({
-		repo,
-		runtime,
+/** Regular files only: no symlink traversal, as in the prior payload checker. */
+function filesIn(dir, prefix = "") {
+	return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+		const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+		if (entry.isDirectory()) return filesIn(join(dir, entry.name), relative);
+		return entry.isFile() ? [relative] : [];
+	});
+}
+
+function nativeIO() {
+	return {
 		platform: process.platform,
 		arch: process.arch,
 		node: process.execPath,
-		manifest,
+		repo: fileURLToPath(new URL("../..", import.meta.url)),
+		cwd: process.env.INIT_CWD ?? process.cwd(),
+		env: process.env,
+		stdout: (text) => process.stdout.write(text),
+		stderr: (text) => process.stderr.write(text),
+		readJson: (path) => {
+			try {
+				return JSON.parse(readFileSync(path, "utf8"));
+			} catch (cause) {
+				throw new Error(`Cannot read packaging metadata: ${path}`, { cause });
+			}
+		},
 		isFile: (path) => isKind(path, "isFile"),
 		isDirectory: (path) => isKind(path, "isDirectory"),
-	});
-	// Run the repository's installed CLI via Node, never pnpm.cmd through execFile/spawn.
-	process.stdout.write(
-		`Using ${runtime}; tauri build --bundles nsis (no staging; the installer adds WebView2 when missing).\n`,
-	);
-	const result = spawnSync(plan.program, plan.args, {
-		cwd: plan.cwd,
-		env: { ...process.env, ...plan.env },
-		stdio: "inherit",
-	});
-	if (result.error || result.status !== 0)
-		throw new Error(
-			`Windows package build failed (${result.error?.message ?? `exit ${result.status}, signal ${result.signal ?? "none"}`}).`,
-		);
-	process.stdout.write(
-		"NSIS build finished; installer/installed runtime has not been exercised by this command.\n",
-	);
+		exists: existsSync,
+		spawn: spawnSync,
+		// Load platform compatibility only after argument/host/stage admission.
+		applyConsole: async (runtime, options) => {
+			const { applyWindowsConsole } = await import("./windows-console.mjs");
+			return applyWindowsConsole(runtime, options);
+		},
+		filesIn,
+		directoriesIn: (dir) =>
+			readdirSync(dir, { withFileTypes: true })
+				.filter((entry) => entry.isDirectory())
+				.map((entry) => entry.name),
+		size: (path) => statSync(path).size,
+		treeSize,
+		sha256File,
+		makeScratch: () => mkdtempSync(join(tmpdir(), "gentle-dot-windows-check-")),
+		mkdir: (path) => mkdirSync(path, { recursive: true }),
+		removeScratch: (path) => rmSync(path, { recursive: true, force: true }),
+	};
 }
 
-try {
-	main();
-} catch (error) {
-	process.stderr.write(`package-windows: ${error.message}\n`);
-	process.exitCode = 1;
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+	process.exitCode = await runWindowsCli(process.argv.slice(2), nativeIO());
 }

@@ -1,11 +1,25 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { agentSpawnEnv } from "./config.ts";
+import { directAccess, engineAccess } from "./engine-access.ts";
 import { encodeRecord, JsonlDecoder } from "./jsonl.ts";
-import { writePrivateFile } from "./private-file.ts";
+import { PrivateFileProtectionError, readPrivateFileSync, writePrivateFile } from "./private-file.ts";
 import { terminateProcessTree, WINDOWS_TASKKILL_TIMEOUT_MS } from "./process-tree.ts";
+import { clearStaleSetupLock, writeSetupLockOwner } from "./setup-lock.ts";
 import type { OsUser } from "./vps.ts";
+
+/** RPC launch policy, separate from process ownership and restart handling. */
+export function rpcSpawnOptions(options: SupervisorOptions, platform = process.platform): SpawnOptions {
+	const { command, args = [], cwd, env, prepareSpawn, user } = options;
+	return {
+		cwd,
+		env: agentSpawnEnv(command, args, { ...(env ?? process.env), ...prepareSpawn?.() }, platform),
+		stdio: ["pipe", "pipe", "pipe"],
+		...(platform === "win32" ? { windowsHide: true } : {}),
+		...(user ? { uid: user.uid, gid: user.gid } : {}),
+	};
+}
 
 /** A record the agent wrote to stdout that is not a command response. */
 export type AgentRecord = { type: string; [key: string]: unknown };
@@ -69,6 +83,23 @@ type Pending = {
 };
 
 const DEFAULT_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
+
+/**
+ * The engine home the daemon passed as `--home`, if any. The daemon owns that home and marks it
+ * (`claimEngineHome`), so its engine lock is ours to mend; without `--home` the engine manages a
+ * home of its own that we never touch.
+ */
+function engineHomeArgument(args: string[]): string | undefined {
+	for (let at = args.length - 1; at >= 0; at -= 1) {
+		const arg = args[at];
+		if (arg === "--home") {
+			const value = args[at + 1];
+			return value && !value.startsWith("--") ? value : undefined;
+		}
+		if (arg?.startsWith("--home=")) return arg.slice("--home=".length) || undefined;
+	}
+	return undefined;
+}
 
 /**
  * Runs the agent (`gentle-shell --mode rpc`) as a child process, correlates
@@ -332,19 +363,25 @@ export class AgentSupervisor {
 	}
 
 	private spawnChild(): ChildProcess {
-		const { command, args = [], extraArgs = [], cwd, env, prepareSpawn, user } = this.options;
-		const child = spawn(command, [...args, "--mode", "rpc", "--session-dir", this.sessionDir, ...extraArgs], {
-			cwd,
-			env: agentSpawnEnv(
-				command,
-				args,
-				{ ...(env ?? process.env), ...prepareSpawn?.() },
-				this.options.platform,
-			),
-			stdio: ["pipe", "pipe", "pipe"],
-			...(user ? { uid: user.uid, gid: user.gid } : {}),
-		});
+		const { command, args = [], extraArgs = [] } = this.options;
+		// Admission/prepareSpawn must run before touching the engine's provisioning files.
+		const spawnOptions = rpcSpawnOptions(this.options, this.options.platform);
+		const access = this.options.user ? engineAccess(this.options.user) : directAccess;
+		const engineHome = engineHomeArgument(args);
+		// An abrupt stop leaves the engine's empty setup lock behind (it releases it only in a
+		// `finally`), so clear an abandoned one first. The decision never touches a lock our own
+		// owner record proves is live.
+		if (engineHome) access(() => clearStaleSetupLock(engineHome));
+		const child = spawn(
+			command,
+			[...args, "--mode", "rpc", "--session-dir", this.sessionDir, ...extraArgs],
+			spawnOptions,
+		);
 		this.child = child;
+		// Recorded only once the child exists (a failed spawn has no pid): this is the proof a later
+		// start uses to tell an abandoned lock from one a live engine still holds.
+		const pid = child.pid;
+		if (engineHome && pid !== undefined) access(() => writeSetupLockOwner(engineHome, pid));
 		const decoder = new JsonlDecoder(
 			(record) => this.handleRecord(record as AgentRecord),
 			(line) => this.log(`agent wrote a malformed record: ${line.slice(0, 200)}`),
@@ -373,6 +410,8 @@ export class AgentSupervisor {
 
 	private handleRecord(record: AgentRecord): void {
 		if (record.type === "response") {
+			// SAFETY: our supervised engine supplies the RPC envelope; the response discriminator
+			// selects it, and only a matching pending request ID can settle a daemon request.
 			const response = record as unknown as RpcResponse;
 			const pending = response.id === undefined ? undefined : this.pending.get(response.id);
 			if (!pending || response.id === undefined) return;

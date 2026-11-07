@@ -33,7 +33,7 @@ import {
 	resolveConversation,
 } from "./conversations.ts";
 import { directAccess, type EngineAccess } from "./engine-access.ts";
-import { DRAFT_STATUS_KEY } from "./extensions/approval-guard.ts";
+import { DRAFT_STATUS_KEY, powerShellApprovalTitle } from "./extensions/approval-guard.ts";
 import { describeTool, textOf } from "./presentation.ts";
 import {
 	LiveModelSwitch,
@@ -388,7 +388,12 @@ export class DotBridge {
 			case "hello":
 				return;
 			case "send": {
-				if (isBlockedInput(message.text)) {
+				if (
+					isBlockedInput(message.text) ||
+					/^\/(?:diagnostics|discord-debug|discord-trace|discord-status|mcp-inventory)(?:\s|$)/.test(
+						message.text,
+					)
+				) {
 					this.deliver(client, {
 						type: "error",
 						code: "unsupported",
@@ -1321,7 +1326,12 @@ export class DotBridge {
 			title: presentText(String(event.title ?? "")),
 		};
 		const entry: PendingAsk = { ask };
-		if (typeof event.message === "string") ask.message = presentText(event.message);
+		if (typeof event.message === "string") {
+			// Only Dot's command-correlated PowerShell confirmation carries executable text.
+			// Keep it literal; every other dialog retains the existing presentation policy.
+			const exactPowerShell = method === "confirm" && event.title === powerShellApprovalTitle(event.message);
+			ask.message = exactPowerShell ? event.message : presentText(event.message);
+		}
 		if (Array.isArray(event.options)) {
 			entry.options = event.options.map(String);
 			ask.options = entry.options.map(presentText);

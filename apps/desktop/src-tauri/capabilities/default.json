@@ -37,14 +37,17 @@
 				"allow-voice-model-status",
 				"allow-voice-model-download",
 				"allow-voice-model-cancel",
-				"allow-voice-model-remove"
+				"allow-voice-model-remove",
+				"allow-voice-input-devices",
+				"allow-voice-synthesize",
+				"allow-voice-synthesize-cancel"
 			]
 		},
 		{
 			"identifier": "settings",
-			"description": "The panel's Settings screen (S33): read and change the shortcut that opens the panel; the Dot never changes it.",
+			"description": "The panel's Settings screen (S33, SW9): read and change the shortcut and memory mode; the Dot and web page cannot make these changes.",
 			"windows": ["panel"],
-			"permissions": ["allow-shortcut-get", "allow-shortcut-set"]
+			"permissions": ["allow-shortcut-get", "allow-shortcut-set", "allow-memory-get", "allow-memory-set"]
 		},
 		{
 			"identifier": "connectors",
