@@ -3,7 +3,9 @@
 //! the daemon lifecycle (design §9), and the app's private channel to the daemon (S25.1–S25.3).
 
 use crate::app_channel::{self, AppChannel, NO_CHANNEL, REGISTER_TIMEOUT};
-use crate::approvals::{native::NativePrompt, ApprovalRequest, Approvals, Decision, APPROVAL_TIMEOUT};
+use crate::approvals::{
+    native::NativePrompt, ApprovalRequest, Approvals, Decision, APPROVAL_TIMEOUT,
+};
 use crate::computer::app as computer;
 use crate::computer::server::Endpoint;
 use crate::computer::session::Reason;
@@ -41,6 +43,11 @@ use tauri_plugin_opener::OpenerExt;
 pub(crate) const DOT: &str = "dot";
 pub(crate) const PANEL: &str = "panel";
 const TRAY: &str = "main";
+const SMOKE: bool = cfg!(all(
+    windows,
+    feature = "windows-smoke-test",
+    debug_assertions
+));
 /// The Dot window, in points: a 66 pt black disc with the rose, plus a 3 pt
 /// ring for its shadow. About the screen area of the earlier 64 × 84 rose.
 const DOT_SIZE: (f64, f64) = (72.0, 72.0);
@@ -87,11 +94,15 @@ impl ShellWindows {
 
 impl working::Windows for ShellWindows {
     fn is_visible(&self, part: Part) -> bool {
-        self.get(part).and_then(|window| window.is_visible().ok()).unwrap_or(false)
+        self.get(part)
+            .and_then(|window| window.is_visible().ok())
+            .unwrap_or(false)
     }
 
     fn hide(&self, part: Part) -> Result<(), String> {
-        let window = self.get(part).ok_or_else(|| format!("window {part:?} is missing"))?;
+        let window = self
+            .get(part)
+            .ok_or_else(|| format!("window {part:?} is missing"))?;
         window.hide().map_err(err)
     }
 
@@ -123,7 +134,9 @@ impl working::Windows for ShellWindows {
     }
 
     fn rose_hidden(&self) -> bool {
-        self.0.try_state::<Shell>().is_some_and(|shell| shell.rose_hidden.load(Ordering::SeqCst))
+        self.0
+            .try_state::<Shell>()
+            .is_some_and(|shell| shell.rose_hidden.load(Ordering::SeqCst))
     }
 }
 
@@ -177,11 +190,13 @@ fn err(error: impl std::fmt::Display) -> String {
 }
 
 fn window(app: &AppHandle, label: &str) -> CommandResult<WebviewWindow> {
-    app.get_webview_window(label).ok_or_else(|| format!("window `{label}` is missing"))
+    app.get_webview_window(label)
+        .ok_or_else(|| format!("window `{label}` is missing"))
 }
 
 fn read_connection_info(config: &DesktopConfig) -> CommandResult<ConnectionInfo> {
-    let token = std::fs::read_to_string(config.data_dir.join("token")).map_err(|e| format!("cannot read token: {e}"))?;
+    let token = std::fs::read_to_string(config.data_dir.join("token"))
+        .map_err(|e| format!("cannot read token: {e}"))?;
     Ok(config::connection_info(config.port, token.trim()))
 }
 
@@ -211,7 +226,9 @@ impl app_channel::Handler for ChannelService {
         thread::spawn(move || {
             let params = serde_json::json!({ "url": endpoint.url, "token": endpoint.token });
             if let Err(error) = channel.request("computer_register", params, REGISTER_TIMEOUT) {
-                eprintln!("gentle-dot: computer control was not registered with the assistant: {error}");
+                eprintln!(
+                    "gentle-dot: computer control was not registered with the assistant: {error}"
+                );
             }
         });
     }
@@ -221,7 +238,11 @@ impl app_channel::Handler for ChannelService {
 /// window (`client_id`, from its `ready`), so its sign-in steps reach that window. Waits for the
 /// daemon, which may first confirm a widening change in a native dialog.
 #[tauri::command]
-async fn connector_command(app: AppHandle, client_id: String, message: serde_json::Value) -> CommandResult {
+async fn connector_command(
+    app: AppHandle,
+    client_id: String,
+    message: serde_json::Value,
+) -> CommandResult {
     let daemon = app.state::<Shell>().daemon.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let channel = daemon.channel().ok_or_else(|| NO_CHANNEL.to_string())?;
@@ -302,7 +323,8 @@ fn set_rose_hidden(app: AppHandle, hidden: bool) -> CommandResult<bool> {
     if let Some(item) = app.try_state::<RoseMenuItem>() {
         item.0.set_text(rose_menu_label(hidden)).map_err(err)?;
     }
-    app.emit("dot://rose", serde_json::json!({ "hidden": hidden })).map_err(err)?;
+    app.emit("dot://rose", serde_json::json!({ "hidden": hidden }))
+        .map_err(err)?;
     Ok(hidden)
 }
 
@@ -327,7 +349,10 @@ fn set_panel_fullscreen(app: AppHandle, on: bool) -> CommandResult<bool> {
             *full_screen = Some(before);
         }
         (false, Some(before)) => {
-            set_frame(&panel, geometry::restore_rect(before, &monitors, EDGE_MARGIN))?;
+            set_frame(
+                &panel,
+                geometry::restore_rect(before, &monitors, EDGE_MARGIN),
+            )?;
             *full_screen = None;
         }
         _ => {}
@@ -351,7 +376,12 @@ struct ShortcutChoice {
 #[tauri::command]
 fn shortcut_get(app: AppHandle) -> ShortcutInfo {
     let shell = app.state::<Shell>();
-    let current = shell.shortcut.lock().unwrap().clone().unwrap_or_else(|| shell.config.shortcut.clone());
+    let current = shell
+        .shortcut
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| shell.config.shortcut.clone());
     ShortcutInfo {
         shortcut: shortcut::normalize(&current).unwrap_or(current),
         default: DEFAULT_SHORTCUT.to_string(),
@@ -367,7 +397,10 @@ async fn shortcut_set(app: AppHandle, shortcut: String) -> CommandResult<Shortcu
             return Err(DESKTOP_OWNS_SHORTCUTS.to_string());
         }
         let mut current = shell.shortcut.lock().unwrap();
-        let host = ShortcutHost { app: &app, config_file: shell.config.data_dir.join("config.json") };
+        let host = ShortcutHost {
+            app: &app,
+            config_file: shell.config.data_dir.join("config.json"),
+        };
         let saved = shortcut::apply(&host, current.as_deref(), &shortcut)?;
         *current = Some(saved.clone());
         Ok(ShortcutChoice { shortcut: saved })
@@ -383,7 +416,10 @@ struct ShortcutHost<'a> {
 
 impl shortcut::Host for ShortcutHost<'_> {
     fn bind_toggle(&self, shortcut: &str) -> Result<(), String> {
-        self.app.global_shortcut().on_shortcut(shortcut, toggle_on_press).map_err(err)
+        self.app
+            .global_shortcut()
+            .on_shortcut(shortcut, toggle_on_press)
+            .map_err(err)
     }
 
     fn unbind(&self, shortcut: &str) {
@@ -421,8 +457,12 @@ fn set_dot_state(app: AppHandle, state: String) -> CommandResult {
     let status = tray_status(&state).ok_or_else(|| format!("unknown state `{state}`"))?;
     let tray = app.tray_by_id(TRAY).ok_or("tray icon is missing")?;
     tray.set_tooltip(Some(&status.tooltip)).map_err(err)?;
-    tray.set_icon(Some(Image::from_bytes(status.glyph.image(Os::CURRENT)).map_err(err)?)).map_err(err)?;
-    tray.set_icon_as_template(is_template(Os::CURRENT)).map_err(err)
+    tray.set_icon(Some(
+        Image::from_bytes(status.glyph.image(Os::CURRENT)).map_err(err)?,
+    ))
+    .map_err(err)?;
+    tray.set_icon_as_template(is_template(Os::CURRENT))
+        .map_err(err)
 }
 
 /// The window frame in points. Tao reports it in pixels of the window's current scale factor.
@@ -430,7 +470,11 @@ fn rect_of(window: &WebviewWindow) -> CommandResult<Rect> {
     let position = window.outer_position().map_err(err)?;
     let size = window.outer_size().map_err(err)?;
     let scale = window.scale_factor().map_err(err)?;
-    Ok(geometry::to_points((position.x, position.y), (size.width, size.height), scale))
+    Ok(geometry::to_points(
+        (position.x, position.y),
+        (size.width, size.height),
+        scale,
+    ))
 }
 
 /// Work area (without menu bar and Dock) of a monitor in points, using that monitor's own scale factor.
@@ -444,15 +488,27 @@ fn work_area(monitor: &tauri::Monitor) -> Rect {
 }
 
 fn monitor_rects(window: &WebviewWindow) -> CommandResult<Vec<Rect>> {
-    Ok(window.available_monitors().map_err(err)?.iter().map(work_area).collect())
+    Ok(window
+        .available_monitors()
+        .map_err(err)?
+        .iter()
+        .map(work_area)
+        .collect())
 }
 
 fn move_to(window: &WebviewWindow, (x, y): (i32, i32)) -> CommandResult {
-    window.set_position(LogicalPosition::new(f64::from(x), f64::from(y))).map_err(err)
+    window
+        .set_position(LogicalPosition::new(f64::from(x), f64::from(y)))
+        .map_err(err)
 }
 
 fn set_frame(window: &WebviewWindow, rect: Rect) -> CommandResult {
-    window.set_size(LogicalSize::new(f64::from(rect.width), f64::from(rect.height))).map_err(err)?;
+    window
+        .set_size(LogicalSize::new(
+            f64::from(rect.width),
+            f64::from(rect.height),
+        ))
+        .map_err(err)?;
     move_to(window, (rect.x, rect.y))
 }
 
@@ -462,8 +518,13 @@ fn current_monitor(app: &AppHandle, monitors: &[Rect]) -> CommandResult<Option<R
     let primary = app.primary_monitor().map_err(err)?;
     let scale = primary.as_ref().map_or(1.0, |m| m.scale_factor());
     let points = |value: f64| (value / scale).round() as i32;
-    let pointer = app.cursor_position().ok().map(|p| Rect::new(points(p.x), points(p.y), 0, 0));
-    Ok(pointer.and_then(|p| geometry::monitor_for(p, monitors)).or_else(|| primary.as_ref().map(work_area)))
+    let pointer = app
+        .cursor_position()
+        .ok()
+        .map(|p| Rect::new(points(p.x), points(p.y), 0, 0));
+    Ok(pointer
+        .and_then(|p| geometry::monitor_for(p, monitors))
+        .or_else(|| primary.as_ref().map(work_area)))
 }
 
 /// Keeps the Dot at exactly `DOT_SIZE` points, in case macOS or a monitor change resized it.
@@ -471,13 +532,18 @@ fn keep_dot_size(dot: &WebviewWindow, current: Rect) -> CommandResult {
     if (current.width, current.height) == (DOT_SIZE.0 as i32, DOT_SIZE.1 as i32) {
         return Ok(());
     }
-    dot.set_size(LogicalSize::new(DOT_SIZE.0, DOT_SIZE.1)).map_err(err)
+    dot.set_size(LogicalSize::new(DOT_SIZE.0, DOT_SIZE.1))
+        .map_err(err)
 }
 
 fn place_panel(app: &AppHandle) -> CommandResult {
     let shell = app.state::<Shell>();
     let full_screen = shell.full_screen.lock().unwrap().is_some();
-    match panel_placement(shell.places_windows, full_screen, shell.rose_hidden.load(Ordering::SeqCst)) {
+    match panel_placement(
+        shell.places_windows,
+        full_screen,
+        shell.rose_hidden.load(Ordering::SeqCst),
+    ) {
         Placement::Keep => Ok(()),
         Placement::BesideDot => place_panel_next_to_dot(app),
         Placement::Alone => place_panel_alone(app),
@@ -491,7 +557,10 @@ fn place_panel_alone(app: &AppHandle) -> CommandResult {
     };
     let remembered = *app.state::<Shell>().panel_spot.lock().unwrap();
     let size = (PANEL_SIZE.0 as i32, PANEL_SIZE.1 as i32);
-    move_to(&panel, geometry::place_panel_alone(remembered, size, current, EDGE_MARGIN))
+    move_to(
+        &panel,
+        geometry::place_panel_alone(remembered, size, current, EDGE_MARGIN),
+    )
 }
 
 fn place_panel_next_to_dot(app: &AppHandle) -> CommandResult {
@@ -525,10 +594,14 @@ fn show_panel(app: &AppHandle) -> CommandResult {
 /// A minimized panel must be restored before it is moved or shown.
 #[cfg(windows)]
 fn restore_panel(panel: &WebviewWindow) -> CommandResult {
-    if panel.is_minimized().map_err(err)? { panel.unminimize().map_err(err)?; }
+    if panel.is_minimized().map_err(err)? {
+        panel.unminimize().map_err(err)?;
+    }
     let current = rect_of(panel)?;
     if (current.width, current.height) != (PANEL_SIZE.0 as i32, PANEL_SIZE.1 as i32) {
-        panel.set_size(LogicalSize::new(PANEL_SIZE.0, PANEL_SIZE.1)).map_err(err)?;
+        panel
+            .set_size(LogicalSize::new(PANEL_SIZE.0, PANEL_SIZE.1))
+            .map_err(err)?;
     }
     Ok(())
 }
@@ -593,29 +666,51 @@ fn build_windows(
     // GTK sizes a non-resizable window to its content (200 × 200 in an X11 test), so on Linux
     // the Dot stays resizable and equal minimum and maximum sizes pin it at DOT_SIZE.
     #[cfg(target_os = "linux")]
-    let dot = dot.resizable(true).min_inner_size(DOT_SIZE.0, DOT_SIZE.1).max_inner_size(DOT_SIZE.0, DOT_SIZE.1);
+    let dot = dot
+        .resizable(true)
+        .min_inner_size(DOT_SIZE.0, DOT_SIZE.1)
+        .max_inner_size(DOT_SIZE.0, DOT_SIZE.1);
     #[cfg(windows)]
     let dot = dot.minimizable(false);
+    #[cfg(windows)]
+    let dot = match crate::windows_smoke::webview_directory() {
+        Some(directory) => dot.data_directory(directory),
+        None => dot,
+    };
     let dot = dot.build()?;
     #[cfg(windows)]
     crate::computer::win::record_call_window(Part::Dot, dot.hwnd()?.0);
     // Linux has no window effects; the panel URL tells the UI to paint an opaque background.
-    let panel = WebviewWindowBuilder::new(app, PANEL, WebviewUrl::App(platform::panel_url(Os::CURRENT).into()))
-        .title(PANEL_TITLE)
-        .inner_size(PANEL_SIZE.0, PANEL_SIZE.1)
-        .transparent(true)
-        .decorations(false)
-        .always_on_top(true)
-        .resizable(false)
-        .skip_taskbar(true)
-        // Lets the chat receive HTML5 drops of attachments (S31); Tauri's own handler would take them.
-        .disable_drag_drop_handler()
-        .visible(false);
+    let panel = WebviewWindowBuilder::new(
+        app,
+        PANEL,
+        WebviewUrl::App(platform::panel_url(Os::CURRENT).into()),
+    )
+    .title(PANEL_TITLE)
+    .inner_size(PANEL_SIZE.0, PANEL_SIZE.1)
+    .transparent(true)
+    .decorations(false)
+    .always_on_top(true)
+    .resizable(false)
+    .skip_taskbar(true)
+    // Lets the chat receive HTML5 drops of attachments (S31); Tauri's own handler would take them.
+    .disable_drag_drop_handler()
+    .visible(false);
     #[cfg(windows)]
     let panel = panel.minimizable(false);
+    #[cfg(windows)]
+    let panel = match crate::windows_smoke::webview_directory() {
+        Some(directory) => panel.data_directory(directory),
+        None => panel,
+    };
     #[cfg(target_os = "macos")]
-    let panel = panel
-        .effects(EffectsBuilder::new().effect(Effect::HudWindow).state(EffectState::Active).radius(20.0).build());
+    let panel = panel.effects(
+        EffectsBuilder::new()
+            .effect(Effect::HudWindow)
+            .state(EffectState::Active)
+            .radius(20.0)
+            .build(),
+    );
     #[cfg(windows)]
     {
         let panel = panel.build()?;
@@ -640,7 +735,9 @@ fn build_windows(
     let size = (DOT_SIZE.0 as i32, DOT_SIZE.1 as i32);
     let primary = app.primary_monitor()?.as_ref().map(work_area);
     let saved = position::load(&desktop_file(config)).map(|p| (p.x, p.y));
-    if let Some((x, y)) = geometry::initial_dot_position(saved, size, &monitors, primary, EDGE_MARGIN) {
+    if let Some((x, y)) =
+        geometry::initial_dot_position(saved, size, &monitors, primary, EDGE_MARGIN)
+    {
         dot.set_position(LogicalPosition::new(f64::from(x), f64::from(y)))?;
     }
     // Set the size again once the window is in place, so it is exactly DOT_SIZE points there.
@@ -674,8 +771,17 @@ fn tray_menu_ids(conversations: bool, computer_control: bool) -> Vec<&'static st
     ids
 }
 
-fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tauri::Result<TrayIcon> {
-    let autostart = app.autolaunch().is_enabled().unwrap_or(false);
+fn autostart_enabled(smoke: bool, query: impl FnOnce() -> bool) -> bool {
+    !smoke && query()
+}
+
+fn build_tray(
+    app: &AppHandle,
+    config: &DesktopConfig,
+    rose_hidden: bool,
+) -> tauri::Result<TrayIcon> {
+    // Smoke builds must not even query the regular HKCU Run entry.
+    let autostart = autostart_enabled(SMOKE, || app.autolaunch().is_enabled().unwrap_or(false));
     // The accelerator is only a label here; an unparsable one must not break the menu.
     let open = MenuItem::with_id(app, "open", "Open", true, Some(config.shortcut.as_str()))
         .or_else(|_| MenuItem::with_id(app, "open", "Open", true, None::<&str>))?;
@@ -685,10 +791,28 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tau
     for id in tray_menu_ids(conversations, cfg!(any(target_os = "macos", windows))) {
         match id {
             "open" => menu.append(&open)?,
-            "new" => menu.append(&MenuItem::with_id(app, "new", "New conversation", true, None::<&str>)?)?,
-            "browser" => menu.append(&MenuItem::with_id(app, "browser", "Open in browser", true, None::<&str>)?)?,
+            "new" => menu.append(&MenuItem::with_id(
+                app,
+                "new",
+                "New conversation",
+                true,
+                None::<&str>,
+            )?)?,
+            "browser" => menu.append(&MenuItem::with_id(
+                app,
+                "browser",
+                "Open in browser",
+                true,
+                None::<&str>,
+            )?)?,
             "rose" => {
-                let item = MenuItem::with_id(app, "rose", rose_menu_label(rose_hidden), true, None::<&str>)?;
+                let item = MenuItem::with_id(
+                    app,
+                    "rose",
+                    rose_menu_label(rose_hidden),
+                    true,
+                    None::<&str>,
+                )?;
                 menu.append(&item)?;
                 app.manage(RoseMenuItem(item));
             }
@@ -701,18 +825,31 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tau
             )?)?,
             "computer-yolo" => {
                 // Off at launch: yolo mode never outlives the app (S24.9).
-                let item = CheckMenuItem::with_id(app, "computer-yolo", "Yolo mode", true, false, None::<&str>)?;
+                let item = CheckMenuItem::with_id(
+                    app,
+                    "computer-yolo",
+                    "Yolo mode",
+                    true,
+                    false,
+                    None::<&str>,
+                )?;
                 menu.append(&item)?;
                 app.manage(computer::YoloMenuItem(item));
             }
             "restart" => {
-                menu.append(&MenuItem::with_id(app, "restart", "Restart assistant", true, None::<&str>)?)?;
+                menu.append(&MenuItem::with_id(
+                    app,
+                    "restart",
+                    "Restart assistant",
+                    true,
+                    None::<&str>,
+                )?)?;
             }
             "autostart" => menu.append(&CheckMenuItem::with_id(
                 app,
                 "autostart",
                 "Launch at login",
-                true,
+                !SMOKE,
                 autostart,
                 None::<&str>,
             )?)?,
@@ -721,7 +858,9 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tau
         }
     }
     TrayIconBuilder::with_id(TRAY)
-        .icon(Image::from_bytes(TrayGlyph::Unavailable.image(Os::CURRENT))?)
+        .icon(Image::from_bytes(
+            TrayGlyph::Unavailable.image(Os::CURRENT),
+        )?)
         .icon_as_template(is_template(Os::CURRENT))
         .tooltip("Gentle Dot")
         .menu(&menu)
@@ -729,7 +868,8 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tau
         .on_menu_event(move |app, event| {
             let result = match event.id().as_ref() {
                 "open" => show_panel(app),
-                "new" => show_panel(app).and_then(|()| app.emit("dot://new-conversation", ()).map_err(err)),
+                "new" => show_panel(app)
+                    .and_then(|()| app.emit("dot://new-conversation", ()).map_err(err)),
                 "browser" => open_in_browser(app),
                 "rose" => set_rose_hidden(app.clone(), !rose_hidden_state(app)).map(|_| ()),
                 "computer-stop" => {
@@ -772,37 +912,57 @@ fn show_message(app: &AppHandle, kind: MessageDialogKind, text: &str) {
         crate::alert::tell("Gentle Dot", text, matches!(kind, MessageDialogKind::Error));
     }
     #[cfg(not(windows))]
-    app.dialog().message(text).title("Gentle Dot").kind(kind).show(|_| {});
+    app.dialog()
+        .message(text)
+        .title("Gentle Dot")
+        .kind(kind)
+        .show(|_| {});
 }
 
 fn open_in_browser(app: &AppHandle) -> CommandResult {
     let info = read_connection_info(&app.state::<Shell>().config)?;
-    app.opener().open_url(info.web_url, None::<&str>).map_err(err)
+    app.opener()
+        .open_url(info.web_url, None::<&str>)
+        .map_err(err)
 }
 
 fn toggle_autostart(app: &AppHandle, menu: &Menu<tauri::Wry>) -> CommandResult {
+    if SMOKE {
+        return Err("Launch at login is disabled in Windows smoke builds".into());
+    }
     let autolaunch = app.autolaunch();
     if autolaunch.is_enabled().map_err(err)? {
         autolaunch.disable().map_err(err)?;
     } else {
         autolaunch.enable().map_err(err)?;
     }
-    if let Some(item) = menu.get("autostart").and_then(|item| item.as_check_menuitem().cloned()) {
-        item.set_checked(autolaunch.is_enabled().unwrap_or(false)).map_err(err)?;
+    if let Some(item) = menu
+        .get("autostart")
+        .and_then(|item| item.as_check_menuitem().cloned())
+    {
+        item.set_checked(autolaunch.is_enabled().unwrap_or(false))
+            .map_err(err)?;
     }
     Ok(())
 }
 
 fn restart_daemon(app: AppHandle) {
-    let (daemon, port) = (app.state::<Shell>().daemon.clone(), app.state::<Shell>().config.port);
+    let (daemon, port) = (
+        app.state::<Shell>().daemon.clone(),
+        app.state::<Shell>().config.port,
+    );
     thread::spawn(move || match daemon.restart(DAEMON_START_TIMEOUT) {
         RestartOutcome::Restarted => {}
-        RestartOutcome::External => {
-            show_message(&app, MessageDialogKind::Warning, &daemon::foreign_daemon_message(port))
-        }
-        RestartOutcome::Failed(error) => {
-            show_message(&app, MessageDialogKind::Error, &format!("The assistant could not restart: {error}"))
-        }
+        RestartOutcome::External => show_message(
+            &app,
+            MessageDialogKind::Warning,
+            &daemon::foreign_daemon_message(port),
+        ),
+        RestartOutcome::Failed(error) => show_message(
+            &app,
+            MessageDialogKind::Error,
+            &format!("The assistant could not restart: {error}"),
+        ),
     });
 }
 
@@ -816,11 +976,17 @@ fn register_panic_shortcut(app: &AppHandle) {
             computer::stop(app, Reason::Panic);
         }
     };
-    let registered = app.global_shortcut().on_shortcut(computer::PANIC_SHORTCUT, handler);
+    let registered = app
+        .global_shortcut()
+        .on_shortcut(computer::PANIC_SHORTCUT, handler);
     computer::set_panic_shortcut_registered(registered.is_ok());
     if let Err(error) = registered {
         eprintln!("gentle-dot: the computer-control panic shortcut is unavailable: {error}");
-        show_message(app, MessageDialogKind::Warning, computer::PANIC_UNAVAILABLE_TEXT);
+        show_message(
+            app,
+            MessageDialogKind::Warning,
+            computer::PANIC_UNAVAILABLE_TEXT,
+        );
     }
 }
 
@@ -837,9 +1003,16 @@ fn toggle_on_press(app: &AppHandle, _: &Shortcut, event: ShortcutEvent) {
 fn register_shortcut(app: &AppHandle, shortcut: &str) -> Option<String> {
     match app.global_shortcut().on_shortcut(shortcut, toggle_on_press) {
         Ok(()) => return Some(shortcut.to_string()),
-        Err(error) => eprintln!("gentle-dot: shortcut `{shortcut}` is unavailable ({error}); using {DEFAULT_SHORTCUT}"),
+        Err(error) => eprintln!(
+            "gentle-dot: shortcut `{shortcut}` is unavailable ({error}); using {DEFAULT_SHORTCUT}"
+        ),
     }
-    if shortcut != DEFAULT_SHORTCUT && app.global_shortcut().on_shortcut(DEFAULT_SHORTCUT, toggle_on_press).is_ok() {
+    if shortcut != DEFAULT_SHORTCUT
+        && app
+            .global_shortcut()
+            .on_shortcut(DEFAULT_SHORTCUT, toggle_on_press)
+            .is_ok()
+    {
         return Some(DEFAULT_SHORTCUT.to_string());
     }
     None
@@ -848,6 +1021,10 @@ fn register_shortcut(app: &AppHandle, shortcut: &str) -> Option<String> {
 /// A launch of `gentle-dot` (usually `--toggle` from a desktop shortcut) reaches the running app.
 fn handle_launch(app: &AppHandle, args: &[String]) {
     let result = match platform::launch_request(args) {
+        LaunchRequest::Quit => {
+            app.exit(0);
+            Ok(())
+        }
         LaunchRequest::Toggle => toggle_panel(app.clone()),
         LaunchRequest::Show => show_panel(app),
     };
@@ -864,13 +1041,27 @@ pub fn run() {
         std::env::set_var("GDK_BACKEND", backend);
     }
     let places_windows = !platform::compositor_places_windows(|key| std::env::var(key).ok());
-    let config = config::load_config();
-    tauri::Builder::default()
+    let args: Vec<String> = std::env::args().collect();
+    let mut context = tauri::generate_context!();
+    #[cfg(windows)]
+    let smoke_options = crate::windows_smoke::options().expect("invalid Windows smoke settings");
+    #[cfg(windows)]
+    crate::windows_smoke::configure_context(&mut context, smoke_options.as_ref());
+    let builder = tauri::Builder::default()
         // First, so a second launch forwards its arguments and exits before anything else starts.
-        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| handle_launch(app, &args)))
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            handle_launch(app, &args)
+        }))
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build());
+    let builder = if SMOKE {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            None,
+        ))
+    };
+    builder.plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             connection_info,
@@ -900,19 +1091,35 @@ pub fn run() {
             voice::voice_model_remove
         ])
         .setup(move |app| {
+            // Single-instance forwarding already ran. A new --quit must not read
+            // config, initialize isolation/store, or start daemon/voice/webviews.
+            if !platform::launch_request(&args).starts_services() {
+                app.handle().exit(0);
+                return Ok(());
+            }
+            #[cfg(all(windows, feature = "windows-smoke-test", debug_assertions))]
+            let config = crate::windows_smoke::initialize(smoke_options.expect("smoke options required"))?;
+            #[cfg(not(all(windows, feature = "windows-smoke-test", debug_assertions)))]
+            let config = config::load_config();
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let handle = app.handle().clone();
 
             // Computer control first: a daemon this app spawns gets the helper over its channel.
             let computer = computer::start(&handle, Arc::new(ShellWindows(handle.clone())));
+            #[cfg(all(windows, feature = "windows-smoke-test", debug_assertions))]
+            let secrets = crate::windows_smoke::connector_store();
+            #[cfg(not(all(windows, feature = "windows-smoke-test", debug_assertions)))]
+            let secrets = secure_store::connector_store();
             let service = ChannelService {
                 approvals: Approvals::new(Arc::new(NativePrompt::new(handle.clone())), APPROVAL_TIMEOUT),
                 computer: computer.endpoint(),
-                secrets: secure_store::connector_store(),
+                secrets,
             };
             app.manage(computer);
-            let runtime_dir = daemon::runtime_dir(|key| std::env::var(key).ok(), app.path().resource_dir().ok());
+            let runtime_dir = if SMOKE { None } else {
+                daemon::runtime_dir(|key| std::env::var(key).ok(), app.path().resource_dir().ok())
+            };
             let announcer = handle.clone();
             let daemon = Arc::new(
                 Daemon::new(config.port, config.data_dir.clone(), runtime_dir)
@@ -972,21 +1179,22 @@ pub fn run() {
                 );
             }
             // Started by the shortcut while not running: open the panel right away.
-            let args: Vec<String> = std::env::args().collect();
             if platform::launch_request(&args) == LaunchRequest::Toggle {
                 handle_launch(&handle, &args);
             }
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("failed to build Gentle Dot")
         .run(|app, event| {
             if let RunEvent::Exit = event {
-                #[cfg(unix)]
-                app.state::<Shell>().daemon.stop();
-                #[cfg(windows)]
-                if let Err(reason) = app.state::<Shell>().daemon.stop() {
-                    eprintln!("gentle-dot: Windows shutdown was not confirmed: {reason}");
+                if let Some(shell) = app.try_state::<Shell>() {
+                    #[cfg(unix)]
+                    shell.daemon.stop();
+                    #[cfg(windows)]
+                    if let Err(reason) = shell.daemon.stop() {
+                        eprintln!("gentle-dot: Windows shutdown was not confirmed: {reason}");
+                    }
                 }
             }
         });
@@ -997,10 +1205,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn smoke_autostart_does_not_query_regular_registry_state() {
+        assert!(!autostart_enabled(true, || panic!(
+            "smoke must not query autostart"
+        )));
+        assert!(autostart_enabled(false, || true));
+        assert!(!autostart_enabled(false, || false));
+    }
+
+    #[test]
     fn tray_hides_new_conversation_in_the_single_chat() {
         assert_eq!(
             tray_menu_ids(false, false),
-            vec!["open", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
+            vec![
+                "open",
+                "browser",
+                "rose",
+                "-",
+                "restart",
+                "autostart",
+                "-",
+                "quit"
+            ]
         );
     }
 
@@ -1008,7 +1234,17 @@ mod tests {
     fn tray_shows_new_conversation_with_the_conversations_list() {
         assert_eq!(
             tray_menu_ids(true, false),
-            vec!["open", "new", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
+            vec![
+                "open",
+                "new",
+                "browser",
+                "rose",
+                "-",
+                "restart",
+                "autostart",
+                "-",
+                "quit"
+            ]
         );
     }
 
@@ -1016,7 +1252,18 @@ mod tests {
     fn tray_offers_stop_computer_control_where_it_exists() {
         assert_eq!(
             tray_menu_ids(false, true),
-            vec!["open", "browser", "rose", "computer-stop", "computer-yolo", "-", "restart", "autostart", "-", "quit"]
+            vec![
+                "open",
+                "browser",
+                "rose",
+                "computer-stop",
+                "computer-yolo",
+                "-",
+                "restart",
+                "autostart",
+                "-",
+                "quit"
+            ]
         );
     }
 
@@ -1043,13 +1290,22 @@ mod tests {
         let capabilities: serde_json::Value =
             serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
         for command in ["shortcut_get", "shortcut_set", "connector_command"] {
-            assert!(build.contains(&format!("\"{command}\",")), "{command} is missing from build.rs");
+            assert!(
+                build.contains(&format!("\"{command}\",")),
+                "{command} is missing from build.rs"
+            );
             let permission = format!("allow-{}", command.replace('_', "-"));
             let windows: Vec<&serde_json::Value> = capabilities["capabilities"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .filter(|c| c["permissions"].as_array().unwrap().iter().any(|p| p == permission.as_str()))
+                .filter(|c| {
+                    c["permissions"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|p| p == permission.as_str())
+                })
                 .flat_map(|c| c["windows"].as_array().unwrap())
                 .collect();
             assert_eq!(windows, ["panel"], "{permission}");
@@ -1059,14 +1315,23 @@ mod tests {
     #[test]
     fn only_the_glow_overlay_may_acknowledge_the_working_rings() {
         let build = include_str!("../build.rs");
-        assert!(build.contains("\"computer_working_ready\","), "computer_working_ready is missing from build.rs");
+        assert!(
+            build.contains("\"computer_working_ready\","),
+            "computer_working_ready is missing from build.rs"
+        );
         let capabilities: serde_json::Value =
             serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
         let windows: Vec<&serde_json::Value> = capabilities["capabilities"]
             .as_array()
             .unwrap()
             .iter()
-            .filter(|c| c["permissions"].as_array().unwrap().iter().any(|p| p == "allow-computer-working-ready"))
+            .filter(|c| {
+                c["permissions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p == "allow-computer-working-ready")
+            })
             .flat_map(|c| c["windows"].as_array().unwrap())
             .collect();
         assert_eq!(windows, [computer::GLOW_WINDOW]);
@@ -1077,8 +1342,14 @@ mod tests {
         let desktop = include_str!("../../../../packages/ui/src/desktop.ts");
         let app = include_str!("../../../../packages/ui/src/App.tsx");
         let quoted = format!("\"{ASSISTANT_READY}\"");
-        assert!(desktop.contains(&quoted), "desktop.ts does not accept {quoted}");
-        assert!(app.contains(&format!("onDesktopEvent({quoted}")), "App.tsx does not listen for {quoted}");
+        assert!(
+            desktop.contains(&quoted),
+            "desktop.ts does not accept {quoted}"
+        );
+        assert!(
+            app.contains(&format!("onDesktopEvent({quoted}")),
+            "App.tsx does not listen for {quoted}"
+        );
     }
 
     #[test]

@@ -32,6 +32,8 @@ pub use windows::WindowsDpapiStore;
 pub use linux::SecretServiceStore;
 #[cfg(target_os = "macos")]
 pub use macos::Keychain;
+#[cfg(all(windows, any(test, feature = "windows-smoke-test")))]
+pub(crate) use windows::{canonical_smoke_root, prepare_smoke_directory, SmokeDirectory};
 
 /// The keychain service (macOS) or `service` attribute (Linux) of every connector secret.
 pub const SERVICE: &str = "dev.gentleman.gentle-dot.connectors";

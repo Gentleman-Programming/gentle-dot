@@ -196,8 +196,11 @@ mod native {
         }
     }
     fn environment(spec: &LaunchSpec) -> io::Result<Vec<u16>> {
+        #[cfg(not(all(feature = "windows-smoke-test", debug_assertions)))]
         let mut entries: Vec<(Vec<u16>, Vec<u16>)> = std::env::vars_os()
             .map(|(key, value)| (key.encode_wide().collect(), value.encode_wide().collect())).collect();
+        #[cfg(all(feature = "windows-smoke-test", debug_assertions))]
+        let mut entries: Vec<(Vec<u16>, Vec<u16>)> = Vec::new();
         for (key, value) in &spec.envs {
             if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0') {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid launch environment"));
@@ -500,6 +503,12 @@ mod native {
         spawn_inner(spec, log, channel, Path::new(""), faults)
     }
     fn spawn_inner(spec: &LaunchSpec, log: File, channel: &ChildEndpoint, data_dir: &Path, #[cfg(test)] faults: Faults) -> Result<WindowsChild, SpawnFailure> {
+        // Discard caller/environment runtime overrides in development smoke builds.
+        // Selection is rooted in the already validated session, never inherited env.
+        #[cfg(all(feature = "windows-smoke-test", debug_assertions))]
+        let isolated = crate::windows_smoke::launch_spec(data_dir)?;
+        #[cfg(all(feature = "windows-smoke-test", debug_assertions))]
+        let spec = &isolated;
         let application = application(spec)?;
         let mut command = command_line(&spec.program, &spec.args)?;
         // The CLI must read this exact record directory, not infer another profile.
@@ -2162,6 +2171,17 @@ setTimeout(()=>process.exit(74),60000);
 
         fn spec() -> LaunchSpec {
             LaunchSpec { program: std::env::current_exe().unwrap().to_str().unwrap().into(), args: vec![], envs: vec![] }
+        }
+
+        #[test]
+        fn explicit_environment_overrides_survive_and_smoke_has_no_inherited_entries() {
+            let launch = LaunchSpec { program: "unused.exe".into(), args: vec![],
+                envs: vec![("GENTLE_SMOKE_TEST_SENTINEL".into(), "synthetic".into())] };
+            let block = String::from_utf16(&environment(&launch).unwrap()).unwrap();
+            assert!(block.split('\0').any(|entry| entry == "GENTLE_SMOKE_TEST_SENTINEL=synthetic"));
+            if crate::windows_smoke::ENABLED {
+                assert_eq!(block, "GENTLE_SMOKE_TEST_SENTINEL=synthetic\0\0");
+            }
         }
 
         #[test]

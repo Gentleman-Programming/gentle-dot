@@ -17,6 +17,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: '2'
 
 jobs:
   rust:
@@ -60,6 +61,19 @@ jobs:
       - name: cargo test
         working-directory: apps/desktop/src-tauri
         run: cargo test --locked --lib
+
+      - name: Check isolated Windows smoke feature
+        working-directory: apps/desktop/src-tauri
+        run: cargo check --locked --all-targets --features windows-smoke-test
+
+      - name: Test smoke settings and isolation boundaries
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --locked --lib --features windows-smoke-test windows_smoke::tests -- --test-threads=1
+
+      # Explicit native tests use only fresh synthetic system-temp namespaces.
+      - name: Test native smoke directory admission
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --locked --lib --features windows-smoke-test secure_store::windows::tests::smoke_ -- --ignored --test-threads=1
 
   app-channel:
     name: Native app channel
@@ -121,4 +135,4 @@ jobs:
         run: pnpm lint
       # The whole suite (the runtime build uses the addon built above).
       - name: Tests
-        run: pnpm test
+        run: pnpm test --maxWorkers=2

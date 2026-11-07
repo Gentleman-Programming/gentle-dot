@@ -80,16 +80,30 @@ pub fn compositor_places_windows(env: impl Fn(&str) -> Option<String>) -> bool {
 }
 
 /// What a launch asks for: `--toggle` toggles the panel (bind it to a desktop shortcut);
-/// any other launch shows it.
+/// Windows `--quit` requests managed shutdown; any other launch shows the panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchRequest {
     Toggle,
     Show,
+    Quit,
+}
+
+impl LaunchRequest {
+    /// A first-instance quit never starts desktop services or reads application state.
+    pub fn starts_services(self) -> bool {
+        self != Self::Quit
+    }
 }
 
 /// Reads the arguments of a launch, `args[0]` being the program.
 pub fn launch_request(args: &[String]) -> LaunchRequest {
-    if args.iter().skip(1).any(|arg| arg == "--toggle") {
+    launch_request_for(Os::CURRENT, args)
+}
+
+pub fn launch_request_for(os: Os, args: &[String]) -> LaunchRequest {
+    if os == Os::Windows && args.iter().skip(1).any(|arg| arg == "--quit") {
+        LaunchRequest::Quit
+    } else if args.iter().skip(1).any(|arg| arg == "--toggle") {
         LaunchRequest::Toggle
     } else {
         LaunchRequest::Show
@@ -184,6 +198,24 @@ mod tests {
         // The program path is never read as an argument.
         assert_eq!(launch_request(&args(&["--toggle"])), LaunchRequest::Show);
         assert_eq!(launch_request(&[]), LaunchRequest::Show);
+    }
+
+    #[test]
+    fn windows_quit_is_terminal_but_other_platforms_keep_their_launch_behavior() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for input in [vec!["dot", "--quit"], vec!["dot", "--toggle", "--quit"]] {
+            let request = launch_request_for(Os::Windows, &args(&input));
+            assert_eq!(request, LaunchRequest::Quit);
+            assert!(!request.starts_services());
+        }
+        assert_eq!(launch_request_for(Os::Windows, &args(&["--quit"])), LaunchRequest::Show);
+        assert_eq!(launch_request_for(Os::Windows, &args(&["dot", "--quitter"])), LaunchRequest::Show);
+        for os in [Os::MacOs, Os::Linux] {
+            assert_eq!(launch_request_for(os, &args(&["dot", "--quit"])), LaunchRequest::Show);
+            assert_eq!(launch_request_for(os, &args(&["dot", "--quit", "--toggle"])), LaunchRequest::Toggle);
+        }
+        assert!(LaunchRequest::Show.starts_services());
+        assert!(LaunchRequest::Toggle.starts_services());
     }
 
     #[test]

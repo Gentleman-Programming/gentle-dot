@@ -36,6 +36,11 @@ impl WindowsDpapiStore {
         Self { root: Some(root), service,
             fail_before_publish: std::sync::atomic::AtomicBool::new(false) }
     }
+    #[cfg(all(feature = "windows-smoke-test", debug_assertions))]
+    pub(crate) fn for_smoke(root: PathBuf) -> Self {
+        Self { root: Some(root), service: SERVICE.into(),
+            #[cfg(test)] fail_before_publish: std::sync::atomic::AtomicBool::new(false) }
+    }
     fn context(&self) -> Result<Context, StoreError> {
         let root = match &self.root { Some(root) => root.clone(), None => local_app_data()?.join(SERVICE) };
         Context::new(root, &self.service)
@@ -309,53 +314,92 @@ struct Context {
     _ancestors: Vec<OwnedHandle>,
     _lock: File,
 }
+// Smoke admission reuses the DPAPI directory/volume/DACL/reparse checks and pinned
+// ancestry. Keep the guards, not its operation lock: store requests acquire that normally.
+#[cfg(any(test, feature = "windows-smoke-test"))]
+pub(crate) struct SmokeDirectory { _guards: Vec<OwnedHandle> }
+#[cfg(any(test, feature = "windows-smoke-test"))]
+pub(crate) fn prepare_smoke_directory(root: PathBuf, fresh: bool) -> Result<SmokeDirectory, StoreError> {
+    let context = Context::prepare(root, SERVICE, fresh)?;
+    Ok(SmokeDirectory { _guards: context._ancestors })
+}
+
+// One traversal enforces volume, name and reparse invariants for store creation
+// and read-only smoke identity resolution. None never creates or repairs a directory.
+fn pin_directories(directory: &Path, private: Option<(&Path, &Descriptor, PSID, bool)>) -> Result<Vec<OwnedHandle>, StoreError> {
+    let root_name = wide(directory.ancestors().last().ok_or_else(unsafe_store)?.as_os_str())?;
+    if unsafe { GetDriveTypeW(root_name.as_ptr()) } != 3 { return Err(unsafe_store()); }
+    let mut fs = [0u16; 32];
+    checked(unsafe { GetVolumeInformationW(root_name.as_ptr(), null_mut(), 0, null_mut(), null_mut(), null_mut(), fs.as_mut_ptr(), fs.len() as u32) })?;
+    if &fs[..5] != [78, 84, 70, 83, 0] { return Err(unsafe_store()); }
+    let mut guards = Vec::new();
+    let mut prefix = PathBuf::new();
+    for component in directory.components() {
+        match component {
+            Component::Prefix(p) => match p.kind() {
+                std::path::Prefix::Disk(_) => { prefix.push(p.as_os_str()); continue; }
+                _ => return Err(unsafe_store()),
+            },
+            Component::RootDir => prefix.push(component.as_os_str()),
+            Component::Normal(name) => {
+                let units: Vec<u16> = name.encode_wide().collect();
+                if units.is_empty() || units.iter().any(|u| *u < 32 || [58, 47, 42, 63, 34, 60, 62, 124].contains(u))
+                    || matches!(units.last(), Some(32 | 46)) { return Err(unsafe_store()); }
+                prefix.push(name);
+            }
+            _ => return Err(unsafe_store()),
+        }
+        let name = wide(prefix.as_os_str())?;
+        let owned_directory = private.filter(|(root, _, _, _)| prefix.as_path() == *root || prefix.as_path() == directory);
+        if let Some((root, descriptor, _, fresh)) = owned_directory {
+            if unsafe { CreateDirectoryW(name.as_ptr(), &descriptor.attributes()) } == 0 {
+                let code = unsafe { GetLastError() };
+                if code != ERROR_ALREADY_EXISTS || (fresh && prefix == root) {
+                    return Err(failure("DPAPI directory creation failed", code));
+                }
+            }
+        }
+        // No delete sharing pins every directory; only owned directories need private DACLs.
+        let guard = owned(unsafe { CreateFileW(name.as_ptr(), FILE_READ_ATTRIBUTES | if owned_directory.is_some() { READ_CONTROL } else { 0 },
+            FILE_SHARE_READ | FILE_SHARE_WRITE, null(), OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, null_mut()) })?;
+        info(guard.as_raw_handle(), true)?;
+        if let Some((_, _, expected, _)) = owned_directory { security(guard.as_raw_handle(), expected)?; }
+        guards.push(guard);
+    }
+    Ok(guards)
+}
+
+#[cfg(any(test, feature = "windows-smoke-test"))]
+pub(crate) fn canonical_smoke_root(root: &Path) -> Result<(PathBuf, SmokeDirectory), StoreError> {
+    if !root.is_absolute() { return Err(unsafe_store()); }
+    let exists = match std::fs::symlink_metadata(root) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(io_error(error)),
+    };
+    let directory = if exists { root } else { root.parent().ok_or_else(unsafe_store)? };
+    let guards = pin_directories(directory, None)?;
+    // Pinned ancestry prevents a rename/reparse swap during canonicalization.
+    let canonical = std::fs::canonicalize(directory).map_err(io_error)?;
+    let text = canonical.to_str().ok_or_else(unsafe_store)?;
+    let ordinary = PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(text));
+    let canonical_root = if exists { ordinary } else { ordinary.join(root.file_name().ok_or_else(unsafe_store)?) };
+    Ok((canonical_root, SmokeDirectory { _guards: guards }))
+}
+
 impl Context {
     fn new(root: PathBuf, service: &str) -> Result<Self, StoreError> {
+        Self::prepare(root, service, false)
+    }
+    fn prepare(root: PathBuf, service: &str, fresh: bool) -> Result<Self, StoreError> {
         if !root.is_absolute() { return Err(unsafe_store()); }
         let sid = current_sid()?;
         let expected = sid.as_ptr() as PSID;
         let descriptor = Descriptor::for_user(expected)?;
         let namespace = filename(service, "namespace")?;
         let directory = root.join(namespace.trim_end_matches(".bin"));
-        // Reject unsupported volumes before creating any owned directory.
-        let root_name = wide(directory.ancestors().last().ok_or_else(unsafe_store)?.as_os_str())?;
-        if unsafe { GetDriveTypeW(root_name.as_ptr()) } != 3 { return Err(unsafe_store()); }
-        let mut fs = [0u16; 32];
-        checked(unsafe { GetVolumeInformationW(root_name.as_ptr(), null_mut(), 0, null_mut(), null_mut(), null_mut(), fs.as_mut_ptr(), fs.len() as u32) })?;
-        if &fs[..5] != [78, 84, 70, 83, 0] { return Err(unsafe_store()); }
-        let mut guards = Vec::new();
-        let mut prefix = PathBuf::new();
-        for component in directory.components() {
-            match component {
-                Component::Prefix(p) => match p.kind() {
-                    std::path::Prefix::Disk(_) => { prefix.push(p.as_os_str()); continue; }
-                    _ => return Err(unsafe_store()),
-                },
-                Component::RootDir => prefix.push(component.as_os_str()),
-                Component::Normal(name) => {
-                    let units: Vec<u16> = name.encode_wide().collect();
-                    if units.is_empty() || units.iter().any(|u| *u < 32 || [58, 47, 42, 63, 34, 60, 62, 124].contains(u))
-                        || matches!(units.last(), Some(32 | 46)) { return Err(unsafe_store()); }
-                    prefix.push(name);
-                }
-                _ => return Err(unsafe_store()),
-            }
-            let name = wide(prefix.as_os_str())?;
-            let private = prefix == root || prefix == directory;
-            if private && unsafe { CreateDirectoryW(name.as_ptr(), &descriptor.attributes()) } == 0 {
-                let code = unsafe { GetLastError() };
-                if code != ERROR_ALREADY_EXISTS { return Err(failure("DPAPI directory creation failed", code)); }
-            }
-            // No delete sharing pins every directory. Drive/profile ancestors need
-            // not have private DACLs; only our root and namespace do. Write sharing
-            // permits ordinary directory use without allowing ancestor rename/delete.
-            let guard = owned(unsafe { CreateFileW(name.as_ptr(), FILE_READ_ATTRIBUTES | if private { READ_CONTROL } else { 0 },
-                FILE_SHARE_READ | FILE_SHARE_WRITE, null(), OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, null_mut()) })?;
-            info(guard.as_raw_handle(), true)?;
-            if private { security(guard.as_raw_handle(), expected)?; }
-            guards.push(guard);
-        }
+        let guards = pin_directories(&directory, Some((&root, &descriptor, expected, fresh)))?;
         let lock_name = wide(directory.join("namespace.lock").as_os_str())?;
         let mut raw = unsafe { CreateFileW(lock_name.as_ptr(), GENERIC_READ | GENERIC_WRITE | READ_CONTROL,
             0, &descriptor.attributes(), CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT, null_mut()) };
@@ -453,6 +497,54 @@ fn rename_buffer(path: &Path) -> Result<RenameBuffer, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "explicit Windows smoke admission test; fresh system-temp fixture only"]
+    fn smoke_refuses_existing_unowned_root_without_repair_or_overwrite() {
+        let root = std::env::temp_dir().join(format!("gentle-smoke-admission-{}", random_name().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("sentinel"), b"unchanged").unwrap();
+        assert!(prepare_smoke_directory(root.clone(), true).is_err());
+        assert_eq!(std::fs::read(root.join("sentinel")).unwrap(), b"unchanged");
+        std::fs::remove_file(root.join("sentinel")).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "explicit Windows smoke fresh-root test; system-temp fixture only"]
+    fn smoke_fresh_private_root_uses_the_existing_dpapi_contract() {
+        let root = std::env::temp_dir().join(format!("gentle-smoke-fresh-{}", random_name().unwrap()));
+        let (before, parent_pin) = canonical_smoke_root(&root).unwrap();
+        assert!(!root.exists(), "identity resolution must be read-only");
+        let guard = prepare_smoke_directory(root.clone(), true).unwrap();
+        let (after, root_pin) = canonical_smoke_root(&root).unwrap();
+        assert_eq!(before, after, "first and second launch must address the same instance");
+        let alias = root.with_file_name(root.file_name().unwrap().to_str().unwrap().to_ascii_uppercase());
+        let (aliased, alias_pin) = canonical_smoke_root(&alias).unwrap();
+        assert_eq!(after, aliased, "existing case aliases must canonicalize identically");
+        let store = WindowsDpapiStore::with_root(root.clone(), SERVICE.into());
+        assert!(store.list_ids().unwrap().is_empty());
+        assert!(prepare_smoke_directory(root.clone(), true).is_err());
+        drop((guard, parent_pin, root_pin, alias_pin));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "explicit Windows smoke reparse test; symlink permission required"]
+    fn smoke_rejects_reparse_ancestor_before_creating_any_child() {
+        let base = std::env::temp_dir().join(format!("gentle-smoke-link-{}", random_name().unwrap()));
+        std::fs::create_dir(&base).unwrap();
+        let target = base.join("target");
+        let link = base.join("link");
+        std::fs::create_dir(&target).unwrap();
+        std::os::windows::fs::symlink_dir(&target, &link).unwrap();
+        assert!(canonical_smoke_root(&link.join("fresh")).is_err());
+        assert!(prepare_smoke_directory(link.join("fresh"), true).is_err());
+        assert!(!target.join("fresh").exists());
+        std::fs::remove_dir(link).unwrap();
+        std::fs::remove_dir(target).unwrap();
+        std::fs::remove_dir(base).unwrap();
+    }
 
     // Structural regression only: this does not establish the cause of a native
     // publication error. No filesystem operation or native rename is performed.

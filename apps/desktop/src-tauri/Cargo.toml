@@ -5,6 +5,10 @@ description = "Gentle Dot desktop shell"
 edition = "2021"
 publish = false
 
+[features]
+# Explicit development-only native isolation. Windows release builds refuse this feature.
+windows-smoke-test = []
+
 [lib]
 name = "gentle_dot_lib"
 crate-type = ["rlib"]

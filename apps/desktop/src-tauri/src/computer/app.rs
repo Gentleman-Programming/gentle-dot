@@ -433,7 +433,11 @@ fn build_glow(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
     let window = tauri::WebviewWindowBuilder::new(app, GLOW_WINDOW, tauri::WebviewUrl::App("index.html?surface=glow".into()))
         .title(GLOW_TITLE).inner_size(1.0, 1.0).position(0.0, 0.0).transparent(true)
         .decorations(false).always_on_top(true).resizable(false).skip_taskbar(true)
-        .shadow(false).focused(false).focusable(false).visible(false).build().map_err(|error| error.to_string())?;
+        .shadow(false).focused(false).focusable(false).visible(false);
+    let window = match crate::windows_smoke::webview_directory() {
+        Some(directory) => window.data_directory(directory),
+        None => window,
+    }.build().map_err(|error| error.to_string())?;
     window.set_ignore_cursor_events(true).map_err(|error| error.to_string())?;
     if let Err(error) = super::win::prepare_overlay(window.hwnd().map_err(|error| error.to_string())?.0) {
         let _ = window.close();
