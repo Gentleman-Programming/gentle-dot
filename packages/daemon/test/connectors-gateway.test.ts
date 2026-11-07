@@ -2,13 +2,14 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ServerMessage } from "@gentle-dot/protocol";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import WebSocket from "ws";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { oauthOptions } from "./fake-oauth.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { describeWithAppChannel } from "./support/windows.ts";
 
 const GUARD = fileURLToPath(new URL("../src/extensions/approval-guard.ts", import.meta.url));
 
@@ -91,7 +92,7 @@ async function connect(d: DotDaemon, app: ReturnType<typeof fakeApp>) {
 	return { ws, messages, send, find };
 }
 
-describe("connectors over the protocol", () => {
+describeWithAppChannel("connectors over the protocol", () => {
 	it("lists the connectors, and /connectors opens the screen without reaching the assistant", async () => {
 		const { send, find, messages } = await setup();
 		send({ type: "connectors_list" });

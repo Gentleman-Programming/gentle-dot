@@ -8,13 +8,14 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { McpClient, type McpError, StreamableHttpTransport, type Tool } from "@earendil-works/pi-mcp";
 import type { ServerMessage } from "@gentle-dot/protocol";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import WebSocket from "ws";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { oauthOptions } from "./fake-oauth.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { describeWithAppChannel } from "./support/windows.ts";
 
 /** What the stand-in provider issues first (see fake-oauth.ts). */
 const SIGNED_IN_TOKEN = "access-token-1";
@@ -135,7 +136,7 @@ async function setup() {
 	return { d, dataDir, agentHome, notion, app, messages, send, raw, mcpText, engineClient, closeWindow };
 }
 
-describe("connectors through the daemon's proxy (regression, S25.4)", () => {
+describeWithAppChannel("connectors through the daemon's proxy (regression, S25.4)", () => {
 	it("connects, then a read-only call reaches the server with the stored sign-in without asking", async () => {
 		const { d, notion, app, send, messages, mcpText, engineClient } = await setup();
 		const pid = d.supervisor.pid;

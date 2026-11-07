@@ -18,6 +18,7 @@ import { fakeApp } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { oauthOptions } from "./fake-oauth.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { describeServerMode, expectPosixMode, itWithAppChannel } from "./support/windows.ts";
 
 const PIN = "731942";
 const SIGNED_IN_TOKEN = "access-token-1";
@@ -214,7 +215,7 @@ async function connectNotion(s: Awaited<ReturnType<typeof setup>>) {
 	await waitFor(() => s.d.supervisor.pid !== pid && s.d.supervisor.state === "ready");
 }
 
-describe("server mode: the engine as another user (S25.8)", () => {
+describeServerMode("server mode: the engine as another user (S25.8)", () => {
 	it.skipIf(own.uid === 0)("starts the engine under the engine user's uid and gid", async () => {
 		const { d, engineProcess } = await setup();
 		await waitFor(() => d.supervisor.state === "ready");
@@ -277,7 +278,7 @@ describe("server mode: the engine as another user (S25.8)", () => {
 	});
 });
 
-describe("server mode: connector secrets encrypted at rest (S25.8)", () => {
+describeServerMode("server mode: connector secrets encrypted at rest (S25.8)", () => {
 	it("keeps a sign-in only encrypted, in a daemon file the same key opens", async () => {
 		const s = await setup();
 		await waitFor(() => s.d.supervisor.state === "ready");
@@ -331,7 +332,7 @@ describe("server mode: connector secrets encrypted at rest (S25.8)", () => {
 	});
 });
 
-describe("server mode: the web PIN (S25.8)", () => {
+describeServerMode("server mode: the web PIN (S25.8)", () => {
 	it("asks for a PIN for connector changes, sets it on first use, and stores only its hash", async () => {
 		const s = await setup();
 		await waitFor(() => s.d.supervisor.state === "ready");
@@ -447,30 +448,33 @@ describe("server mode: the web PIN (S25.8)", () => {
 });
 
 describe("with the desktop app's channel, server mode changes nothing (S25.2)", () => {
-	it("keeps app_required on the WebSocket, offers no PIN, and keeps secrets in the app", async () => {
-		const s = await setup({ app: true });
-		await waitFor(() => s.d.supervisor.state === "ready");
-		expect(s.ready).toMatchObject({ type: "ready" });
-		expect(s.ready).not.toHaveProperty("pin");
-		for (const message of [
-			{ type: "pin_set", pin: PIN },
-			{ type: "pin_command", pin: PIN, command: mode("notion", "read_write") },
-			mode("notion", "read_write"),
-		])
-			s.send(message);
-		await waitFor(
-			() => s.messages.filter((m) => m.type === "error" && m.code === "app_required").length === 3,
-		);
-		expect(
-			s.messages
-				.filter((m) => m.type === "error")
-				.every((m) => m.type === "error" && m.message === APP_REQUIRED),
-		).toBe(true);
-		expect(existsSync(join(s.dataDir, "web-pin.json"))).toBe(false);
-		// Secrets stay in the app's store.
-		await waitFor(() => s.app.secretCalls.some((call) => call.includes("integrity/connectors")));
-		expect(existsSync(join(s.dataDir, "secrets.enc.json"))).toBe(false);
-	});
+	itWithAppChannel(
+		"keeps app_required on the WebSocket, offers no PIN, and keeps secrets in the app",
+		async () => {
+			const s = await setup({ app: true });
+			await waitFor(() => s.d.supervisor.state === "ready");
+			expect(s.ready).toMatchObject({ type: "ready" });
+			expect(s.ready).not.toHaveProperty("pin");
+			for (const message of [
+				{ type: "pin_set", pin: PIN },
+				{ type: "pin_command", pin: PIN, command: mode("notion", "read_write") },
+				mode("notion", "read_write"),
+			])
+				s.send(message);
+			await waitFor(
+				() => s.messages.filter((m) => m.type === "error" && m.code === "app_required").length === 3,
+			);
+			expect(
+				s.messages
+					.filter((m) => m.type === "error")
+					.every((m) => m.type === "error" && m.message === APP_REQUIRED),
+			).toBe(true);
+			expect(existsSync(join(s.dataDir, "web-pin.json"))).toBe(false);
+			// Secrets stay in the app's store.
+			await waitFor(() => s.app.secretCalls.some((call) => call.includes("integrity/connectors")));
+			expect(existsSync(join(s.dataDir, "secrets.enc.json"))).toBe(false);
+		},
+	);
 
 	it("without server mode and without the app, a PIN opens nothing", async () => {
 		const s = await setup({ vps: false });
@@ -483,7 +487,7 @@ describe("with the desktop app's channel, server mode changes nothing (S25.2)", 
 		);
 		expect(existsSync(join(s.dataDir, "web-pin.json"))).toBe(false);
 		// The data folder stays 0700 and nothing is handed over outside server mode.
-		expect(statSync(s.dataDir).mode & 0o777).toBe(0o700);
+		expectPosixMode(statSync(s.dataDir).mode, 0o700);
 		expect(s.handedOver).toEqual([]);
 	});
 });
