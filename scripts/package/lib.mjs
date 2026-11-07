@@ -1,6 +1,14 @@
 // Pure helpers for staging the installed app's runtime (`stage-runtime.mjs`).
 import { createHash } from "node:crypto";
-import { createReadStream, lstatSync, readdirSync } from "node:fs";
+import {
+	copyFileSync,
+	cpSync,
+	createReadStream,
+	lstatSync,
+	mkdirSync,
+	readdirSync,
+	writeFileSync,
+} from "node:fs";
 import { join, posix, win32 } from "node:path";
 
 /**
@@ -133,9 +141,8 @@ export function installerEnv(out, cache, target, source = process.env, goExecuta
 			APPDATA: path(home, "AppData", "Roaming"),
 			SystemRoot: root,
 			ComSpec: path(root, "System32", "cmd.exe"),
-			// Node's Windows zip keeps node.exe and the npm shims in the folder's root.
 			PATH: [
-				path(out, "node"),
+				path(out, "node", "bin"),
 				path(root, "System32"),
 				root,
 				...(goExecutable ? [win32.dirname(goExecutable)] : []),
@@ -145,6 +152,56 @@ export function installerEnv(out, cache, target, source = process.env, goExecuta
 		});
 	}
 	return env;
+}
+
+/**
+ * No shell quoting or direct `.cmd` spawn: on Windows pnpm supplies its JavaScript entry through
+ * `npm_execpath`, which Node runs. Spawning `pnpm` itself fails with ENOENT there, as it is a `.cmd` shim.
+ */
+export function pnpmInvocation(
+	args,
+	platform = process.platform,
+	env = process.env,
+	node = process.execPath,
+) {
+	if (platform !== "win32") return { command: "pnpm", args };
+	if (!/pnpm\.(?:c?js|mjs)$/i.test(env.npm_execpath ?? ""))
+		throw new Error("Run Windows staging through pnpm so npm_execpath names pnpm's JavaScript entry.");
+	return { command: node, args: [env.npm_execpath, ...args] };
+}
+
+/**
+ * The files a staged Windows runtime must hold, relative to its root: what `launch.rs`
+ * `validate_packaged_runtime` requires of the installed copy, and what `windows-layout.test.ts`
+ * keeps in step with it. `node/bin/node.exe` is where the app launches Node (`launch.rs`).
+ */
+export const WINDOWS_RUNTIME_FILES = Object.freeze([
+	"node/bin/node.exe",
+	"daemon/cli.mjs",
+	"daemon/package.json",
+	"daemon/native/windows-stop.node",
+	"daemon/node_modules/gentle-pi/package.json",
+	"bin/engram.exe",
+	"bin/pi.cmd",
+	"ui/index.html",
+]);
+
+/**
+ * Lays Node's extracted Windows zip (`extracted` holds node.exe, the cmd shims and `node_modules/npm`)
+ * out like the other targets under `node`: `bin/node.exe`, `bin/npm.cmd` and `bin/npx.cmd` that run
+ * the staged Node's own npm, and `lib/node_modules/npm`. The zip's own shims look for npm beside
+ * node.exe, so they are rewritten rather than copied.
+ */
+export function layoutWindowsNode(extracted, node) {
+	mkdirSync(join(node, "bin"), { recursive: true });
+	mkdirSync(join(node, "lib", "node_modules"), { recursive: true });
+	copyFileSync(join(extracted, "node.exe"), join(node, "bin", "node.exe"));
+	copyFileSync(join(extracted, "LICENSE"), join(node, "LICENSE"));
+	cpSync(join(extracted, "node_modules", "npm"), join(node, "lib", "node_modules", "npm"), {
+		recursive: true,
+	});
+	for (const name of ["npm", "npx"])
+		writeFileSync(join(node, "bin", `${name}.cmd`), npmWrapper(`${name}-cli.js`, "win32"));
 }
 
 /** The SHA-256 a `SHASUMS256.txt` / `checksums.txt` listing gives `fileName`; throws when it is absent. */
@@ -230,7 +287,9 @@ export function buildManifest({ target, versions, daemonCommit, sizeBytes, stage
 }
 
 /** A `bin/npm` or `bin/npx` that runs the staged Node's own npm, wherever the folder is copied. */
-export function npmWrapper(cli) {
+export function npmWrapper(cli, platform = "unix") {
+	if (platform === "win32")
+		return `@echo off\r\n"%~dp0node.exe" "%~dp0..\\lib\\node_modules\\npm\\bin\\${cli}" %*\r\n`;
 	return `#!/bin/sh
 # Runs the npm bundled with this Node; a script rather than Node's symlink, so copies that follow links work.
 self=$0
@@ -414,7 +473,7 @@ export function payloadDifferences(staged, extracted) {
  */
 export const RUNTIME_HASH_SAMPLE = Object.freeze([
 	"MANIFEST.json",
-	"node/node.exe",
+	"node/bin/node.exe",
 	"bin/pi.cmd",
 	"bin/engram.exe",
 	"daemon/cli.mjs",

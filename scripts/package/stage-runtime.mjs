@@ -31,10 +31,12 @@ import {
 	formatSize,
 	gentleAiProvenance,
 	installerEnv,
+	layoutWindowsNode,
 	nodeArchiveName,
 	nodeVersion,
 	npmWrapper,
 	parseArgs,
+	pnpmInvocation,
 	symlinksIn,
 	TARGETS,
 	treeSize,
@@ -154,11 +156,9 @@ async function stageNode(out, target) {
 		const found = findFile(extracted, "node.exe");
 		const root = found ? dirname(found) : undefined;
 		if (!root) throw new Error(`${archiveName} has no node.exe.`);
-		// The Windows zip has node.exe at its root, npm one folder down and the cmd shims beside it.
-		mkdirSync(join(node, "node_modules"), { recursive: true });
-		for (const name of ["node.exe", "npm.cmd", "npx.cmd", "LICENSE"])
-			copyFileSync(join(root, name), join(node, name));
-		cpSync(join(root, "node_modules", "npm"), join(node, "node_modules", "npm"), { recursive: true });
+		// The Windows zip has node.exe at its root, npm one folder down and the cmd shims beside it;
+		// the staged layout matches the other targets and `launch.rs`: `node/bin/node.exe`.
+		layoutWindowsNode(root, node);
 		rmSync(extracted, { recursive: true });
 		return version;
 	}
@@ -214,11 +214,9 @@ function installDaemonModules(out, target, goExecutable) {
 		for (const path of [env.LOCALAPPDATA, env.APPDATA, env.TEMP, env.TMP])
 			mkdirSync(path, { recursive: true });
 	const result = spawnSync(
-		windows ? join(out, "node", "node.exe") : join(out, "node", "bin", "node"),
+		join(out, "node", "bin", windows ? "node.exe" : "node"),
 		[
-			windows
-				? join(out, "node", "node_modules", "npm", "bin", "npm-cli.js")
-				: join(out, "node", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+			join(out, "node", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
 			"install",
 			"--omit=dev",
 			"--no-bin-links",
@@ -351,14 +349,16 @@ async function main() {
 
 	const node = await stageNode(out, target);
 	say("Daemon (build:runtime)");
-	run("pnpm", ["--filter", "@gentle-dot/daemon", "build:runtime", "--", "--out", out], { cwd: REPO });
+	const daemonBuild = pnpmInvocation(["--filter", "@gentle-dot/daemon", "build:runtime", "--", "--out", out]);
+	run(daemonBuild.command, daemonBuild.args, { cwd: REPO });
 	const modules = installDaemonModules(out, target, goExecutable);
 	const engram = await stageEngram(out, target, options.engramVersion);
 	say("Engram guard");
 	const guard = stageEngramGuard(out, target);
 	say(`Staged ${guard}`);
 	say("Web UI");
-	run("pnpm", ["--filter", "@gentle-dot/ui", "build"], { cwd: REPO });
+	const uiBuild = pnpmInvocation(["--filter", "@gentle-dot/ui", "build"]);
+	run(uiBuild.command, uiBuild.args, { cwd: REPO });
 	cpSync(join(REPO, "packages", "ui", "dist", "app"), join(out, "ui"), { recursive: true });
 
 	const links = symlinksIn(out);

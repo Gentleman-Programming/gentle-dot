@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { installerEnv, windowsBuildGo } from "../lib.mjs";
+import { installerEnv, pnpmInvocation, windowsBuildGo } from "../lib.mjs";
 
 describe("Windows staging install", () => {
 	it("admits only explicitly provisioned Go and adds only its directory to installer PATH", () => {
@@ -20,7 +20,9 @@ describe("Windows staging install", () => {
 			expect(() => windowsBuildGo({ GENTLE_DOT_BUILD_GO: value }, () => true)).toThrow(usage);
 		}
 		const env = installerEnv("C:\\stage", "C:\\cache", "win-x64", source, source.GENTLE_DOT_BUILD_GO);
-		expect(env.PATH).toBe("C:\\stage\\node;C:\\Windows\\System32;C:\\Windows;C:\\Program Files\\Go\\bin");
+		expect(env.PATH).toBe(
+			"C:\\stage\\node\\bin;C:\\Windows\\System32;C:\\Windows;C:\\Program Files\\Go\\bin",
+		);
 		expect(env.SECRET).toBeUndefined();
 		expect(env.GENTLE_DOT_BUILD_GO).toBeUndefined();
 		expect(source.PATH).toBe("C:\\private-tools");
@@ -38,7 +40,7 @@ describe("Windows staging install", () => {
 		const before = { ...source };
 		for (const target of ["win-x64", "win-arm64"]) {
 			const env = installerEnv("C:\\stage & space", "C:\\cache", target, source);
-			expect(env.PATH).toBe("C:\\stage & space\\node;C:\\Windows\\System32;C:\\Windows");
+			expect(env.PATH).toBe("C:\\stage & space\\node\\bin;C:\\Windows\\System32;C:\\Windows");
 			expect(env).toMatchObject({
 				HOME: "C:\\cache\\npm-home",
 				USERPROFILE: "C:\\cache\\npm-home",
@@ -94,5 +96,25 @@ describe("Windows staging install", () => {
 		expect(installerEnv("/stage", "/cache", "darwin-arm64", { TMPDIR: "/var/tmp/x" }).TMPDIR).toBe(
 			"/var/tmp/x",
 		);
+	});
+});
+
+describe("pnpm invocation", () => {
+	const args = ["--filter", "@gentle-dot/ui", "build"];
+
+	it("runs pnpm's own JavaScript entry through Node on Windows, never a .cmd shim", () => {
+		expect(
+			pnpmInvocation(args, "win32", { npm_execpath: "C:\\tools & space\\pnpm.cjs" }, "C:\\Node\\node.exe"),
+		).toEqual({ command: "C:\\Node\\node.exe", args: ["C:\\tools & space\\pnpm.cjs", ...args] });
+	});
+
+	it("refuses to guess when Windows staging was not started through pnpm", () => {
+		expect(() => pnpmInvocation(args, "win32", { npm_execpath: "pnpm.cmd" })).toThrow(/pnpm/);
+		expect(() => pnpmInvocation(args, "win32", {})).toThrow(/npm_execpath/);
+	});
+
+	it("keeps the plain pnpm command elsewhere", () => {
+		expect(pnpmInvocation(args, "linux", {})).toEqual({ command: "pnpm", args });
+		expect(pnpmInvocation(args, "darwin", {})).toEqual({ command: "pnpm", args });
 	});
 });

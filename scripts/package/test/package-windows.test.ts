@@ -87,7 +87,7 @@ describe("payloadDifferences", () => {
 describe("the payload hash sample", () => {
 	it("pins the files whose bytes prove the runtime crossed the installer", () => {
 		expect(RUNTIME_HASH_SAMPLE).toContain("MANIFEST.json");
-		expect(RUNTIME_HASH_SAMPLE).toContain("node/node.exe");
+		expect(RUNTIME_HASH_SAMPLE).toContain("node/bin/node.exe");
 		expect(RUNTIME_HASH_SAMPLE).toContain("bin/pi.cmd");
 		expect(RUNTIME_HASH_SAMPLE).toContain("bin/engram.exe");
 		expect(RUNTIME_HASH_SAMPLE).toContain("daemon/cli.mjs");

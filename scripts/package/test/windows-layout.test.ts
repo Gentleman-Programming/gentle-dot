@@ -1,0 +1,75 @@
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import {
+	installerEnv,
+	layoutWindowsNode,
+	npmWrapper,
+	RUNTIME_HASH_SAMPLE,
+	WINDOWS_RUNTIME_FILES,
+} from "../lib.mjs";
+
+const LAUNCH = new URL("../../../apps/desktop/src-tauri/src/daemon/launch.rs", import.meta.url);
+const launch = readFileSync(LAUNCH, "utf8");
+
+/** The relative paths `validate_packaged_runtime` requires, read from its `for relative in [...]` list. */
+function requiredRuntimeFiles(): string[] {
+	const list = /for relative in \[([^\]]+)\]/.exec(launch)?.[1];
+	if (!list) throw new Error("launch.rs has no `for relative in [...]` required-file list.");
+	return [...list.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+}
+
+/** The Node path the Windows launch spec runs, read from its `#[cfg(windows)]` block. */
+function launchNodePath(): string {
+	const path = /dir\.join\("([^"]+node\.exe)"\)\.display\(\)\.to_string\(\)/.exec(launch)?.[1];
+	if (!path) throw new Error("launch.rs has no Windows node.exe launch path.");
+	return path;
+}
+
+describe("Windows runtime layout against launch.rs", () => {
+	it("reads a non-trivial required-file list and a Node path from launch.rs", () => {
+		expect(requiredRuntimeFiles().length).toBeGreaterThan(5);
+		expect(launchNodePath()).toBe("node/bin/node.exe");
+		expect(requiredRuntimeFiles()).toContain(launchNodePath());
+	});
+
+	it("puts the Node directory launch.rs runs on the installer PATH", () => {
+		const nodeDir = launchNodePath()
+			.replace(/\/node\.exe$/, "")
+			.replace(/\//g, "\\");
+		const env = installerEnv("C:\\stage", "C:\\cache", "win-x64", { SystemRoot: "C:\\Windows" });
+		expect(env.PATH.split(";")).toContain(`C:\\stage\\${nodeDir}`);
+	});
+
+	it("hashes the Node binary launch.rs requires when the installer payload is checked", () => {
+		expect(RUNTIME_HASH_SAMPLE).toContain(launchNodePath());
+	});
+
+	it("lays Node out where launch.rs runs it, with the npm shims beside it", () => {
+		const scratch = mkdtempSync(join(tmpdir(), "windows-layout-"));
+		try {
+			// Node's Windows zip: node.exe and the cmd shims at the root, npm one folder down.
+			const extracted = join(scratch, "node-v24-win-x64");
+			mkdirSync(join(extracted, "node_modules", "npm", "bin"), { recursive: true });
+			for (const name of ["node.exe", "npm.cmd", "npx.cmd", "LICENSE", "node_modules/npm/bin/npm-cli.js"])
+				writeFileSync(join(extracted, name), name);
+			const node = join(scratch, "runtime", "node");
+			layoutWindowsNode(extracted, node);
+			const runtime = join(scratch, "runtime");
+			expect(existsSync(join(runtime, launchNodePath()))).toBe(true);
+			expect(readFileSync(join(runtime, launchNodePath()), "utf8")).toBe("node.exe");
+			expect(existsSync(join(node, "bin", "npm.cmd"))).toBe(true);
+			expect(existsSync(join(node, "bin", "npx.cmd"))).toBe(true);
+			expect(readFileSync(join(node, "bin", "npm.cmd"), "utf8")).toBe(npmWrapper("npm-cli.js", "win32"));
+			expect(existsSync(join(node, "lib", "node_modules", "npm", "bin", "npm-cli.js"))).toBe(true);
+			expect(existsSync(join(node, "node.exe"))).toBe(false);
+		} finally {
+			rmSync(scratch, { recursive: true, force: true });
+		}
+	});
+
+	it("declares every required file the stages produce, and none launch.rs does not require", () => {
+		expect([...WINDOWS_RUNTIME_FILES].sort()).toEqual([...requiredRuntimeFiles()].sort());
+	});
+});
