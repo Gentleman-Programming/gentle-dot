@@ -4,13 +4,17 @@
 # `cfg(unix)` and `cfg(target_os = "…")` arms are compiled at all: an arm the host does not
 # match is not type-checked on that host, so a change to the macOS or Linux half of a shared
 # module can be wrong in a way no other platform can see. The Windows channel is
-# `.github/workflows/windows.yml`, which lives on the Windows port branch until that port
-# merges (odd/tasks/windows-port.md, W3); this one guards the platforms `main` was written for.
+# `.github/workflows/windows.yml`; this one guards the platforms `main` was written for.
 #
-# Nothing here is platform-specific on purpose: the same commands the README names
-# (`pnpm typecheck && pnpm lint && pnpm test`, and `cargo test` in `apps/desktop/src-tauri`) are
-# run on both runners, so a suite that only passes on a developer's machine is a failure here.
+# The commands are the ones the README names (`pnpm typecheck && pnpm lint && pnpm test`, and
+# `cargo test` in `apps/desktop/src-tauri`), so a suite that only passes on a developer's machine
+# is a failure here. The TypeScript job runs on Linux only: `macos.yml` already runs typecheck and
+# the full Vitest suite on macOS, and lint does not depend on the OS. The Rust job runs on both,
+# because nothing else compiles the shell's macOS arms.
 name: POSIX
+
+permissions:
+  contents: read
 
 on:
   push:
@@ -36,14 +40,9 @@ jobs:
   # postinstall builds its binary from source on Windows only, and on Darwin and Linux it
   # downloads a pinned release archive (the Windows job says so where it installs Go).
   typescript:
-    name: TypeScript (${{ matrix.os }})
-    strategy:
-      # One platform's failure must not hide the other's: a POSIX suite that fails on macOS and
-      # passes on Linux is the interesting case, not a reason to stop early.
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    name: TypeScript (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -75,10 +74,14 @@ jobs:
   rust:
     name: Rust (${{ matrix.os }})
     strategy:
+      # One platform's failure must not hide the other's: a suite that fails on macOS and passes
+      # on Linux is the interesting case, not a reason to stop early.
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    # The first run on a runner compiles the shell and downloads sherpa-onnx.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
 
@@ -121,4 +124,4 @@ jobs:
       # the cache above carries the compiled artifacts from the second run on.
       - name: cargo test
         working-directory: apps/desktop/src-tauri
-        run: cargo test
+        run: cargo test --locked
