@@ -1,6 +1,7 @@
 //! Desktop view of `~/.gentle-dot/config.json` and the connection details the UI needs.
 
 use serde::Serialize;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_PORT: u16 = 4317;
@@ -115,13 +116,15 @@ pub const NO_HOME: &str =
 /// The data dir. `GENTLE_DOT_DATA_DIR` wins and needs no home unless its value names one with
 /// `~`; otherwise the home comes from [`crate::platform::home_dir`], and a home that cannot be
 /// resolved is an error rather than a relative `.gentle-dot` resolved against the working
-/// directory — which is what made the app miss its own token on Windows (W22).
-pub fn resolve_data_dir(os: crate::platform::Os, env: impl Fn(&str) -> Option<String>) -> Result<PathBuf, String> {
-    match env("GENTLE_DOT_DATA_DIR").filter(|value| !value.is_empty()) {
+/// directory — which is what made the app miss its own token on Windows (W22). The environment is
+/// read as OS strings so a non-UTF-8 `HOME` on POSIX still names the home.
+pub fn resolve_data_dir(os: crate::platform::Os, env: impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, String> {
+    let text = |key: &str| env(key).and_then(|value| value.into_string().ok());
+    match text("GENTLE_DOT_DATA_DIR").filter(|value| !value.is_empty()) {
         Some(dir) if !dir.starts_with('~') => Ok(PathBuf::from(dir)),
         _ => {
             let home = crate::platform::home_dir(os, &env).ok_or_else(|| NO_HOME.to_string())?;
-            Ok(data_dir(env, &home))
+            Ok(data_dir(text, &home))
         }
     }
 }
@@ -129,7 +132,8 @@ pub fn resolve_data_dir(os: crate::platform::Os, env: impl Fn(&str) -> Option<St
 /// Reads the real environment and `<data dir>/config.json`.
 pub fn load_config() -> Result<DesktopConfig, String> {
     let env = |key: &str| std::env::var(key).ok();
-    let dir = resolve_data_dir(crate::platform::Os::CURRENT, &env)?;
+    // OS strings preserve non-UTF-8 Unix HOME paths too.
+    let dir = resolve_data_dir(crate::platform::Os::CURRENT, |key| std::env::var_os(key))?;
     let file = std::fs::read_to_string(dir.join("config.json")).ok();
     Ok(parse_config(dir, file.as_deref(), &env))
 }
@@ -224,6 +228,10 @@ mod tests {
         move |key| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string())
     }
 
+    fn os_env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
+        move |key| env_of(pairs)(key).map(Into::into)
+    }
+
     fn dir() -> PathBuf {
         PathBuf::from("/data")
     }
@@ -244,7 +252,7 @@ mod tests {
     #[test]
     fn the_data_dir_never_falls_back_to_a_relative_path() {
         use crate::platform::Os;
-        let windows = |pairs: &'static [(&'static str, &'static str)]| resolve_data_dir(Os::Windows, env_of(pairs));
+        let windows = |pairs: &'static [(&'static str, &'static str)]| resolve_data_dir(Os::Windows, os_env_of(pairs));
         // Built with Path::join rather than written as a literal: this test drives the Windows
         // resolution on every host, and on macOS and Linux a backslash is not a separator, so the
         // literal is one component there while the resolved value is two. Comparing the two
@@ -257,15 +265,19 @@ mod tests {
         );
         // The W22 bug: a Windows GUI launch has no HOME. That is an error, never `.gentle-dot`.
         assert_eq!(windows(&[]), Err(NO_HOME.to_string()));
-        assert_eq!(windows(&[("HOME", r"C:\Users\me")]), Err(NO_HOME.to_string()));
+        // `HOME` wins on Windows too (Git Bash, MSYS), so their data dir keeps being found.
+        assert_eq!(
+            windows(&[("HOME", r"C:\Users\me"), ("USERPROFILE", r"D:\profile")]),
+            Ok(Path::new(r"C:\Users\me").join(".gentle-dot"))
+        );
         // An explicit absolute dir needs no home; a `~` value still does.
         assert_eq!(windows(&[("GENTLE_DOT_DATA_DIR", r"D:\dot")]), Ok(PathBuf::from(r"D:\dot")));
         assert_eq!(
-            resolve_data_dir(Os::Linux, env_of(&[("HOME", "/home/me"), ("GENTLE_DOT_DATA_DIR", "~/dot")])),
+            resolve_data_dir(Os::Linux, os_env_of(&[("HOME", "/home/me"), ("GENTLE_DOT_DATA_DIR", "~/dot")])),
             Ok(PathBuf::from("/home/me/dot"))
         );
-        assert_eq!(resolve_data_dir(Os::Linux, env_of(&[])), Err(NO_HOME.to_string()));
-        assert_eq!(resolve_data_dir(Os::MacOs, env_of(&[("HOME", "/Users/me")])), Ok(PathBuf::from("/Users/me/.gentle-dot")));
+        assert_eq!(resolve_data_dir(Os::Linux, os_env_of(&[])), Err(NO_HOME.to_string()));
+        assert_eq!(resolve_data_dir(Os::MacOs, os_env_of(&[("HOME", "/Users/me")])), Ok(PathBuf::from("/Users/me/.gentle-dot")));
     }
 
     #[test]

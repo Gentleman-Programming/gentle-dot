@@ -7,6 +7,7 @@
 //! injected values so they are tested on every OS; the one exception is [`WindowsBackdrop::current`],
 //! which reads the Windows facts at runtime behind `cfg(target_os = "windows")` and fails closed.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,24 +80,32 @@ impl Os {
 
 /// The user's home folder, from the variables this OS actually sets.
 ///
-/// **Windows does not define `HOME`** — only MSYS and similar shells do — so an app started the
-/// way a user starts it (Explorer, the Start menu, autostart) has none. Reading `HOME` alone
-/// therefore left the data dir as a bare relative `.gentle-dot`, resolved against the working
-/// directory, and the app never found its own token (W22). Windows sets `USERPROFILE`, with
-/// `HOMEDRIVE` + `HOMEPATH` as the older pair; macOS and Linux set `HOME`.
+/// **`HOME` wins on every OS**, as it always has: a Windows user who has it set (Git Bash, MSYS)
+/// keeps the data dir, token, config and memory store they already have. **Windows does not define
+/// `HOME`** by itself, though — only MSYS and similar shells do — so an app started the way a user
+/// starts it (Explorer, the Start menu, autostart) has none. Reading `HOME` alone therefore left
+/// the data dir as a bare relative `.gentle-dot`, resolved against the working directory, and the
+/// app never found its own token (W22). On Windows `USERPROFILE` is the fallback, with
+/// `HOMEDRIVE` + `HOMEPATH` as the older pair; macOS and Linux read `HOME` only.
+///
+/// The values are `OsString`, so a non-UTF-8 `HOME` on POSIX still resolves.
 ///
 /// `None` is the honest answer when nothing names a home, and the caller must fail rather than
 /// invent a relative path.
-pub fn home_dir(os: Os, env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    // A blank value is not a folder: `USERPROFILE=   ` must not become a home called `   `.
-    let value = |key: &str| env(key).filter(|value| !value.trim().is_empty());
+pub fn home_dir(os: Os, env: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    // A blank value is not a folder: `USERPROFILE=   ` must not become a home called `   `. A value
+    // that is not UTF-8 cannot be blank text, so it is kept.
+    let value = |key: &str| env(key).filter(|value| value.to_str().map_or(true, |text| !text.trim().is_empty()));
+    let home = value("HOME").map(PathBuf::from);
     match os {
-        Os::Windows => value("USERPROFILE").map(PathBuf::from).or_else(|| {
-            let drive = value("HOMEDRIVE")?;
-            let rest = value("HOMEPATH")?;
-            Some(PathBuf::from(format!("{drive}{rest}")))
-        }),
-        Os::MacOs | Os::Linux => value("HOME").map(PathBuf::from),
+        Os::Windows => home
+            .or_else(|| value("USERPROFILE").map(PathBuf::from))
+            .or_else(|| {
+                let mut path = value("HOMEDRIVE")?;
+                path.push(value("HOMEPATH")?);
+                Some(PathBuf::from(path))
+            }),
+        Os::MacOs | Os::Linux => home,
     }
 }
 
@@ -311,6 +320,10 @@ mod tests {
 
     fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
         move |key| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string())
+    }
+
+    fn os_env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
+        move |key| env_of(pairs)(key).map(Into::into)
     }
 
     const GNOME_WAYLAND: &[(&str, &str)] = &[
@@ -530,24 +543,50 @@ mod tests {
 
     #[test]
     fn the_home_comes_from_the_variables_this_os_sets() {
-        assert_eq!(
-            home_dir(Os::Windows, env_of(&[("USERPROFILE", r"C:\Users\me")])),
-            Some(PathBuf::from(r"C:\Users\me"))
-        );
+        let profile = || os_env_of(&[("USERPROFILE", r"C:\Users\me")]);
+        assert_eq!(home_dir(Os::Windows, profile()), Some(PathBuf::from(r"C:\Users\me")));
         // The older pair, joined the way Windows renders it.
         assert_eq!(
-            home_dir(Os::Windows, env_of(&[("HOMEDRIVE", "C:"), ("HOMEPATH", r"\Users\me")])),
+            home_dir(Os::Windows, os_env_of(&[("HOMEDRIVE", "C:"), ("HOMEPATH", r"\Users\me")])),
             Some(PathBuf::from(r"C:\Users\me"))
         );
-        assert_eq!(home_dir(Os::Windows, env_of(&[("USERPROFILE", "   ")])), None);
-        // The W22 bug: a Windows GUI launch has no HOME, and that must never become a relative path.
-        assert_eq!(home_dir(Os::Windows, env_of(&[("HOME", "/home/me")])), None);
-        assert_eq!(home_dir(Os::Windows, env_of(&[("HOMEDRIVE", "C:")])), None);
-        assert_eq!(home_dir(Os::Linux, env_of(&[("HOME", "/home/me")])), Some(PathBuf::from("/home/me")));
-        assert_eq!(home_dir(Os::MacOs, env_of(&[("HOME", "/Users/me")])), Some(PathBuf::from("/Users/me")));
+        // A blank value is not a folder, so the next variable is tried and then `None`.
+        assert_eq!(home_dir(Os::Windows, os_env_of(&[("USERPROFILE", "   ")])), None);
+        assert_eq!(
+            home_dir(Os::Windows, os_env_of(&[("HOME", ""), ("USERPROFILE", r"C:\Users\me")])),
+            Some(PathBuf::from(r"C:\Users\me"))
+        );
+        // The W22 bug: a Windows GUI launch has no HOME or USERPROFILE. That is `None`, never a
+        // relative path.
+        assert_eq!(home_dir(Os::Windows, os_env_of(&[])), None);
+        assert_eq!(home_dir(Os::Windows, os_env_of(&[("HOMEDRIVE", "C:")])), None);
+        assert_eq!(home_dir(Os::Linux, os_env_of(&[("HOME", "/home/me")])), Some(PathBuf::from("/home/me")));
+        assert_eq!(home_dir(Os::MacOs, os_env_of(&[("HOME", "/Users/me")])), Some(PathBuf::from("/Users/me")));
         // The other direction too: Unix does not read USERPROFILE.
-        assert_eq!(home_dir(Os::Linux, env_of(&[("USERPROFILE", r"C:\Users\me")])), None);
-        assert_eq!(home_dir(Os::MacOs, env_of(&[])), None);
+        assert_eq!(home_dir(Os::Linux, profile()), None);
+        assert_eq!(home_dir(Os::MacOs, os_env_of(&[])), None);
+    }
+
+    #[test]
+    fn home_keeps_home_precedence_and_limits_userprofile_to_windows() {
+        // Git Bash and MSYS set both; `HOME` wins so the existing data dir keeps being found.
+        let both = || os_env_of(&[("HOME", "/home/me"), ("USERPROFILE", r"C:\Users\me")]);
+        assert_eq!(home_dir(Os::Windows, both()), Some(PathBuf::from("/home/me")));
+        assert_eq!(home_dir(Os::Linux, both()), Some(PathBuf::from("/home/me")));
+        assert_eq!(home_dir(Os::MacOs, both()), Some(PathBuf::from("/home/me")));
+        // `HOME` alone is a home on Windows too.
+        assert_eq!(home_dir(Os::Windows, os_env_of(&[("HOME", "/home/me")])), Some(PathBuf::from("/home/me")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_home_that_is_not_utf8_still_resolves_on_posix() {
+        use std::os::unix::ffi::OsStringExt;
+        let raw = OsString::from_vec(b"/home/caf\xe9".to_vec());
+        let home = raw.clone();
+        let env = move |key: &str| (key == "HOME").then(|| home.clone());
+        assert_eq!(home_dir(Os::Linux, &env), Some(PathBuf::from(raw.clone())));
+        assert_eq!(home_dir(Os::MacOs, &env), Some(PathBuf::from(raw)));
     }
 
     #[test]

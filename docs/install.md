@@ -109,6 +109,8 @@ Open **Gentle Dot** from the Start menu. The first open needs the network once: 
 
 The app's install folder never changes after install; everything it writes goes to the folders above.
 
+`%USERPROFILE%` is the home folder Windows gives every user. If `HOME` is set (Git Bash and MSYS set it), Gentle Dot uses that folder instead, so `.gentle-dot\` is looked for there. The assistant's background process uses the same order (`HOME` first, then `USERPROFILE`), so an install that already keeps its data under `HOME` keeps finding it.
+
 ### A connector secret that cannot be read
 
 Each connector secret is one `.bin` file in a subfolder of `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\`. If one of those files is damaged, or was put there by something other than Gentle Dot, that secret can no longer be read or saved again. The error says `The app's secure store refused it: the secret store failed: …` (in the app or in `%USERPROFILE%\.gentle-dot\daemon.log`), and setting the connector up again does not help. When the damaged file holds the key Gentle Dot checks your connectors with, Gentle Dot says on every start that it could not check your connectors, and the connectors that need a secret stay locked. Restarting, as that notice suggests, does not help in this case.
