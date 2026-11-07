@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
-import { bootDaemon } from "./harness.ts";
+import { bootDaemon, BRIDGE_KEY } from "./harness.ts";
 import { tempDir, waitFor } from "./helpers.ts";
 
 vi.setConfig({ testTimeout: 180_000 });
@@ -43,7 +43,7 @@ describe("a prompt during a run steers it (T3)", () => {
 			}
 		});
 
-		ws.send(JSON.stringify({ type: "hello", token: "gentle-dot-bridge-secret", protocol: 1 }));
+		ws.send(JSON.stringify({ type: "hello", token: BRIDGE_KEY, protocol: 1 }));
 		await waitFor(() => frames.some((f) => f.type === "ready"), 60_000);
 
 		// ask:select leaves the run open until the question is answered: a real busy run.

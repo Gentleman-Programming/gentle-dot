@@ -4,7 +4,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
-import { bootDaemon } from "./harness.ts";
+import { bootDaemon, BRIDGE_KEY } from "./harness.ts";
 import { waitFor } from "./helpers.ts";
 
 vi.setConfig({ testTimeout: 180_000 });
@@ -34,7 +34,7 @@ describe("the app WebSocket gateway (T2.2)", () => {
 		collect(ws, frames);
 
 		// The client protocol: flat hello, no envelope, no connectorType.
-		ws.send(JSON.stringify({ type: "hello", token: "gentle-dot-bridge-secret", protocol: 1 }));
+		ws.send(JSON.stringify({ type: "hello", token: BRIDGE_KEY, protocol: 1 }));
 
 		await waitFor(() => frames.some((f) => f.type === "ready"), 60_000);
 		const ready = frames.find((f) => f.type === "ready");
@@ -68,7 +68,7 @@ describe("the app WebSocket gateway (T2.2)", () => {
 		});
 		collect(ws, frames);
 
-		ws.send(JSON.stringify({ type: "hello", token: "gentle-dot-bridge-secret", protocol: 1 }));
+		ws.send(JSON.stringify({ type: "hello", token: BRIDGE_KEY, protocol: 1 }));
 		await waitFor(() => frames.some((f) => f.type === "ready"), 60_000);
 
 		// The fake engine answers "ask:select" by asking the user to pick a colour.
