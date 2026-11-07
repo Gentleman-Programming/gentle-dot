@@ -4,15 +4,27 @@ import { APP_REQUIRED, type ConnectorInfo } from "@gentle-dot/protocol";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ComputerPermissions } from "../src/computer.ts";
 import { type DotState, initialState } from "../src/store.ts";
 
 const HELPER = "http://127.0.0.1:51234/mcp";
 const KEY = "s3cr3t-Computer-Key-0123456789abcdef";
+const WINDOWS_2004_NOTE =
+	"Computer control needs Windows 10 version 2004 (build 19041) or newer for screenshots.";
+const YOLO_NOTE_WITHOUT_PANIC =
+	"Yolo mode lets the assistant send, pay, delete, and submit without asking you first. It turns itself off after 1 hour or when the app quits; Stop still works.";
+const UNKNOWN_WINDOWS_NOTE =
+	"Gentle Dot cannot tell which Windows version this is, so computer control is unavailable: screenshots need Windows 10 version 2004 (build 19041) or newer.";
 
 const h = vi.hoisted(() => ({
 	tauri: true,
 	endpoint: null as unknown,
-	permissions: { accessibility: false, screenRecording: true },
+	permissions: {
+		accessibility: false,
+		screenRecording: true,
+		screenshotsSupported: true,
+		panicShortcut: true,
+	} as ComputerPermissions,
 	status: { active: false } as unknown,
 	invoke: vi.fn(),
 	send: vi.fn(),
@@ -92,7 +104,12 @@ async function emitState(payload: unknown) {
 beforeEach(() => {
 	h.tauri = true;
 	h.endpoint = { url: HELPER, token: KEY };
-	h.permissions = { accessibility: false, screenRecording: true };
+	h.permissions = {
+		accessibility: false,
+		screenRecording: true,
+		screenshotsSupported: true,
+		panicShortcut: true,
+	};
 	h.status = { active: false };
 	h.listeners.clear();
 	h.send = vi.fn();
@@ -189,7 +206,12 @@ describe("the Computer entry in Connectors (S24.5)", () => {
 		expect(h.invoke).toHaveBeenCalledWith("computer_request_permission", { kind: "accessibility" });
 		await waitFor(() => expect(invoked("computer_permissions").length).toBe(checks + 1));
 
-		h.permissions = { accessibility: true, screenRecording: true };
+		h.permissions = {
+			accessibility: true,
+			screenRecording: true,
+			screenshotsSupported: true,
+			panicShortcut: true,
+		};
 		await userEvent.click(within(entry).getByRole("button", { name: "Check again" }));
 		await waitFor(() => expect(accessibility).toHaveTextContent("Allowed"));
 		expect(accessibility).not.toHaveTextContent("Not allowed");
@@ -197,7 +219,12 @@ describe("the Computer entry in Connectors (S24.5)", () => {
 	});
 
 	it("asks for Screen Recording with its own kind", async () => {
-		h.permissions = { accessibility: true, screenRecording: false };
+		h.permissions = {
+			accessibility: true,
+			screenRecording: false,
+			screenshotsSupported: true,
+			panicShortcut: true,
+		};
 		h.state = connectorsOpen([computerEntry()]);
 		await renderApp("?surface=panel");
 		const recording = await screen.findByRole("listitem", { name: "Screen Recording" });
@@ -267,6 +294,141 @@ describe("while the assistant controls the Mac (S24.6)", () => {
 		expect(rule(".rose-control .rose-light path")).toMatch(/animation: rose-run/);
 		expect(rule(".computer-banner")).toMatch(/var\(--accent/);
 		expect(rule(".computer-banner")).toMatch(/border-radius: var\(--radius-md\)/);
+	});
+});
+
+describe("on Windows", () => {
+	beforeEach(() => {
+		vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+	});
+	afterEach(() => vi.restoreAllMocks());
+
+	it("shows Windows guidance without macOS permissions", async () => {
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		expect(
+			within(entry).getByText("Windows asks for no permission for computer control."),
+		).toBeInTheDocument();
+		expect(within(entry).queryByText("Accessibility")).toBeNull();
+		expect(within(entry).queryByText("Screen Recording")).toBeNull();
+		expect(within(entry).queryByRole("button", { name: "Check again" })).toBeNull();
+		expect(within(entry).queryByText(DEBUG_NOTE)).toBeNull();
+		expect(await within(entry).findByText(/Stop and Alt\+Shift\+Esc still work/)).toBeInTheDocument();
+	});
+
+	it("names Alt+Shift+Esc in the yolo note only when the app registered it", async () => {
+		h.permissions.panicShortcut = false;
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		expect(await within(entry).findByText(YOLO_NOTE_WITHOUT_PANIC)).toBeInTheDocument();
+		expect(within(entry).queryByText(/Alt\+Shift\+Esc/)).toBeNull();
+	});
+
+	it("promises no shortcut in the yolo note while the app has not answered", async () => {
+		const answer = h.invoke.getMockImplementation();
+		h.invoke.mockImplementation((command: string, args?: unknown) =>
+			command === "computer_permissions" ? new Promise(() => {}) : answer?.(command, args),
+		);
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		expect(within(entry).getByText(YOLO_NOTE_WITHOUT_PANIC)).toBeInTheDocument();
+		expect(within(entry).queryByText(/Alt\+Shift\+Esc/)).toBeNull();
+	});
+
+	it("explains unsupported screenshots require Windows 10 version 2004 or newer", async () => {
+		h.permissions.screenshotsSupported = false;
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		expect(await screen.findByText(WINDOWS_2004_NOTE)).toBeInTheDocument();
+		expect(screen.queryByText(UNKNOWN_WINDOWS_NOTE)).toBeNull();
+	});
+
+	it("says this Windows is too old when the app says so", async () => {
+		h.permissions.screenshotsSupported = false;
+		h.permissions.screenshotsUnsupported = "tooOld";
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		expect(await screen.findByText(WINDOWS_2004_NOTE)).toBeInTheDocument();
+		expect(screen.queryByText(UNKNOWN_WINDOWS_NOTE)).toBeNull();
+	});
+
+	it("says the Windows version is unknown, not too old, when the app cannot tell it", async () => {
+		h.permissions.screenshotsSupported = false;
+		h.permissions.screenshotsUnsupported = "unknownVersion";
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		expect(await screen.findByText(UNKNOWN_WINDOWS_NOTE)).toBeInTheDocument();
+		expect(screen.queryByText(WINDOWS_2004_NOTE)).toBeNull();
+	});
+
+	it("says nothing about Windows 10 version 2004 when screenshots are supported", async () => {
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		await within(entry).findByText("Windows asks for no permission for computer control.");
+		expect(within(entry).queryByText(WINDOWS_2004_NOTE)).toBeNull();
+		expect(within(entry).queryByText(UNKNOWN_WINDOWS_NOTE)).toBeNull();
+	});
+
+	it("names the PC in the session banner", async () => {
+		h.status = { active: true };
+		await renderApp("?surface=panel");
+		expect(await screen.findByText("Controlling your PC")).toBeInTheDocument();
+	});
+});
+
+describe("on macOS", () => {
+	beforeEach(() => {
+		vi.spyOn(navigator, "userAgent", "get").mockReturnValue(
+			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)",
+		);
+	});
+	afterEach(() => vi.restoreAllMocks());
+
+	it("shows none of the Windows texts, even when screenshots are reported unsupported", async () => {
+		h.permissions.screenshotsSupported = false;
+		h.permissions.screenshotsUnsupported = "unknownVersion";
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		await within(entry).findByText("Accessibility");
+		expect(within(entry).queryByText("Windows asks for no permission for computer control.")).toBeNull();
+		expect(within(entry).queryByText(WINDOWS_2004_NOTE)).toBeNull();
+		expect(within(entry).queryByText(UNKNOWN_WINDOWS_NOTE)).toBeNull();
+		expect(within(entry).queryByText(/Alt\+Shift\+Esc/)).toBeNull();
+		expect(await within(entry).findByText(/Stop and ⌥⇧Esc still work/)).toBeInTheDocument();
+	});
+
+	it("names ⌥⇧Esc in the yolo note only when the app registered it", async () => {
+		h.permissions.panicShortcut = false;
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		await within(entry).findByText("Allowed");
+		expect(within(entry).getByText(YOLO_NOTE_WITHOUT_PANIC)).toBeInTheDocument();
+		expect(within(entry).queryByText(/⌥⇧Esc/)).toBeNull();
+	});
+
+	it("promises no shortcut in the yolo note when the permissions check fails", async () => {
+		const answer = h.invoke.getMockImplementation();
+		h.invoke.mockImplementation((command: string, args?: unknown) =>
+			command === "computer_permissions" ? Promise.reject(new Error("no answer")) : answer?.(command, args),
+		);
+		h.state = connectorsOpen([computerEntry()]);
+		await renderApp("?surface=panel");
+		const entry = await screen.findByRole("listitem", { name: "Computer" });
+		expect(within(entry).getByText(YOLO_NOTE_WITHOUT_PANIC)).toBeInTheDocument();
+		expect(within(entry).queryByText(/⌥⇧Esc/)).toBeNull();
+	});
+
+	it("names the Mac in the session banner", async () => {
+		h.status = { active: true };
+		await renderApp("?surface=panel");
+		expect(await screen.findByText("Controlling your Mac")).toBeInTheDocument();
+		expect(screen.queryByText("Controlling your PC")).toBeNull();
 	});
 });
 

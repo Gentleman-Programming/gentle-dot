@@ -270,6 +270,18 @@ describe("handoff session file", () => {
 		const reopened = SessionManager.open(file).buildSessionContext().messages;
 		expect(reopened.map((m) => m.role)).toEqual(["custom", "user"]);
 	});
+
+	// SessionManager.open migrates an older header up to its own version, so the check above
+	// cannot see a stale version; the bytes on disk can.
+	it("writes the installed engine's session version in its header", async () => {
+		const dir = tempDir();
+		const previous = join(dir, "previous.jsonl");
+		writeFileSync(previous, `${JSON.stringify({ type: "session", version: 3, id: "p", cwd: dir })}\n`);
+		const file = await writeHandoffSession(previous, "Summary.");
+		const { CURRENT_SESSION_VERSION } = await import("@earendil-works/pi-coding-agent");
+		const header = JSON.parse(readFileSync(file, "utf8").split("\n")[0] ?? "");
+		expect(header).toMatchObject({ type: "session", version: CURRENT_SESSION_VERSION });
+	});
 });
 
 describe("recent history", () => {

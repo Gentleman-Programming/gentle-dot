@@ -18,3 +18,11 @@ apps/desktop/src-tauri/gen/
 packages/*/src/**/*.d.ts
 packages/daemon/voice-tools/pnpm-lock.yaml
 .fake-sessions/
+
+# Explicit Windows addon build outputs
+/packages/daemon/native/*.node
+/packages/daemon/native/*.obj
+/packages/daemon/native/*.lib
+/packages/daemon/native/*.exp
+/packages/daemon/native/*.pdb
+packages/connectors.json

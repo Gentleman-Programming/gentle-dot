@@ -106,7 +106,7 @@ Attach files with the paperclip, drag and drop, or paste. Images go straight to 
 
 ## Get started
 
-There are no published releases yet: build the installer for your system. You need Node.js 24 and pnpm; the macOS app also needs Rust and the Xcode command line tools, and the Linux packages need Docker.
+There are no published releases yet: build the installer for your system. You need Node.js 24 and pnpm; the macOS app also needs Rust and the Xcode command line tools, the Linux packages need Docker, and the Windows installer needs Rust, Visual Studio's C++ build tools and Go (see [docs/install.md](docs/install.md#windows)).
 
 ```sh
 pnpm install
@@ -117,6 +117,11 @@ pnpm package:mac
 # Linux: a .deb (amd64 also builds the Arch package)
 pnpm package:linux --arch arm64
 pnpm package:linux --arch amd64
+
+# Windows (x64): an NSIS installer. First build the native addon and set
+# GENTLE_DOT_BUILD_GO: see docs/install.md#build-the-installer-from-source
+pnpm package:runtime --target windows-x64
+pnpm package:windows
 ```
 
 Then follow **[docs/install.md](docs/install.md)**: opening an unsigned app on macOS 15 and later goes through **System Settings → Privacy & Security → Open Anyway**, and the guide covers permissions, where your data lives, and uninstalling.
@@ -141,7 +146,7 @@ A small Node daemon starts the agent engine (Gentle Shell, `gentle-shell --mode 
 - **Your data:** `~/.gentle-dot` (mode 0700): sessions, settings, the access key (`token`), and the engine's own home and workspace. Point the assistant at a folder of yours with `GENTLE_DOT_WORKSPACE` or `"workspace"` in `~/.gentle-dot/config.json`.
 - **Memory:** your global Engram (`~/.engram`, port 7437), project `gentle-dot`; `GENTLE_DOT_ENGRAM=private` gives the assistant a memory of its own.
 - **Connectors:** the daemon alone writes `~/.gentle-dot/connectors.json` and the engine's `mcp.json`, and puts them back if anything else changes them. `connectors.json` is signed with a key kept in the Keychain; if it was changed while Gentle Dot was closed, it is set aside and you are told.
-- **Screenshots:** each model call carries only the latest one; earlier ones become one-line log entries, which keeps long control sessions fast.
+- **Screenshots:** each model call carries only the latest one; earlier ones become one-line log entries, which keeps long control sessions fast. On Windows, computer control needs Windows 10 version 2004 (build 19041) or newer to exclude Gentle Dot's windows from screenshots.
 
 <div align="right"><a href="#top">Back to top</a></div>
 

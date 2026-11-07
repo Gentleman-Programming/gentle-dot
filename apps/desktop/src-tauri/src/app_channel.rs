@@ -24,8 +24,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
+#[cfg(unix)]
 use std::net::Shutdown;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(unix)]
+pub type ChannelStream = UnixStream;
+#[cfg(windows)]
+pub mod windows;
+#[cfg(windows)]
+pub use windows::ChannelStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -146,7 +154,9 @@ pub(crate) fn serve_secret(store: &dyn SecretStore, method: &str, params: &Value
 type Reply = mpsc::Sender<Result<Value, String>>;
 
 pub struct AppChannel {
-    writer: Mutex<UnixStream>,
+    writer: Mutex<ChannelStream>,
+    #[cfg(windows)]
+    closer: ChannelStream,
     pending: Mutex<HashMap<u64, Reply>>,
     next: AtomicU64,
     open: AtomicBool,
@@ -154,9 +164,11 @@ pub struct AppChannel {
 
 impl AppChannel {
     /// Reads `stream` on a thread of its own; each daemon request runs on a worker thread.
-    pub fn start(stream: UnixStream, handler: Arc<dyn Handler>) -> io::Result<Arc<Self>> {
+    pub fn start(stream: ChannelStream, handler: Arc<dyn Handler>) -> io::Result<Arc<Self>> {
         let reader = stream.try_clone()?;
         let channel = Arc::new(AppChannel {
+            #[cfg(windows)]
+            closer: stream.try_clone()?,
             writer: Mutex::new(stream),
             pending: Mutex::new(HashMap::new()),
             next: AtomicU64::new(0),
@@ -180,7 +192,16 @@ impl AppChannel {
         }
         let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
         let (reply, answer) = mpsc::channel();
+        #[cfg(unix)]
         self.pending().insert(id, reply);
+        #[cfg(windows)]
+        {
+            // Admission and close's sender clearing share this lock: a request racing close
+            // is either cleared by close or refused before it can enter the pending map.
+            let mut pending = self.pending();
+            if !self.is_open() { return Err("The assistant's channel is closed.".into()); }
+            pending.insert(id, reply);
+        }
         if let Err(error) = self.write(&Frame::Request { id, method: method.into(), params }) {
             self.pending().remove(&id);
             if error.kind() == io::ErrorKind::InvalidInput {
@@ -205,11 +226,41 @@ impl AppChannel {
         self.request("command", json!({"clientId": client_id, "message": message}), COMMAND_TIMEOUT).map(|_| ())
     }
 
+    #[cfg(unix)]
     pub fn close(&self) {
         self.open.store(false, Ordering::SeqCst);
         let _ = self.writer.lock().unwrap_or_else(PoisonError::into_inner).shutdown(Shutdown::Both);
         // Dropping the senders wakes every waiting request.
         self.pending().clear();
+    }
+
+    /// Logical refusal/wakeup is independent of native cancellation. On error the owner
+    /// must retain this channel and retry: is_open() == false does NOT establish native EOF.
+    #[cfg(windows)]
+    pub fn close(&self) -> io::Result<()> {
+        self.open.store(false, Ordering::SeqCst);
+        self.pending().clear();
+        self.closer.shutdown()
+    }
+
+    /// Observable failure of explicit or reader-initiated shutdown; cleared by successful
+    /// checked retry. None before close is not proof that the native endpoint was closed.
+    #[cfg(windows)]
+    pub fn close_error(&self) -> Option<i32> {
+        self.closer.close_error()
+    }
+
+    // Used by the Windows daemon lifecycle tests, which land after the daemon module compiles there.
+    #[cfg(all(test, windows))]
+    #[allow(dead_code)]
+    pub(crate) fn test_inject_cancel_error(&self, code: i32) {
+        self.closer.inject_cancel_error(code);
+    }
+
+    #[cfg(all(test, windows))]
+    #[allow(dead_code)]
+    pub(crate) fn test_close_barriers(&self, entered: Arc<std::sync::Barrier>, release: Arc<std::sync::Barrier>) {
+        self.closer.close_barriers(entered, release);
     }
 
     fn pending(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Reply>> {
@@ -226,9 +277,11 @@ impl AppChannel {
         self.writer.lock().unwrap_or_else(PoisonError::into_inner).write_all(&line)
     }
 
-    fn read(self: Arc<Self>, mut reader: BufReader<UnixStream>, handler: Arc<dyn Handler>) {
+    fn read(self: Arc<Self>, mut reader: BufReader<ChannelStream>, handler: Arc<dyn Handler>) {
         let mut line = Vec::new();
         loop {
+            #[cfg(windows)]
+            if !self.is_open() { break; }
             line.clear();
             match (&mut reader).take(MAX_FRAME + 1).read_until(b'\n', &mut line) {
                 Ok(0) | Err(_) => break,
@@ -238,6 +291,10 @@ impl AppChannel {
                 }
                 Ok(_) => {}
             }
+            // A failed cancellation may let the pending read complete with real bytes.
+            // Logical closure still refuses them; do not dispatch privileged requests.
+            #[cfg(windows)]
+            if !self.is_open() { break; }
             match serde_json::from_slice::<Frame>(&line) {
                 Ok(Frame::Response { id, result, error }) => {
                     if let Some(reply) = self.pending().remove(&id) {
@@ -260,10 +317,23 @@ impl AppChannel {
                 Err(_) => eprintln!("gentle-dot: the assistant's channel sent a frame that is not understood"),
             }
         }
+        #[cfg(unix)]
         self.close();
+        #[cfg(windows)]
+        match self.close() {
+            Ok(()) => {}
+            // close() retains the failure in close_error() for the owner. No successful
+            // teardown is reported; the owner must retry before forgetting this channel.
+            Err(_) => return,
+        }
     }
 
     fn answer(&self, id: u64, method: &str, params: Value, handler: &dyn Handler) {
+        // Refuses a worker that reaches this check after closure. It is an admission check,
+        // not a fence: a worker that passed it just before close() may still enter its handler
+        // after close() returns. Its request was received while the channel was open.
+        #[cfg(windows)]
+        if !self.is_open() { return; }
         let frame = match method {
             "approve" => {
                 let approved = serde_json::from_value::<ApprovalRequest>(params).is_ok_and(|r| handler.approve(&r));
@@ -298,8 +368,8 @@ mod tests {
 
     /// The daemon's side of the pair, read and written frame by frame.
     struct FakeDaemon {
-        reader: BufReader<UnixStream>,
-        writer: UnixStream,
+        reader: BufReader<ChannelStream>,
+        writer: ChannelStream,
     }
 
     impl FakeDaemon {
@@ -332,7 +402,13 @@ mod tests {
     }
 
     fn pair(handler: Arc<dyn Handler>) -> (Arc<AppChannel>, FakeDaemon) {
+        #[cfg(unix)]
         let (app, daemon) = UnixStream::pair().unwrap();
+        #[cfg(windows)]
+        let (app, daemon) = {
+            let (app, child) = windows::channel_pair().unwrap();
+            (app, child.into_test_stream())
+        };
         let channel = AppChannel::start(app, handler).unwrap();
         let reader = BufReader::new(daemon.try_clone().unwrap());
         (channel, FakeDaemon { reader, writer: daemon })
@@ -387,6 +463,7 @@ mod tests {
         assert_eq!(refused.join().unwrap(), Err("That window is gone.".into()));
     }
 
+    #[cfg(unix)] // This particular assertion uses Unix nonblocking socket reads.
     #[test]
     fn a_message_that_is_not_a_connector_change_never_leaves_the_app() {
         let (channel, daemon) = pair(Arc::new(Recorder::default()));
@@ -590,10 +667,68 @@ mod tests {
         assert!(channel.is_open());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn close_failure_is_observable_wakes_waiters_and_refuses_received_requests() {
+        let recorder = Arc::new(Recorder::default());
+        let (channel, mut daemon) = pair(recorder.clone());
+        let (tx, rx) = mpsc::channel();
+        channel.pending().insert(77, tx);
+        channel.closer.inject_cancel_error(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32);
+        let error = channel.close().unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32));
+        assert_eq!(channel.close_error(), error.raw_os_error());
+        assert!(!channel.is_open());
+        assert!(matches!(rx.recv_timeout(Duration::from_secs(1)), Err(mpsc::RecvTimeoutError::Disconnected)));
+        assert!(channel.request("secret_list", json!({}), Duration::from_secs(1)).is_err());
+        // Cancellation failed: release the real pending read with a privileged request.
+        // It must not be dispatched, even though the native endpoint remains alive.
+        daemon.send(&Frame::Request { id: 9, method: "approve".into(), params: json!({
+            "connector": "Slack", "action": "send message", "preview": []
+        }) });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Arc::strong_count(&channel) != 1 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(Arc::strong_count(&channel), 1, "reader must exit without dispatching");
+        assert!(recorder.asked.lock().unwrap().is_empty());
+        assert!(channel.close_error().is_some());
+        channel.closer.inject_cancel_error(0);
+        channel.close().unwrap();
+        assert_eq!(channel.close_error(), None);
+        assert_eq!(daemon.reader.read(&mut [0]).unwrap(), 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn public_close_cancels_a_blocked_writer_and_reader_after_checked_retry() {
+        let (channel, _daemon) = pair(Arc::new(Recorder::default()));
+        let writer = std::thread::spawn({
+            let channel = channel.clone();
+            move || channel.request("computer_register", json!({"pad": "x".repeat(512 * 1024)}), Duration::from_secs(10))
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while channel.closer.active_operations() < 2 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(channel.closer.active_operations(), 2, "read and write must be pending");
+        channel.closer.inject_cancel_error(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED as i32);
+        assert!(channel.close().is_err());
+        assert!(!channel.is_open());
+        assert!(channel.pending().is_empty());
+        channel.closer.inject_cancel_error(0);
+        channel.close().unwrap();
+        assert!(writer.join().unwrap().is_err());
+        assert_eq!(channel.closer.active_operations(), 0);
+    }
+
     #[test]
     fn closing_the_channel_ends_the_daemons_side() {
         let (channel, mut daemon) = pair(Arc::new(Recorder::default()));
+        #[cfg(unix)]
         channel.close();
+        #[cfg(windows)]
+        channel.close().unwrap();
         let mut line = String::new();
         assert_eq!(daemon.reader.read_line(&mut line).unwrap(), 0);
         assert!(!channel.is_open());
