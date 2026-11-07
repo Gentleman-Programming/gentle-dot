@@ -33,11 +33,14 @@ import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { fakeOAuth } from "./fake-oauth.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { hasPosixModes } from "./support/posix-modes.ts";
 
 const FAKE_SERVER = fileURLToPath(new URL("./fixtures/fake-mcp-server.ts", import.meta.url));
 const TOKEN = "discord-bot-token-0f9c2b7e";
 const NOTION_KEY = "mcp__notion|https://mcp.notion.com/mcp";
 const LINEAR_KEY = "mcp__linear|https://mcp.linear.app/mcp";
+if (!hasPosixModes())
+	process.stderr.write("Windows-only test skip: chmod 0o000 cannot make a sign-in file unreadable\n");
 
 const stores: ConnectorStore[] = [];
 const managers: ConnectorManager[] = [];
@@ -574,39 +577,39 @@ describe("one-time migration into the app's store", () => {
 		expect(logs.join("\n")).not.toContain("planted-token");
 	});
 
-	// Gated whole on Windows: `chmodSync(path, 0o000)` is a no-op there, so the file stays readable,
-	// migration genuinely reads and consumes it, and this test's premise -- an unreadable sign-in
-	// file that does not block migration -- cannot hold. Its guarantee is unverified on Windows;
-	// gating only the failing assertion would hide that behind a green tick.
-	it.skipIf(process.platform === "win32")(
-		"a 0-byte or unreadable sign-in file never blocks the rest (N2)",
-		async () => {
-			const { dataDir, agentHome, signin } = legacyInstall();
-			writeFileSync(join(signin, "mcp-auth.json"), "");
-			const source = new MemorySecretSource();
-			const logs: string[] = [];
-			const store = storeWith(dataDir, source, logs);
-			await store.migrate();
-			expect(await (await store.credentials("notion")).authProvider?.token()).toBe("older-notion-access");
-			expect(await (await store.credentials("linear")).authProvider?.token()).toBe("linear-access");
-			expect((await store.credentials("discord")).env).toEqual({ DISCORD_TOKEN: TOKEN });
-			expect(existsSync(join(agentHome, "mcp-auth.json"))).toBe(false);
-			expect(JSON.parse(readFileSync(join(dataDir, "connectors.json"), "utf8")).version).toBe(2);
+	it("a 0-byte sign-in file never blocks the rest (N2)", async () => {
+		const { dataDir, agentHome, signin } = legacyInstall();
+		writeFileSync(join(signin, "mcp-auth.json"), "");
+		const source = new MemorySecretSource();
+		const logs: string[] = [];
+		const store = storeWith(dataDir, source, logs);
+		await store.migrate();
+		expect(await (await store.credentials("notion")).authProvider?.token()).toBe("older-notion-access");
+		expect(await (await store.credentials("linear")).authProvider?.token()).toBe("linear-access");
+		expect((await store.credentials("discord")).env).toEqual({ DISCORD_TOKEN: TOKEN });
+		expect(existsSync(join(agentHome, "mcp-auth.json"))).toBe(false);
+		expect(JSON.parse(readFileSync(join(dataDir, "connectors.json"), "utf8")).version).toBe(2);
+	});
 
-			const other = legacyInstall();
-			const unreadable = join(other.agentHome, "mcp-auth.json");
-			chmodSync(unreadable, 0o000);
-			const blocked = statSync(unreadable).mode;
-			const second = storeWith(other.dataDir, new MemorySecretSource(), logs);
-			await second.migrate();
-			expect(await (await second.credentials("notion")).authProvider?.token()).toBe("notion-access");
-			expect((await second.credentials("discord")).env).toEqual({ DISCORD_TOKEN: TOKEN });
-			expect(existsSync(unreadable)).toBe(true);
-			expect(statSync(unreadable).mode).toBe(blocked);
-			chmodSync(unreadable, 0o600);
-			expect(logs.join("\n")).not.toMatch(/notion-access|linear-access/);
-		},
-	);
+	// Skipped on Windows alone: `chmodSync(path, 0o000)` is a no-op there, so the file stays readable,
+	// migration genuinely reads and consumes it, and this premise -- an unreadable sign-in file that
+	// does not block migration -- cannot hold. Its guarantee is unverified on Windows; the 0-byte
+	// half above runs everywhere.
+	it.skipIf(!hasPosixModes())("an unreadable sign-in file never blocks the rest (N2)", async () => {
+		const logs: string[] = [];
+		const other = legacyInstall();
+		const unreadable = join(other.agentHome, "mcp-auth.json");
+		chmodSync(unreadable, 0o000);
+		const blocked = statSync(unreadable).mode;
+		const second = storeWith(other.dataDir, new MemorySecretSource(), logs);
+		await second.migrate();
+		expect(await (await second.credentials("notion")).authProvider?.token()).toBe("notion-access");
+		expect((await second.credentials("discord")).env).toEqual({ DISCORD_TOKEN: TOKEN });
+		expect(existsSync(unreadable)).toBe(true);
+		expect(statSync(unreadable).mode).toBe(blocked);
+		chmodSync(unreadable, 0o600);
+		expect(logs.join("\n")).not.toMatch(/notion-access|linear-access/);
+	});
 
 	it("keeps the files as they were when a secret does not read back the same, and finishes next time", async () => {
 		const { dataDir, signin } = legacyInstall();

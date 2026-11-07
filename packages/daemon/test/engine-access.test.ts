@@ -45,9 +45,20 @@ describe.skipIf(
 });
 
 describe("the daemon's own files", () => {
+	it("are written whole and private, and replace a file at their place", () => {
+		const dir = tempDir();
+		writeFileSync(join(dir, "state.json"), "old\n");
+		writePrivateFile(join(dir, "state.json"), "new\n");
+		expect(lstatSync(join(dir, "state.json")).isFile()).toBe(true);
+		expect(readFileSync(join(dir, "state.json"), "utf8")).toBe("new\n");
+		expectPosixMode(join(dir, "state.json"), 0o600);
+		expect(readdirSync(dir)).toEqual(["state.json"]);
+	});
+
+	// Only the link needs the skip: a file symlink wants a privilege a plain Windows install lacks.
 	it.skipIf(
 		!canCreateFileSymlinks("engine-access: the daemon's state file, replaced where a symlink held it"),
-	)("are written whole, private, and replace a link at their place without following it", () => {
+	)("replace a link at their place without following it", () => {
 		const dir = tempDir();
 		const target = join(dir, "target");
 		writeFileSync(target, "keep");
