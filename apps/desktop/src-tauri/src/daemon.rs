@@ -391,19 +391,6 @@ pub fn stop_child(child: &mut dyn ChildProcess, grace: Duration) {
     let _ = child.wait();
 }
 
-#[cfg(windows)]
-pub fn stop_child(child: &mut dyn ChildProcess, grace: Duration) {
-    let deadline = Instant::now() + grace;
-    while Instant::now() < deadline {
-        if !matches!(child.try_wait(), Ok(None)) {
-            return;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum RestartOutcome {
     Restarted,

@@ -12,6 +12,7 @@ import {
 } from "../src/daemon.ts";
 import { HIDDEN_NAMES, presentText } from "../src/white-label.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { expectPosixMode } from "./support/windows.ts";
 
 const daemons: DotDaemon[] = [];
 afterEach(async () => {
@@ -529,7 +530,7 @@ describe("own instance", () => {
 			GIT_CONFIG_GLOBAL: join(realHome, ".gitconfig"),
 			// The bundled `pi` folder first, then the user's PATH unchanged.
 			PATH: expect.stringMatching(
-				new RegExp(`node_modules/\\.bin${delimiter}${escapeRegExp(process.env.PATH ?? "")}$`),
+				new RegExp(`${escapeRegExp(join("node_modules", ".bin") + delimiter + (process.env.PATH ?? ""))}$`),
 			),
 			// The user's global Engram: its data dir, so the memory plugin accepts the user's server.
 			ENGRAM_DATA_DIR: join(realHome, ".engram"),
@@ -539,7 +540,7 @@ describe("own instance", () => {
 			// Subagents on, behind the proxy and with the guard (S25.4).
 			GENTLE_PI_AGENTS: "1",
 		});
-		expect(statSync(home).mode & 0o777).toBe(0o700);
+		expectPosixMode(statSync(home).mode, 0o700);
 		expect(existsSync(join(dataDir, "workspace"))).toBe(true);
 	});
 
@@ -550,8 +551,8 @@ describe("own instance", () => {
 		writeFileSync(join(dataDir, "token"), `${"k".repeat(43)}\n`, { mode: 0o644 });
 		chmodSync(join(dataDir, "token"), 0o644);
 		expect(ensureToken(dataDir)).toBe("k".repeat(43));
-		expect(statSync(dataDir).mode & 0o777).toBe(0o700);
-		expect(statSync(join(dataDir, "token")).mode & 0o777).toBe(0o600);
+		expectPosixMode(statSync(dataDir).mode, 0o700);
+		expectPosixMode(statSync(join(dataDir, "token")).mode, 0o600);
 	});
 
 	it("shows the access key only on an interactive terminal", () => {
@@ -559,7 +560,9 @@ describe("own instance", () => {
 		expect(startupMessage(url, "/data", true)).toBe(`Gentle Dot is running at ${url}`);
 		const piped = startupMessage(url, "/data", false);
 		expect(piped).not.toContain("secret-token");
-		expect(piped).toBe("Gentle Dot is running at http://127.0.0.1:4317/ (the access key is in /data/token)");
+		expect(piped).toBe(
+			`Gentle Dot is running at http://127.0.0.1:4317/ (the access key is in ${join("/data", "token")})`,
+		);
 	});
 });
 

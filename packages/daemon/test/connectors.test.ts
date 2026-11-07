@@ -24,6 +24,7 @@ import { isReadOnlyCall } from "../src/extensions/approval-guard.ts";
 import { MemorySecretSource } from "../src/secret-source.ts";
 import { fakeOAuth } from "./fake-oauth.ts";
 import { tempDir, waitFor } from "./helpers.ts";
+import { expectPosixMode } from "./support/windows.ts";
 
 describe("connectors catalog", () => {
 	it("lists Notion, Linear, and Atlassian with their official remote servers", () => {
@@ -111,8 +112,8 @@ describe("connector store", () => {
 			version: 2,
 			connectors: { notion: { enabled: true, mode: "read_only" } },
 		});
-		expect(statSync(join(dataDir, "connectors.json")).mode & 0o777).toBe(0o600);
-		expect(statSync(join(agentHome, "mcp.json")).mode & 0o777).toBe(0o600);
+		expectPosixMode(statSync(join(dataDir, "connectors.json")).mode, 0o600);
+		expectPosixMode(statSync(join(agentHome, "mcp.json")).mode, 0o600);
 		// The old sign-in home is never made again.
 		expect(existsSync(s.signinHome)).toBe(false);
 		expect(readdirSync(agentHome).filter((f) => f.includes(".tmp"))).toEqual([]);

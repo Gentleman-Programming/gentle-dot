@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { type DaemonOptions, type DotDaemon, startDaemon } from "../src/daemon.ts";
 import { composePrompt, sanitizeName, sniffMime, splitAttachments, UploadStore } from "../src/uploads.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { expectPosixMode } from "./support/windows.ts";
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 1, 2, 3]);
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46]);
@@ -67,9 +68,9 @@ describe("upload store", () => {
 		expect(path).toBe(`uploads/${uploadId}/shot.png`);
 		const file = join(workspace, path);
 		expect(readFileSync(file)).toEqual(PNG);
-		expect(statSync(file).mode & 0o777).toBe(0o600);
-		expect(statSync(join(workspace, "uploads", uploadId)).mode & 0o777).toBe(0o700);
-		expect(statSync(join(workspace, "uploads")).mode & 0o777).toBe(0o700);
+		expectPosixMode(statSync(file).mode, 0o600);
+		expectPosixMode(statSync(join(workspace, "uploads", uploadId)).mode, 0o700);
+		expectPosixMode(statSync(join(workspace, "uploads")).mode, 0o700);
 	});
 
 	it("adds files to the same message folder, renaming duplicates", async () => {
@@ -111,7 +112,7 @@ describe("upload store", () => {
 			uploadId,
 		});
 		expect(over).toMatchObject({ ok: false, status: 413, code: "message_too_large" });
-		expect(listUploads(workspace)).toEqual([uploadId, `${uploadId}/a.bin`]);
+		expect(listUploads(workspace)).toEqual([uploadId, join(uploadId, "a.bin")]);
 		await uploads.receive(Readable.from(["x"]), { name: "c.bin", uploadId });
 		await uploads.receive(Readable.from(["x"]), { name: "d.bin", uploadId });
 		const fourth = await uploads.receive(Readable.from(["x"]), { name: "e.bin", uploadId });
@@ -383,8 +384,8 @@ describe("POST /upload", () => {
 		const file = JSON.parse(reply.body) as UploadedFile;
 		expect(file).toMatchObject({ name: "shot.png", size: PNG.length, mime: "image/png" });
 		expect(file.path).toBe(`uploads/${file.uploadId}/shot.png`);
-		expect(statSync(join(workspace, file.path)).mode & 0o777).toBe(0o600);
-		expect(statSync(join(workspace, "uploads", file.uploadId)).mode & 0o777).toBe(0o700);
+		expectPosixMode(statSync(join(workspace, file.path)).mode, 0o600);
+		expectPosixMode(statSync(join(workspace, "uploads", file.uploadId)).mode, 0o700);
 	});
 
 	it("enforces the size limits on the server and cleans up", async () => {

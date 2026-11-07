@@ -18,7 +18,7 @@ import { engineAccess, insideEngineAccess } from "../src/engine-access.ts";
 import { ensurePrivateDir } from "../src/isolation.ts";
 import { writePrivateFile } from "../src/private-file.ts";
 import { tempDir } from "./helpers.ts";
-import { inspectWindowsAcl } from "./windows-acl-oracle.ts";
+import { describeServerMode, expectPosixMode, itServerMode } from "./support/windows.ts";
 
 // Bracket semantics use an explicit POSIX identity fixture, not a fabricated Windows root.
 const own = { uid: process.getuid?.() ?? 1001, gid: process.getgid?.() ?? 1001 };
@@ -33,7 +33,7 @@ afterEach(() => {
 });
 const SRC = fileURLToPath(new URL("../src/", import.meta.url));
 
-describe("engine access", () => {
+describeServerMode("engine access", () => {
 	it("runs a synchronous call and says it is inside while it runs", () => {
 		const access = engineAccess(own);
 		expect(insideEngineAccess()).toBe(false);
@@ -86,20 +86,13 @@ describe("the daemon's own files", () => {
 		} else writePrivateFile(file, "new\n");
 		writePrivateFile(file, "new\n");
 		expect(readFileSync(target, "utf8")).toBe("keep");
-		expect(lstatSync(file).isFile()).toBe(true);
-		expect(readFileSync(file, "utf8")).toBe("new\n");
-		if (process.platform === "win32") {
-			const acl = inspectWindowsAcl(file);
-			expect(acl.owner).toBe(acl.currentSid);
-			expect(acl.protected).toBe(true);
-			expect(acl.rules.map((rule) => rule.sid)).toEqual(expect.arrayContaining([acl.currentSid, "S-1-5-18"]));
-			expect(acl.rules).toHaveLength(2);
-			expect(acl.rules.every((rule) => rule.type === "Allow" && !rule.inherited)).toBe(true);
-		} else expect(statSync(file).mode & 0o777).toBe(0o600);
+		expect(lstatSync(join(dir, "state.json")).isFile()).toBe(true);
+		expect(readFileSync(join(dir, "state.json"), "utf8")).toBe("new\n");
+		expectPosixMode(statSync(join(dir, "state.json")).mode, 0o600);
 		expect(readdirSync(dir).sort()).toEqual(["state.json", "target"]);
 	});
 
-	it("are never written inside an engine-access call, and nothing is left behind", () => {
+	itServerMode("are never written inside an engine-access call, and nothing is left behind", () => {
 		const dir = tempDir();
 		expect(() => engineAccess(own)(() => writePrivateFile(join(dir, "token"), "x"))).toThrow(/engine's user/);
 		expect(existsSync(join(dir, "token"))).toBe(false);

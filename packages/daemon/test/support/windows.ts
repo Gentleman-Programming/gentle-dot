@@ -32,7 +32,8 @@ export function expectPosixMode(actualMode: number, expectedMode: number): void 
 export const describeWithAppChannel: ReturnType<typeof describe.skipIf> = describe.skipIf(windows);
 export const itWithAppChannel: ReturnType<typeof it.skipIf> = it.skipIf(windows);
 
-/** Server-mode tests are absent on Windows; desktop and generic file behavior remain active. */
+/** Server-mode suites and tests are absent on Windows; desktop and generic file behavior remain active. */
+export const describeServerMode: ReturnType<typeof describe.skipIf> = describe.skipIf(windows);
 export const itServerMode: ReturnType<typeof it.skipIf> = it.skipIf(windows);
 
 export const itWithPosixShell: ReturnType<typeof it.skipIf> = it.skipIf(windows);

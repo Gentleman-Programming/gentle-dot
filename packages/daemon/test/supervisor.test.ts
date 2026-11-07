@@ -2,6 +2,7 @@ import * as childProcess from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as privateFile from "../src/private-file.ts";
 import type { AgentSupervisor } from "../src/supervisor.ts";
 import { fakeSupervisor, tempDir, waitFor } from "./helpers.ts";
 import { itServerMode } from "./support/windows.ts";
@@ -44,6 +45,25 @@ setInterval(() => {}, 1000);
 `;
 
 describe("AgentSupervisor", () => {
+	it("propagates a private-state protection failure before spawning an engine", () => {
+		const dataDir = join(tempDir(), "protected-state");
+		const stateFile = join(dataDir, "state.json");
+		const failure = new privateFile.PrivateFileProtectionError(stateFile, new Error("owner refused"));
+		const read = vi.spyOn(privateFile, "readPrivateFileSync").mockImplementation(() => {
+			throw failure;
+		});
+		const spawn = vi.spyOn(childProcess, "spawn");
+		const callsBefore = spawn.mock.calls.length;
+		try {
+			expect(() => fakeSupervisor({ dataDir })).toThrow(failure);
+			expect(read).toHaveBeenCalledExactlyOnceWith(stateFile);
+			expect(spawn.mock.calls).toHaveLength(callsBefore);
+		} finally {
+			read.mockRestore();
+			spawn.mockRestore();
+		}
+	});
+
 	it("enforces packaged Windows setup opt-outs after prepareSpawn on every spawn without launching the engine", async () => {
 		const runtime = join(process.cwd(), "packaged-runtime");
 		const script = join(runtime, "daemon", "node_modules", "gentle-pi", "bin", "gentle-shell.mjs");

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { agentSpawnEnv } from "./config.ts";
 import { encodeRecord, JsonlDecoder } from "./jsonl.ts";
-import { writePrivateFile } from "./private-file.ts";
+import { PrivateFileProtectionError, readPrivateFileSync, writePrivateFile } from "./private-file.ts";
 import { terminateProcessTree, WINDOWS_TASKKILL_TIMEOUT_MS } from "./process-tree.ts";
 import type { OsUser } from "./vps.ts";
 

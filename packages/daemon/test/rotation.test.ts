@@ -1,7 +1,8 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import * as fs from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { HistoryMessage, ServerPayload } from "@gentle-dot/protocol";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DotBridge } from "../src/bridge.ts";
 import {
 	DEFAULT_ROTATION,
@@ -13,6 +14,8 @@ import {
 } from "../src/rotation.ts";
 import { AgentSupervisor } from "../src/supervisor.ts";
 import { FAKE_AGENT, fakeSupervisor, tempDir, waitFor } from "./helpers.ts";
+
+vi.mock("node:fs", { spy: true });
 
 const supervisors: AgentSupervisor[] = [];
 afterEach(async () => {
@@ -126,12 +129,18 @@ describe("transparent rotation", () => {
 		const { supervisor, logs, say, answers } = await setup({ limits: { compactions: 1 } });
 		const first = supervisor.sessionFile as string;
 		await say("hello");
-		chmodSync(dirname(first), 0o500);
+		const original = (await vi.importActual<typeof fs>("node:fs")).writeFileSync;
+		const blocked = vi.spyOn(fs, "writeFileSync").mockImplementation((file, data, options) => {
+			// Only the daemon's new handoff write fails; the agent can keep writing its current session.
+			if (typeof file === "string" && file.endsWith(".jsonl") && file !== first)
+				throw new Error("test: handoff destination is not writable");
+			return original(file, data, options);
+		});
 		try {
 			await say("compact");
 			await waitFor(() => logs.some((line) => line.includes("rotation")));
 		} finally {
-			chmodSync(dirname(first), 0o700);
+			blocked.mockRestore();
 		}
 		expect(supervisor.sessionFile).toBe(first);
 		expect(supervisor.previousSessions).toEqual([]);

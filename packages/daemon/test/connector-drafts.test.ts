@@ -19,6 +19,7 @@ import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { oauthOptions } from "./fake-oauth.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { describeWithAppChannel } from "./support/windows.ts";
 
 const SECRET = "gh-token-$top!secret";
 
@@ -336,7 +337,7 @@ async function connect(d: DotDaemon, app: ReturnType<typeof fakeApp>) {
 	};
 }
 
-describe("connector drafts through the daemon", () => {
+describeWithAppChannel("connector drafts through the daemon", () => {
 	it("shows the engine's draft as a card in every window; only the user's answer adds it", async () => {
 		const dataDir = tempDir();
 		const fake = fakeAuthRuntime();

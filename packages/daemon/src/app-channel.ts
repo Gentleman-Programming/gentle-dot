@@ -143,7 +143,8 @@ export class AppChannel implements AppLink {
 	close(): Promise<void> {
 		if (this.closing) return this.closing;
 		this.open = false;
-		this.buffer = "";
+		this.buffer = [];
+		this.bufferBytes = 0;
 		const stream = this.stream;
 		const windows = isWindowsAppChannel(stream);
 		this.closing = windows
@@ -165,13 +166,25 @@ export class AppChannel implements AppLink {
 		return this.closing;
 	}
 
-	private receive(chunk: string): void {
+	private receive(chunk: Buffer): void {
 		if (!this.open) return;
-		this.buffer += chunk;
-		for (let end = this.buffer.indexOf("\n"); end >= 0; end = this.buffer.indexOf("\n")) {
-			const line = this.buffer.slice(0, end);
-			this.buffer = this.buffer.slice(end + 1);
+		let start = 0;
+		while (start < chunk.length) {
+			const end = chunk.indexOf(0x0a, start);
+			const part = chunk.subarray(start, end < 0 ? chunk.length : end);
+			if (this.bufferBytes + part.length > MAX_FRAME) {
+				this.log("the app's channel sent a frame that is too long; closing it");
+				void this.close();
+				return;
+			}
+			if (part.length > 0) this.buffer.push(part);
+			this.bufferBytes += part.length;
+			if (end < 0) return;
+			const line = Buffer.concat(this.buffer, this.bufferBytes).toString("utf8");
+			this.buffer = [];
+			this.bufferBytes = 0;
 			if (line.trim() !== "") this.onFrame(line);
+			if (!this.open) return;
 			start = end + 1;
 		}
 	}

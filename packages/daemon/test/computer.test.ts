@@ -1,13 +1,14 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ConnectorInfo, ServerMessage } from "@gentle-dot/protocol";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, expect, it } from "vitest";
 import WebSocket from "ws";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { oauthOptions } from "./fake-oauth.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { describeWithAppChannel } from "./support/windows.ts";
 
 const HELPER = "http://127.0.0.1:51234/mcp";
 const KEY = "s3cr3t-Computer-Key-0123456789abcdef";
@@ -131,7 +132,7 @@ async function restarted(d: DotDaemon, pid: number | undefined) {
 	await waitFor(() => d.supervisor.pid !== pid && d.supervisor.state === "ready");
 }
 
-describe("computer control registration (S24.7)", () => {
+describeWithAppChannel("computer control registration (S24.7)", () => {
 	it("registering on an install with no saved connectors is not reported as a blocked change", async () => {
 		const { send, logs, messages, servers, dataDir } = await setup();
 		send({ type: "computer_register", url: HELPER, token: KEY });
@@ -337,7 +338,7 @@ describe("computer control registration (S24.7)", () => {
 	});
 });
 
-describe("connectors next to the computer (regression)", () => {
+describeWithAppChannel("connectors next to the computer (regression)", () => {
 	it("connects, changes, and removes a connector while the helper is registered, and puts back a tampered mcp.json", async () => {
 		const { d, mcpFile, servers, send, find, list, policy } = await setup({ browser: "auto" });
 		send({ type: "computer_register", url: HELPER, token: KEY });
