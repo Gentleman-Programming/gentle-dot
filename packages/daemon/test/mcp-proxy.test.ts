@@ -42,7 +42,8 @@ type Rec = Record<string, unknown>;
 /** An MCP server behind an in-memory transport: every request it got, and how often it was closed. */
 function memoryUpstream() {
 	const requests: { method: string; params: Rec }[] = [];
-	const state = { closed: 0, connects: 0, dropNext: false };
+	const state = { closed: 0, connects: 0, dropNext: false, holdLists: false };
+	const held: (() => void)[] = [];
 	const answer = (method: string, params: Rec): { result?: unknown; error?: Rec } => {
 		switch (method) {
 			case "initialize":
@@ -87,17 +88,24 @@ function memoryUpstream() {
 				void server.close();
 				return;
 			}
-			void server.send({
-				jsonrpc: "2.0",
-				id: message.id,
-				...answer(message.method, params),
-			} as JsonRpcMessage);
+			const reply = () =>
+				void server.send({
+					jsonrpc: "2.0",
+					id: message.id,
+					...answer(message.method, params),
+				} as JsonRpcMessage);
+			if (state.holdLists && message.method === "tools/list") held.push(reply);
+			else reply();
 		});
 		void server.start();
 		return client;
 	};
 	const called = () => requests.filter((r) => r.method === "tools/call").map((r) => r.params.name);
-	return { transport, requests, called, state };
+	/** Answers the `tools/list` requests held back by `state.holdLists`. */
+	const release = () => {
+		for (const reply of held.splice(0)) reply();
+	};
+	return { transport, requests, called, state, held, release };
 }
 
 function connector(overrides: Partial<ProxiedConnector> = {}): ProxiedConnector {
@@ -378,6 +386,24 @@ describe("MCP proxy: upstream connections", () => {
 		expect(await client.callTool("search", {})).toMatchObject({ content: [{ text: "ran search" }] });
 		expect(upstream.state.connects).toBe(2);
 		expect(logs.join("\n")).not.toContain("Bearer");
+	});
+
+	it("keeps the connection for the new session when the engine's old session goes away", async () => {
+		const { open, upstream, logs } = await setup();
+		upstream.state.holdLists = true;
+		const closing = await open();
+		const current = await open();
+		const abandoned = closing.listTools().catch((error: unknown) => error);
+		const listed = current.listTools();
+		await waitFor(() => upstream.held.length === 2);
+		await closing.close();
+		await abandoned;
+		await waitFor(() => logs.length > 0 || upstream.state.closed > 0, 200).catch(() => undefined);
+		upstream.release();
+		expect((await listed).map((tool) => tool.name)).toContain("search");
+		expect(upstream.state.connects).toBe(1);
+		expect(upstream.state.closed).toBe(0);
+		expect(logs.join("\n")).not.toContain("could not reach");
 	});
 
 	it("tells the model why the secret store is unavailable and keeps the reason in the log", async () => {

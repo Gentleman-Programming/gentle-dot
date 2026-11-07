@@ -23,6 +23,7 @@ import {
 	type AuthProvider,
 	JSON_RPC_ERROR_CODES,
 	LATEST_PROTOCOL_VERSION,
+	McpAbortError,
 	McpAuthRequiredError,
 	McpClient,
 	McpError,
@@ -434,6 +435,8 @@ export class McpProxy {
 		}
 		// The server's own answer, passed on as it came.
 		if (error instanceof McpError) return { code: error.code, message: error.message };
+		// Only this request stopped (its caller went away); others may be sharing the connection.
+		if (error instanceof McpAbortError) return { code: REFUSED, message: "The request was cancelled." };
 		const upstream = this.upstreams.get(connector.id);
 		if (upstream) this.drop(connector.id, upstream);
 		if (error instanceof McpOAuthAuthorizationRequiredError || error instanceof McpAuthRequiredError) {
