@@ -84,10 +84,8 @@ function listFiles(dir: string, prefix = ""): string[] {
 
 describe("piWrapper", () => {
 	it("emits a relocatable Windows cmd wrapper without relying on sh or ambient Node", () => {
-		const wrapper = piCmdWrapper("@earendil-works/pi-coding-agent/dist/bundle/cli.js");
-		expect(wrapper).toContain('"%_runtime%\\node\\node.exe"');
-		expect(wrapper).toContain(
-			'"%_runtime%\\daemon\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js" %*',
+		expect(piCmdWrapper("@earendil-works/pi-coding-agent/dist/bundle/cli.js")).toBe(
+			'@echo off\r\nsetlocal DisableDelayedExpansion\r\n"%~dp0..\\node\\bin\\node.exe" "%~dp0..\\daemon\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js" %*\r\nexit /b %errorlevel%\r\n',
 		);
 	});
 
@@ -231,18 +229,21 @@ describe.skipIf(skipBuild)("build:runtime", () => {
 		if (process.platform === "win32") {
 			// The Windows wrapper is `bin/pi.cmd`, which `cmd.exe` only runs as a batch file.
 			copyFileSync(join(out, "bin", "pi.cmd"), join(moved, "bin", "pi.cmd"));
-			mkdirSync(join(moved, "node"), { recursive: true });
-			copyFileSync(process.execPath, join(moved, "node", "node.exe"));
+			mkdirSync(join(moved, "node", "bin"), { recursive: true });
+			copyFileSync(process.execPath, join(moved, "node", "bin", "node.exe"));
 			const engine = join(moved, "daemon", "node_modules", ENGINE_CLI);
 			mkdirSync(dirname(engine), { recursive: true });
 			writeFileSync(engine, 'console.log(process.argv.slice(1).join("\\n"));\n');
-			const run = spawnSync(`"${join(real, "bin", "pi.cmd")}" --version "a b"`, {
-				encoding: "utf8",
-				shell: true,
-			});
+			// `/s` strips only the outer quotes, so the quoted path and arguments stay as written;
+			// the `!` in `wow!` must reach the engine literally (delayed expansion off).
+			const run = spawnSync(
+				"cmd.exe",
+				["/d", "/s", "/c", `""${join(real, "bin", "pi.cmd")}" --version "a b" "wow!""`],
+				{ encoding: "utf8", windowsVerbatimArguments: true },
+			);
 			expect(run.status).toBe(0);
 			const lines = run.stdout.trim().split("\n");
-			expect(lines.slice(-2)).toEqual(["--version", "a b"]);
+			expect(lines.slice(-3)).toEqual(["--version", "a b", "wow!"]);
 			expect(lines[0]).toContain("cli.js");
 		} else {
 			expectPosixExecutable(join(out, "bin", "pi"));
