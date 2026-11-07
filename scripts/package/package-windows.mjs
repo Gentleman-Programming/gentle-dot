@@ -18,8 +18,8 @@ import {
 	sevenZipCandidates,
 	sha256File,
 	treeSize,
-	windowsInstallerNames,
 	windowsBuildEnv,
+	windowsInstallerNames,
 	windowsReleaseConfig,
 } from "./lib.mjs";
 
