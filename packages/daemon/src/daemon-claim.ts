@@ -5,7 +5,7 @@
  * `GENTLE_DOT_PORT` or `config.json` (`config.ts`), so two daemons on one data folder are reachable
  * by overriding the port. They would then share the engine's home and its setup lock, the sessions
  * folder, and the private memory server — and W5b's owner record is last-writer-wins, so a later
- * start could clear a lock a live engine still holds (odd/tasks/windows-port.md, W24).
+ * start could clear a lock a live engine still holds.
  *
  * So a daemon claims each folder it owns before anything is written there: the folder is created
  * private if it is not there yet, and an exclusive file holding the pid of the daemon that took it

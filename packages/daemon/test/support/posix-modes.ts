@@ -3,8 +3,7 @@
 // macOS and Linux carry real mode bits, so a file or directory the daemon means to keep private can
 // be asserted to be `0o600` / `0o700` / `0o644` / `0o711`. Windows has none: `statSync().mode` never
 // carries them, so a raw mode assertion there can never pass. File privacy on Windows comes from the
-// ACL of the profile directory the data folder lives in, not from a per-file mode
-// (odd/tasks/windows-port.md). These helpers skip the mode assertion on Windows, but announce every
+// ACL of the profile directory the data folder lives in, not from a per-file mode. These helpers skip the mode assertion on Windows, but announce every
 // skip so a green Windows run cannot quietly assert nothing.
 import { lstatSync, statSync } from "node:fs";
 import { expect } from "vitest";
@@ -17,7 +16,7 @@ function warnSkipped(kind: "stat" | "lstat" | "executable", path: string, mode: 
 	console.warn(
 		`posix-modes: skipped ${kind} mode 0o${mode.toString(8)} assertion for ${path}; ` +
 			"Windows has no POSIX mode bits, and privacy relies on the ACL of the profile directory " +
-			"(see odd/tasks/windows-port.md).",
+			'(see docs/windows-testing.md, "Running the JavaScript tests").',
 	);
 }
 

@@ -1,7 +1,7 @@
 // Test fixtures whose POSIX mechanism does not port to Windows, and the portable substitutes.
 //
 // Three things a fixture needs on POSIX behave differently on Windows, and each substitute is
-// measured rather than assumed (odd/tasks/windows-port.md):
+// measured on Windows rather than assumed:
 //
 // - A **directory link**. `symlinkSync(dir, link)` needs `SeCreateSymbolicLinkPrivilege` on a plain
 //   Windows install (it fails with `EPERM` unless Developer Mode is on). A **junction** needs no
@@ -65,7 +65,7 @@ function warnSkipped(label: string): void {
 	process.stderr.write(
 		`fixture-capabilities: skipping ${label}; a write inside a write-bit-cleared directory still ` +
 			"succeeded on this host, so the unwritable-folder fixture would test nothing " +
-			"(see odd/tasks/windows-port.md).\n",
+			'(see docs/windows-testing.md, "Running the JavaScript tests").\n',
 	);
 }
 
@@ -153,7 +153,7 @@ function warnSkippedFileSymlink(label: string, reason: string): void {
 		`fixture-capabilities: skipping ${label}; this host refuses to create a file symlink ` +
 			`(${reason}), and a file symlink has no unprivileged substitute here (a junction is ` +
 			"directory-only and a hardlink is not a link); turn on Windows Developer Mode, or run the " +
-			"suite from an elevated terminal, to run it (see odd/tasks/windows-port.md).\n",
+			'suite from an elevated terminal, to run it (see docs/windows-testing.md, "Running the JavaScript tests").\n',
 	);
 }
 

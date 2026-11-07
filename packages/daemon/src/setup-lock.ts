@@ -5,7 +5,7 @@
  * and writes nothing into it, and it releases the lock from a `finally` with no exit or signal
  * hook. A hard kill therefore runs no JavaScript and leaves the empty lock behind, and the next
  * start skips setup until upstream's own 15-minute mtime expiry clears it
- * (odd/tasks/windows-port.md, L67). That expiry is upstream's and is untouched here.
+ * (a lock left by a hard kill is the case this file exists for). That expiry is upstream's and is untouched here.
  *
  * We cannot write into the lock — it is upstream's file and is created empty — so ownership is
  * decided from a second file we own, `<home>/.gentle-shell-setup.owner`, holding the pid of the

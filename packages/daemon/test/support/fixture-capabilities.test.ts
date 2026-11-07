@@ -135,7 +135,7 @@ describe("fixture capabilities", () => {
 			].entries()) {
 				const line = String(write.mock.calls[index]?.[0]);
 				expect(line).toContain(needle);
-				expect(line).toContain("odd/tasks/windows-port.md");
+				expect(line).toContain("docs/windows-testing.md");
 				expect(line.endsWith("\n")).toBe(true);
 				expect(line.slice(0, -1)).not.toContain("\n");
 			}
@@ -180,7 +180,7 @@ describe("fixture capabilities", () => {
 			expect(line).toContain("EPERM");
 			expect(line).toContain("Developer Mode");
 			expect(line).toContain("elevated");
-			expect(line).toContain("odd/tasks/windows-port.md");
+			expect(line).toContain("docs/windows-testing.md");
 			expect(line.endsWith("\n")).toBe(true);
 			expect(line.slice(0, -1)).not.toContain("\n");
 		} finally {

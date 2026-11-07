@@ -46,7 +46,7 @@ describe("posix mode helper", () => {
 			for (const call of warn.mock.calls) {
 				const line = String(call[0]);
 				expect(line).toContain(file);
-				expect(line).toContain("odd/tasks/windows-port.md");
+				expect(line).toContain("docs/windows-testing.md");
 				expect(line).toContain("ACL");
 				expect(line).not.toContain("\n");
 			}
