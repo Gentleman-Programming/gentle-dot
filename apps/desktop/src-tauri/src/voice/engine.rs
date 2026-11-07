@@ -1,6 +1,6 @@
 //! Which speech-to-text engine records (S30.5): the local Parakeet model when it is installed,
-//! else the platform's own (Apple Speech on macOS, S30.1). Linux has no platform engine, so
-//! there voice input needs the model. The choice is made on every call, so a model installed or
+//! else the platform's own (Apple Speech on macOS, S30.1). Linux and Windows have no platform
+//! engine, so there voice input needs the model. The choice is made on every call, so a model installed or
 //! removed while the app runs takes effect on the next recording.
 
 use super::model::EngineName;
