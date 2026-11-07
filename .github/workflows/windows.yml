@@ -53,9 +53,39 @@ jobs:
         working-directory: apps/desktop/src-tauri
         run: cargo check --locked --all-targets
 
+      # The test binary has ended with STATUS_ACCESS_VIOLATION (0xC0000005) after every test
+      # passed, and nothing explains it yet. Windows Error Reporting writes a full dump of a
+      # crashing process when LocalDumps is configured, so the next occurrence leaves evidence.
+      # The test binary's name carries a hash (`gentle_dot_lib-<hash>.exe`) that no registry key
+      # can wildcard, so this sets the machine-wide default rather than a per-exe key; DumpCount
+      # keeps only the newest few. Settings under HKLM need the runner's administrator token.
+      - name: Collect crash dumps (WER LocalDumps)
+        shell: pwsh
+        run: |
+          $dumps = Join-Path $env:RUNNER_TEMP 'wer-dumps'
+          New-Item -ItemType Directory -Force -Path $dumps | Out-Null
+          $key = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps'
+          New-Item -Path $key -Force | Out-Null
+          New-ItemProperty -Path $key -Name DumpFolder -Value $dumps -PropertyType ExpandString -Force | Out-Null
+          New-ItemProperty -Path $key -Name DumpType -Value 2 -PropertyType DWord -Force | Out-Null
+          New-ItemProperty -Path $key -Name DumpCount -Value 5 -PropertyType DWord -Force | Out-Null
+
       - name: cargo test
         working-directory: apps/desktop/src-tauri
         run: cargo test --locked --lib
+
+      # A dump is only readable next to the binary and symbols that produced it.
+      - name: Upload crash dumps
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-test-crash-dumps
+          path: |
+            ${{ runner.temp }}/wer-dumps
+            apps/desktop/src-tauri/target/debug/deps/gentle_dot_lib-*.exe
+            apps/desktop/src-tauri/target/debug/deps/gentle_dot_lib-*.pdb
+          if-no-files-found: ignore
+          retention-days: 14
 
   app-channel:
     name: Native app channel
