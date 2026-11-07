@@ -24,6 +24,8 @@ import {
 } from "../src/profiles.ts";
 import { HIDDEN_NAMES } from "../src/white-label.ts";
 import { tempDir } from "./helpers.ts";
+import { canCreateFileSymlinks, symlinkDirectory } from "./support/fixture-capabilities.ts";
+import { expectPosixMode } from "./support/posix-modes.ts";
 
 function setup() {
 	const root = tempDir();
@@ -152,7 +154,7 @@ describe("profile store", () => {
 	it("writes the store atomically with mode 0600 and leaves no temp files", async () => {
 		const { store, configHome, profilesPath } = setup();
 		await store.save("a", { orchestrator: { model: "fake/fake-model" } });
-		expect(statSync(profilesPath).mode & 0o777).toBe(0o600);
+		expectPosixMode(profilesPath, 0o600);
 		expect(readdirSync(configHome)).toEqual(["profiles.json"]);
 	});
 
@@ -217,7 +219,7 @@ describe("applying a profile", () => {
 			defaultProvider: "anthropic",
 			defaultModel: "claude-opus-4",
 		});
-		expect(statSync(modelsPath).mode & 0o777).toBe(0o600);
+		expectPosixMode(modelsPath, 0o600);
 		// The agent's own frontmatter follows the profile, as the engine's apply does.
 		expect(readFileSync(agentFile, "utf8")).toBe(
 			"---\nname: gentle-ai-worker\nmodel: openai/gpt-5\nthinking: high\n---\nBody\n",
@@ -239,24 +241,38 @@ describe("applying a profile", () => {
 		await store.save("p", { "kit.helper": { model: "x/y" } });
 		await store.apply("p");
 		expect(readFileSync(explore, "utf8")).toBe("---\nname: gentle-ai-explore\ndescription: d\n---\nB\n");
-		expect(statSync(explore).mode & 0o777).toBe(0o644);
+		expectPosixMode(explore, 0o644);
 		expect(readFileSync(helper, "utf8")).toBe("---\nname: helper\nmodel: x/y\npackage: kit\n---\nB\n");
 	});
 
-	it("never writes an agent file whose real path is outside the assistant's agent folders", async () => {
+	it("never writes an agent file whose folder real path is outside the assistant's agent folders", async () => {
 		const { store, agentHome } = setup();
 		const outside = join(agentHome, "..", "outside");
 		mkdirSync(join(outside, "dir"), { recursive: true });
+		mkdirSync(agentHome, { recursive: true });
+		const text = "---\nname: gentle-ai-explore\nmodel: old/model\n---\nB\n";
+		writeFileSync(join(outside, "dir", "explore.md"), text);
+		symlinkDirectory(join(outside, "dir"), join(agentHome, "subagents"));
+		await store.save("p", { "gentle-ai-explore": { model: "x/y" } });
+		await store.apply("p");
+		expect(readFileSync(join(outside, "dir", "explore.md"), "utf8")).toBe(text);
+	});
+
+	it.skipIf(
+		!canCreateFileSymlinks(
+			"profiles: an agent file whose real path is outside the assistant's agent folders",
+		),
+	)("never writes an agent file whose real path is outside the assistant's agent folders", async () => {
+		const { store, agentHome } = setup();
+		const outside = join(agentHome, "..", "outside");
 		mkdirSync(join(agentHome, "agents"), { recursive: true });
+		mkdirSync(outside, { recursive: true });
 		const text = "---\nname: gentle-ai-worker\nmodel: old/model\n---\nB\n";
 		writeFileSync(join(outside, "worker.md"), text);
-		writeFileSync(join(outside, "dir", "explore.md"), text.replace("worker", "explore"));
 		symlinkSync(join(outside, "worker.md"), join(agentHome, "agents", "worker.md"));
-		symlinkSync(join(outside, "dir"), join(agentHome, "subagents"));
 		await store.save("p", { "gentle-ai-worker": { model: "x/y" } });
 		await store.apply("p");
 		expect(readFileSync(join(outside, "worker.md"), "utf8")).toBe(text);
-		expect(readFileSync(join(outside, "dir", "explore.md"), "utf8")).toBe(text.replace("worker", "explore"));
 	});
 
 	it("sets the thinking level and drops model_profiles when the profile routes no agent", async () => {

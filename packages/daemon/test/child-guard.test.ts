@@ -4,22 +4,15 @@
 // (it loads the guard with `-e`) or in any engine Gentle Dot did not start, and the daemon writes it
 // at every engine start and puts it back when it changes. The proxy and the native approvals stay
 // the boundary; the guard in children is defense in depth.
-import {
-	chmodSync,
-	existsSync,
-	lstatSync,
-	mkdirSync,
-	readFileSync,
-	rmSync,
-	symlinkSync,
-	writeFileSync,
-} from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { APPROVAL_GUARD } from "../src/connectors.ts";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import { type ConnectorPolicy, POLICY_ENV, PROPOSE_TOOL } from "../src/extensions/approval-guard.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { canMakeDirectoryUnwritable, symlinkDirectory } from "./support/fixture-capabilities.ts";
+import { expectPosixLstatMode } from "./support/posix-modes.ts";
 
 const SHIM = "gentle-dot-child-guard.ts";
 
@@ -85,7 +78,7 @@ describe("subagents in the assistant's engine (S25.4)", () => {
 		expect(env().GENTLE_PI_AGENTS).toBe("1");
 		// The guard comes from the daemon's own install, never from a path in the environment.
 		expect(readFileSync(shim, "utf8")).toContain(`import guard from ${JSON.stringify(APPROVAL_GUARD)};`);
-		expect(lstatSync(shim).mode & 0o777).toBe(0o600);
+		expectPosixLstatMode(shim, 0o600);
 	});
 
 	it("keeps subagents off with GENTLE_DOT_SUBAGENTS=off", async () => {
@@ -149,7 +142,7 @@ describe("subagents in the assistant's engine (S25.4)", () => {
 		const elsewhere = tempDir();
 		writeFileSync(join(elsewhere, "keep.txt"), "mine\n");
 		rmSync(join(agentHome, "extensions"), { recursive: true });
-		symlinkSync(elsewhere, join(agentHome, "extensions"));
+		symlinkDirectory(elsewhere, join(agentHome, "extensions"));
 		await waitFor(() => !lstatSync(join(agentHome, "extensions")).isSymbolicLink(), 5000);
 		await waitFor(() => existsSync(shim) && readFileSync(shim, "utf8") === original, 5000);
 		expect(readFileSync(join(elsewhere, "keep.txt"), "utf8")).toBe("mine\n");
@@ -167,7 +160,11 @@ describe("subagents in the assistant's engine (S25.4)", () => {
 		expect(lines.some((line) => /subagents are off/i.test(line))).toBe(true);
 	});
 
-	it("starts with subagents off when the extensions folder cannot be written, on or off", async () => {
+	it.skipIf(
+		!canMakeDirectoryUnwritable(
+			"child-guard: starts with subagents off when the extensions folder cannot be written",
+		),
+	)("starts with subagents off when the extensions folder cannot be written, on or off", async () => {
 		for (const env of [{}, { GENTLE_DOT_SUBAGENTS: "off" }]) {
 			let folder = "";
 			try {
@@ -187,21 +184,28 @@ describe("subagents in the assistant's engine (S25.4)", () => {
 		}
 	});
 
-	it("still removes a planted .pi/mcp.json when the child guard cannot be put back, and says so once", async () => {
-		const { dataDir, agentHome, shim, lines } = await start();
-		const folder = join(agentHome, "extensions");
-		const planted = join(dataDir, "workspace", ".pi", "mcp.json");
-		try {
-			rmSync(shim);
-			chmodSync(folder, 0o555);
-			mkdirSync(join(dataDir, "workspace", ".pi"), { recursive: true });
-			writeFileSync(planted, '{"mcpServers":{}}\n');
-			await waitFor(() => !existsSync(planted), 5000);
-			await new Promise((resolve) => setTimeout(resolve, 2500));
-			expect(lines.filter((line) => line.includes("cannot be written")).length).toBe(1);
-			expect(lines.some((line) => line.includes("could not check"))).toBe(false);
-		} finally {
-			chmodSync(folder, 0o755);
-		}
-	});
+	it.skipIf(
+		!canMakeDirectoryUnwritable(
+			"child-guard: still removes a planted .pi/mcp.json when the child guard cannot be put back",
+		),
+	)(
+		"still removes a planted .pi/mcp.json when the child guard cannot be put back, and says so once",
+		async () => {
+			const { dataDir, agentHome, shim, lines } = await start();
+			const folder = join(agentHome, "extensions");
+			const planted = join(dataDir, "workspace", ".pi", "mcp.json");
+			try {
+				rmSync(shim);
+				chmodSync(folder, 0o555);
+				mkdirSync(join(dataDir, "workspace", ".pi"), { recursive: true });
+				writeFileSync(planted, '{"mcpServers":{}}\n');
+				await waitFor(() => !existsSync(planted), 5000);
+				await new Promise((resolve) => setTimeout(resolve, 2500));
+				expect(lines.filter((line) => line.includes("cannot be written")).length).toBe(1);
+				expect(lines.some((line) => line.includes("could not check"))).toBe(false);
+			} finally {
+				chmodSync(folder, 0o755);
+			}
+		},
+	);
 });

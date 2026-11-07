@@ -1,17 +1,62 @@
 //! Desktop view of `~/.gentle-dot/config.json` and the connection details the UI needs.
 
 use serde::Serialize;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_PORT: u16 = 4317;
-/// Windows keeps Alt+Space for the window menu, and overlays such as NVIDIA's claim it as well.
-pub const DEFAULT_SHORTCUT: &str = if cfg!(windows) { "Ctrl+Alt+Space" } else { "Alt+Space" };
+
+/// The panel shortcut a fresh install binds, per platform (Windows avoids `Alt+Space`, its
+/// window-menu key). See [`crate::platform::Os::default_shortcut`].
+pub fn default_shortcut() -> &'static str {
+    crate::platform::Os::CURRENT.default_shortcut()
+}
+
+/// The assistant's memory mode (SW9), spelled `shared`/`private` in `config.json`: the user's own
+/// Engram (`Shared`, the default) or a private store of the assistant's own (`Private`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryMode {
+    Shared,
+    Private,
+}
+
+impl MemoryMode {
+    pub const DEFAULT: MemoryMode = MemoryMode::Shared;
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MemoryMode::Shared => "shared",
+            MemoryMode::Private => "private",
+        }
+    }
+
+    /// The mode a `memory_set` call asked for, or the named error that refuses anything else.
+    pub fn parse(value: &str) -> Result<MemoryMode, String> {
+        match value {
+            "shared" => Ok(MemoryMode::Shared),
+            "private" => Ok(MemoryMode::Private),
+            other => Err(invalid_memory(other)),
+        }
+    }
+}
+
+/// The named error for a `memory` value that is neither `shared` nor `private` (SW9): it names the
+/// file and the value with the daemon's own wording. Known divergence from the daemon's JS
+/// `String(value)`: a JSON object or array renders as Rust JSON (`{"a":1}`, `[1,2]`) where the
+/// daemon renders `[object Object]` / `1,2`; scalars and `null` match exactly.
+pub fn invalid_memory(value: &str) -> String {
+    format!("Invalid memory in config.json: {value}")
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DesktopConfig {
     pub data_dir: PathBuf,
     pub port: u16,
     pub shortcut: String,
+    /// The mode `config.json` names, or the daemon's own error for a `memory` value it refuses.
+    /// Never a mode in disguise: the app starts, the UI shows the error, and nothing treats it as
+    /// shared (SW9).
+    pub memory: Result<MemoryMode, String>,
 }
 
 /// Result of the `connection_info` command (design §9).
@@ -39,8 +84,21 @@ fn valid_port(value: Option<u64>) -> Option<u16> {
     value.and_then(|port| u16::try_from(port).ok())
 }
 
-/// Resolves the port and shortcut: environment first, then the file, then defaults.
-/// A missing or invalid file never prevents the app from starting.
+/// The file's `memory` as the daemon reads it: absent is `shared`; anything else that is not
+/// `shared` or `private` (`null`, a typo, `"Private"`, a number) is its named error (SW9).
+fn file_memory(file: &serde_json::Value) -> Result<MemoryMode, String> {
+    match file.get("memory") {
+        None => Ok(MemoryMode::DEFAULT),
+        Some(serde_json::Value::String(text)) => MemoryMode::parse(text),
+        Some(other) => Err(invalid_memory(&other.to_string())),
+    }
+}
+
+/// Resolves the port, shortcut and memory mode: environment first, then the file, then defaults.
+/// A missing or invalid file never prevents the app from starting, and neither does an invalid
+/// value in it: `port` and `shortcut` fall back to their defaults, while an invalid `memory` is
+/// kept as an error for the UI to show, because falling back would turn a privacy setting into
+/// shared memory (SW9).
 pub fn parse_config(
     data_dir: PathBuf,
     file: Option<&str>,
@@ -57,37 +115,47 @@ pub fn parse_config(
         .as_str()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or(DEFAULT_SHORTCUT)
+        .unwrap_or_else(|| default_shortcut())
         .to_string();
-    DesktopConfig { data_dir, port, shortcut }
+    let memory = file_memory(&file);
+    DesktopConfig { data_dir, port, shortcut, memory }
 }
 
-/// HOME keeps precedence on every platform; USERPROFILE is a Windows-only fallback.
-/// Pure so profile selection can be checked without reading a real user's environment.
-fn home_dir(env: impl Fn(&str) -> Option<std::ffi::OsString>, windows: bool) -> PathBuf {
-    env("HOME")
-        .filter(|value| !value.is_empty())
-        .or_else(|| windows.then(|| env("USERPROFILE").filter(|value| !value.is_empty())).flatten())
-        .map(PathBuf::from)
-        .unwrap_or_default()
+/// Nothing names a home folder, so there is nowhere to keep the app's data.
+pub const NO_HOME: &str =
+    "Gentle Dot cannot find your home folder, so there is nowhere to keep its data. Set GENTLE_DOT_DATA_DIR to a folder and start it again.";
+
+/// The data dir. `GENTLE_DOT_DATA_DIR` wins and needs no home unless its value names one with
+/// `~`; otherwise the home comes from [`crate::platform::home_dir`], and a home that cannot be
+/// resolved is an error rather than a relative `.gentle-dot` resolved against the working
+/// directory — which is what made the app miss its own token on Windows (W22). The environment is
+/// read as OS strings so a non-UTF-8 `HOME` on POSIX still names the home.
+pub fn resolve_data_dir(os: crate::platform::Os, env: impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, String> {
+    let text = |key: &str| env(key).and_then(|value| value.into_string().ok());
+    match text("GENTLE_DOT_DATA_DIR").filter(|value| !value.is_empty()) {
+        Some(dir) if !dir.starts_with('~') => Ok(PathBuf::from(dir)),
+        _ => {
+            let home = crate::platform::home_dir(os, &env).ok_or_else(|| NO_HOME.to_string())?;
+            Ok(data_dir(text, &home))
+        }
+    }
 }
 
 /// Reads the real environment and `<data dir>/config.json`.
-pub fn load_config() -> DesktopConfig {
+pub fn load_config() -> Result<DesktopConfig, String> {
     let env = |key: &str| std::env::var(key).ok();
     // OS strings preserve non-UTF-8 Unix HOME paths too.
-    let home = home_dir(|key| std::env::var_os(key), cfg!(windows));
-    let dir = data_dir(env, &home);
+    let dir = resolve_data_dir(crate::platform::Os::CURRENT, |key| std::env::var_os(key))?;
     let file = std::fs::read_to_string(dir.join("config.json")).ok();
-    parse_config(dir, file.as_deref(), env)
+    Ok(parse_config(dir, file.as_deref(), &env))
 }
 
 pub const INVALID_CONFIG: &str =
     "config.json is not valid JSON, so Gentle Dot left it as it is. Fix or remove it, then try again.";
 
-/// The text of `config.json` with `shortcut` set and every other key kept.
-/// A file that is not a JSON object is refused rather than replaced.
-pub fn with_shortcut(file: Option<&str>, shortcut: &str) -> Result<String, String> {
+/// The text of `config.json` with one key set and every other key kept. A file that is not a JSON
+/// object is refused rather than replaced.
+fn with_key(file: Option<&str>, key: &str, value: serde_json::Value) -> Result<String, String> {
     let mut json = match file {
         Some(text) => serde_json::from_str::<serde_json::Value>(text)
             .ok()
@@ -95,21 +163,41 @@ pub fn with_shortcut(file: Option<&str>, shortcut: &str) -> Result<String, Strin
             .ok_or(INVALID_CONFIG)?,
         None => serde_json::json!({}),
     };
-    json["shortcut"] = shortcut.into();
+    json[key] = value;
     let text = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
     Ok(text + "\n")
+}
+
+/// The text of `config.json` with `shortcut` set and every other key kept.
+pub fn with_shortcut(file: Option<&str>, shortcut: &str) -> Result<String, String> {
+    with_key(file, "shortcut", shortcut.into())
+}
+
+/// The text of `config.json` with `memory` set and every other key kept (SW9).
+pub fn with_memory(file: Option<&str>, memory: MemoryMode) -> Result<String, String> {
+    with_key(file, "memory", memory.as_str().into())
+}
+
+fn save_key(path: &Path, key: &str, what: &str, value: serde_json::Value) -> Result<(), String> {
+    let file = match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("Gentle Dot cannot read config.json ({error}), so the {what} was not saved.")),
+    };
+    let text = with_key(file.as_deref(), key, value)?;
+    write_private(path, &text).map_err(|error| format!("Gentle Dot cannot save config.json ({error})."))
 }
 
 /// Saves the shortcut in `config.json` (S33.3): read, change one key, then write a private
 /// temporary file and rename it over the old one, so a crash never leaves half a file.
 pub fn save_shortcut(path: &Path, shortcut: &str) -> Result<(), String> {
-    let file = match std::fs::read_to_string(path) {
-        Ok(text) => Some(text),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(format!("Gentle Dot cannot read config.json ({error}), so the shortcut was not saved.")),
-    };
-    let text = with_shortcut(file.as_deref(), shortcut)?;
-    write_private(path, &text).map_err(|error| format!("Gentle Dot cannot save config.json ({error})."))
+    save_key(path, "shortcut", "shortcut", shortcut.into())
+}
+
+/// Saves the memory mode in `config.json` (SW9), the shortcut's way: one key changed, every other
+/// key kept, written privately and renamed over the old file.
+pub fn save_memory(path: &Path, memory: MemoryMode) -> Result<(), String> {
+    save_key(path, "memory", "memory mode", memory.as_str().into())
 }
 
 fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
@@ -152,33 +240,12 @@ mod tests {
         move |key| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string())
     }
 
-    fn os_env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<std::ffi::OsString> {
+    fn os_env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
         move |key| env_of(pairs)(key).map(Into::into)
     }
 
     fn dir() -> PathBuf {
         PathBuf::from("/data")
-    }
-
-    #[test]
-    fn home_keeps_home_precedence_and_limits_userprofile_to_windows() {
-        let both = || os_env_of(&[("HOME", "/home/me"), ("USERPROFILE", "C:\\Users\\me")]);
-        assert_eq!(home_dir(both(), true), PathBuf::from("/home/me"));
-        assert_eq!(home_dir(both(), false), PathBuf::from("/home/me"));
-        let profile = || os_env_of(&[("USERPROFILE", "C:\\Users\\me")]);
-        assert_eq!(home_dir(profile(), true), PathBuf::from("C:\\Users\\me"));
-        assert_eq!(home_dir(profile(), false), PathBuf::new());
-        assert_eq!(home_dir(os_env_of(&[("HOME", ""), ("USERPROFILE", "C:\\Users\\me")]), true), PathBuf::from("C:\\Users\\me"));
-        assert_eq!(home_dir(os_env_of(&[]), true), PathBuf::new());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_profile_default_and_override_use_native_paths() {
-        let home = home_dir(os_env_of(&[("USERPROFILE", "C:\\Users\\me")]), cfg!(windows));
-        assert_eq!(data_dir(env_of(&[]), &home), home.join(".gentle-dot"));
-        assert_eq!(data_dir(env_of(&[("GENTLE_DOT_DATA_DIR", "D:\\dot")]), &home), PathBuf::from("D:\\dot"));
-        assert_eq!(data_dir(env_of(&[("GENTLE_DOT_DATA_DIR", "~/other")]), &home), home.join("other"));
     }
 
     #[test]
@@ -195,19 +262,43 @@ mod tests {
     }
 
     #[test]
-    fn defaults_without_file() {
-        let config = parse_config(dir(), None, env_of(&[]));
-        assert_eq!(config, DesktopConfig { data_dir: dir(), port: DEFAULT_PORT, shortcut: DEFAULT_SHORTCUT.into() });
+    fn the_data_dir_never_falls_back_to_a_relative_path() {
+        use crate::platform::Os;
+        let windows = |pairs: &'static [(&'static str, &'static str)]| resolve_data_dir(Os::Windows, os_env_of(pairs));
+        // Built with Path::join rather than written as a literal: this test drives the Windows
+        // resolution on every host, and on macOS and Linux a backslash is not a separator, so the
+        // literal is one component there while the resolved value is two. Comparing the two
+        // constructions is the only portable way to assert the exact result (POSIX run 39869942335).
+        let expected = Path::new(r"C:\Users\me").join(".gentle-dot");
+        assert_eq!(windows(&[("USERPROFILE", r"C:\Users\me")]), Ok(expected.clone()));
+        assert_eq!(
+            windows(&[("HOMEDRIVE", "C:"), ("HOMEPATH", r"\Users\me")]),
+            Ok(expected.clone())
+        );
+        // The W22 bug: a Windows GUI launch has no HOME. That is an error, never `.gentle-dot`.
+        assert_eq!(windows(&[]), Err(NO_HOME.to_string()));
+        // `HOME` wins on Windows too (Git Bash, MSYS), so their data dir keeps being found.
+        assert_eq!(
+            windows(&[("HOME", r"C:\Users\me"), ("USERPROFILE", r"D:\profile")]),
+            Ok(Path::new(r"C:\Users\me").join(".gentle-dot"))
+        );
+        // An explicit absolute dir needs no home; a `~` value still does.
+        assert_eq!(windows(&[("GENTLE_DOT_DATA_DIR", r"D:\dot")]), Ok(PathBuf::from(r"D:\dot")));
+        assert_eq!(
+            resolve_data_dir(Os::Linux, os_env_of(&[("HOME", "/home/me"), ("GENTLE_DOT_DATA_DIR", "~/dot")])),
+            Ok(PathBuf::from("/home/me/dot"))
+        );
+        assert_eq!(resolve_data_dir(Os::Linux, os_env_of(&[])), Err(NO_HOME.to_string()));
+        assert_eq!(resolve_data_dir(Os::MacOs, os_env_of(&[("HOME", "/Users/me")])), Ok(PathBuf::from("/Users/me/.gentle-dot")));
     }
 
     #[test]
-    fn windows_default_shortcut_avoids_the_system_window_menu() {
-        // Windows owns Alt+Space (window menu) and overlays such as NVIDIA's claim it too.
-        let expected = if cfg!(windows) { "Ctrl+Alt+Space" } else { "Alt+Space" };
-        assert_eq!(DEFAULT_SHORTCUT, expected);
-        assert_eq!(parse_config(dir(), Some(r#"{ "port": 5000 }"#), env_of(&[])).shortcut, expected);
-        // A saved shortcut still wins, including Alt+Space chosen explicitly.
-        assert_eq!(parse_config(dir(), Some(r#"{ "shortcut": "Alt+Space" }"#), env_of(&[])).shortcut, "Alt+Space");
+    fn defaults_without_file() {
+        let config = parse_config(dir(), None, env_of(&[]));
+        assert_eq!(
+            config,
+            DesktopConfig { data_dir: dir(), port: DEFAULT_PORT, shortcut: default_shortcut().into(), memory: Ok(MemoryMode::DEFAULT) }
+        );
     }
 
     #[test]
@@ -215,6 +306,34 @@ mod tests {
         let config = parse_config(dir(), Some(r#"{ "port": 5000, "shortcut": "Cmd+Shift+K", "workspace": "~" }"#), env_of(&[]));
         assert_eq!(config.port, 5000);
         assert_eq!(config.shortcut, "Cmd+Shift+K");
+    }
+
+    #[test]
+    fn memory_defaults_to_shared_and_reads_from_the_file() {
+        assert_eq!(parse_config(dir(), None, env_of(&[])).memory, Ok(MemoryMode::Shared));
+        let private = parse_config(dir(), Some(r#"{ "memory": "private" }"#), env_of(&[]));
+        assert_eq!(private.memory, Ok(MemoryMode::Private));
+        let shared = parse_config(dir(), Some(r#"{ "memory": "shared" }"#), env_of(&[]));
+        assert_eq!(shared.memory, Ok(MemoryMode::Shared));
+    }
+
+    #[test]
+    fn an_invalid_memory_value_is_an_error_and_never_shared() {
+        // The app must still start, so the other keys resolve as usual; but `memory` is the
+        // daemon's own error, not a mode: a typo in a privacy setting never reads as shared.
+        let cases = [
+            (r#"{ "memory": "privat" }"#, "privat"),
+            (r#"{ "memory": "Private" }"#, "Private"),
+            (r#"{ "memory": null }"#, "null"),
+            (r#"{ "memory": 3 }"#, "3"),
+            (r#"{ "memory": true }"#, "true"),
+        ];
+        for (file, shown) in cases {
+            let config = parse_config(dir(), Some(file), env_of(&[("GENTLE_DOT_PORT", "6000")]));
+            assert_eq!(config.memory, Err(format!("Invalid memory in config.json: {shown}")), "{file}");
+            assert_eq!(config.port, 6000, "{file}");
+            assert_eq!(config.shortcut, default_shortcut(), "{file}");
+        }
     }
 
     #[test]
@@ -227,10 +346,10 @@ mod tests {
     fn invalid_values_fall_back() {
         let config = parse_config(dir(), Some(r#"{ "port": 70000, "shortcut": 3 }"#), env_of(&[("GENTLE_DOT_PORT", "abc")]));
         assert_eq!(config.port, DEFAULT_PORT);
-        assert_eq!(config.shortcut, DEFAULT_SHORTCUT);
+        assert_eq!(config.shortcut, default_shortcut());
         let config = parse_config(dir(), Some(r#"{ "port": "5001", "shortcut": "  " }"#), env_of(&[]));
         assert_eq!(config.port, DEFAULT_PORT);
-        assert_eq!(config.shortcut, DEFAULT_SHORTCUT);
+        assert_eq!(config.shortcut, default_shortcut());
     }
 
     #[test]
@@ -238,7 +357,7 @@ mod tests {
         let config = parse_config(dir(), Some("{ not json"), env_of(&[]));
         assert_eq!(config.port, DEFAULT_PORT);
         let config = parse_config(dir(), Some("[1, 2]"), env_of(&[]));
-        assert_eq!(config.shortcut, DEFAULT_SHORTCUT);
+        assert_eq!(config.shortcut, default_shortcut());
     }
 
     #[test]
@@ -261,11 +380,41 @@ mod tests {
         // The file the app writes reads back like any hand-written one: port, shortcut, defaults.
         let text = with_shortcut(Some(r#"{ "port": 5000, "workspace": "~" }"#), "Shift+Super+K").unwrap();
         let config = parse_config(dir(), Some(&text), env_of(&[]));
-        assert_eq!(config, DesktopConfig { data_dir: dir(), port: 5000, shortcut: "Shift+Super+K".into() });
+        assert_eq!(
+            config,
+            DesktopConfig { data_dir: dir(), port: 5000, shortcut: "Shift+Super+K".into(), memory: Ok(MemoryMode::DEFAULT) }
+        );
         let config = parse_config(dir(), Some(&text), env_of(&[("GENTLE_DOT_PORT", "6000")]));
         assert_eq!(config.port, 6000);
         let text = with_shortcut(None, "F5").unwrap();
         assert_eq!(parse_config(dir(), Some(&text), env_of(&[])).port, DEFAULT_PORT);
+    }
+
+    #[test]
+    fn saving_a_memory_mode_keeps_every_other_key() {
+        let text = with_memory(
+            Some(r#"{ "port": 5000, "shortcut": "Alt+Space", "memory": "shared", "extra": { "a": [1] } }"#),
+            MemoryMode::Private,
+        )
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "port": 5000, "shortcut": "Alt+Space", "memory": "private", "extra": { "a": [1] } })
+        );
+        let json: serde_json::Value = serde_json::from_str(&with_memory(None, MemoryMode::Private).unwrap()).unwrap();
+        assert_eq!(json, serde_json::json!({ "memory": "private" }));
+        // A file that is not an object is refused, exactly as the shortcut's writer refuses it.
+        assert_eq!(with_memory(Some("{ not json"), MemoryMode::Private), Err(INVALID_CONFIG.to_string()));
+        assert_eq!(with_memory(Some("[1, 2]"), MemoryMode::Private), Err(INVALID_CONFIG.to_string()));
+    }
+
+    #[test]
+    fn saving_a_memory_mode_repairs_an_invalid_value() {
+        let text = with_memory(Some(r#"{ "port": 5000, "memory": "Private" }"#), MemoryMode::Private).unwrap();
+        let config = parse_config(dir(), Some(&text), env_of(&[]));
+        assert_eq!(config.memory, Ok(MemoryMode::Private));
+        assert_eq!(config.port, 5000);
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -294,6 +443,32 @@ mod tests {
         let fresh = scratch("fresh").join("config.json");
         save_shortcut(&fresh, "F5").unwrap();
         assert_eq!(parse_config(dir.clone(), std::fs::read_to_string(&fresh).ok().as_deref(), env_of(&[])).shortcut, "F5");
+    }
+
+    #[test]
+    fn saves_the_memory_mode_privately_in_place() {
+        let dir = scratch("memory");
+        let file = dir.join("config.json");
+        std::fs::write(&file, r#"{ "port": 5000, "shortcut": "Alt+Space" }"#).unwrap();
+        save_memory(&file, MemoryMode::Private).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(json, serde_json::json!({ "port": 5000, "shortcut": "Alt+Space", "memory": "private" }));
+        // Nothing else is left in the folder (the temporary file was renamed over the old one).
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // The file the app wrote reads back as the private mode, with the other keys kept.
+        let config = parse_config(dir.clone(), std::fs::read_to_string(&file).ok().as_deref(), env_of(&[]));
+        assert_eq!(config.memory, Ok(MemoryMode::Private));
+        assert_eq!(config.shortcut, "Alt+Space");
+        // A missing file is created with just the key.
+        let fresh = scratch("memory-fresh").join("config.json");
+        save_memory(&fresh, MemoryMode::Private).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&fresh).unwrap()).unwrap();
+        assert_eq!(json, serde_json::json!({ "memory": "private" }));
     }
 
     #[test]

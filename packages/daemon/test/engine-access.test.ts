@@ -1,26 +1,24 @@
 // How the root daemon reaches the engine's files in server mode (S25.8, B1): synchronously, as the
 // engine's user, and never while it writes a file of its own. The root-only half of these checks runs
 // in the container (vps-root.test.ts); here, the rules that hold for any user.
-import {
-	existsSync,
-	lstatSync,
-	readdirSync,
-	readFileSync,
-	statSync,
-	symlinkSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { engineAccess, insideEngineAccess } from "../src/engine-access.ts";
 import { writePrivateFile } from "../src/private-file.ts";
 import { tempDir } from "./helpers.ts";
+import { canCreateFileSymlinks } from "./support/fixture-capabilities.ts";
+import { hasServerMode } from "./support/platform-absence.ts";
+import { expectPosixMode } from "./support/posix-modes.ts";
 
 const own = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
 const SRC = fileURLToPath(new URL("../src/", import.meta.url));
 
-describe("engine access", () => {
+describe.skipIf(
+	// Server mode takes the engine's user with setuid, which Windows does not have (S25.8).
+	!hasServerMode("engine access"),
+)("engine access", () => {
 	it("runs a synchronous call and says it is inside while it runs", () => {
 		const access = engineAccess(own);
 		expect(insideEngineAccess()).toBe(false);
@@ -47,7 +45,9 @@ describe("engine access", () => {
 });
 
 describe("the daemon's own files", () => {
-	it("are written whole, private, and replace a link at their place without following it", () => {
+	it.skipIf(
+		!canCreateFileSymlinks("engine-access: the daemon's state file, replaced where a symlink held it"),
+	)("are written whole, private, and replace a link at their place without following it", () => {
 		const dir = tempDir();
 		const target = join(dir, "target");
 		writeFileSync(target, "keep");
@@ -56,16 +56,21 @@ describe("the daemon's own files", () => {
 		expect(readFileSync(target, "utf8")).toBe("keep");
 		expect(lstatSync(join(dir, "state.json")).isFile()).toBe(true);
 		expect(readFileSync(join(dir, "state.json"), "utf8")).toBe("new\n");
-		expect(statSync(join(dir, "state.json")).mode & 0o777).toBe(0o600);
+		expectPosixMode(join(dir, "state.json"), 0o600);
 		expect(readdirSync(dir).sort()).toEqual(["state.json", "target"]);
 	});
 
-	it("are never written inside an engine-access call, and nothing is left behind", () => {
-		const dir = tempDir();
-		expect(() => engineAccess(own)(() => writePrivateFile(join(dir, "token"), "x"))).toThrow(/engine's user/);
-		expect(existsSync(join(dir, "token"))).toBe(false);
-		expect(readdirSync(dir)).toEqual([]);
-	});
+	it.skipIf(!hasServerMode("the daemon's own files: a call writes no daemon file"))(
+		"are never written inside an engine-access call, and nothing is left behind",
+		() => {
+			const dir = tempDir();
+			expect(() => engineAccess(own)(() => writePrivateFile(join(dir, "token"), "x"))).toThrow(
+				/engine's user/,
+			);
+			expect(existsSync(join(dir, "token"))).toBe(false);
+			expect(readdirSync(dir)).toEqual([]);
+		},
+	);
 });
 
 describe("no file work on libuv's thread pool (S25.8, B1)", () => {

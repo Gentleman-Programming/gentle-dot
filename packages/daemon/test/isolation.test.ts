@@ -1,12 +1,4 @@
-import {
-	existsSync,
-	mkdirSync,
-	readdirSync,
-	readFileSync,
-	realpathSync,
-	statSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
@@ -17,7 +9,7 @@ import {
 	PRIVATE_ENGRAM_PORT,
 } from "../src/isolation.ts";
 import { FAKE_AGENT, tempDir } from "./helpers.ts";
-import { expectPosixMode } from "./support/windows.ts";
+import { expectPosixMode } from "./support/posix-modes.ts";
 
 const daemons: DotDaemon[] = [];
 afterEach(async () => {
@@ -31,6 +23,7 @@ describe("Windows isolation", () => {
 		const env = isolatedAgentEnv(
 			{ USERPROFILE: realHome, TEMP: "/user/temp", TMP: "/user/tmp" },
 			data,
+			undefined,
 			undefined,
 			{
 				platform: "win32",
@@ -50,12 +43,14 @@ describe("Windows isolation", () => {
 			APPDATA: "C:\\Users\\me\\AppData\\Roaming",
 			LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local",
 		};
-		const env = isolatedAgentEnv(user, data, undefined, { platform: "win32" });
+		const env = isolatedAgentEnv(user, data, undefined, undefined, { platform: "win32" });
 		expect(env.APPDATA).toBe(join(data, "home", "AppData", "Roaming"));
 		expect(env.LOCALAPPDATA).toBe(join(data, "home", "AppData", "Local"));
 		expect(existsSync(env.APPDATA as string)).toBe(true);
 		expect(existsSync(env.LOCALAPPDATA as string)).toBe(true);
-		const unix = isolatedAgentEnv({ ...user, HOME: tempDir() }, tempDir(), undefined, { platform: "linux" });
+		const unix = isolatedAgentEnv({ ...user, HOME: tempDir() }, tempDir(), undefined, undefined, {
+			platform: "linux",
+		});
 		expect(unix.APPDATA).toBe(user.APPDATA);
 		expect(unix.LOCALAPPDATA).toBe(user.LOCALAPPDATA);
 	});
@@ -63,7 +58,7 @@ describe("Windows isolation", () => {
 	it("recognizes a source pi.cmd without a POSIX shim", () => {
 		const bin = tempDir();
 		writeFileSync(join(bin, "pi.cmd"), "@echo off\r\n");
-		const env = isolatedAgentEnv({ HOME: tempDir(), PATH: "/tools" }, tempDir(), undefined, {
+		const env = isolatedAgentEnv({ HOME: tempDir(), PATH: "/tools" }, tempDir(), undefined, undefined, {
 			platform: "win32",
 			sourceBinDirs: [bin],
 		});
@@ -75,6 +70,7 @@ describe("Windows isolation", () => {
 			{ HOME: tempDir(), USERPROFILE: "/user", TEMP: "/tmp/user", TMP: "/tmp/other" },
 			tempDir(),
 			undefined,
+			undefined,
 			{ platform: "linux" },
 		);
 		expect(env.USERPROFILE).toBe("/user");
@@ -85,11 +81,28 @@ describe("Windows isolation", () => {
 
 describe("isolatedAgentEnv PATH", () => {
 	it("puts the bundled `pi` first so the engine's first-run setup works on a clean machine", () => {
+		// The input PATH is built with the platform's own separator, and read back the same way: a
+		// POSIX-shaped literal is one segment on Windows, and the test then asserts the drive letter of
+		// a path that does start with the bundled folder (W4a's lesson, at the fixture's own input).
 		const env = isolatedAgentEnv({ PATH: ["/usr/bin", "/bin"].join(delimiter), HOME: tempDir() }, tempDir());
 		const [first, ...rest] = (env.PATH ?? "").split(delimiter);
-		expect(first?.endsWith(join("node_modules", ".bin"))).toBe(true);
-		const shims = process.platform === "win32" ? ["pi", "pi.cmd", "pi.exe"] : ["pi"];
-		expect(shims.some((name) => existsSync(join(first ?? "", name)))).toBe(true);
+		expect(first).toMatch(/node_modules[\\/]\.bin$/);
+		expect(existsSync(join(first ?? "", "pi"))).toBe(true);
+		expect(rest).toEqual(["/usr/bin", "/bin"]);
+	});
+
+	it("carries a `Path` the daemon was handed, under a single name", () => {
+		// Windows names the variable `Path`, and reading only `PATH` here made `rest` empty while the
+		// inherited key stayed: the engine got two path variables anyway, and its own resolution used
+		// the uppercase one — measured on an installed copy, the engine's `PATH` was
+		// `…\runtime\bin` alone, so `git` was not found and the skill registry refused to write. The
+		// daemon's own `Path` had carried git and the system folders all along (W34).
+		const base = { Path: ["/usr/bin", "/bin"].join(delimiter), HOME: tempDir() };
+		const env = isolatedAgentEnv(base, tempDir());
+		const names = Object.keys(env).filter((key) => key.toLowerCase() === "path");
+		expect(names).toEqual(["PATH"]);
+		const [first, ...rest] = (env.PATH ?? "").split(delimiter);
+		expect(first).toMatch(/node_modules[\\/]\.bin$/);
 		expect(rest).toEqual(["/usr/bin", "/bin"]);
 	});
 
@@ -101,6 +114,7 @@ describe("isolatedAgentEnv PATH", () => {
 		const env = isolatedAgentEnv(
 			{ Path: "C:\\Windows\\System32;C:\\Git\\cmd", HOME: tempDir() },
 			tempDir(),
+			undefined,
 			undefined,
 			{
 				platform: "win32",
@@ -117,6 +131,7 @@ describe("isolatedAgentEnv PATH", () => {
 		const env = isolatedAgentEnv(
 			{ Path: `C:\\Windows\\System32;${bin.toUpperCase()}\\;${bin}/`, HOME: tempDir() },
 			tempDir(),
+			undefined,
 			undefined,
 			{ platform: "win32", sourceBinDirs: [bin] },
 		);
@@ -169,8 +184,9 @@ describe("isolatedAgentEnv memory", () => {
 		const env = isolatedAgentEnv(base, dataDir);
 		expect(env.ENGRAM_PORT).toBe(PRIVATE_ENGRAM_PORT);
 		expect(PRIVATE_ENGRAM_PORT).toBe("7438");
-		// Engram then keeps its data under the engine's own home.
-		expect(env.ENGRAM_DATA_DIR).toBeUndefined();
+		// Engram then keeps its data under the engine's own home, and the path is named rather than left
+		// to Engram's default: on Windows that default follows the user profile, not `HOME` (W25).
+		expect(env.ENGRAM_DATA_DIR).toBe(join(dataDir, "home", ".engram"));
 		expect(env.ENGRAM_URL).toBeUndefined();
 		expect(isolatedAgentEnv({ ...base, GENTLE_DOT_ENGRAM_PORT: "17438" }, dataDir).ENGRAM_PORT).toBe("17438");
 	});
@@ -233,12 +249,12 @@ describe("isolatedAgentEnv temporary folder", () => {
 		const dataDir = tempDir();
 		const env = isolatedAgentEnv({ HOME: tempDir() }, dataDir);
 		expect(env.TMPDIR).toBe(join(dataDir, "home", ".cache", "tmp"));
-		expectPosixMode(statSync(env.TMPDIR ?? "").mode, 0o700);
+		expectPosixMode(env.TMPDIR ?? "", 0o700);
 	});
 
 	it("keeps the Unix user's own TMPDIR (Windows always isolates TEMP/TMP)", () => {
 		expect(
-			isolatedAgentEnv({ HOME: tempDir(), TMPDIR: "/var/tmp/me" }, tempDir(), undefined, {
+			isolatedAgentEnv({ HOME: tempDir(), TMPDIR: "/var/tmp/me" }, tempDir(), undefined, undefined, {
 				platform: "linux",
 			}).TMPDIR,
 		).toBe("/var/tmp/me");
@@ -314,9 +330,9 @@ describe("engine memory and folders", () => {
 	});
 
 	it("keeps the private memory opt-out", async () => {
-		const { env } = await start({ env: { GENTLE_DOT_ENGRAM: "private" } });
+		const { dataDir, env } = await start({ env: { GENTLE_DOT_ENGRAM: "private" } });
 		expect(env.ENGRAM_PORT).toBe("7438");
-		expect(env.ENGRAM_DATA_DIR).toBeUndefined();
+		expect(env.ENGRAM_DATA_DIR).toBe(join(dataDir, "home", ".engram"));
 	});
 
 	it("tells the engine about a custom folder without working or writing in it", async () => {

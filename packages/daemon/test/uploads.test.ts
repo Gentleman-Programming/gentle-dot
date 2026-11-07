@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { type DaemonOptions, type DotDaemon, startDaemon } from "../src/daemon.ts";
 import { composePrompt, sanitizeName, sniffMime, splitAttachments, UploadStore } from "../src/uploads.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { expectPosixMode } from "./support/posix-modes.ts";
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 1, 2, 3]);
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46]);
@@ -53,7 +54,12 @@ function store(limits = { fileBytes: 100, messageBytes: 150, files: 3 }) {
 const listUploads = (workspace: string) => {
 	const root = join(workspace, "uploads");
 	if (!existsSync(root)) return [];
-	return readdirSync(root, { recursive: true }).map(String).sort();
+	// The store reports its keys with forward slashes (`uploads/<id>/<name>`, see `uploads.ts`),
+	// so this helper normalises what the filesystem hands back instead of leaking the host's
+	// separator into an expectation about the store's key format.
+	return readdirSync(root, { recursive: true })
+		.map((entry) => String(entry).replaceAll("\\", "/"))
+		.sort();
 };
 
 describe("upload store", () => {
@@ -67,9 +73,9 @@ describe("upload store", () => {
 		expect(path).toBe(`uploads/${uploadId}/shot.png`);
 		const file = join(workspace, path);
 		expect(readFileSync(file)).toEqual(PNG);
-		expect(statSync(file).mode & 0o777).toBe(0o600);
-		expect(statSync(join(workspace, "uploads", uploadId)).mode & 0o777).toBe(0o700);
-		expect(statSync(join(workspace, "uploads")).mode & 0o777).toBe(0o700);
+		expectPosixMode(file, 0o600);
+		expectPosixMode(join(workspace, "uploads", uploadId), 0o700);
+		expectPosixMode(join(workspace, "uploads"), 0o700);
 	});
 
 	it("adds files to the same message folder, renaming duplicates", async () => {
@@ -383,8 +389,8 @@ describe("POST /upload", () => {
 		const file = JSON.parse(reply.body) as UploadedFile;
 		expect(file).toMatchObject({ name: "shot.png", size: PNG.length, mime: "image/png" });
 		expect(file.path).toBe(`uploads/${file.uploadId}/shot.png`);
-		expect(statSync(join(workspace, file.path)).mode & 0o777).toBe(0o600);
-		expect(statSync(join(workspace, "uploads", file.uploadId)).mode & 0o777).toBe(0o700);
+		expectPosixMode(join(workspace, file.path), 0o600);
+		expectPosixMode(join(workspace, "uploads", file.uploadId), 0o700);
 	});
 
 	it("enforces the size limits on the server and cleans up", async () => {

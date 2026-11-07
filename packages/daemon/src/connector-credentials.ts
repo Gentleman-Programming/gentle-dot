@@ -5,6 +5,8 @@
  * home). T23d moves them to the Keychain.
  */
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { win32 } from "node:path";
 import type { AuthProvider } from "@earendil-works/pi-mcp";
 import {
 	authorizeMcp,
@@ -18,6 +20,91 @@ const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /** Where a refresh says it would redirect when nothing is stored; refreshing never redirects. */
 const FALLBACK_REDIRECT = "http://127.0.0.1/callback";
 
+/** The shell a `!command` value runs under, and how the command reaches it. */
+export interface CommandShell {
+	shell: string;
+	args: string[];
+	/** The command goes on stdin instead of in `args`: what the engine does for a legacy WSL bash. */
+	stdin?: boolean;
+}
+
+/** The engine's `isLegacyWslBashPath`: a drive-letter WSL bash, either separator, any case. */
+function isLegacyWslBashPath(path: string): boolean {
+	return /^[a-z]:\\windows\\(?:system32|sysnative)\\bash\.exe$/i.test(path.replace(/\//g, "\\"));
+}
+
+/**
+ * The shell a `!command` value runs under, mirroring the engine's `getShellConfig()` without
+ * importing it: `@earendil-works/pi-coding-agent` costs about two seconds of daemon startup and
+ * `resolveValue` is synchronous and on the daemon's startup path. POSIX stays `/bin/sh -c`. On
+ * Windows the candidates are Git Bash under `%ProgramFiles%` and `%ProgramFiles(x86)%`, then
+ * `bash.exe` in every `env.PATH` directory, and a legacy WSL bash runs the command on stdin.
+ *
+ * The engine asks `where` for the PATH hit; this scans `env.PATH` instead, so the decision stays
+ * pure and reads the environment the command will actually run in.
+ */
+export function commandShell(
+	env: NodeJS.ProcessEnv,
+	platform: NodeJS.Platform = process.platform,
+	exists: (path: string) => boolean = existsSync,
+): CommandShell | undefined {
+	if (platform !== "win32") return { shell: "/bin/sh", args: ["-c"] };
+	const candidates: string[] = [];
+	for (const root of [env.ProgramFiles, env["ProgramFiles(x86)"]]) {
+		if (root) candidates.push(win32.join(root, "Git", "bin", "bash.exe"));
+	}
+	for (const dir of (env.PATH ?? "").split(win32.delimiter)) {
+		if (dir) candidates.push(win32.join(dir, "bash.exe"));
+	}
+	const shell = candidates.find((candidate) => exists(candidate));
+	if (!shell) return undefined;
+	return isLegacyWslBashPath(shell) ? { shell, args: ["-s"], stdin: true } : { shell, args: ["-c"] };
+}
+
+/** Why a `!command` value's shell could not produce output, named instead of blamed on the command. */
+function commandFailure(error: unknown): string {
+	if (error && typeof error === "object") {
+		const { code, signal, status } = error as { code?: unknown; signal?: unknown; status?: unknown };
+		if (typeof code === "string") return `the command could not run (${code})`;
+		if (typeof signal === "string") return `the command was stopped (${signal})`;
+		if (typeof status === "number") return `the command exited with status ${status}`;
+	}
+	return error instanceof Error ? error.message : String(error);
+}
+
+/** Runs a `!command` value and returns its trimmed output; throws when the shell itself fails. */
+function runCommand(command: string, env: NodeJS.ProcessEnv, label: string): string {
+	const shell = commandShell(env);
+	try {
+		if (!shell) {
+			return execFileSync(command, {
+				encoding: "utf8",
+				timeout: 10_000,
+				env,
+				shell: true,
+				stdio: ["ignore", "pipe", "ignore"],
+			}).trim();
+		}
+		if (shell.stdin) {
+			return execFileSync(shell.shell, shell.args, {
+				encoding: "utf8",
+				timeout: 10_000,
+				env,
+				input: command,
+				stdio: ["pipe", "pipe", "ignore"],
+			}).trim();
+		}
+		return execFileSync(shell.shell, [...shell.args, command], {
+			encoding: "utf8",
+			timeout: 10_000,
+			env,
+			stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
+	} catch (error) {
+		throw new Error(`${label} could not be read: ${commandFailure(error)}.`);
+	}
+}
+
 /**
  * A value in the engine's syntax, resolved the way the engine resolved it before the proxy: a
  * leading `!` runs the rest as a command and takes its output, `$NAME` and `${NAME}` read the
@@ -25,15 +112,7 @@ const FALLBACK_REDIRECT = "http://127.0.0.1/callback";
  */
 export function resolveValue(text: string, env: NodeJS.ProcessEnv, label: string): string {
 	if (text.startsWith("!")) {
-		let output = "";
-		try {
-			output = execFileSync("/bin/sh", ["-c", text.slice(1)], {
-				encoding: "utf8",
-				timeout: 10_000,
-				stdio: ["ignore", "pipe", "ignore"],
-				env,
-			}).trim();
-		} catch {}
+		const output = runCommand(text.slice(1), env, label);
 		if (!output) throw new Error(`${label} could not be read: its command gave nothing.`);
 		return output;
 	}
