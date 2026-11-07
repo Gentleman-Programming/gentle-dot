@@ -53,7 +53,10 @@ pub struct DesktopConfig {
     pub data_dir: PathBuf,
     pub port: u16,
     pub shortcut: String,
-    pub memory: MemoryMode,
+    /// The mode `config.json` names, or the daemon's own error for a `memory` value it refuses.
+    /// Never a mode in disguise: the app starts, the UI shows the error, and nothing treats it as
+    /// shared (SW9).
+    pub memory: Result<MemoryMode, String>,
 }
 
 /// Result of the `connection_info` command (design §9).
@@ -81,9 +84,21 @@ fn valid_port(value: Option<u64>) -> Option<u16> {
     value.and_then(|port| u16::try_from(port).ok())
 }
 
+/// The file's `memory` as the daemon reads it: absent is `shared`; anything else that is not
+/// `shared` or `private` (`null`, a typo, `"Private"`, a number) is its named error (SW9).
+fn file_memory(file: &serde_json::Value) -> Result<MemoryMode, String> {
+    match file.get("memory") {
+        None => Ok(MemoryMode::DEFAULT),
+        Some(serde_json::Value::String(text)) => MemoryMode::parse(text),
+        Some(other) => Err(invalid_memory(&other.to_string())),
+    }
+}
+
 /// Resolves the port, shortcut and memory mode: environment first, then the file, then defaults.
 /// A missing or invalid file never prevents the app from starting, and neither does an invalid
-/// value in it: each key falls back to its default, `memory` included (SW9).
+/// value in it: `port` and `shortcut` fall back to their defaults, while an invalid `memory` is
+/// kept as an error for the UI to show, because falling back would turn a privacy setting into
+/// shared memory (SW9).
 pub fn parse_config(
     data_dir: PathBuf,
     file: Option<&str>,
@@ -102,10 +117,7 @@ pub fn parse_config(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| default_shortcut())
         .to_string();
-    let memory = file["memory"]
-        .as_str()
-        .and_then(|text| MemoryMode::parse(text).ok())
-        .unwrap_or(MemoryMode::DEFAULT);
+    let memory = file_memory(&file);
     DesktopConfig { data_dir, port, shortcut, memory }
 }
 
@@ -285,7 +297,7 @@ mod tests {
         let config = parse_config(dir(), None, env_of(&[]));
         assert_eq!(
             config,
-            DesktopConfig { data_dir: dir(), port: DEFAULT_PORT, shortcut: default_shortcut().into(), memory: MemoryMode::DEFAULT }
+            DesktopConfig { data_dir: dir(), port: DEFAULT_PORT, shortcut: default_shortcut().into(), memory: Ok(MemoryMode::DEFAULT) }
         );
     }
 
@@ -298,27 +310,27 @@ mod tests {
 
     #[test]
     fn memory_defaults_to_shared_and_reads_from_the_file() {
-        assert_eq!(parse_config(dir(), None, env_of(&[])).memory, MemoryMode::Shared);
+        assert_eq!(parse_config(dir(), None, env_of(&[])).memory, Ok(MemoryMode::Shared));
         let private = parse_config(dir(), Some(r#"{ "memory": "private" }"#), env_of(&[]));
-        assert_eq!(private.memory, MemoryMode::Private);
+        assert_eq!(private.memory, Ok(MemoryMode::Private));
         let shared = parse_config(dir(), Some(r#"{ "memory": "shared" }"#), env_of(&[]));
-        assert_eq!(shared.memory, MemoryMode::Shared);
+        assert_eq!(shared.memory, Ok(MemoryMode::Shared));
     }
 
     #[test]
-    fn an_invalid_memory_value_falls_back_to_shared() {
-        // The app must still start, so `memory` falls back like `port` and `shortcut` do.
+    fn an_invalid_memory_value_is_an_error_and_never_shared() {
+        // The app must still start, so the other keys resolve as usual; but `memory` is the
+        // daemon's own error, not a mode: a typo in a privacy setting never reads as shared.
         let cases = [
-            r#"{ "memory": "privat" }"#,
-            r#"{ "memory": "Private" }"#,
-            r#"{ "memory": null }"#,
-            r#"{ "memory": 3 }"#,
-            r#"{ "memory": true }"#,
+            (r#"{ "memory": "privat" }"#, "privat"),
+            (r#"{ "memory": "Private" }"#, "Private"),
+            (r#"{ "memory": null }"#, "null"),
+            (r#"{ "memory": 3 }"#, "3"),
+            (r#"{ "memory": true }"#, "true"),
         ];
-        for file in cases {
+        for (file, shown) in cases {
             let config = parse_config(dir(), Some(file), env_of(&[("GENTLE_DOT_PORT", "6000")]));
-            assert_eq!(config.memory, MemoryMode::DEFAULT, "{file}");
-            // The other keys are resolved as usual.
+            assert_eq!(config.memory, Err(format!("Invalid memory in config.json: {shown}")), "{file}");
             assert_eq!(config.port, 6000, "{file}");
             assert_eq!(config.shortcut, default_shortcut(), "{file}");
         }
@@ -370,7 +382,7 @@ mod tests {
         let config = parse_config(dir(), Some(&text), env_of(&[]));
         assert_eq!(
             config,
-            DesktopConfig { data_dir: dir(), port: 5000, shortcut: "Shift+Super+K".into(), memory: MemoryMode::DEFAULT }
+            DesktopConfig { data_dir: dir(), port: 5000, shortcut: "Shift+Super+K".into(), memory: Ok(MemoryMode::DEFAULT) }
         );
         let config = parse_config(dir(), Some(&text), env_of(&[("GENTLE_DOT_PORT", "6000")]));
         assert_eq!(config.port, 6000);
@@ -395,6 +407,14 @@ mod tests {
         // A file that is not an object is refused, exactly as the shortcut's writer refuses it.
         assert_eq!(with_memory(Some("{ not json"), MemoryMode::Private), Err(INVALID_CONFIG.to_string()));
         assert_eq!(with_memory(Some("[1, 2]"), MemoryMode::Private), Err(INVALID_CONFIG.to_string()));
+    }
+
+    #[test]
+    fn saving_a_memory_mode_repairs_an_invalid_value() {
+        let text = with_memory(Some(r#"{ "port": 5000, "memory": "Private" }"#), MemoryMode::Private).unwrap();
+        let config = parse_config(dir(), Some(&text), env_of(&[]));
+        assert_eq!(config.memory, Ok(MemoryMode::Private));
+        assert_eq!(config.port, 5000);
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -442,7 +462,7 @@ mod tests {
         }
         // The file the app wrote reads back as the private mode, with the other keys kept.
         let config = parse_config(dir.clone(), std::fs::read_to_string(&file).ok().as_deref(), env_of(&[]));
-        assert_eq!(config.memory, MemoryMode::Private);
+        assert_eq!(config.memory, Ok(MemoryMode::Private));
         assert_eq!(config.shortcut, "Alt+Space");
         // A missing file is created with just the key.
         let fresh = scratch("memory-fresh").join("config.json");

@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
 	tauri: true,
 	shortcut: "Alt+Space",
 	memory: "shared" as "shared" | "private",
+	memoryError: undefined as string | undefined,
 	setResult: undefined as undefined | ((shortcut: string) => Promise<unknown>),
 	invoke: vi.fn(),
 	state: undefined as unknown as DotState,
@@ -61,6 +62,7 @@ beforeEach(() => {
 	h.tauri = true;
 	h.shortcut = "Alt+Space";
 	h.memory = "shared";
+	h.memoryError = undefined;
 	h.setResult = undefined;
 	h.state = { ...initialState, connection: "open", agentState: "idle" };
 	vi.spyOn(navigator, "userAgent", "get").mockReturnValue(MAC_AGENT);
@@ -77,10 +79,11 @@ beforeEach(() => {
 				return { shortcut };
 			}
 			case "memory_get":
-				return { memory: h.memory };
+				return h.memoryError ? { memory: null, error: h.memoryError } : { memory: h.memory };
 			case "memory_set": {
 				const memory = String(args?.memory) as "shared" | "private";
 				h.memory = memory;
+				h.memoryError = undefined;
 				return { memory };
 			}
 			default:
@@ -220,6 +223,54 @@ describe("the Private memory toggle (SW9)", () => {
 		await waitFor(() => expect(invoked("memory_set")).toHaveLength(1));
 		expect(invoked("memory_set")[0]?.[1]).toEqual({ memory: "private" });
 		await waitFor(() => expect(toggle).toBeChecked());
+	});
+});
+
+describe("an invalid memory setting (S9)", () => {
+	const ERROR = "Invalid memory in config.json: Private";
+
+	it("shows the error and never presents the setting as shared", async () => {
+		h.memoryError = ERROR;
+		await openSettings();
+		const alert = await screen.findByText(new RegExp(ERROR));
+		expect(alert).toHaveAttribute("role", "alert");
+		expect(alert).toHaveTextContent(/"shared" or "private"/);
+		// No switch to read as "Shared": the user picks a valid value explicitly.
+		expect(screen.queryByRole("switch", { name: "Private memory" })).toBeNull();
+		expect(invoked("memory_set")).toHaveLength(0);
+	});
+
+	it("repairs the value with either choice and goes back to the switch", async () => {
+		h.memoryError = ERROR;
+		await openSettings();
+		await userEvent.click(await screen.findByRole("button", { name: "Use private memory" }));
+		await waitFor(() => expect(invoked("memory_set")).toHaveLength(1));
+		expect(invoked("memory_set")[0]?.[1]).toEqual({ memory: "private" });
+		const toggle = await screen.findByRole("switch", { name: "Private memory" });
+		expect(toggle).toBeChecked();
+		expect(screen.queryByText(new RegExp(ERROR))).toBeNull();
+	});
+
+	it("offers shared memory too", async () => {
+		h.memoryError = ERROR;
+		await openSettings();
+		await userEvent.click(await screen.findByRole("button", { name: "Use shared memory" }));
+		await waitFor(() => expect(invoked("memory_set")[0]?.[1]).toEqual({ memory: "shared" }));
+		expect(await screen.findByRole("switch", { name: "Private memory" })).not.toBeChecked();
+	});
+
+	it("keeps the error when saving fails", async () => {
+		h.memoryError = ERROR;
+		const base = h.invoke.getMockImplementation() as (command: string, args?: unknown) => Promise<unknown>;
+		h.invoke.mockImplementation(async (command: string, args?: unknown) => {
+			if (command === "memory_set") throw "Gentle Dot cannot save config.json (denied).";
+			return base(command, args);
+		});
+		await openSettings();
+		await userEvent.click(await screen.findByRole("button", { name: "Use shared memory" }));
+		expect(await screen.findByText("Gentle Dot cannot save config.json (denied).")).toBeInTheDocument();
+		expect(screen.getByText(new RegExp(ERROR))).toBeInTheDocument();
+		expect(screen.queryByRole("switch", { name: "Private memory" })).toBeNull();
 	});
 });
 

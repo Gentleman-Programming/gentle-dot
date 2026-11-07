@@ -34,6 +34,7 @@ export function SettingsPanel({ close }: { close: () => void }) {
 	const [loadFailed, setLoadFailed] = useState(false);
 	const [status, setStatus] = useState<Status>({ kind: "idle" });
 	const [memory, setMemory] = useState<MemoryMode | undefined>(undefined);
+	const [memoryInvalid, setMemoryInvalid] = useState<string | undefined>(undefined);
 	const [memoryFailed, setMemoryFailed] = useState(false);
 	const [memoryApplying, setMemoryApplying] = useState(false);
 	const [memoryReason, setMemoryReason] = useState<string | undefined>(undefined);
@@ -52,7 +53,9 @@ export function SettingsPanel({ close }: { close: () => void }) {
 		);
 		loadMemory().then(
 			(found) => {
-				if (live.current) setMemory(found.memory);
+				if (!live.current) return;
+				setMemory(found.memory ?? undefined);
+				setMemoryInvalid(found.error);
 			},
 			() => {
 				if (live.current) setMemoryFailed(true);
@@ -84,6 +87,7 @@ export function SettingsPanel({ close }: { close: () => void }) {
 			(saved) => {
 				if (!live.current) return;
 				setMemory(saved);
+				setMemoryInvalid(undefined);
 				setMemoryApplying(false);
 			},
 			(error: unknown) => {
@@ -191,17 +195,34 @@ export function SettingsPanel({ close }: { close: () => void }) {
 						Gentle Dot could not read the memory setting.
 					</p>
 				) : null}
-				<label className="shortcut-row">
-					<input
-						type="checkbox"
-						role="switch"
-						aria-checked={memory === "private"}
-						checked={memory === "private"}
-						disabled={memory === undefined || memoryApplying}
-						onChange={(event) => applyMemory(event.target.checked ? "private" : "shared")}
-					/>
-					<span>Private memory</span>
-				</label>
+				{memoryInvalid ? (
+					<>
+						<p className="settings-error" role="alert">
+							{memoryInvalid}. The assistant is not running until this is fixed: set memory to "shared" or
+							"private" in config.json, or choose one here.
+						</p>
+						<div className="shortcut-row">
+							<button type="button" disabled={memoryApplying} onClick={() => applyMemory("shared")}>
+								Use shared memory
+							</button>
+							<button type="button" disabled={memoryApplying} onClick={() => applyMemory("private")}>
+								Use private memory
+							</button>
+						</div>
+					</>
+				) : (
+					<label className="shortcut-row">
+						<input
+							type="checkbox"
+							role="switch"
+							aria-checked={memory === "private"}
+							checked={memory === "private"}
+							disabled={memory === undefined || memoryApplying}
+							onChange={(event) => applyMemory(event.target.checked ? "private" : "shared")}
+						/>
+						<span>Private memory</span>
+					</label>
+				)}
 				{memoryReason ? (
 					<p className="settings-error" role="alert">
 						{memoryReason}

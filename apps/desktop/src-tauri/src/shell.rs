@@ -69,8 +69,9 @@ struct Shell {
     full_screen: Mutex<Option<Rect>>,
     /// The shortcut that toggles the panel now; `None` while none is bound (native Wayland).
     shortcut: Mutex<Option<String>>,
-    /// The assistant's memory mode now (SW9); set by `memory_set` and read by `memory_get`.
-    memory: Mutex<config::MemoryMode>,
+    /// The assistant's memory mode now (SW9), or the error for an invalid `memory` in `config.json`
+    /// until `memory_set` replaces it with a valid one; read by `memory_get`.
+    memory: Mutex<Result<config::MemoryMode, String>>,
 }
 
 /// The Dot and the panel as computer control hides them during a call (S1, S5): never through
@@ -384,12 +385,24 @@ async fn shortcut_set(app: AppHandle, shortcut: String) -> CommandResult<Shortcu
 /// Result of `memory_get`/`memory_set` (SW9): the assistant's memory mode as the panel reads it.
 #[derive(serde::Serialize)]
 struct MemoryInfo {
-    memory: &'static str,
+    /// `null` while `config.json` holds a value the daemon refuses; `error` then says which.
+    memory: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl MemoryInfo {
+    fn of(state: &Result<config::MemoryMode, String>) -> MemoryInfo {
+        match state {
+            Ok(mode) => MemoryInfo { memory: Some(mode.as_str()), error: None },
+            Err(error) => MemoryInfo { memory: None, error: Some(error.clone()) },
+        }
+    }
 }
 
 #[tauri::command]
 fn memory_get(app: AppHandle) -> MemoryInfo {
-    MemoryInfo { memory: app.state::<Shell>().memory.lock().unwrap().as_str() }
+    MemoryInfo::of(&app.state::<Shell>().memory.lock().unwrap())
 }
 
 /// Saves the memory mode and restarts the assistant so the engine picks it up (SW9). An unchanged
@@ -400,15 +413,16 @@ async fn memory_set(app: AppHandle, memory: String) -> CommandResult<MemoryInfo>
         let mode = config::MemoryMode::parse(&memory)?;
         let (data_dir, current) = {
             let shell = app.state::<Shell>();
-            let current = *shell.memory.lock().unwrap();
+            let current = shell.memory.lock().unwrap().clone();
             (shell.config.data_dir.clone(), current)
         };
-        if current != mode {
+        // An invalid value is never equal to a mode, so choosing one repairs the file.
+        if current != Ok(mode) {
             config::save_memory(&data_dir.join("config.json"), mode)?;
-            *app.state::<Shell>().memory.lock().unwrap() = mode;
+            *app.state::<Shell>().memory.lock().unwrap() = Ok(mode);
             restart_daemon(app.clone());
         }
-        Ok(MemoryInfo { memory: mode.as_str() })
+        Ok(MemoryInfo { memory: Some(mode.as_str()), error: None })
     })
     .await
     .map_err(err)?
@@ -1024,7 +1038,7 @@ pub fn run() {
                 panel_spot: Mutex::new(None),
                 full_screen: Mutex::new(None),
                 shortcut: Mutex::new(None),
-                memory: Mutex::new(config.memory),
+                memory: Mutex::new(config.memory.clone()),
             });
             let (voice_input, voice_model) = voice::start(&handle);
             app.manage(voice_input);
