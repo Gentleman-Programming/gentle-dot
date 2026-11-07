@@ -1,9 +1,11 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
 	daemonSourceRevision,
 	engramArchiveName,
 	installerEnv,
 	pnpmInvocation,
+	WINDOWS_RUNTIME_FILES,
 	windowsBuildGo,
 } from "../lib.mjs";
 
@@ -191,5 +193,84 @@ describe("Windows Engram archive", () => {
 		expect(engramArchiveName("3.2.1", "darwin-arm64", line("engram_3.2.1_darwin_arm64.zip"))).toBe(
 			"engram_3.2.1_darwin_arm64.tar.gz",
 		);
+	});
+});
+
+// `WINDOWS_RUNTIME_FILES` is a constant: nothing else stops a stage from dropping a file it lists.
+// Each listed path names the stage functions that produce it and the statement in each that does,
+// read from their source the way windows-layout.test.ts reads launch.rs (the stager runs `main()`
+// on import, so it cannot be imported here).
+describe("Windows runtime files against the stages that build them", () => {
+	const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
+	const sources = {
+		stager: read("../stage-runtime.mjs"),
+		lib: read("../lib.mjs"),
+		daemonBuild: read("../../../packages/daemon/src/runtime-build.ts"),
+	};
+	type Source = keyof typeof sources;
+
+	/** The text of a top-level `function name(...) { ... }`, up to its closing brace at column 0. */
+	function functionBody(source: string, name: string): string {
+		const start = new RegExp(`^(?:export )?(?:async )?function ${name}\\(`, "m").exec(source);
+		if (!start) throw new Error(`no top-level function ${name}`);
+		const end = source.indexOf("\n}\n", start.index);
+		return source.slice(start.index, end < 0 ? undefined : end);
+	}
+
+	/** A stage function, and the statement in it that puts the file in the runtime. */
+	const PRODUCERS: Record<string, [Source, string, string][]> = {
+		"node/bin/node.exe": [
+			["stager", "stageNode", "layoutWindowsNode("],
+			["lib", "layoutWindowsNode", 'join(node, "bin", "node.exe")'],
+		],
+		"daemon/cli.mjs": [
+			["stager", "main", '"build:runtime"'],
+			["daemonBuild", "buildRuntime", 'join(daemon, "cli.mjs")'],
+		],
+		"daemon/package.json": [["daemonBuild", "buildRuntime", 'join(daemon, "package.json")']],
+		"daemon/native/windows-stop.node": [
+			["daemonBuild", "buildRuntime", 'join(daemon, "native", "windows-stop.node")'],
+		],
+		"daemon/node_modules/gentle-pi/package.json": [
+			["stager", "main", "installDaemonModules("],
+			["stager", "installDaemonModules", '"install"'],
+		],
+		"bin/engram.exe": [
+			["stager", "main", "stageEngram("],
+			["stager", "stageEngram", 'join(out, "bin", binaryName)'],
+		],
+		"bin/pi.cmd": [["daemonBuild", "buildRuntime", 'join(outDir, "bin", "pi.cmd")']],
+		"ui/index.html": [["stager", "main", 'join(out, "ui")']],
+	};
+
+	/** What keeps a path from being produced: the producers it lacks, or the statements that are gone. */
+	function unproduced(files: readonly string[], producers = PRODUCERS): string[] {
+		return files.flatMap((file) => {
+			const stages = producers[file];
+			if (!stages) return [`${file}: no stage function is named for it`];
+			return stages
+				.filter(([source, fn, marker]) => !functionBody(sources[source], fn).includes(marker))
+				.map(([, fn, marker]) => `${file}: ${fn} no longer has ${marker}`);
+		});
+	}
+
+	it("names a producing stage for every listed file, and every statement is still there", () => {
+		expect(unproduced(WINDOWS_RUNTIME_FILES)).toEqual([]);
+		expect(Object.keys(PRODUCERS).sort()).toEqual([...WINDOWS_RUNTIME_FILES].sort());
+	});
+
+	it("notices a listed file no stage produces, and a stage that stopped producing one", () => {
+		expect(unproduced(["bin/new-tool.exe"])).toEqual(["bin/new-tool.exe: no stage function is named for it"]);
+		expect(
+			unproduced(["bin/pi.cmd"], { "bin/pi.cmd": [["daemonBuild", "buildRuntime", "not-written.cmd"]] }),
+		).toEqual(["bin/pi.cmd: buildRuntime no longer has not-written.cmd"]);
+	});
+
+	it("builds the daemon's gentle-pi dependency and the web UI's index.html into the places staged", () => {
+		const daemon = JSON.parse(read("../../../packages/daemon/package.json"));
+		expect(Object.keys(daemon.dependencies)).toContain("gentle-pi");
+		expect(read("../../../packages/ui/vite.config.ts")).toContain('outDir: "dist/app"');
+		expect(sources.stager).toContain('join(REPO, "packages", "ui", "dist", "app")');
+		expect(read("../../../packages/ui/index.html")).toContain("<html");
 	});
 });
