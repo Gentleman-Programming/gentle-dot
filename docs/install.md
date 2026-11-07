@@ -129,7 +129,7 @@ Gentle Dot never repairs, replaces or deletes such a file, and it never keeps th
 3. Optional: tick **Delete the application data** in the uninstaller to remove the window's data (`%APPDATA%\dev.gentleman.gentle-dot\` and `%LOCALAPPDATA%\dev.gentleman.gentle-dot\`).
 4. Optional: remove `%USERPROFILE%\.gentle-dot\` to delete settings and conversations, and `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\` to delete connector secrets. The uninstaller never touches these.
 
-`%USERPROFILE%\.gentle-dot\daemon.owner` stays behind after a normal quit. It records the last launch without any authority over it, and the next launch replaces it.
+`%USERPROFILE%\.gentle-dot\daemon.owner` stays behind after a normal quit. It records the last launch without any authority over it. Stale records are not replaced today ([#216](https://github.com/Gentleman-Programming/gentle-dot/issues/216)), so if Gentle Dot refuses to start after a crash or a forced stop, quit it, then rename `daemon.owner`, `daemon.pid` and `.gentle-dot-daemon.lock` in `%USERPROFILE%\.gentle-dot\` aside and start it again.
 
 
 ## Linux

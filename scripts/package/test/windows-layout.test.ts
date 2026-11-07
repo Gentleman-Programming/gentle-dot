@@ -73,3 +73,12 @@ describe("Windows runtime layout against launch.rs", () => {
 		expect([...WINDOWS_RUNTIME_FILES].sort()).toEqual([...requiredRuntimeFiles()].sort());
 	});
 });
+
+describe("desktop bundle config", () => {
+	it("lists the tracked Windows icon, which the MSI step needs", () => {
+		const tauri = new URL("../../../apps/desktop/src-tauri/", import.meta.url);
+		const config = JSON.parse(readFileSync(new URL("tauri.conf.json", tauri), "utf8"));
+		expect(config.bundle.icon).toContain("icons/icon.ico");
+		expect(existsSync(new URL("icons/icon.ico", tauri))).toBe(true);
+	});
+});
