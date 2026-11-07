@@ -27,12 +27,11 @@ function launchNodePath(): string {
 	return path;
 }
 
-/** The runtime folders the Windows launch spec puts on PATH, read from its `format!("{};{};...")` block. */
+/** The runtime folders the Windows launch spec puts on PATH, read from `windows_bundled_path`'s leading array. */
 function launchPathDirs(source: string): string[] {
-	// Up to the closing `),` of the format! call: its arguments hold `)` themselves.
-	const block = /format!\("\{\};\{\};[^"]*",([\s\S]*?)\),\s*\n/.exec(source)?.[1];
-	if (!block) throw new Error("launch.rs has no Windows PATH format! block.");
-	return [...block.matchAll(/dir\.join\("([^"]+)"\)/g)].map((match) => match[1]);
+	const block = /fn windows_bundled_path\([^)]*\)[^{]*\{\s*\[([^\]]*)\]/.exec(source)?.[1];
+	if (!block) throw new Error("launch.rs has no windows_bundled_path runtime folders.");
+	return [...block.matchAll(/runtime\.join\("([^"]+)"\)/g)].map((match) => match[1]);
 }
 
 describe("Windows runtime layout against launch.rs", () => {
@@ -40,7 +39,7 @@ describe("Windows runtime layout against launch.rs", () => {
 		const nodeDir = launchNodePath().replace(/\/node\.exe$/, "");
 		expect(launchPathDirs(launch)).toContain(nodeDir);
 		// A PATH entry that drifts from the Node path is caught, not only a moved node.exe.
-		const drifted = launch.replace('dir.join("node/bin").display()', 'dir.join("node").display()');
+		const drifted = launch.replace('runtime.join("node/bin")', 'runtime.join("node")');
 		expect(drifted).not.toBe(launch);
 		expect(launchPathDirs(drifted)).not.toContain(nodeDir);
 	});
