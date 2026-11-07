@@ -38,7 +38,7 @@ function isLegacyWslBashPath(path: string): boolean {
  * importing it: `@earendil-works/pi-coding-agent` costs about two seconds of daemon startup and
  * `resolveValue` is synchronous and on the daemon's startup path. POSIX stays `/bin/sh -c`. On
  * Windows the candidates are Git Bash under `%ProgramFiles%` and `%ProgramFiles(x86)%`, then
- * `bash.exe` in every `env.PATH` directory, and a legacy WSL bash runs the command on stdin.
+ * `bash.exe` in every `env.PATH` (or `Path`) directory, and a legacy WSL bash runs the command on stdin.
  *
  * The engine asks `where` for the PATH hit; this scans `env.PATH` instead, so the decision stays
  * pure and reads the environment the command will actually run in.
@@ -53,12 +53,34 @@ export function commandShell(
 	for (const root of [env.ProgramFiles, env["ProgramFiles(x86)"]]) {
 		if (root) candidates.push(win32.join(root, "Git", "bin", "bash.exe"));
 	}
-	for (const dir of (env.PATH ?? "").split(win32.delimiter)) {
+	// Windows spells the variable `Path` and a copied environment keeps that spelling.
+	const pathKey = Object.keys(env).find((key) => key.toUpperCase() === "PATH");
+	for (const dir of (pathKey ? (env[pathKey] ?? "") : "").split(win32.delimiter)) {
 		if (dir) candidates.push(win32.join(dir, "bash.exe"));
 	}
 	const shell = candidates.find((candidate) => exists(candidate));
 	if (!shell) return undefined;
 	return isLegacyWslBashPath(shell) ? { shell, args: ["-s"], stdin: true } : { shell, args: ["-c"] };
+}
+
+const announcedFallback = new WeakSet<(line: string) => void>();
+
+/**
+ * {@link commandShell}, saying through `log` (once per log) when no bash was found and `!command`
+ * values fall back to cmd.exe, which parses them differently from the bash the engine would use.
+ */
+export function resolveCommandShell(
+	env: NodeJS.ProcessEnv,
+	log?: (line: string) => void,
+	platform: NodeJS.Platform = process.platform,
+	exists: (path: string) => boolean = existsSync,
+): CommandShell | undefined {
+	const shell = commandShell(env, platform, exists);
+	if (!shell && log && !announcedFallback.has(log)) {
+		announcedFallback.add(log);
+		log("no bash.exe found (Git for Windows or on PATH); connector !command values run through cmd.exe");
+	}
+	return shell;
 }
 
 /** Why a `!command` value's shell could not produce output, named instead of blamed on the command. */
@@ -73,8 +95,13 @@ function commandFailure(error: unknown): string {
 }
 
 /** Runs a `!command` value and returns its trimmed output; throws when the shell itself fails. */
-function runCommand(command: string, env: NodeJS.ProcessEnv, label: string): string {
-	const shell = commandShell(env);
+function runCommand(
+	command: string,
+	env: NodeJS.ProcessEnv,
+	label: string,
+	log?: (line: string) => void,
+): string {
+	const shell = resolveCommandShell(env, log);
 	try {
 		if (!shell) {
 			return execFileSync(command, {
@@ -110,9 +137,14 @@ function runCommand(command: string, env: NodeJS.ProcessEnv, label: string): str
  * leading `!` runs the rest as a command and takes its output, `$NAME` and `${NAME}` read the
  * environment, `$$` is `$` and `$!` is `!`. Throws when a variable or the command gives nothing.
  */
-export function resolveValue(text: string, env: NodeJS.ProcessEnv, label: string): string {
+export function resolveValue(
+	text: string,
+	env: NodeJS.ProcessEnv,
+	label: string,
+	log?: (line: string) => void,
+): string {
 	if (text.startsWith("!")) {
-		const output = runCommand(text.slice(1), env, label);
+		const output = runCommand(text.slice(1), env, label, log);
 		if (!output) throw new Error(`${label} could not be read: its command gave nothing.`);
 		return output;
 	}
@@ -150,10 +182,11 @@ export function resolveRecord(
 	values: Record<string, string> | undefined,
 	env: NodeJS.ProcessEnv,
 	label: string,
+	log?: (line: string) => void,
 ): Record<string, string> | undefined {
 	if (!values || Object.keys(values).length === 0) return undefined;
 	return Object.fromEntries(
-		Object.entries(values).map(([key, text]) => [key, resolveValue(text, env, `${label} ${key}`)]),
+		Object.entries(values).map(([key, text]) => [key, resolveValue(text, env, `${label} ${key}`, log)]),
 	);
 }
 

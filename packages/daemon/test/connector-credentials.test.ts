@@ -6,7 +6,7 @@
 import { existsSync } from "node:fs";
 import { win32 } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { commandShell, resolveValue } from "../src/connector-credentials.ts";
+import { commandShell, resolveCommandShell, resolveValue } from "../src/connector-credentials.ts";
 
 const GIT_BASH = win32.join("C:\\Program Files", "Git", "bin", "bash.exe");
 const GIT_BASH_X86 = win32.join("C:\\Program Files (x86)", "Git", "bin", "bash.exe");
@@ -35,6 +35,18 @@ describe("commandShell", () => {
 			(path) => path === bash,
 		);
 		expect(shell).toEqual({ shell: bash, args: ["-c"] });
+	});
+
+	it("reads the Windows `Path` spelling of the variable, in any case", () => {
+		const bash = win32.join("C:\\second", "bash.exe");
+		for (const name of ["Path", "path", "PATH"]) {
+			const shell = commandShell(
+				{ [name]: ["C:\\first", "C:\\second"].join(";") },
+				"win32",
+				(p) => p === bash,
+			);
+			expect(shell, name).toEqual({ shell: bash, args: ["-c"] });
+		}
 	});
 
 	it("reads a legacy WSL bash from PATH as the stdin form", () => {
@@ -83,6 +95,51 @@ describe("commandShell", () => {
 		expect(ours?.shell).toBe(engine.shell);
 		expect(ours?.args).toEqual(engine.args);
 		expect(Boolean(ours?.stdin)).toBe(engine.commandTransport === "stdin");
+	});
+});
+
+describe("resolveCommandShell", () => {
+	it("says once per log that no bash was found and commands run through cmd.exe", () => {
+		const lines: string[] = [];
+		const log = (line: string) => lines.push(line);
+		expect(resolveCommandShell({ PATH: "C:\\one" }, log, "win32", () => false)).toBeUndefined();
+		expect(resolveCommandShell({ PATH: "C:\\one" }, log, "win32", () => false)).toBeUndefined();
+		expect(lines).toEqual([
+			"no bash.exe found (Git for Windows or on PATH); connector !command values run through cmd.exe",
+		]);
+		const other: string[] = [];
+		resolveCommandShell(
+			{},
+			(line) => other.push(line),
+			"win32",
+			() => false,
+		);
+		expect(other).toHaveLength(1);
+	});
+
+	it("stays quiet when a bash is found or there is no log", () => {
+		const lines: string[] = [];
+		const bash = win32.join("C:\\one", "bash.exe");
+		const found = resolveCommandShell(
+			{ PATH: "C:\\one" },
+			(l) => lines.push(l),
+			"win32",
+			(p) => p === bash,
+		);
+		expect(found).toEqual({ shell: bash, args: ["-c"] });
+		expect(resolveCommandShell({}, undefined, "win32", () => false)).toBeUndefined();
+		expect(
+			resolveCommandShell(
+				{},
+				(l) => lines.push(l),
+				"linux",
+				() => false,
+			),
+		).toEqual({
+			shell: "/bin/sh",
+			args: ["-c"],
+		});
+		expect(lines).toEqual([]);
 	});
 });
 
