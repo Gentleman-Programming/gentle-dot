@@ -82,10 +82,11 @@ export function isStartableProgram(path: string, platform: NodeJS.Platform): boo
  * listened on the private port. Substituting the runtime's own guard keeps the guard's real
  * contract — refuse, print why, touch no store — and makes the notice true on every platform.
  *
- * Two cases are deliberately **not** substituted. An `ENGRAM_BIN` this platform starts is the
+ * Three cases are deliberately **not** substituted. An `ENGRAM_BIN` this platform starts is the
  * caller's choice and is left alone. A path that is not there is a different defect, and the
  * provider's own message names it better than a refusal would: substituting there would hide a
- * typo behind "memory disabled".
+ * typo behind "memory disabled". And on POSIX the guard is never a substitute: a file that is not
+ * executable is the user's own mistake, and `main` hands it to the provider, which names it.
  */
 export function refusalGuard(
 	env: NodeJS.ProcessEnv,
@@ -99,6 +100,7 @@ export function refusalGuard(
 	const inherited = env.ENGRAM_BIN;
 	if (!inherited) return undefined;
 	const platform = options.platform ?? process.platform;
+	if (platform !== "win32") return undefined;
 	const startable = options.startable ?? isStartableProgram;
 	if (startable(inherited, platform)) return undefined;
 	const exists = options.exists ?? existsSync;

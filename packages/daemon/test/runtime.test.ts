@@ -7,6 +7,7 @@ import { bundledMcpCli } from "../src/connectors.ts";
 import { isolatedAgentEnv } from "../src/isolation.ts";
 import { engramBinaryName, refusalGuard, resolveEngramBin, runtimeDir } from "../src/runtime.ts";
 import { tempDir } from "./helpers.ts";
+import { hasPosixModes } from "./support/posix-modes.ts";
 import { itWithPosixShell } from "./support/windows.ts";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
@@ -256,6 +257,40 @@ describe("refusalGuard", () => {
 		touch(join(runtime, "bin", "engram-guard"), "");
 		expect(refusalGuard({ ENGRAM_BIN: inherited }, runtime, { platform: "linux" })).toBeUndefined();
 	});
+
+	// On main a non-executable ENGRAM_BIN reaches the provider, which names it; swapping it for the
+	// guard on POSIX hid the user's own mistake behind "memory disabled".
+	it("never substitutes the guard for an ENGRAM_BIN that exists but is not executable on POSIX", () => {
+		const runtime = fakeRuntime();
+		const inherited = touch(join(tempDir(), "engram"), "", 0o644);
+		touch(join(runtime, "bin", "engram-guard"), "");
+		for (const platform of ["linux", "darwin"] as const) {
+			expect(
+				refusalGuard({ ENGRAM_BIN: inherited }, runtime, { platform, startable: () => false }),
+			).toBeUndefined();
+		}
+	});
+
+	it.skipIf(!hasPosixModes())(
+		"passes a non-executable ENGRAM_BIN to the engine unchanged and says so in the log",
+		() => {
+			const runtime = fakeRuntime();
+			touch(join(runtime, "bin", "engram-guard"), "#!/bin/sh\nexit 78\n", 0o755);
+			const inherited = touch(join(tempDir(), "engram"), "", 0o644);
+			const lines: string[] = [];
+			const env = isolatedAgentEnv(
+				{ PATH: "/bin", HOME: tempDir(), GENTLE_DOT_RUNTIME: runtime, ENGRAM_BIN: inherited },
+				tempDir(),
+				undefined,
+				(line) => lines.push(line),
+				{ platform: "linux" },
+			);
+			expect(env.ENGRAM_BIN).toBe(inherited);
+			expect(lines).toEqual([
+				`ENGRAM_BIN (${inherited}) exists but cannot be started here; it is passed to the engine unchanged and Engram will report it`,
+			]);
+		},
+	);
 
 	it("adds nothing when the runtime ships no guard (a source checkout)", () => {
 		const runtime = fakeRuntime();

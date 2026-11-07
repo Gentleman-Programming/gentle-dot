@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { delimiter, dirname, join, win32 } from "node:path";
 import { bundledGentleShell } from "./config.ts";
 import { directAccess, type EngineAccess } from "./engine-access.ts";
-import { refusalGuard, resolveEngramBin, runtimeDir } from "./runtime.ts";
+import { isStartableProgram, refusalGuard, resolveEngramBin, runtimeDir } from "./runtime.ts";
 
 /**
  * The folder with the `pi` executable bundled with the daemon. The engine's
@@ -226,7 +226,7 @@ export function isolatedAgentEnv(
 		// An `ENGRAM_BIN` that exists and cannot be started on this platform — the POSIX guard on
 		// Windows — used to reach the engine as a broken spawn. The runtime's own guard takes its
 		// place, so the refusal is reported as a refusal and no store is touched either way.
-		const guard = refusalGuard(base, runtime);
+		const guard = refusalGuard(base, runtime, { platform });
 		if (guard) {
 			log?.(
 				"the ENGRAM_BIN in the environment exists but cannot be started here; the engine gets the runtime's Engram guard, so memory reports itself disabled",
@@ -234,6 +234,12 @@ export function isolatedAgentEnv(
 			env.ENGRAM_BIN = guard;
 		} else {
 			env.ENGRAM_BIN = resolveEngramBin(base, runtime, { home: realHome, platform });
+			const named = base.ENGRAM_BIN;
+			if (named && existsSync(named) && !isStartableProgram(named, platform)) {
+				log?.(
+					`ENGRAM_BIN (${named}) exists but cannot be started here; it is passed to the engine unchanged and Engram will report it`,
+				);
+			}
 		}
 	}
 	const gitConfig = join(realHome, ".gitconfig");
