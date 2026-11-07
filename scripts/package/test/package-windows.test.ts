@@ -10,6 +10,7 @@ import {
 	RUNTIME_HASH_SAMPLE,
 	sevenZipCandidates,
 	WINDOWS_USAGE,
+	windowsBuildEnv,
 	windowsInstallerNames,
 	windowsReleaseConfig,
 } from "../lib.mjs";
@@ -145,5 +146,25 @@ describe("package:windows", () => {
 	it("is wired to the packaging script", () => {
 		const pkg = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8"));
 		expect(pkg.scripts["package:windows"]).toBe("node scripts/package/package-windows.mjs");
+	});
+});
+
+describe("windowsBuildEnv", () => {
+	it("makes the release app require the packaged runtime, whatever the caller inherited", () => {
+		const env = windowsBuildEnv({ PATH: "C:\\bin", GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED: "0" });
+		expect(env).toEqual({ PATH: "C:\\bin", CI: "true", GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED: "1" });
+	});
+
+	it("is the environment package-windows hands to tauri build", () => {
+		const script = readFileSync(join(REPO, "scripts/package/package-windows.mjs"), "utf8");
+		expect(script).toMatch(/"tauri",\s*"build"[\s\S]*?env: windowsBuildEnv\(process\.env\)/);
+	});
+
+	it("is the marker build.rs embeds and the release daemon checks", () => {
+		const build = readFileSync(join(REPO, "apps/desktop/src-tauri/build.rs"), "utf8");
+		const daemon = readFileSync(join(REPO, "apps/desktop/src-tauri/src/daemon.rs"), "utf8");
+		expect(build).toContain("cargo:rerun-if-env-changed=GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED");
+		expect(build).toContain("cargo:rustc-env=GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED=");
+		expect(daemon).toContain('option_env!("GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED") == Some("1")');
 	});
 });

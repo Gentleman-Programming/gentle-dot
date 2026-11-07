@@ -303,6 +303,17 @@ export function windowsReleaseConfig({ runtime }) {
 	return { bundle: { resources: { [runtime]: "runtime" } } };
 }
 
+/**
+ * The environment `tauri build` runs with for the Windows installers. `CI` keeps the bundler
+ * non-interactive, as in package-mac. `GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED=1` is the marker
+ * build.rs embeds and the release daemon checks: without it an installed copy with a missing
+ * or partial runtime falls back to the build machine's paths instead of refusing to start.
+ * It is set last so an inherited value can never turn the requirement off.
+ */
+export function windowsBuildEnv(env = process.env) {
+	return { ...env, CI: "true", GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED: "1" };
+}
+
 /** The NSIS and MSI names Tauri's bundler gives a product and version. */
 export function windowsInstallerNames(productName, version) {
 	return {

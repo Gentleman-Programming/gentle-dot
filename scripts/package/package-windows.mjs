@@ -19,6 +19,7 @@ import {
 	sha256File,
 	treeSize,
 	windowsInstallerNames,
+	windowsBuildEnv,
 	windowsReleaseConfig,
 } from "./lib.mjs";
 
@@ -81,8 +82,8 @@ function buildInstallers(runtime) {
 			"--config",
 			JSON.stringify(config),
 		],
-		// CI in package-mac's sense: no interactive bundler behaviour.
-		{ cwd: REPO, env: { ...process.env, CI: "true" } },
+		// Non-interactive bundler, and a release app that requires its packaged runtime.
+		{ cwd: REPO, env: windowsBuildEnv(process.env) },
 	);
 	const names = windowsInstallerNames(productName, version);
 	const installers = { NSIS: join(BUNDLE, "nsis", names.nsis), MSI: join(BUNDLE, "msi", names.msi) };
