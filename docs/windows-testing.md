@@ -157,7 +157,7 @@ From `apps/desktop/src-tauri`, run:
 cargo test --lib
 ```
 
-**Expected** (measured on Windows 11): the suite passes, 399 passed / 0 failed / 4 ignored. `%LOCALAPPDATA%\Gentle Dot\secrets.dat` is where a connector secret would be written; you do not need to create one for this check.
+**Expected** (measured on Windows 11): the suite passes, 399 passed / 0 failed / 4 ignored. A connector secret is written as its own DPAPI-protected `<64 hex digits>.bin` file (the name is a hash of the secret's id) in a hashed-name subfolder of `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\`; you do not need to create one for this check. To clear every connector secret after testing, quit Gentle Dot and delete that whole folder.
 
 ### 15. Voice — not yet on Windows
 
