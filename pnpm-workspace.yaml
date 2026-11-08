@@ -11,3 +11,5 @@ allowBuilds:
   better-sqlite3: true
   libsignal: true
 exoticSubdeps: true
+minimumReleaseAgeExclude:
+  - gentle-pi@4.7.0

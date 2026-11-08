@@ -150,8 +150,18 @@ export type AuthEvent =
 /** What a connector may do: only read, or also act after the user approves each action. */
 export type ConnectorMode = "read_only" | "read_write";
 
-/** `off`: not added or turned off; `needs_setup`: a value the user types is missing; `error`: the last sign-in failed. */
-export type ConnectorStatus = "off" | "needs_setup" | "needs_signin" | "connected" | "error";
+/**
+ * `off`: not added or turned off; `needs_setup`: a value the user types is missing; `needs_preparation`:
+ * what it runs is not on this computer yet (Discord on Windows), and connecting again prepares it with
+ * the values it already has; `error`: the last sign-in failed.
+ */
+export type ConnectorStatus =
+	| "off"
+	| "needs_setup"
+	| "needs_preparation"
+	| "needs_signin"
+	| "connected"
+	| "error";
 
 /** In-app steps for a connector the user sets up with an app or bot of their own. */
 export interface ConnectorGuide {
