@@ -366,7 +366,9 @@ export class WsServer extends EventEmitter {
         }
       } catch (error) {
         console.error('[WsServer] Error parsing message:', error);
-        this.sendError(ws, 'PARSE_ERROR', 'Invalid JSON');
+        // A window gets the flat client-protocol error; bridges get the envelope one.
+        if (appClientId) this.sendAppError(ws, 'bad_message', 'Invalid JSON');
+        else this.sendError(ws, 'PARSE_ERROR', 'Invalid JSON');
       }
     };
 

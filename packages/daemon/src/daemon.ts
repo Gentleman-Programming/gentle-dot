@@ -7,6 +7,7 @@ import { loadAndValidateConfig, watchConfig, type AppConfig } from './config-loa
 import { WsServer } from './ws-server.ts';
 import { ConnectorRegistry, connectorRegistry, type ConnectorInfo, type ConnectorType } from './connector-registry.ts';
 import { GentleShellSpawner, type ShellConfig } from './gentle-shell-spawner.ts';
+import { isBlockedInput, presentText } from './white-label.ts';
 import { McpProxy, type McpServerConfig, type McpMode, type ApprovalRequest, type ApprovalResponse } from './mcp-proxy.ts';
 import { AppChannel, type AppMessage } from './app-channel.ts';
 import { childGuardFile, installChildGuardFile, watchChildGuard } from './child-guard.ts';
@@ -1094,11 +1095,12 @@ export class Daemon {
           const ask = {
             requestId,
             method,
-            title: String(event['title'] ?? ''),
-            ...(event['message'] !== undefined ? { message: String(event['message']) } : {}),
-            ...(Array.isArray(event['options']) ? { options: event['options'] as string[] } : {}),
-            ...(event['placeholder'] !== undefined ? { placeholder: String(event['placeholder']) } : {}),
-            ...(event['prefill'] !== undefined ? { prefill: String(event['prefill']) } : {}),
+            // UI-bound text shows the product, never the branded names.
+            title: presentText(String(event['title'] ?? '')),
+            ...(event['message'] !== undefined ? { message: presentText(String(event['message'])) } : {}),
+            ...(Array.isArray(event['options']) ? { options: (event['options'] as string[]).map(presentText) } : {}),
+            ...(event['placeholder'] !== undefined ? { placeholder: presentText(String(event['placeholder'])) } : {}),
+            ...(event['prefill'] !== undefined ? { prefill: presentText(String(event['prefill'])) } : {}),
           };
           this.wsServer.deliver(origin, 'ask', ask);
           break;
@@ -1247,6 +1249,15 @@ export class Daemon {
     }
     if (text.trim() === '/profiles') {
       void this.profilesScreen(connectorId, true);
+      return;
+    }
+    // Internal Gentle commands are the engine's own surface: a window or bridge never names them,
+    // so a text that does is refused before the engine ever sees it.
+    if (isBlockedInput(text)) {
+      this.wsServer.deliver(connectorId, 'error', {
+        code: 'unsupported',
+        message: 'Ese comando no está disponible acá.',
+      });
       return;
     }
 
