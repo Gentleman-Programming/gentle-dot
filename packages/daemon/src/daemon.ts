@@ -7,6 +7,8 @@ import { loadAndValidateConfig, watchConfig, type AppConfig } from './config-loa
 import { WsServer } from './ws-server.ts';
 import { ConnectorRegistry, connectorRegistry, type ConnectorInfo, type ConnectorType } from './connector-registry.ts';
 import { GentleShellSpawner, type ShellConfig } from './gentle-shell-spawner.ts';
+import { isolatedAgentEnv } from './isolation.ts';
+import { directAccess } from './engine-access.ts';
 import { isBlockedInput, presentText } from './white-label.ts';
 import { McpProxy, type McpServerConfig, type McpMode, type ApprovalRequest, type ApprovalResponse } from './mcp-proxy.ts';
 import { AppChannel, type AppMessage } from './app-channel.ts';
@@ -1679,6 +1681,14 @@ export class Daemon {
     // The subagents of the assistant's engine load the guard from its extensions folder. If it
     // cannot be put there (or kept there), the engine runs with subagents off rather than
     // unprotected.
+    // The engine never inherits the daemon's environment wholesale: it gets the isolated one
+    // (own HOME/XDG, the user's Engram, no daemon-only secrets), the way the bundled daemon
+    // always did. The spawner's own keys (project, policy, subagent gate) still win on top.
+    const engineEnv = isolatedAgentEnv(process.env, this.config.daemon.data_dir, directAccess, {
+      platform: process.platform,
+    });
+    engineEnv.GENTLE_PI_CONFIG_HOME = path.join(this.config.daemon.data_dir, 'gentle-ai');
+    shellConfig.agentEnv = engineEnv as Record<string, string>;
     // The engine is about to read its server list: whatever the assistant changed is put back
     // first, and the report says so in the log.
     this.engineStarts += 1;

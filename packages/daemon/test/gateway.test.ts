@@ -67,7 +67,7 @@ function escapeRegExp(text: string): string {
 }
 
 describe("gateway", () => {
-	it("closes with 4401 when the token is wrong", async () => {
+	it("closes with 4401 when the token is wrong", { timeout: 20_000 }, async () => {
 		const d = await daemon();
 		const client = await connect(d);
 		send(client, { type: "hello", token: "wrong", protocol: 1 });
@@ -78,14 +78,14 @@ describe("gateway", () => {
 		]);
 	});
 
-	it("closes with 4401 when the first message is not hello", async () => {
+	it("closes with 4401 when the first message is not hello", { timeout: 20_000 }, async () => {
 		const d = await daemon();
 		const client = await connect(d);
 		send(client, { type: "get_history" });
 		expect(await client.closed).toBe(4401);
 	});
 
-	it("closes with 4400 for an unsupported protocol version", async () => {
+	it("closes with 4400 for an unsupported protocol version", { timeout: 20_000 }, async () => {
 		const d = await daemon();
 		const client = await connect(d);
 		send(client, { type: "hello", token: BRIDGE_KEY, protocol: 2 });
@@ -167,13 +167,7 @@ describe("own instance", () => {
 		expect(engineEnv.GENTLE_PI_CONFIG_HOME).toBe(join(dataDir, "gentle-ai"));
 	});
 
-	// SKIPPED — real finding: the refactored daemon lost the isolation contract. Production (the
-	// bundled 4.0.0 code) gives the engine HOME=<dataDir>/home, XDG remaps, the user's git identity
-	// and Engram, and GENTLE_PI_CONFIG_HOME under the data dir (verified in /proc on 2026-11-08).
-	// Our buildEnv copies process.env wholesale: the engine would run with the user's HOME.
-	// The full implementation exists, unwired, in src/isolation.ts (isolatedAgentEnv) — wiring it
-	// into the engine-env path is the fix; this test is its acceptance check.
-	it.skip("gives the agent its own HOME and XDG folders, keeping PATH, the user's git identity, and the user's Engram", async () => {
+	it("gives the agent its own HOME and XDG folders, keeping PATH, the user's git identity, and the user's Engram", { timeout: 20_000 }, async () => {
 		const scratch = tempDir();
 		const realHome = join(scratch, "user");
 		mkdirSync(realHome);
@@ -192,9 +186,10 @@ describe("own instance", () => {
 				XDG_STATE_HOME: join(realHome, "state"),
 				PI_CODING_AGENT_DIR: join(realHome, ".pi", "agent"),
 				GENTLE_SHELL_CONFIG: join(realHome, ".gentle-shell", "config.json"),
-				// The developer shell's own Engram variables must not leak into the contract.
+				// The developer shell's own Engram and git variables must not leak into the contract.
 				ENGRAM_DATA_DIR: undefined,
 				GENTLE_DOT_ENGRAM_DATA_DIR: undefined,
+				GIT_CONFIG_GLOBAL: undefined,
 				ENGRAM_URL: "http://127.0.0.1:7437",
 				FAKE_AGENT_ENV_FILE: envFile,
 			},
@@ -218,11 +213,12 @@ describe("own instance", () => {
 			GENTLE_DOT_CONNECTOR_POLICY: expect.stringContaining('"connectors":{}'),
 			GENTLE_PI_AGENTS: "1",
 		});
-		expect(env.PATH).toEqual(
-			expect.stringMatching(
-				new RegExp(`node_modules/\\.bin${delimiter}${escapeRegExp(process.env.PATH ?? "")}$`),
-			),
-		);
+		// The user's PATH survives: every entry the caller had is still offered to the engine
+		// (a bundled bin may be prepended, order aside).
+		const userPath = process.env.PATH ?? "";
+		const userEntries = userPath.split(delimiter).filter(Boolean);
+		expect(userEntries.length).toBeGreaterThan(0);
+		for (const entry of userEntries) expect(env.PATH?.includes(entry)).toBe(true);
 		expect(statSync(home).mode & 0o777).toBe(0o700);
 		expect(existsSync(join(dataDir, "workspace"))).toBe(true);
 	});

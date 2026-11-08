@@ -58,6 +58,9 @@ export interface ShellConfig {
   policy?: Record<string, unknown>;
   /** Agent home for the engine's own state (auth, settings). Defaults to config.home. */
   agentHome?: string;
+  /** The isolated engine environment the daemon computed (own HOME/XDG, the user's Engram).
+   *  Without it the engine inherits this process's environment wholesale. */
+  agentEnv?: Record<string, string>;
 }
 
 export interface ShellSpawnOptions {
@@ -320,8 +323,10 @@ export class GentleShellSpawner extends EventEmitter {
   private buildEnv(config: ShellConfig): Record<string, string> {
     const env: Record<string, string> = {};
 
-    // Copy all defined env vars
-    for (const [key, value] of Object.entries(process.env)) {
+    // The daemon hands the isolated engine environment when it computed one; without it the
+    // engine inherits this process's environment wholesale.
+    const base = config.agentEnv ?? process.env;
+    for (const [key, value] of Object.entries(base)) {
       if (value !== undefined) {
         env[key] = value;
       }
@@ -339,8 +344,8 @@ export class GentleShellSpawner extends EventEmitter {
     // change. Without it nothing counts as read-only and every connector call would ask.
     if (config.policy) env['GENTLE_DOT_CONNECTOR_POLICY'] = JSON.stringify(config.policy);
 
-    // Gentle AI config home
-    env['GENTLE_PI_CONFIG_HOME'] = path.join(config.home, 'gentle-ai');
+    // Gentle AI config home (the isolated env names the data dir's; keep whichever is set)
+    env['GENTLE_PI_CONFIG_HOME'] ??= path.join(config.home, 'gentle-ai');
 
     // Disable auto setup if requested
     if (config.noAutoSetup) {
