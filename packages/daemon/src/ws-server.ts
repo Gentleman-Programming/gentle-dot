@@ -155,12 +155,39 @@ export class WsServer extends EventEmitter {
   async start(): Promise<void> {
     // Fail closed before listening: without a key, no client can authenticate.
     this.authToken = requireAuthToken();
+    // Origins the operator named on top of the desktop app's defaults.
+    const configured = (this.config.daemon as { allowedOrigins?: string[] }).allowedOrigins;
+    for (const origin of configured ?? []) this.allowedOrigins.add(origin);
     return new Promise((resolve, reject) => {
       this.httpServer = createServer((req, res) => {
         this.handleHttpRequest(req, res);
       });
 
-      this.wss = new WebSocketServer({ server: this.httpServer, path: '/ws' });
+      this.wss = new WebSocketServer({ noServer: true, path: '/ws' });
+      const wss = this.wss;
+
+      // WebSocket upgrades are routed here instead of through the HTTP handler, so the origin
+      // veto runs before the handshake: a page the user happens to open must not drive their
+      // assistant. Same-origin windows (the served web UI, a proxied VPS domain) and the
+      // allowlisted desktop origins pass; anything else is refused before upgrading.
+      this.httpServer.on('upgrade', (req, socket, head) => {
+        const url = new URL(req.url ?? '/', 'http://localhost');
+        if (url.pathname !== '/ws') {
+          socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        const origin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
+        const host = typeof req.headers.host === 'string' ? req.headers.host : undefined;
+        const sameOrigin =
+          origin !== undefined && host !== undefined && (origin === `http://${host}` || origin === `https://${host}`);
+        if (origin !== undefined && !sameOrigin && !this.allowedOrigins.has(origin)) {
+          socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\nThat origin is not allowed.');
+          socket.destroy();
+          return;
+        }
+        wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+      });
 
       this.wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
         this.handleConnection(ws, req);

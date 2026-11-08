@@ -67,6 +67,18 @@ function escapeRegExp(text: string): string {
 }
 
 describe("gateway", () => {
+	it("rejects a WebSocket upgrade from a foreign origin", async () => {
+		const d = await daemon();
+		await expect(connect(d, "https://evil.example")).rejects.toThrow(/403/);
+	});
+
+	it("accepts the desktop app origin", async () => {
+		const d = await daemon();
+		const client = await connect(d, "tauri://localhost");
+		send(client, { type: "hello", token: BRIDGE_KEY, protocol: 1 });
+		await find(client, "ready");
+	});
+
 	it("closes with 4401 when the token is wrong", { timeout: 20_000 }, async () => {
 		const d = await daemon();
 		const client = await connect(d);
