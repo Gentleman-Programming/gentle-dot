@@ -46,9 +46,14 @@ const LOCK_STALE_MS = 10_000;
 const LOCK_RETRY_MS = 20;
 const LOCK_ATTEMPTS = 250;
 
+export interface ProfileWorkflow {
+	orchestratorMode: "organic" | "full-delegation";
+}
+
 export interface ProfilesFile {
 	active?: string;
 	profiles: Record<string, ProfileRoles>;
+	workflow?: Record<string, ProfileWorkflow>;
 }
 
 export type ProfileErrorCode =
@@ -117,6 +122,26 @@ function normalizeRoles(value: unknown): ProfileRoles | undefined {
 	return roles;
 }
 
+/** Keeps the engine's declared, non-default workflow opt-ins for surviving profiles. */
+function normalizeWorkflow(
+	value: unknown,
+	profiles: Record<string, ProfileRoles>,
+): Record<string, ProfileWorkflow> | undefined {
+	if (!isRecord(value)) return undefined;
+	const workflow: Record<string, ProfileWorkflow> = {};
+	for (const [name, entry] of Object.entries(value)) {
+		if (
+			Object.hasOwn(profiles, name) &&
+			isValidProfileName(name) &&
+			isRecord(entry) &&
+			entry.orchestratorMode === "full-delegation"
+		) {
+			workflow[name] = { orchestratorMode: "full-delegation" };
+		}
+	}
+	return Object.keys(workflow).length > 0 ? workflow : undefined;
+}
+
 /** Parses a profile store; undefined when it is not one. Invalid entries are dropped like the engine does. */
 export function parseProfilesFile(text: string): ProfilesFile | undefined {
 	let value: unknown;
@@ -135,10 +160,12 @@ export function parseProfilesFile(text: string): ProfilesFile | undefined {
 	}
 	const file: ProfilesFile = { profiles };
 	if (typeof value.active === "string" && Object.hasOwn(profiles, value.active)) file.active = value.active;
+	const workflow = normalizeWorkflow(value.workflow, profiles);
+	if (workflow) file.workflow = workflow;
 	return file;
 }
 
-/** Serializes in the engine's key order: kind, version, profiles, active. */
+/** Serializes in the engine's key order: kind, version, profiles, active, optional workflow. */
 export function serializeProfilesFile(file: ProfilesFile): string {
 	const payload: Record<string, unknown> = {
 		kind: PROFILES_KIND,
@@ -146,6 +173,8 @@ export function serializeProfilesFile(file: ProfilesFile): string {
 		profiles: file.profiles,
 	};
 	if (file.active !== undefined) payload.active = file.active;
+	const workflow = normalizeWorkflow(file.workflow, file.profiles);
+	if (workflow) payload.workflow = workflow;
 	return `${JSON.stringify(payload, null, 2)}\n`;
 }
 
@@ -199,7 +228,9 @@ function readObject(path: string, code: ProfileErrorCode): Record<string, unknow
 	try {
 		const value: unknown = JSON.parse(text);
 		if (isRecord(value)) return value;
-	} catch {}
+	} catch {
+		throw new ProfileError(code);
+	}
 	throw new ProfileError(code);
 }
 
@@ -333,6 +364,11 @@ export class ProfileStore {
 			file.profiles = Object.fromEntries(
 				Object.entries(file.profiles).map(([name, roles]) => [name === from ? to : name, roles]),
 			);
+			if (file.workflow?.[from]) {
+				file.workflow = Object.fromEntries(
+					Object.entries(file.workflow).map(([name, entry]) => [name === from ? to : name, entry]),
+				);
+			}
 			if (file.active === from) file.active = to;
 		});
 	}
@@ -342,6 +378,7 @@ export class ProfileStore {
 			const roles = requireExisting(file, from);
 			requireFree(file, to);
 			file.profiles[to] = structuredClone(roles);
+			if (file.workflow?.[from]) file.workflow[to] = structuredClone(file.workflow[from]);
 		});
 	}
 
@@ -350,6 +387,7 @@ export class ProfileStore {
 			requireExisting(file, name);
 			if (file.active === name) throw new ProfileError("active_profile");
 			delete file.profiles[name];
+			if (file.workflow) delete file.workflow[name];
 		});
 	}
 
@@ -448,9 +486,14 @@ export class ProfileStore {
 			const imported: ImportResult["imported"] = [];
 			const used = new Set<string>();
 			for (const [name, roles] of Object.entries(source.profiles)) {
-				const target = importName(file, name, roles);
+				const workflow = source.workflow?.[name];
+				const target = importName(file, name, roles, workflow);
 				if (!target) continue;
 				file.profiles[target] = roles;
+				if (workflow) {
+					file.workflow ??= {};
+					file.workflow[target] = { ...workflow };
+				}
 				imported.push({ from: name, to: target });
 				for (const route of Object.values(roles)) {
 					const provider = route.model ? splitModel(route.model)?.provider : undefined;
@@ -554,8 +597,15 @@ function cleanRoles(roles: ProfileRoles): ProfileRoles {
 }
 
 /** The free name for an imported profile, or undefined when an identical copy is already saved. */
-function importName(file: ProfilesFile, name: string, roles: ProfileRoles): string | undefined {
-	const same = (other: string) => JSON.stringify(file.profiles[other]) === JSON.stringify(roles);
+function importName(
+	file: ProfilesFile,
+	name: string,
+	roles: ProfileRoles,
+	workflow?: ProfileWorkflow,
+): string | undefined {
+	const same = (other: string) =>
+		JSON.stringify(file.profiles[other]) === JSON.stringify(roles) &&
+		(file.workflow?.[other]?.orchestratorMode ?? "organic") === (workflow?.orchestratorMode ?? "organic");
 	for (let n = 0; ; n++) {
 		const suffix = n === 0 ? "" : n === 1 ? "-imported" : `-imported-${n}`;
 		const candidate = `${name.slice(0, 64 - suffix.length)}${suffix}`;
