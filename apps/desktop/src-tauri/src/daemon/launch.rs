@@ -132,7 +132,10 @@ fn node_runtime_path(dir: &Path) -> PathBuf {
 /// Among `where.exe`'s answers a `cmd` folder wins over any other, because only that folder holds
 /// git's own wrappers: `…\Git\mingw64\bin` also carries MSYS copies of `curl` (measured on this
 /// machine), and putting it ahead of `System32` would hand the engine a different `curl` than the
-/// one the packaged `PATH` was designed around.
+/// one the packaged `PATH` was designed around. A default install still gets `Git\bin` beside
+/// `cmd`, so `Git\bin\bash.exe` shadows the WSL `bash.exe` in `System32` on the engine's `PATH`
+/// (measured on a default install); accepted, because that bash is the engine's own tool shell —
+/// it prepends `mingw64\bin` and `usr\bin` to every command it runs.
 #[cfg(windows)]
 fn windows_git_dirs(
     env: impl Fn(&str) -> Option<String>,
