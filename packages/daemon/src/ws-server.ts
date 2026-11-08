@@ -255,7 +255,7 @@ export class WsServer extends EventEmitter {
       return;
     }
 
-    if (url.pathname === '/mcp') {
+    if (url.pathname === '/mcp' || url.pathname.startsWith('/mcp/')) {
       this.handleMcp(req, res);
       return;
     }
@@ -438,74 +438,9 @@ export class WsServer extends EventEmitter {
       return;
     }
 
-    const chunks: Buffer[] = [];
-    let size = 0;
-    req.on('data', (chunk: Buffer) => {
-      size += chunk.length;
-      // A request larger than this is not something a tool call needs.
-      if (size > 4 * 1024 * 1024) {
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on('end', () => {
-      let request: { id?: unknown; method?: string; params?: Record<string, unknown> };
-      try {
-        request = JSON.parse(Buffer.concat(chunks).toString('utf8')) as typeof request;
-      } catch {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }));
-        return;
-      }
-
-      const reply = (body: unknown): void => {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(body));
-      };
-      const fail = (code: number, message: string): void =>
-        reply({ jsonrpc: '2.0', id: request.id ?? null, error: { code, message } });
-
-      switch (request.method) {
-        case 'initialize':
-          reply({
-            jsonrpc: '2.0',
-            id: request.id ?? null,
-            result: {
-              protocolVersion: '2024-11-05',
-              capabilities: { tools: {} },
-              serverInfo: { name: 'gentle-dot-connectors', version: '1.0.0' },
-            },
-          });
-          return;
-        case 'notifications/initialized':
-          res.writeHead(202);
-          res.end();
-          return;
-        case 'tools/list':
-          reply({
-            jsonrpc: '2.0',
-            id: request.id ?? null,
-            result: { tools: endpoint.list() },
-          });
-          return;
-        case 'tools/call': {
-          const params = (request.params ?? {}) as { name?: unknown; arguments?: unknown };
-          const name = typeof params.name === 'string' ? params.name : '';
-          const args = typeof params.arguments === 'object' && params.arguments !== null
-            ? (params.arguments as Record<string, unknown>)
-            : {};
-          if (name === '') return fail(-32602, 'A tool name is required');
-          void endpoint
-            .call(name, args)
-            .then((result) => reply({ jsonrpc: '2.0', id: request.id ?? null, result }))
-            .catch((error: Error) => fail(-32603, error.message));
-          return;
-        }
-        default:
-          fail(-32601, `Unknown method: ${String(request.method)}`);
-      }
-    });
+    // The proxy speaks the full MCP protocol over streamable HTTP, per connector: the path
+    // carries the connector id and the proxy owns parsing, listing, calls and approvals.
+    endpoint.handle(req, res);
   }
 
   /**
@@ -879,8 +814,7 @@ export class WsServer extends EventEmitter {
    */
   mcpEndpoint: {
     key: string;
-    list(): { name: string; description?: string; inputSchema?: unknown }[];
-    call(name: string, args: Record<string, unknown>): Promise<unknown>;
+    handle(req: IncomingMessage, res: import('http').ServerResponse): void;
   } | null = null;
 
   /**

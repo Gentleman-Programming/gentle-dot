@@ -10,7 +10,9 @@ import { GentleShellSpawner, type ShellConfig } from './gentle-shell-spawner.ts'
 import { isolatedAgentEnv } from './isolation.ts';
 import { directAccess } from './engine-access.ts';
 import { isBlockedInput, presentText } from './white-label.ts';
-import { McpProxy, type McpServerConfig, type McpMode, type ApprovalRequest, type ApprovalResponse } from './mcp-proxy.ts';
+import { McpProxy, type ApprovalPreview } from './mcp-proxy.ts';
+
+type McpMode = 'read_only' | 'read_write';
 import { AppChannel, type AppMessage } from './app-channel.ts';
 import { childGuardFile, installChildGuardFile, watchChildGuard } from './child-guard.ts';
 import { Transcript } from './transcript.ts';
@@ -65,9 +67,9 @@ const ASK_METHODS = new Set(['select', 'confirm', 'input', 'editor']);
 export class Daemon {
   private config: AppConfig;
   private wsServer: WsServer;
+  private mcpProxy!: McpProxy;
   private registry: ConnectorRegistry;
   private shellSpawner: GentleShellSpawner;
-  private mcpProxy: McpProxy;
   private appChannel: AppChannel;
   private configWatcher: ReturnType<typeof watchConfig> | null = null;
   private shutdown = false;
@@ -93,8 +95,7 @@ export class Daemon {
     // One spawner per daemon: a shared singleton makes a second daemon in the same process
     // fail with "Gentle Shell already running", which is how tests boot several.
     this.shellSpawner = new GentleShellSpawner();
-    this.mcpProxy = new McpProxy();
-    this.closed = new Promise<void>((resolve) => {
+        this.closed = new Promise<void>((resolve) => {
       this.resolveClosed = resolve;
     });
     // A pipe from the app replaces the socket server: one class, two transports.
@@ -160,21 +161,6 @@ export class Daemon {
         this.activeRun = null;
         this.shellSpawner.rpc('abort', {}, 60_000).catch(() => {});
       }
-    });
-
-    // MCP Proxy events
-    this.mcpProxy.on('approval_requested', (request: ApprovalRequest) => {
-      console.log(`[Daemon] Approval requested: ${request.toolName} for ${request.connectorId}`);
-      // Forward to app channel for native approval dialog
-      this.appChannel.broadcast('approval_requested', request);
-    });
-
-    this.mcpProxy.on('server_ready', (serverName: string, tools: any[]) => {
-      console.log(`[Daemon] MCP server ready: ${serverName} (${tools.length} tools)`);
-    });
-
-    this.mcpProxy.on('server_error', (serverName: string, error: Error) => {
-      console.error(`[Daemon] MCP server error (${serverName}):`, error);
     });
 
     // The daemon lives as long as the app that launched it (S35.2, #22): when its pipe goes,
@@ -438,32 +424,33 @@ export class Daemon {
 
   }
 
-  /** The tools the proxied connectors offer, named the way the engine and the guard expect. */
-  private proxiedTools(): { name: string; description?: string; inputSchema?: unknown }[] {
-    const policy = this.connectorStore?.policy();
-    const tools: { name: string; description?: string; inputSchema?: unknown }[] = [];
-    for (const id of policy?.proxied ?? []) {
-      const mode = (policy?.connectors?.[id]?.mode ?? 'read_only') as McpMode;
-      for (const tool of this.mcpProxy.getAvailableTools(id, mode)) {
-        tools.push({
-          name: `mcp__${id}__${tool.name}`,
-          ...(tool.description === undefined ? {} : { description: tool.description }),
-          ...(tool.inputSchema === undefined ? {} : { inputSchema: tool.inputSchema }),
-        });
-      }
-    }
-    return tools;
-  }
 
-  /** Runs one proxied tool call; the name carries the connector it belongs to. */
-  private async callProxiedTool(name: string, args: Record<string, unknown>): Promise<unknown> {
-    const parts = name.split('__');
-    if (parts.length < 3 || parts[0] !== 'mcp') throw new Error(`Unknown tool: ${name}`);
-    const connectorId = parts[1] as string;
-    const toolName = parts.slice(2).join('__');
-    const policy = this.connectorStore?.policy();
-    const mode = (policy?.connectors?.[connectorId]?.mode ?? 'read_only') as McpMode;
-    return this.mcpProxy.callTool(connectorId, toolName, args, mode);
+  /** Proxy approvals waiting for the user: one entry per ask, resolved once. */
+  private readonly proxyApprovals = new Map<string, { resolve: (ok: boolean) => void; timer: NodeJS.Timeout }>();
+
+  /** Asks the windows for a proxied write; nothing is sent unless the user allows it. */
+  private approveProxied(preview: ApprovalPreview, signal: AbortSignal): Promise<boolean> {
+    const requestId = `proxy-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    return new Promise<boolean>((resolve) => {
+      const finish = (ok: boolean) => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', onAbort);
+        this.proxyApprovals.delete(requestId);
+        resolve(ok);
+      };
+      const onAbort = () => finish(false);
+      const timer = setTimeout(() => finish(false), 30_000);
+      signal.addEventListener('abort', onAbort, { once: true });
+      this.proxyApprovals.set(requestId, { resolve: finish, timer });
+      const ask = {
+        requestId,
+        method: 'confirm',
+        title: `${preview.connector}: ${preview.tool}`,
+        message: `¿Permitir que el asistente use ${preview.connector} (${preview.tool})?`,
+      };
+      this.wsServer.broadcastApps('ask', ask);
+      this.appChannel.broadcast('approval_requested', { ...preview, requestId });
+    });
   }
 
   /** Changes a connector's mode; widening it is the app's decision, and the engine restarts. */
@@ -1183,6 +1170,12 @@ export class Daemon {
         const payload = message.payload as { requestId?: string; value?: string; confirmed?: boolean; cancelled?: boolean };
         const requestId = payload?.requestId;
         if (!requestId) return;
+        // A proxy approval answers here, before the engine's ask routing sees it.
+        const pendingApproval = this.proxyApprovals.get(requestId);
+        if (pendingApproval) {
+          pendingApproval.resolve(payload.confirmed === true);
+          return;
+        }
         const sent = this.shellSpawner.uiRespond(requestId, {
           value: payload.value,
           confirmed: payload.confirmed,
@@ -1327,11 +1320,6 @@ export class Daemon {
       let result: unknown;
 
       switch (action) {
-        case 'mcp_call_tool': {
-          const { toolName, args, mode } = params as { toolName: string; args: Record<string, unknown>; mode: McpMode };
-          result = await this.mcpProxy.callTool(connectorId, toolName, args, mode);
-          break;
-        }
 
         case 'get_connectors': {
           result = this.registry.list().map(c => ({
@@ -1382,8 +1370,11 @@ export class Daemon {
   private async handleAppMessage(clientId: string, message: AppMessage): Promise<void> {
     switch (message.type) {
       case 'approval_response': {
-        const response = message.payload as ApprovalResponse;
-        this.mcpProxy.respondToApproval(response);
+        const response = message.payload as { requestId?: string; approved?: boolean };
+        const pendingApproval = response.requestId
+          ? this.proxyApprovals.get(response.requestId)
+          : undefined;
+        if (pendingApproval) pendingApproval.resolve(response.approved === true);
         break;
       }
 
@@ -1486,7 +1477,6 @@ export class Daemon {
 
     // Register MCP servers based on config. Not awaited: a server that needs installing (or whose
     // package does not exist) must not keep the daemon from reporting itself ready.
-    void this.registerMcpServers();
 
     // Watch config for hot reload
     this.configWatcher = watchConfig(this.options.configPath || '', (newConfig) => {
@@ -1501,81 +1491,6 @@ export class Daemon {
     console.log('[Daemon] Daemon started successfully');
   }
 
-  /**
-   * Register MCP servers based on connector configuration
-   */
-  private async registerMcpServers(): Promise<void> {
-    const connectors = this.config.connectors;
-
-    // Gmail MCP (official)
-    if (connectors.gmail.enabled) {
-      const mode: McpMode = connectors.gmail.mode;
-      try {
-        await this.mcpProxy.registerServer({
-                name: 'gmail',
-                command: 'npx',
-                args: ['-y', '@google/mcp-gmail'],
-                env: {
-                  GMAIL_WEBHOOK_SECRET: process.env[connectors.gmail.webhook_secret_env] || '',
-                },
-                mode,
-                writeTools: ['send_email', 'modify_labels', 'trash_message'],
-                approvalTools: ['send_email', 'trash_message'],
-              });
-      } catch (error) {
-        // Fail-soft: a broken/unreachable MCP server must not kill the daemon
-        // (the connectors themselves are the integration in the BaseBridge v2 architecture).
-        console.error(`[Daemon] MCP server 'gmail' failed to register (continuing):`, (error as Error).message);
-      }
-    }
-
-    // Discord MCP (community)
-    if (connectors.discord.enabled) {
-      const mode: McpMode = connectors.discord.mode;
-      try {
-        await this.mcpProxy.registerServer({
-                name: 'discord',
-                command: 'npx',
-                args: ['-y', 'mcp-discord'],
-                env: {
-                  DISCORD_BOT_TOKEN: process.env[connectors.discord.bot_token_env] || '',
-                  DISCORD_CLIENT_ID: process.env[connectors.discord.client_id_env] || '',
-                },
-                mode,
-                writeTools: ['send_message', 'create_channel', 'ban_user', 'kick_user'],
-                approvalTools: ['ban_user', 'kick_user', 'delete_channel'],
-              });
-      } catch (error) {
-        // Fail-soft: a broken/unreachable MCP server must not kill the daemon
-        // (the connectors themselves are the integration in the BaseBridge v2 architecture).
-        console.error(`[Daemon] MCP server 'discord' failed to register (continuing):`, (error as Error).message);
-      }
-    }
-
-    // WhatsApp Meta Cloud MCP (official)
-    if (connectors.whatsapp.enabled && connectors.whatsapp.modes.meta_cloud.enabled) {
-      const mode: McpMode = connectors.whatsapp.mode;
-      try {
-        await this.mcpProxy.registerServer({
-                name: 'whatsapp-meta',
-                command: 'npx',
-                args: ['-y', '@meta/mcp-whatsapp'],
-                env: {
-                  WHATSAPP_PHONE_ID: process.env[connectors.whatsapp.modes.meta_cloud.phone_number_id_env] || '',
-                  WHATSAPP_ACCESS_TOKEN: process.env[connectors.whatsapp.modes.meta_cloud.access_token_env] || '',
-                  WHATSAPP_WEBHOOK_VERIFY: process.env[connectors.whatsapp.modes.meta_cloud.webhook_verify_token_env] || '',
-                },
-                mode,
-                writeTools: ['send_message', 'send_template'],
-                approvalTools: ['send_template'],
-              });
-      } catch (error) {
-        // Fail-soft: a broken/unreachable MCP server must not kill the daemon
-        // (the connectors themselves are the integration in the BaseBridge v2 architecture).
-        console.error(`[Daemon] MCP server 'whatsapp-meta' failed to register (continuing):`, (error as Error).message);
-      }
-    }
-  }
 
   /**
    * Setup signal handlers for graceful shutdown
@@ -1689,6 +1604,18 @@ export class Daemon {
     });
     engineEnv.GENTLE_PI_CONFIG_HOME = path.join(this.config.daemon.data_dir, 'gentle-ai');
     shellConfig.agentEnv = engineEnv as Record<string, string>;
+
+    // The proxy speaks the real MCP protocol per connector at /mcp/<id>; it asks the windows for
+    // every write through the approval callback, and stdio servers start from the engine's own
+    // environment (the isolated one), never from the daemon's.
+    this.mcpProxy = new McpProxy({
+      connector: (id) => this.connectorStore?.proxyView(id),
+      credentials: (id) => this.connectorStore!.credentials(id),
+      approve: (preview, signal) => this.approveProxied(preview, signal),
+      env: engineEnv,
+      cwd: this.config.daemon.workspace,
+      log: (line) => console.log(`[McpProxy] ${line}`),
+    });
     // The engine is about to read its server list: whatever the assistant changed is put back
     // first, and the report says so in the log.
     this.engineStarts += 1;
@@ -1703,8 +1630,7 @@ export class Daemon {
     });
     this.wsServer.mcpEndpoint = {
       key: proxyKey,
-      list: () => this.proxiedTools(),
-      call: (name, args) => this.callProxiedTool(name, args),
+      handle: (req, res) => this.mcpProxy.handle(req, res),
     };
 
     const guardPath = shellConfig.extensions?.[0] ?? this.approvalGuardPath();
@@ -1804,9 +1730,7 @@ export class Daemon {
       this.configWatcher = null;
     }
 
-    // Stop components in reverse order
-    await this.mcpProxy.stopAll();
-    console.log('[Daemon] MCP Proxy stopped');
+    // Stop components in reverse order (the proxy's upstreams abort with their own signals).
 
     await this.shellSpawner.stop();
     console.log('[Daemon] Gentle Shell stopped');
@@ -1846,7 +1770,6 @@ export class Daemon {
         status: c.status,
         connectedAt: c.connectedAt,
       })),
-      mcpServers: this.mcpProxy.getServerStatus(),
       shell: {
         ready: this.shellSpawner.isReady(),
         pid: this.shellSpawner.getPid(),
