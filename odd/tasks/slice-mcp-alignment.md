@@ -70,3 +70,28 @@ desviación. Reconverger = ruido cero contra la arquitectura de Alan + trabajo P
 - `connectors-gateway` (8) + `app-ws-gateway` (2) siguen verdes (el endpoint /mcp cambia de
   proveedor interno).
 - Suite completa ≥ yardstick vigente (531/90 de 639) con varianza conocida.
+
+## Notas de cableado (sondeo del 2026-11-08, sesión de arranque)
+
+Lo verificado al intentar el commit 1 — el contrato cambia de forma y estas son las piezas:
+
+1. **Un endpoint por conector**: `serve()` extrae el id de la URL (`pathname.slice(MCP_PREFIX)`)
+   → el engine habla MCP real contra `/mcp/<connectorId>`, tools sin prefijo. El naming del guard
+   sobrevive: el engine nombra cada servidor por el id del conector (el `mcp.json` del store
+   lleva `mcpServers: { <id>: { url: .../mcp/<id> } }`).
+2. **`writeMcp` del store**: pasa de una URL única a URLs por conector (`/mcp/<id>`).
+3. **Sitios de uso en daemon.ts** a reemplazar: `new McpProxy()` → `new McpProxy(options)`;
+   `.on('approval_requested'|'server_ready'|'server_error')` ×3 → el callback `approve` +
+   `options.log`; `proxiedTools()`/`callProxiedTool()` → desaparecen (el proxy sirve el
+   protocolo completo: initialize/tools/list/tools/call/resources/prompts con `readsAllowed`).
+4. **ws-server**: `mcpEndpoint` pasa de `{key, list, call}` a `{key, handle}` y delega en
+   `proxy.handle(req, res)` — el proxy valida su propia key (`authorized(header)` + `rotateKey`).
+5. **El gate de aprobación ya está en su callTool**: `refuseHidden` + `isReadOnlyTool` +
+   `options.approve(preview, signal)` con preview completo y REFUSED si no se pudo preguntar
+   ("Nothing was sent").
+6. Los 30 tests se reescriben contra la clase nueva (mismos métodos públicos, constructor con
+   options; los 2 `.on(` → `log`).
+
+Estado del arranque: el swap del archivo se probó (tsc marcó los 12 sitios) y se revirtió para
+no dejar el árbol rojo; esta rama queda con el mapa + notas, lista para ejecutar los 4 commits
+en la sesión siguiente.
