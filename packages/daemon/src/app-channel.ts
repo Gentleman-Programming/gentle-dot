@@ -23,7 +23,8 @@ export const APP_FD = 3;
 /** Longer than the app's own 120 s dialog timeout, which answers "declined" first. */
 export const APPROVAL_WAIT_MS = 130_000;
 /**
- * A frame longer than this closes the channel; nothing legitimate comes close. The app has the same
+ * A frame longer than this UTF-8 byte count (excluding its newline) closes the channel; nothing
+ * legitimate comes close. The app has the same
  * rule, and a closed channel stops the daemon (S35.2), so neither side ever sends a longer one: an
  * oversized request fails (an approval is refused) and an oversized answer becomes an error.
  */
@@ -171,10 +172,15 @@ export class AppChannel implements AppLink {
 		for (let end = this.buffer.indexOf("\n"); end >= 0; end = this.buffer.indexOf("\n")) {
 			const line = this.buffer.slice(0, end);
 			this.buffer = this.buffer.slice(end + 1);
+			if (Buffer.byteLength(line, "utf8") > MAX_FRAME) {
+				this.log("the app's channel sent a frame that is too long; closing it");
+				this.close();
+				return;
+			}
 			if (line.trim() !== "") this.onFrame(line);
 			if (!this.open) return;
 		}
-		if (this.buffer.length > MAX_FRAME) {
+		if (Buffer.byteLength(this.buffer, "utf8") > MAX_FRAME) {
 			this.log("the app's channel sent a frame that is too long; closing it");
 			this.close();
 		}
