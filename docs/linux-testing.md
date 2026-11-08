@@ -230,6 +230,19 @@ Some things Wayland does not allow at all, and we already work around them: apps
 
 For a quick comparison on GNOME, you can start the app as a native Wayland client with `GDK_BACKEND=wayland gentle-dot` (from source: `GDK_BACKEND=wayland ~/.local/bin/gentle-dot`), and note which steps change.
 
+## Testing screenshots (capture-only Linux backend)
+
+On Hyprland, the app asks xdg-desktop-portal for screenshots (S24 Linux, capture only:
+the assistant cannot move the pointer or press keys). To verify:
+
+1. Run the app under Hyprland (`GDK_BACKEND=x11`, see above) with `HYPRLAND_INSTANCE_SIGNATURE` in the environment.
+2. Ask the assistant to "take a screenshot". The portal shows its own permission dialog the first time: allow it.
+3. The assistant describes what it sees: the screenshot matches the focused monitor, downscaled, and clicks/typing are refused with a message saying this Linux backend only captures screenshots.
+4. Deny the portal dialog once and ask again: the assistant reports the refusal, and the permissions screen stops offering screenshots until a capture is allowed again.
+5. Switch to another monitor and ask again: the capture follows the focused monitor (coordinates map to the focused monitor's position).
+
+`hyprctl monitors -j` must work in the app's environment; the portal request needs the session bus (no `sudo`).
+
 ## Troubleshooting
 
 | Symptom | Try |
