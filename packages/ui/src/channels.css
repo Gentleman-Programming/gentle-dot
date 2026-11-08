@@ -1,0 +1,145 @@
+/* Channels (WhatsApp, phase 1): the bridge card and its pairing wizard. Shares the accounts shell. */
+
+.channel-card {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 14px;
+	border: 1px solid var(--border, #342230);
+	border-radius: 12px;
+	background: var(--surface, #20161e);
+}
+
+.channel-card-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.channel-badge {
+	padding: 2px 10px;
+	border-radius: 999px;
+	font-size: 12px;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+.channel-badge.status-connected {
+	color: #b4e7c7;
+	background: rgba(180, 231, 199, 0.12);
+}
+
+.channel-badge.status-pairing {
+	color: #e0c27a;
+	background: rgba(224, 194, 122, 0.12);
+}
+
+.channel-badge.status-error {
+	color: #ff718f;
+	background: rgba(255, 113, 143, 0.12);
+}
+
+.channel-badge.status-off {
+	color: var(--muted, #a78e9b);
+	background: rgba(167, 142, 155, 0.12);
+}
+
+.channel-error {
+	color: #ff718f;
+	font-size: 13px;
+}
+
+.channel-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: center;
+}
+
+.channel-actions .danger {
+	color: #ff718f;
+	border-color: #ff718f;
+}
+
+.channel-actions .danger-text {
+	color: #ff718f;
+}
+
+.channel-verify {
+	margin: 4px 0 0;
+	padding: 0;
+	list-style: none;
+	font-size: 13px;
+	color: var(--muted, #a78e9b);
+}
+
+.channel-step {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.channel-option {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	padding: 12px;
+	border: 1px solid var(--border, #342230);
+	border-radius: 12px;
+	background: var(--surface, #20161e);
+	text-align: left;
+	cursor: pointer;
+}
+
+.channel-option.disabled {
+	opacity: 0.55;
+	cursor: default;
+}
+
+.channel-option-title {
+	font-weight: 600;
+}
+
+.channel-numbers {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+	font-family: var(--mono, monospace);
+	font-size: 13px;
+}
+
+.channel-typed {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.channel-typed input {
+	padding: 8px 10px;
+	border: 1px solid var(--border, #342230);
+	border-radius: 8px;
+	background: transparent;
+	color: inherit;
+	font-family: var(--mono, monospace);
+}
+
+.channel-preview {
+	padding: 10px;
+	border-left: 3px solid var(--accent, #f095c8);
+	border-radius: 4px;
+	background: rgba(240, 149, 200, 0.08);
+	font-size: 13px;
+}
+
+.channel-qr {
+	align-self: center;
+	border-radius: 12px;
+	background: #fff;
+	padding: 8px;
+}
+
+.channel-qr.placeholder {
+	width: 280px;
+	height: 280px;
+}
