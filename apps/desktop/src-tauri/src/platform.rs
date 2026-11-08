@@ -52,6 +52,12 @@ fn is_hyprland(env: &impl Fn(&str) -> Option<String>) -> bool {
         || set(env, "XDG_CURRENT_DESKTOP").is_some_and(|desktop| desktop.to_lowercase().contains("hyprland"))
 }
 
+/// Whether this Linux session runs under Hyprland, from the real environment: the computer
+/// backend's capability gate (S24 Linux, S4).
+pub fn is_hyprland_compositor() -> bool {
+    is_hyprland(&|name| std::env::var(name).ok())
+}
+
 fn is_wayland(env: &impl Fn(&str) -> Option<String>) -> bool {
     set(env, "WAYLAND_DISPLAY").is_some() || set(env, "XDG_SESSION_TYPE").as_deref() == Some("wayland")
 }

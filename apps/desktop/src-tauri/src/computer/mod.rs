@@ -24,6 +24,11 @@ pub mod session;
 pub mod windows;
 #[cfg(windows)]
 pub(crate) mod win;
+// The Linux desktop's pure parts, tested everywhere: the portal Screenshot response mapping
+// and Hyprland monitor geometry. The Linux backend widens each to `any(linux, test)` once
+// it uses it (odd/tasks/linux-screenshot-capture.md S2).
+#[cfg(any(target_os = "linux", test))]
+pub mod linux;
 // The Windows desktop's pure parts, tested everywhere: UI Automation element mapping, which
 // processes are apps, and what Windows posts for each input event. The Windows desktop backend
 // widens each to `any(windows, test)` once it uses it.

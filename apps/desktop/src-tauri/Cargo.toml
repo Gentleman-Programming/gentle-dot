@@ -25,7 +25,7 @@ libc = "0.2"
 getrandom = "0.3"
 base64 = "0.22"
 tiny_http = "0.12"
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 # The optional local voice model (S30.5): Parakeet through sherpa-onnx, linked statically (its
 # build script downloads the prebuilt static libraries from the sherpa-onnx GitHub release unless
 # SHERPA_ONNX_LIB_DIR or SHERPA_ONNX_ARCHIVE_DIR points at a local copy). The model itself is
@@ -66,6 +66,9 @@ core-foundation = "0.10"
 # dependency is already linked by tao on Linux.
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus-secret-service = "4.1"
+# The Screenshot portal (computer/linux.rs, S24 Linux): org.freedesktop.portal over the
+# session bus, same blocking `dbus` the store's tests already build errors with.
+dbus = "0.9"
 
 # The store's tests build D-Bus errors (the same `dbus` that dbus-secret-service uses).
 [target.'cfg(target_os = "linux")'.dev-dependencies]
