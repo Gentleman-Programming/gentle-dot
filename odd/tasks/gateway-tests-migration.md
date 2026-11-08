@@ -765,3 +765,35 @@ cancela el flujo.
    y eso dispara la cancelación de flujos que estaban por completarse).
 3. Con eso, `runLogin` debería llegar a `saveSignIn`, el estado pasaría a `connected` y caerían los
    seis tests de conectores (el resto —frames, política, reinicio— ya está verificado).
+
+## Veredicto sobre gateway.test.ts (2026-11-08)
+
+El intento de migración al harness reveló que el archivo es la especificación del gateway VIEJO,
+no del actual. El gateway de hoy (WsServer + daemon absorbiendo el rol de bridge, sin instanciar
+`bridge.ts` — código muerto) tiene su spec en `app-ws-gateway.test.ts` (verde).
+
+Reemplazo del objetivo: NO portar los 37; rescatar el cobertura que falta y descartar el que
+describe features removidas.
+
+Hallazgo de valor del intento (commiteado en `c761089`): el handshake de ventana cerraba con
+1002/1008 genéricos en vez de los códigos del protocolo (`unauthorized: 4401`, `badProtocol:
+4400`), y un primer frame que no era hello quedaba colgado. Corregido.
+
+### Cobertura a rescatar (reescribir contra la API actual, ~10 tests)
+- Rechazo de origin foráneo y aceptación del origin del app (verificar soporte de origin en WsServer).
+- Frames malformados responden error y mantienen la conexión.
+- requestId repetido ignorado.
+- White-label ×4: identidad al engine, chatter oculto, ask text reescrito, comandos internos rechazados.
+- Own instance ×2: home/perfiles propios; HOME/XDG propios conservando PATH, git identity y Engram.
+- Claves y permisos ×2: modo del data folder y del archivo de clave (`ensureToken`/`startupMessage`
+  ya no existen; reescribir contra `requireAuthToken` + `<dataDir>/token`).
+
+### Cobertura a descartar (~27 tests)
+- Streaming con deltas, numeración de mensajes, cola de busy, conversations
+  (`list_conversations`/`open_conversation` solo en `bridge.ts`, muerto): el protocolo actual es
+  el de `app-ws-gateway.test.ts`.
+- Dos pruebas de own instance con `startDaemon` directo: reescribir con `bootDaemon` + `env`.
+
+### Nota técnica
+`bootDaemon` sirve de helper; `Daemon` expone `port/close/supervisor`; el token del hello es
+`BRIDGE_KEY`. El helper migrado quedó probado (tsc limpio, 4 verdes antes del restore del archivo).
