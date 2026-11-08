@@ -229,6 +229,7 @@ export class AgentSupervisor {
 		this.stopping = true;
 		this.wasLaunched = true;
 		clearTimeout(this.restartTimer);
+		this.restartTimer = undefined;
 		const child = this.child;
 		if (!child) {
 			this.setState("stopped");
@@ -414,16 +415,21 @@ export class AgentSupervisor {
 		}
 		this.log(`agent exited unexpectedly (${signal ?? `code ${code}`})`);
 		if (wasBusy) this.interrupted = true;
+		// Only the completed run can reset backoff; failed startup attempts must not reuse its age.
+		if (this.spawnedAt && Date.now() - this.spawnedAt > (this.options.stableMs ?? 30_000)) this.attempts = 0;
+		this.spawnedAt = 0;
 		this.scheduleRestart();
 	}
 
 	private scheduleRestart(): void {
+		// A startup death reaches both handleClose and initialize's catch; share one pending respawn.
+		if (this.restartTimer) return;
 		const backoff = this.options.backoffMs ?? DEFAULT_BACKOFF_MS;
-		if (this.spawnedAt && Date.now() - this.spawnedAt > (this.options.stableMs ?? 30_000)) this.attempts = 0;
 		const delay = backoff[Math.min(this.attempts, backoff.length - 1)] ?? 1000;
 		this.attempts += 1;
 		this.setState("restarting");
 		this.restartTimer = setTimeout(() => {
+			this.restartTimer = undefined;
 			if (this.stopping) return;
 			this.initialize().catch((error: Error) => {
 				this.log(`agent restart failed: ${error.message}`);

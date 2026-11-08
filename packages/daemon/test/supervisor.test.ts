@@ -1,9 +1,10 @@
 import * as childProcess from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSupervisor } from "../src/supervisor.ts";
-import { fakeSupervisor, tempDir, waitFor } from "./helpers.ts";
+import { FAKE_AGENT, fakeSupervisor, tempDir, waitFor } from "./helpers.ts";
 import { itServerMode } from "./support/windows.ts";
 
 vi.mock("node:child_process", { spy: true });
@@ -179,6 +180,65 @@ describe("AgentSupervisor", () => {
 				2,
 		);
 		expect(events.some((e) => e.type === "interrupted")).toBe(false);
+	});
+
+	describe("restart scheduling", () => {
+		it("backs off once per step when a stable agent is followed by startup crashes", {
+			timeout: 9000,
+		}, async () => {
+			const dataDir = tempDir();
+			const dieFlag = join(dataDir, "die");
+			const spawnLog = join(dataDir, "spawns.txt");
+			const launcher = join(dataDir, "launcher.mjs");
+			writeFileSync(
+				launcher,
+				[
+					"import { appendFileSync, existsSync } from 'node:fs';",
+					"if (existsSync(process.env.DIE_FLAG)) {",
+					"  appendFileSync(process.env.SPAWN_LOG, String(Date.now()) + String.fromCharCode(10));",
+					"  process.exit(1);",
+					"}",
+					`await import(${JSON.stringify(pathToFileURL(FAKE_AGENT).href)});`,
+				].join("\n"),
+			);
+			const { supervisor } = track(
+				fakeSupervisor({
+					command: process.execPath,
+					args: [launcher],
+					dataDir,
+					stableMs: 20,
+					env: { ...process.env, DIE_FLAG: dieFlag, SPAWN_LOG: spawnLog },
+				}),
+			);
+			await supervisor.start();
+			await new Promise((resolve) => setTimeout(resolve, 60));
+			writeFileSync(dieFlag, "");
+			await supervisor.request({ type: "prompt", message: "crash" });
+			await new Promise((resolve) => setTimeout(resolve, 4000));
+			const spawns = readFileSync(spawnLog, "utf8").trim().split("\n").filter(Boolean);
+			expect(spawns.length).toBeGreaterThanOrEqual(3);
+			expect(spawns.length).toBeLessThanOrEqual(20);
+			expect(supervisor.state).toBe("restarting");
+		});
+
+		it("still respawns after stopping a pending restart and starting again", async () => {
+			const { supervisor, events } = track(fakeSupervisor({ backoffMs: [200] }));
+			await supervisor.start();
+			await supervisor.request({ type: "prompt", message: "crash" });
+			await waitFor(() => supervisor.state === "restarting");
+			await supervisor.stop();
+			expect(supervisor.state).toBe("stopped");
+			expect(supervisor.pid).toBeUndefined();
+			await supervisor.start();
+			await supervisor.request({ type: "prompt", message: "crash" });
+			await waitFor(
+				() =>
+					events.filter(
+						(event) => event.type === "supervisor_state" && "state" in event && event.state === "ready",
+					).length === 3,
+			);
+			expect(supervisor.state).toBe("ready");
+		});
 	});
 
 	it("rejects pending commands when the agent exits", async () => {
