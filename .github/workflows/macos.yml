@@ -19,8 +19,8 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 30
     env:
-      # Keep this exact CI-only exception consistent across pnpm's automatic dependency checks.
-      PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: '["gentle-pi@4.6.0"]'
+      # Match pnpm-workspace.yaml's exact exception for automatic dependency checks.
+      PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: '["gentle-pi@4.7.0"]'
     defaults:
       run:
         shell: bash

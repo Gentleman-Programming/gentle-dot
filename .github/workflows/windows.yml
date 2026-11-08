@@ -65,8 +65,8 @@ jobs:
     name: Native app channel
     runs-on: windows-latest
     env:
-      # Match the exact CI-only policy used by the macOS job and pnpm's dependency checks.
-      PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: '["gentle-pi@4.6.0"]'
+      # Match pnpm-workspace.yaml and the macOS job's exact-version exception.
+      PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: '["gentle-pi@4.7.0"]'
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v4

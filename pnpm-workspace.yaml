@@ -9,3 +9,5 @@ allowBuilds:
   # Not needed: optional extras of the Pi SDK.
   '@google/genai': false
   protobufjs: false
+minimumReleaseAgeExclude:
+  - gentle-pi@4.7.0
