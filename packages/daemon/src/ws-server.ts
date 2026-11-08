@@ -7,6 +7,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage, Server as HttpServer } from 'http';
 import { URL } from 'url';
 import { EventEmitter } from 'events';
+import { CloseCode } from '@gentle-dot/protocol';
 import { CONNECTOR_TYPES, ConnectorRegistry, type ConnectorInfo, type ConnectorType } from './connector-registry.ts';
 import type { UploadStore } from './uploads.ts';
 import type { AppConfig } from './config-loader.ts';
@@ -312,6 +313,12 @@ export class WsServer extends EventEmitter {
           appClientId = this.handleAppHello(ws, message);
           return;
         }
+        // No session exists yet: the first frame a window sends must be the flat hello, and a
+        // connection that never authenticated cannot keep talking (client protocol, S25.1).
+        if (message.type !== 'hello') {
+          ws.close(CloseCode.unauthorized, 'The first message must be hello');
+          return;
+        }
 
         // Validate message structure
         if (!message.type || typeof message.timestamp !== 'number') {
@@ -558,12 +565,12 @@ export class WsServer extends EventEmitter {
   private handleAppHello(ws: WebSocket, message: { token?: string; protocol?: number }): string | null {
     if (message.protocol !== PROTOCOL_VERSION) {
       this.sendAppError(ws, 'PROTOCOL_MISMATCH', `Expected protocol v${PROTOCOL_VERSION}, got v${message.protocol}`);
-      ws.close(1002, 'Protocol mismatch');
+      ws.close(CloseCode.badProtocol, 'Protocol mismatch');
       return null;
     }
     if (!message.token || message.token !== this.getAuthToken()) {
       this.sendAppError(ws, 'INVALID_TOKEN', 'Invalid authentication token');
-      ws.close(1008, 'Invalid token');
+      ws.close(CloseCode.unauthorized, 'Invalid token');
       return null;
     }
 
