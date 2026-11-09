@@ -24,6 +24,8 @@ import {
 } from "../src/profiles.ts";
 import { HIDDEN_NAMES } from "../src/white-label.ts";
 import { tempDir } from "./helpers.ts";
+import { canCreateFileSymlinks, symlinkDirectory } from "./support/fixture-capabilities.ts";
+import { expectPosixMode } from "./support/posix-modes.ts";
 
 function setup() {
 	const root = tempDir();
@@ -77,6 +79,31 @@ describe("profile file format", () => {
 		expect(serializeProfilesFile(file ?? { profiles: {} })).toBe(ENGINE_FILE);
 	});
 
+	it("preserves 4.7 workflow metadata using the engine's normalization", () => {
+		const payload = {
+			kind: "gentle-pi.agent_model_profiles",
+			version: 1,
+			profiles: { delegated: {}, organic: {}, invalid: {} },
+			active: "delegated",
+			workflow: {
+				delegated: { orchestratorMode: "full-delegation" },
+				organic: { orchestratorMode: "organic" },
+				invalid: { orchestratorMode: "unknown" },
+				missing: { orchestratorMode: "full-delegation" },
+			},
+		};
+		const file = parseProfilesFile(JSON.stringify(payload));
+		expect(file?.workflow).toEqual({ delegated: { orchestratorMode: "full-delegation" } });
+		expect(serializeProfilesFile(file ?? { profiles: {} })).toBe(
+			`${JSON.stringify({ ...payload, workflow: { delegated: { orchestratorMode: "full-delegation" } } }, null, 2)}\n`,
+		);
+		const organic = parseProfilesFile(
+			JSON.stringify({ ...payload, workflow: { organic: { orchestratorMode: "organic" } } }),
+		);
+		expect(organic?.workflow).toBeUndefined();
+		expect(JSON.parse(serializeProfilesFile(organic ?? { profiles: {} }))).not.toHaveProperty("workflow");
+	});
+
 	it("normalizes like the engine: string routes, effort alias, invalid names and stale active dropped", () => {
 		const file = parseProfilesFile(
 			JSON.stringify({
@@ -99,6 +126,73 @@ describe("profile file format", () => {
 });
 
 describe("profile store", () => {
+	it("keeps 4.7 workflow metadata through routing mutations", async () => {
+		const { store, write, json, profilesPath } = setup();
+		write(profilesPath, {
+			kind: "gentle-pi.agent_model_profiles",
+			version: 1,
+			profiles: { source: { worker: { thinking: "low" } }, organic: {} },
+			active: "source",
+			workflow: { source: { orchestratorMode: "full-delegation" } },
+		});
+		const beforeRejected = readFileSync(profilesPath, "utf8");
+		const beforeList = store.list();
+		await expect(store.rename("source", "organic")).rejects.toMatchObject({ code: "duplicate_name" });
+		expect(readFileSync(profilesPath, "utf8")).toBe(beforeRejected);
+		expect(store.list()).toEqual(beforeList);
+		await store.save("source", { worker: { thinking: "high" } });
+		expect(json(profilesPath).workflow).toEqual({ source: { orchestratorMode: "full-delegation" } });
+		await store.duplicate("source", "copy");
+		await store.rename("source", "renamed");
+		expect(json(profilesPath).workflow).toEqual({
+			copy: { orchestratorMode: "full-delegation" },
+			renamed: { orchestratorMode: "full-delegation" },
+		});
+		expect(store.list().active).toBe("renamed");
+		await store.apply("organic");
+		expect(store.list().active).toBe("organic");
+		await store.remove("copy");
+		await store.saveCurrent("captured");
+		expect(json(profilesPath).workflow).toEqual({ renamed: { orchestratorMode: "full-delegation" } });
+		expect(store.list().profiles).toEqual([
+			{ name: "captured", roles: {} },
+			{ name: "organic", roles: {} },
+			{ name: "renamed", roles: { worker: { thinking: "high" } } },
+		]);
+	});
+
+	it("imports 4.7 profiles with identical routes but distinct workflow modes", async () => {
+		const { store, write, json, shellHome, profilesPath } = setup();
+		const roles = { worker: { thinking: "low" as const } };
+		await store.save("same", roles);
+		await store.apply("same");
+		const sourcePath = join(shellHome, "profiles.json");
+		write(sourcePath, {
+			kind: "gentle-pi.agent_model_profiles",
+			version: 1,
+			profiles: { same: roles },
+			active: "same",
+			workflow: { same: { orchestratorMode: "full-delegation" } },
+		});
+		const sourceBytes = readFileSync(sourcePath, "utf8");
+		expect(await store.import()).toEqual({
+			imported: [{ from: "same", to: "same-imported" }],
+			missingProviders: [],
+		});
+		expect(json(profilesPath).workflow).toEqual({ "same-imported": { orchestratorMode: "full-delegation" } });
+		expect(store.list()).toEqual({
+			profiles: [
+				{ name: "same", roles },
+				{ name: "same-imported", roles },
+			],
+			active: "same",
+		});
+		const importedBytes = readFileSync(profilesPath, "utf8");
+		expect(await store.import()).toEqual({ imported: [], missingProviders: [] });
+		expect(readFileSync(profilesPath, "utf8")).toBe(importedBytes);
+		expect(readFileSync(sourcePath, "utf8")).toBe(sourceBytes);
+	});
+
 	it("creates, updates, duplicates, renames, and deletes profiles", async () => {
 		const { store, json, profilesPath } = setup();
 		expect(store.list()).toEqual({ profiles: [] });
@@ -152,7 +246,7 @@ describe("profile store", () => {
 	it("writes the store atomically with mode 0600 and leaves no temp files", async () => {
 		const { store, configHome, profilesPath } = setup();
 		await store.save("a", { orchestrator: { model: "fake/fake-model" } });
-		expect(statSync(profilesPath).mode & 0o777).toBe(0o600);
+		expectPosixMode(profilesPath, 0o600);
 		expect(readdirSync(configHome)).toEqual(["profiles.json"]);
 	});
 
@@ -217,7 +311,7 @@ describe("applying a profile", () => {
 			defaultProvider: "anthropic",
 			defaultModel: "claude-opus-4",
 		});
-		expect(statSync(modelsPath).mode & 0o777).toBe(0o600);
+		expectPosixMode(modelsPath, 0o600);
 		// The agent's own frontmatter follows the profile, as the engine's apply does.
 		expect(readFileSync(agentFile, "utf8")).toBe(
 			"---\nname: gentle-ai-worker\nmodel: openai/gpt-5\nthinking: high\n---\nBody\n",
@@ -239,24 +333,38 @@ describe("applying a profile", () => {
 		await store.save("p", { "kit.helper": { model: "x/y" } });
 		await store.apply("p");
 		expect(readFileSync(explore, "utf8")).toBe("---\nname: gentle-ai-explore\ndescription: d\n---\nB\n");
-		expect(statSync(explore).mode & 0o777).toBe(0o644);
+		expectPosixMode(explore, 0o644);
 		expect(readFileSync(helper, "utf8")).toBe("---\nname: helper\nmodel: x/y\npackage: kit\n---\nB\n");
 	});
 
-	it("never writes an agent file whose real path is outside the assistant's agent folders", async () => {
+	it("never writes an agent file whose folder real path is outside the assistant's agent folders", async () => {
 		const { store, agentHome } = setup();
 		const outside = join(agentHome, "..", "outside");
 		mkdirSync(join(outside, "dir"), { recursive: true });
+		mkdirSync(agentHome, { recursive: true });
+		const text = "---\nname: gentle-ai-explore\nmodel: old/model\n---\nB\n";
+		writeFileSync(join(outside, "dir", "explore.md"), text);
+		symlinkDirectory(join(outside, "dir"), join(agentHome, "subagents"));
+		await store.save("p", { "gentle-ai-explore": { model: "x/y" } });
+		await store.apply("p");
+		expect(readFileSync(join(outside, "dir", "explore.md"), "utf8")).toBe(text);
+	});
+
+	it.skipIf(
+		!canCreateFileSymlinks(
+			"profiles: an agent file whose real path is outside the assistant's agent folders",
+		),
+	)("never writes an agent file whose real path is outside the assistant's agent folders", async () => {
+		const { store, agentHome } = setup();
+		const outside = join(agentHome, "..", "outside");
 		mkdirSync(join(agentHome, "agents"), { recursive: true });
+		mkdirSync(outside, { recursive: true });
 		const text = "---\nname: gentle-ai-worker\nmodel: old/model\n---\nB\n";
 		writeFileSync(join(outside, "worker.md"), text);
-		writeFileSync(join(outside, "dir", "explore.md"), text.replace("worker", "explore"));
 		symlinkSync(join(outside, "worker.md"), join(agentHome, "agents", "worker.md"));
-		symlinkSync(join(outside, "dir"), join(agentHome, "subagents"));
 		await store.save("p", { "gentle-ai-worker": { model: "x/y" } });
 		await store.apply("p");
 		expect(readFileSync(join(outside, "worker.md"), "utf8")).toBe(text);
-		expect(readFileSync(join(outside, "dir", "explore.md"), "utf8")).toBe(text.replace("worker", "explore"));
 	});
 
 	it("sets the thinking level and drops model_profiles when the profile routes no agent", async () => {
