@@ -24,6 +24,7 @@ import { fakeApp } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 import { expectPosixMode } from "./support/posix-modes.ts";
+import { itWithAppChannel } from "./support/windows.ts";
 
 const TOKEN = "discord-bot-token-5e1d7a90";
 const NOTION_TOKENS = "notion-signin-tokens-secret";
@@ -513,42 +514,45 @@ const setAsideToasts = (messages: ServerMessage[]) =>
 	messages.filter((m) => m.type === "toast" && m.message === SET_ASIDE_NOTICE);
 
 describe("the daemon checks connectors.json with the app (S25.6)", () => {
-	it("sets a changed file aside at start and tells the window; a restart starts clean", async () => {
-		const dataDir = tempDir();
-		const app = fakeApp();
-		app.secrets.set(INTEGRITY_KEY_ID, "cd".repeat(32));
-		writeFileSync(
-			join(dataDir, "connectors.json"),
-			JSON.stringify({
-				version: 2,
-				connectors: { plain: { enabled: true, mode: "read_write", custom: PLAIN } },
-			}),
-		);
-		const logs: string[] = [];
-		const d = await daemonWith(dataDir, app, logs);
-		const messages = await window(d);
-		await waitFor(() => setAsideToasts(messages).length > 0);
-		expect(setAsideToasts(messages)).toHaveLength(1);
-		expect(setAsideToasts(messages)[0]).toMatchObject({ level: "warning" });
-		expect(rejectedFiles(dataDir)).toHaveLength(1);
-		expect(logs.filter((line) => line.includes("changed while Gentle Dot was closed"))).toHaveLength(1);
-		const mcp = JSON.parse(readFileSync(join(dataDir, "agent", "mcp.json"), "utf8"));
-		expect(Object.keys(mcp.mcpServers ?? {})).not.toContain("plain");
-		await d.close();
-		daemons.splice(daemons.indexOf(d), 1);
+	itWithAppChannel(
+		"sets a changed file aside at start and tells the window; a restart starts clean",
+		async () => {
+			const dataDir = tempDir();
+			const app = fakeApp();
+			app.secrets.set(INTEGRITY_KEY_ID, "cd".repeat(32));
+			writeFileSync(
+				join(dataDir, "connectors.json"),
+				JSON.stringify({
+					version: 2,
+					connectors: { plain: { enabled: true, mode: "read_write", custom: PLAIN } },
+				}),
+			);
+			const logs: string[] = [];
+			const d = await daemonWith(dataDir, app, logs);
+			const messages = await window(d);
+			await waitFor(() => setAsideToasts(messages).length > 0);
+			expect(setAsideToasts(messages)).toHaveLength(1);
+			expect(setAsideToasts(messages)[0]).toMatchObject({ level: "warning" });
+			expect(rejectedFiles(dataDir)).toHaveLength(1);
+			expect(logs.filter((line) => line.includes("changed while Gentle Dot was closed"))).toHaveLength(1);
+			const mcp = JSON.parse(readFileSync(join(dataDir, "agent", "mcp.json"), "utf8"));
+			expect(Object.keys(mcp.mcpServers ?? {})).not.toContain("plain");
+			await d.close();
+			daemons.splice(daemons.indexOf(d), 1);
 
-		// The app launches a new daemon: a new channel, the same Keychain.
-		const relaunched = fakeApp();
-		for (const [id, secret] of app.secrets) relaunched.secrets.set(id, secret);
-		const again = await daemonWith(dataDir, relaunched, logs);
-		const later = await window(again);
-		await new Promise((resolve) => setTimeout(resolve, 100));
-		expect(setAsideToasts(later)).toEqual([]);
-		expect(rejectedFiles(dataDir)).toHaveLength(1);
-		expect(validlySigned(dataDir, relaunched.secrets)).toBe(true);
-	});
+			// The app launches a new daemon: a new channel, the same Keychain.
+			const relaunched = fakeApp();
+			for (const [id, secret] of app.secrets) relaunched.secrets.set(id, secret);
+			const again = await daemonWith(dataDir, relaunched, logs);
+			const later = await window(again);
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			expect(setAsideToasts(later)).toEqual([]);
+			expect(rejectedFiles(dataDir)).toHaveLength(1);
+			expect(validlySigned(dataDir, relaunched.secrets)).toBe(true);
+		},
+	);
 
-	it("puts back a change made while running, still signed", async () => {
+	itWithAppChannel("puts back a change made while running, still signed", async () => {
 		const dataDir = tempDir();
 		const app = fakeApp();
 		writeFileSync(

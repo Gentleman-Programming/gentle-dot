@@ -34,6 +34,7 @@ import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { fakeOAuth } from "./fake-oauth.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 import { hasPosixModes } from "./support/posix-modes.ts";
+import { itWithAppChannel } from "./support/windows.ts";
 
 const FAKE_SERVER = fileURLToPath(new URL("./fixtures/fake-mcp-server.ts", import.meta.url));
 const TOKEN = "discord-bot-token-0f9c2b7e";
@@ -724,30 +725,33 @@ async function daemonWith(options: { dataDir: string; app?: ReturnType<typeof fa
 }
 
 describe("connector secrets end to end", () => {
-	it("connects Notion through the app: OAuth runs in the daemon, the token lives only in the app's store, and the proxy sends it", async () => {
-		const dataDir = tempDir();
-		const app = fakeApp([], "allow");
-		const { d, notion, messages, mcpText, engineClient, clientId, ws } = await daemonWith({ dataDir, app });
-		const send = sendLikeThePanel(
-			app,
-			() => clientId,
-			(m) => ws.send(JSON.stringify(m)),
-		);
-		const pid = d.supervisor.pid;
-		send({ type: "connector_connect", connectorId: "notion" });
-		await waitFor(() => messages.find((m) => m.type === "auth_done" && m.ok));
-		await waitFor(() => d.supervisor.pid !== pid && d.supervisor.state === "ready");
-		await waitFor(() => JSON.parse(mcpText()).mcpServers.notion);
-		const client = await engineClient("notion");
-		expect((await client.listTools()).map((t) => t.name)).toEqual(["notion-search"]);
-		expect(notion.seen.every((auth) => auth === "Bearer access-token-1")).toBe(true);
-		expect(JSON.parse(app.secrets.get("connector/notion/signin") ?? "{}").tokens.access_token).toBe(
-			"access-token-1",
-		);
-		expect(app.secretCalls.join("\n")).not.toContain("access-token-1");
-		expect(filesContaining(dataDir, "access-token-1")).toEqual([]);
-		expect(filesContaining(dataDir, "refresh-token-1")).toEqual([]);
-	});
+	itWithAppChannel(
+		"connects Notion through the app: OAuth runs in the daemon, the token lives only in the app's store, and the proxy sends it",
+		async () => {
+			const dataDir = tempDir();
+			const app = fakeApp([], "allow");
+			const { d, notion, messages, mcpText, engineClient, clientId, ws } = await daemonWith({ dataDir, app });
+			const send = sendLikeThePanel(
+				app,
+				() => clientId,
+				(m) => ws.send(JSON.stringify(m)),
+			);
+			const pid = d.supervisor.pid;
+			send({ type: "connector_connect", connectorId: "notion" });
+			await waitFor(() => messages.find((m) => m.type === "auth_done" && m.ok));
+			await waitFor(() => d.supervisor.pid !== pid && d.supervisor.state === "ready");
+			await waitFor(() => JSON.parse(mcpText()).mcpServers.notion);
+			const client = await engineClient("notion");
+			expect((await client.listTools()).map((t) => t.name)).toEqual(["notion-search"]);
+			expect(notion.seen.every((auth) => auth === "Bearer access-token-1")).toBe(true);
+			expect(JSON.parse(app.secrets.get("connector/notion/signin") ?? "{}").tokens.access_token).toBe(
+				"access-token-1",
+			);
+			expect(app.secretCalls.join("\n")).not.toContain("access-token-1");
+			expect(filesContaining(dataDir, "access-token-1")).toEqual([]);
+			expect(filesContaining(dataDir, "refresh-token-1")).toEqual([]);
+		},
+	);
 
 	it("without the app, a connector without secrets still works end to end, and one with a secret says why it cannot (regression)", async () => {
 		const dataDir = tempDir();
