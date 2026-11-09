@@ -6,8 +6,8 @@
 const ISSUER = "https://auth.example.com";
 
 export interface FakeOAuthOptions {
-	/** "fail": the token endpoint refuses every code. */
-	mode?: "ok" | "fail";
+	/** "fail": the token endpoint refuses every code. "no-registration": no dynamic client registration. */
+	mode?: "ok" | "fail" | "no-registration";
 }
 
 export function fakeOAuth(options: FakeOAuthOptions = {}) {
@@ -45,7 +45,7 @@ export function fakeOAuth(options: FakeOAuthOptions = {}) {
 				issuer: ISSUER,
 				authorization_endpoint: `${ISSUER}/authorize`,
 				token_endpoint: `${ISSUER}/token`,
-				registration_endpoint: `${ISSUER}/register`,
+				...(options.mode === "no-registration" ? {} : { registration_endpoint: `${ISSUER}/register` }),
 				response_types_supported: ["code"],
 				grant_types_supported: ["authorization_code", "refresh_token"],
 				code_challenge_methods_supported: ["S256"],

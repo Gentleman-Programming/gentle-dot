@@ -1780,6 +1780,10 @@ interface Setup {
 const PASTE_PROMPT =
 	"If the browser shows an error page after you approve, copy the full address from its address bar and paste it here.";
 const DRAFT_ORIGIN = "Drafted by the assistant";
+/** Trying again cannot help a server that refuses to register the app, as GitHub's hosted server does. */
+const NO_CLIENT_REGISTRATION = /does not support dynamic client registration/i;
+const NEEDS_ACCESS_TOKEN =
+	"This service does not let apps sign in on their own. Ask the assistant to connect it with an access token instead.";
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 
 /** How sign-ins reach the provider and the user's browser; tests replace both. */
@@ -2530,7 +2534,9 @@ export class ConnectorManager {
 					message:
 						error instanceof SecretsUnavailableError
 							? error.message
-							: "Sign-in did not finish. Please try again.",
+							: NO_CLIENT_REGISTRATION.test(detail)
+								? NEEDS_ACCESS_TOKEN
+								: "Sign-in did not finish. Please try again.",
 				});
 			}
 		} finally {
