@@ -2,22 +2,23 @@
 //! hiding the rose, the full-screen panel, voice input, the shortcut chosen in Settings,
 //! the daemon lifecycle (design §9), and the app's private channel to the daemon (S25.1–S25.3).
 
-use crate::app_channel::{self, AppChannel, NO_CHANNEL, REGISTER_TIMEOUT};
+use crate::app_channel;
+use crate::app_channel::{AppChannel, NO_CHANNEL, REGISTER_TIMEOUT};
 use crate::approvals::{native::NativePrompt, ApprovalRequest, Approvals, Decision, APPROVAL_TIMEOUT};
 use crate::computer::app as computer;
 use crate::computer::server::Endpoint;
 use crate::computer::session::Reason;
 use crate::computer::working::{self, Part};
-use crate::config::{self, ConnectionInfo, DesktopConfig, DEFAULT_SHORTCUT};
+use crate::config::{self, ConnectionInfo, DesktopConfig};
 use crate::daemon::{self, Daemon, RestartOutcome};
 use crate::geometry::{self, Rect};
-use crate::platform::{self, LaunchRequest, Os, DOT_TITLE, PANEL_TITLE};
+use crate::platform::{self, LaunchRequest, Os, WindowEffect, DOT_TITLE, PANEL_TITLE};
 use crate::position::{self, DotPosition};
 use crate::secure_store::{self, SecretStore};
 use crate::shortcut;
 use crate::status::{is_template, tray_status, TrayGlyph};
 use crate::voice::app as voice;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -25,7 +26,6 @@ use std::time::Duration;
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
-#[cfg(target_os = "macos")]
 use tauri::window::{Effect, EffectState, EffectsBuilder};
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, RunEvent, WebviewUrl, WebviewWindow,
@@ -69,6 +69,9 @@ struct Shell {
     full_screen: Mutex<Option<Rect>>,
     /// The shortcut that toggles the panel now; `None` while none is bound (native Wayland).
     shortcut: Mutex<Option<String>>,
+    /// The assistant's memory mode now (SW9), or the error for an invalid `memory` in `config.json`
+    /// until `memory_set` replaces it with a valid one; read by `memory_get`.
+    memory: Mutex<Result<config::MemoryMode, String>>,
 }
 
 /// The Dot and the panel as computer control hides them during a call (S1, S5): never through
@@ -190,6 +193,9 @@ fn read_connection_info(config: &DesktopConfig) -> CommandResult<ConnectionInfo>
 /// spawned (S24.7, L61).
 struct ChannelService {
     approvals: Approvals,
+    /// The computer endpoint to register with the assistant once the channel opens. It is read
+    /// only on that path, which Windows does not have yet (L30), so it is dead there by design.
+    #[cfg_attr(not(unix), allow(dead_code))]
     computer: Option<Endpoint>,
     secrets: Box<dyn SecretStore>,
 }
@@ -353,8 +359,8 @@ fn shortcut_get(app: AppHandle) -> ShortcutInfo {
     let shell = app.state::<Shell>();
     let current = shell.shortcut.lock().unwrap().clone().unwrap_or_else(|| shell.config.shortcut.clone());
     ShortcutInfo {
-        shortcut: shortcut::normalize(&current).unwrap_or(current),
-        default: DEFAULT_SHORTCUT.to_string(),
+        shortcut: shortcut::normalize(&current, Os::CURRENT).unwrap_or(current),
+        default: config::default_shortcut().to_string(),
     }
 }
 
@@ -368,12 +374,89 @@ async fn shortcut_set(app: AppHandle, shortcut: String) -> CommandResult<Shortcu
         }
         let mut current = shell.shortcut.lock().unwrap();
         let host = ShortcutHost { app: &app, config_file: shell.config.data_dir.join("config.json") };
-        let saved = shortcut::apply(&host, current.as_deref(), &shortcut)?;
+        let saved = shortcut::apply(&host, current.as_deref(), &shortcut, Os::CURRENT)?;
         *current = Some(saved.clone());
         Ok(ShortcutChoice { shortcut: saved })
     })
     .await
     .map_err(err)?
+}
+
+/// Result of `memory_get`/`memory_set` (SW9): the assistant's memory mode as the panel reads it.
+#[derive(serde::Serialize)]
+struct MemoryInfo {
+    /// `null` while `config.json` holds a value the daemon refuses; `error` then says which.
+    memory: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl MemoryInfo {
+    fn of(state: &Result<config::MemoryMode, String>) -> MemoryInfo {
+        match state {
+            Ok(mode) => MemoryInfo { memory: Some(mode.as_str()), error: None },
+            Err(error) => MemoryInfo { memory: None, error: Some(error.clone()) },
+        }
+    }
+}
+
+#[tauri::command]
+fn memory_get(app: AppHandle) -> MemoryInfo {
+    MemoryInfo::of(&app.state::<Shell>().memory.lock().unwrap())
+}
+
+/// Saves the memory mode and restarts the assistant so the engine picks it up (SW9). An unchanged
+/// value is a no-op: nothing is written and the assistant is left running. A failed restart is an
+/// error the panel shows; the mode stays saved, so the next start of the assistant uses it.
+#[tauri::command]
+async fn memory_set(app: AppHandle, memory: String) -> CommandResult<MemoryInfo> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mode = config::MemoryMode::parse(&memory)?;
+        let shell = app.state::<Shell>();
+        let config_file = shell.config.data_dir.join("config.json");
+        let (daemon, port) = (shell.daemon.clone(), shell.config.port);
+        apply_memory(&shell.memory, &config_file, mode, || {
+            memory_restart_result(daemon.restart(DAEMON_START_TIMEOUT), port)
+        })?;
+        Ok(MemoryInfo { memory: Some(mode.as_str()), error: None })
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Records `mode` as the memory mode (SW9): the lock is held across reading the current mode,
+/// writing `config.json` and updating it, so two calls cannot interleave their read and write.
+/// `restart` runs after the lock is released (a restart takes seconds and `memory_get` reads the
+/// same lock) and only when the mode changed; its error is the caller's. An invalid value is never
+/// equal to a mode, so choosing one repairs the file.
+fn apply_memory(
+    state: &Mutex<Result<config::MemoryMode, String>>,
+    config_file: &Path,
+    mode: config::MemoryMode,
+    restart: impl FnOnce() -> CommandResult,
+) -> CommandResult {
+    {
+        let mut current = state.lock().unwrap();
+        if *current == Ok(mode) {
+            return Ok(());
+        }
+        config::save_memory(config_file, mode)?;
+        *current = Ok(mode);
+    }
+    restart()
+}
+
+/// What `memory_set` tells the panel about a restart: the new mode is already saved either way.
+fn memory_restart_result(outcome: RestartOutcome, port: u16) -> CommandResult {
+    match outcome {
+        RestartOutcome::Restarted => Ok(()),
+        RestartOutcome::External => {
+            Err(format!("The memory mode was saved, but the assistant was not restarted. {}", daemon::foreign_daemon_message(port)))
+        }
+        RestartOutcome::Failed(error) => {
+            Err(format!("The memory mode was saved, but the assistant could not restart: {error}"))
+        }
+    }
 }
 
 struct ShortcutHost<'a> {
@@ -571,6 +654,38 @@ fn spawn_snapper(app: AppHandle) -> mpsc::Sender<()> {
     tx
 }
 
+/// The material the panel asks the window system for, as a pure decision so every OS can test it
+/// without opening a window: the effect the panel resolved, mapped to the tauri material and the
+/// corner radius it goes with (`HudWindow` takes 20.0; `Mica` uses the builder's default).
+/// `None` means the OS gets no material, which is Linux and Windows whenever the backdrop facts
+/// do not hold.
+///
+/// Which effect each platform gets, and why the Windows request is gated rather than proven, is
+/// [`WindowEffect`]'s to say: this function only translates the answer, never decides it. Taking
+/// the effect rather than the OS is what keeps the window and the page from disagreeing — both
+/// consume the one resolution in `build_windows`.
+fn panel_material(effect: WindowEffect) -> Option<(Effect, Option<f64>)> {
+    match effect {
+        WindowEffect::HudWindow => Some((Effect::HudWindow, Some(20.0))),
+        WindowEffect::Mica => Some((Effect::Mica, None)),
+        WindowEffect::None => None,
+    }
+}
+
+fn with_panel_effects<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
+    panel: WebviewWindowBuilder<'a, R, M>,
+    effect: WindowEffect,
+) -> WebviewWindowBuilder<'a, R, M> {
+    let Some((material, radius)) = panel_material(effect) else {
+        return panel;
+    };
+    let mut effects = EffectsBuilder::new().effect(material).state(EffectState::Active);
+    if let Some(radius) = radius {
+        effects = effects.radius(radius);
+    }
+    panel.effects(effects.build())
+}
+
 fn build_windows(
     app: &AppHandle,
     config: &DesktopConfig,
@@ -599,8 +714,10 @@ fn build_windows(
     let dot = dot.build()?;
     #[cfg(windows)]
     crate::computer::win::record_call_window(Part::Dot, dot.hwnd()?.0);
-    // Linux has no window effects; the panel URL tells the UI to paint an opaque background.
-    let panel = WebviewWindowBuilder::new(app, PANEL, WebviewUrl::App(platform::panel_url(Os::CURRENT).into()))
+    // The backdrop is resolved once here and threaded into both the panel URL and the window
+    // material, so the UI's own background and the system backdrop can never disagree.
+    let effect = Os::CURRENT.panel_effect(platform::WindowsBackdrop::current());
+    let panel = WebviewWindowBuilder::new(app, PANEL, WebviewUrl::App(platform::panel_url(effect).into()))
         .title(PANEL_TITLE)
         .inner_size(PANEL_SIZE.0, PANEL_SIZE.1)
         .transparent(true)
@@ -613,9 +730,7 @@ fn build_windows(
         .visible(false);
     #[cfg(windows)]
     let panel = panel.minimizable(false);
-    #[cfg(target_os = "macos")]
-    let panel = panel
-        .effects(EffectsBuilder::new().effect(Effect::HudWindow).state(EffectState::Active).radius(20.0).build());
+    let panel = with_panel_effects(panel, effect);
     #[cfg(windows)]
     {
         let panel = panel.build()?;
@@ -835,12 +950,13 @@ fn toggle_on_press(app: &AppHandle, _: &Shortcut, event: ShortcutEvent) {
 
 /// Binds the configured shortcut, or the default one when it is unavailable. Returns the bound one.
 fn register_shortcut(app: &AppHandle, shortcut: &str) -> Option<String> {
+    let default = config::default_shortcut();
     match app.global_shortcut().on_shortcut(shortcut, toggle_on_press) {
         Ok(()) => return Some(shortcut.to_string()),
-        Err(error) => eprintln!("gentle-dot: shortcut `{shortcut}` is unavailable ({error}); using {DEFAULT_SHORTCUT}"),
+        Err(error) => eprintln!("gentle-dot: shortcut `{shortcut}` is unavailable ({error}); using {default}"),
     }
-    if shortcut != DEFAULT_SHORTCUT && app.global_shortcut().on_shortcut(DEFAULT_SHORTCUT, toggle_on_press).is_ok() {
-        return Some(DEFAULT_SHORTCUT.to_string());
+    if shortcut != default && app.global_shortcut().on_shortcut(default, toggle_on_press).is_ok() {
+        return Some(default.to_string());
     }
     None
 }
@@ -864,7 +980,15 @@ pub fn run() {
         std::env::set_var("GDK_BACKEND", backend);
     }
     let places_windows = !platform::compositor_places_windows(|key| std::env::var(key).ok());
-    let config = config::load_config();
+    // No home folder and no `GENTLE_DOT_DATA_DIR`: there is nowhere to keep anything, and
+    // guessing a relative folder is the W22 bug. Fail before a window exists rather than after.
+    let config = match config::load_config() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("gentle-dot: {error}");
+            std::process::exit(1);
+        }
+    };
     tauri::Builder::default()
         // First, so a second launch forwards its arguments and exits before anything else starts.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| handle_launch(app, &args)))
@@ -882,6 +1006,8 @@ pub fn run() {
             set_panel_fullscreen,
             shortcut_get,
             shortcut_set,
+            memory_get,
+            memory_set,
             connector_command,
             computer::computer_endpoint,
             computer::computer_permissions,
@@ -943,6 +1069,7 @@ pub fn run() {
                 panel_spot: Mutex::new(None),
                 full_screen: Mutex::new(None),
                 shortcut: Mutex::new(None),
+                memory: Mutex::new(config.memory.clone()),
             });
             let (voice_input, voice_model) = voice::start(&handle);
             app.manage(voice_input);
@@ -950,8 +1077,12 @@ pub fn run() {
             #[cfg(any(target_os = "macos", windows))]
             register_panic_shortcut(&handle);
 
-            build_windows(&handle, &config, places_windows, rose_hidden)?;
+            // The tray goes up before the windows: a webview starts loading the UI as soon as it is
+            // built, and the UI calls `set_dot_state` as soon as it runs, which needs `tray_by_id`
+            // to find one. Building the tray second lost that race and the UI reported
+            // "tray icon is missing" while the tray appeared a moment later anyway.
             build_tray(&handle, &config, rose_hidden)?;
+            build_windows(&handle, &config, places_windows, rose_hidden)?;
             if places_windows {
                 let bound = register_shortcut(&handle, &config.shortcut);
                 match &bound {
@@ -1057,6 +1188,14 @@ mod tests {
     }
 
     #[test]
+    fn the_memory_commands_are_registered_in_build_rs() {
+        let build = include_str!("../build.rs");
+        for command in ["memory_get", "memory_set"] {
+            assert!(build.contains(&format!("\"{command}\",")), "{command} is missing from build.rs");
+        }
+    }
+
+    #[test]
     fn only_the_glow_overlay_may_acknowledge_the_working_rings() {
         let build = include_str!("../build.rs");
         assert!(build.contains("\"computer_working_ready\","), "computer_working_ready is missing from build.rs");
@@ -1087,5 +1226,109 @@ mod tests {
         assert!(!conversations_on(None));
         assert!(!conversations_on(Some("0")));
         assert!(!conversations_on(Some("true")));
+    }
+
+    #[test]
+    fn the_panel_material_follows_the_effect_the_os_chose() {
+        assert!(matches!(
+            panel_material(WindowEffect::HudWindow),
+            Some((Effect::HudWindow, Some(radius))) if radius == 20.0
+        ));
+        assert!(matches!(panel_material(WindowEffect::Mica), Some((Effect::Mica, None))));
+        assert!(panel_material(WindowEffect::None).is_none());
+    }
+
+    #[test]
+    fn the_page_and_the_material_agree_on_every_effect() {
+        // The doc on `panel_material` promises that the material and the URL "cannot disagree", and
+        // each side is asserted alone — the mapping here, the URL in `platform` — so the pair is
+        // what this checks: a window asking for a backdrop exactly when the page does not paint its
+        // own background.
+        for effect in [WindowEffect::HudWindow, WindowEffect::Mica, WindowEffect::None] {
+            let url = platform::panel_url(effect);
+            let page_paints_its_own = url.ends_with("effects=none");
+            assert_eq!(panel_material(effect).is_none(), page_paints_its_own, "{effect:?} gives {url}");
+        }
+    }
+
+    fn memory_scratch(name: &str) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-scratch/shell-memory").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn memory_set_saves_the_mode_then_restarts_once() {
+        let file = memory_scratch("changed").join("config.json");
+        std::fs::write(&file, r#"{ "memory": "shared" }"#).unwrap();
+        let state = Mutex::new(Ok(config::MemoryMode::Shared));
+        let mut restarts = 0;
+        let result = apply_memory(&state, &file, config::MemoryMode::Private, || {
+            restarts += 1;
+            Ok(())
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(restarts, 1);
+        assert_eq!(*state.lock().unwrap(), Ok(config::MemoryMode::Private));
+        assert_eq!(std::fs::read_to_string(&file).unwrap().replace(char::is_whitespace, ""), r#"{"memory":"private"}"#);
+    }
+
+    #[test]
+    fn memory_set_to_the_current_mode_writes_and_restarts_nothing() {
+        let file = memory_scratch("same").join("config.json");
+        let state = Mutex::new(Ok(config::MemoryMode::Shared));
+        let result = apply_memory(&state, &file, config::MemoryMode::Shared, || panic!("must not restart"));
+        assert_eq!(result, Ok(()));
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn memory_set_repairs_an_invalid_value_and_restarts() {
+        let file = memory_scratch("repair").join("config.json");
+        std::fs::write(&file, r#"{ "memory": "Private" }"#).unwrap();
+        let state = Mutex::new(Err(config::invalid_memory("Private")));
+        let mut restarts = 0;
+        let result = apply_memory(&state, &file, config::MemoryMode::Shared, || {
+            restarts += 1;
+            Ok(())
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(restarts, 1);
+        assert_eq!(*state.lock().unwrap(), Ok(config::MemoryMode::Shared));
+    }
+
+    #[test]
+    fn memory_set_returns_the_restart_failure_and_keeps_the_saved_mode() {
+        let file = memory_scratch("restart-fails").join("config.json");
+        std::fs::write(&file, r#"{ "memory": "shared" }"#).unwrap();
+        let state = Mutex::new(Ok(config::MemoryMode::Shared));
+        let result = apply_memory(&state, &file, config::MemoryMode::Private, || {
+            memory_restart_result(RestartOutcome::Failed("no port".to_string()), 4317)
+        });
+        assert_eq!(result, Err("The memory mode was saved, but the assistant could not restart: no port".to_string()));
+        assert_eq!(*state.lock().unwrap(), Ok(config::MemoryMode::Private));
+        assert!(std::fs::read_to_string(&file).unwrap().contains("private"));
+    }
+
+    #[test]
+    fn memory_set_does_not_restart_when_saving_fails() {
+        // The folder does not exist as a directory: its parent is a file.
+        let dir = memory_scratch("save-fails");
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, "").unwrap();
+        let state = Mutex::new(Ok(config::MemoryMode::Shared));
+        let result = apply_memory(&state, &blocker.join("config.json"), config::MemoryMode::Private, || {
+            panic!("must not restart")
+        });
+        assert!(result.is_err());
+        assert_eq!(*state.lock().unwrap(), Ok(config::MemoryMode::Shared));
+    }
+
+    #[test]
+    fn a_foreign_assistant_after_a_memory_restart_is_an_error_naming_the_port() {
+        let result = memory_restart_result(RestartOutcome::External, 4317);
+        assert!(result.unwrap_err().contains("port 4317"));
+        assert_eq!(memory_restart_result(RestartOutcome::Restarted, 4317), Ok(()));
     }
 }

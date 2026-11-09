@@ -484,6 +484,22 @@ describe("Windows production stop bootstrap (S8, S10, S11)", () => {
 		).rejects.toThrow("Windows stop listener initialization failed");
 		expect(start).not.toHaveBeenCalled();
 	});
+	it("keeps the native failure cause in the initialization error for daemon.log diagnosis", async () => {
+		const start = vi.fn();
+		const failure = await startWithWindowsStop("data/daemon.pid", start, {
+			platform: "win32",
+			loadNative: () => {
+				throw new Error("Stop record does not identify this process");
+			},
+		}).then(
+			() => undefined,
+			(error: Error) => error,
+		);
+		expect(start).not.toHaveBeenCalled();
+		expect(failure?.message).toBe(
+			"Windows stop listener initialization failed: Stop record does not identify this process",
+		);
+	});
 	it("refuses a malformed native export or capability before startup", async () => {
 		for (const native of [
 			{},

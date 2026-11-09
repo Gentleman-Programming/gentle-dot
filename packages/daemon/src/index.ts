@@ -15,7 +15,7 @@ export { GentleShellSpawner, gentleShellSpawner, IDENTITY_PROMPT } from './gentl
 export type { ShellConfig, ShellSpawnOptions } from './gentle-shell-spawner.ts';
 
 export { McpProxy } from './mcp-proxy.ts';
-export type { McpServerConfig, McpMode, McpTool, ApprovalRequest, ApprovalResponse } from './mcp-proxy.ts';
+export type { McpProxyOptions, ProxiedConnector, UpstreamCredentials, ApprovalPreview } from './mcp-proxy.ts';
 
 export { AppChannel, AppChannelClient } from './app-channel.ts';
 export type { AppMessage, AppChannelConfig } from './app-channel.ts';

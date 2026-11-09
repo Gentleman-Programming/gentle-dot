@@ -2,14 +2,31 @@
 //! and applying a new one without a restart.
 
 use crate::computer::app::PANIC_SHORTCUT;
+use crate::platform::Os;
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
 
 pub const UNREADABLE: &str = "Gentle Dot cannot use that key combination. Try another one.";
-pub const NEEDS_MODIFIER: &str =
-    "Add ⌘, ⌥ or ⌃ (Super, Alt or Ctrl), or use a function key (F1–F24). Shift alone would capture your typing.";
-pub const RESERVED_PANIC: &str = "⌥⇧Esc (Alt+Shift+Esc) is reserved for stopping computer control.";
 pub const ESC_ALONE: &str = "Esc alone closes the panel. Add a modifier key or choose another key.";
 pub const TAKEN: &str = "That shortcut is taken by the system or another app.";
+
+/// Why Shift alone is not enough, named the way this OS spells its modifiers. macOS keeps its
+/// glyphs; Windows and Linux name the keys.
+fn needs_modifier(os: Os) -> &'static str {
+    match os {
+        Os::MacOs => "Add ⌘, ⌥ or ⌃ (Super, Alt or Ctrl), or use a function key (F1–F24). Shift alone would capture your typing.",
+        Os::Windows | Os::Linux => {
+            "Add Ctrl, Alt or Super, or use a function key (F1–F24). Shift alone would capture your typing."
+        }
+    }
+}
+
+/// The panic shortcut, named the way this OS spells it. macOS keeps its glyphs.
+fn reserved_panic(os: Os) -> &'static str {
+    match os {
+        Os::MacOs => "⌥⇧Esc (Alt+Shift+Esc) is reserved for stopping computer control.",
+        Os::Windows | Os::Linux => "Alt+Shift+Esc is reserved for stopping computer control.",
+    }
+}
 
 const FUNCTION_KEYS: [Code; 24] = [
     Code::F1,
@@ -71,17 +88,17 @@ fn spell(shortcut: &Shortcut) -> String {
 }
 
 /// Checks a requested shortcut and returns its normal spelling, or why it cannot be used.
-pub fn normalize(text: &str) -> Result<String, String> {
+pub fn normalize(text: &str, os: Os) -> Result<String, String> {
     let shortcut = parse(text).ok_or(UNREADABLE)?;
     if shortcut.mods.is_empty() && shortcut.key == Code::Escape {
         return Err(ESC_ALONE.into());
     }
     if parse(PANIC_SHORTCUT) == Some(shortcut) {
-        return Err(RESERVED_PANIC.into());
+        return Err(reserved_panic(os).into());
     }
     // Shift alone would take over typing: ⇧K is a capital K in every app.
     if shortcut.mods.difference(Modifiers::SHIFT).is_empty() && !FUNCTION_KEYS.contains(&shortcut.key) {
-        return Err(NEEDS_MODIFIER.into());
+        return Err(needs_modifier(os).into());
     }
     Ok(spell(&shortcut))
 }
@@ -99,8 +116,8 @@ pub trait Host {
 
 /// Applies a new panel shortcut at once. The new one is bound before the old one is released,
 /// so a refused or unsaved change leaves the old one working. Returns the saved spelling.
-pub fn apply(host: &impl Host, current: Option<&str>, requested: &str) -> Result<String, String> {
-    let shortcut = normalize(requested)?;
+pub fn apply(host: &impl Host, current: Option<&str>, requested: &str, os: Os) -> Result<String, String> {
+    let shortcut = normalize(requested, os)?;
     let rebind = !current.is_some_and(|current| same_keys(current, &shortcut));
     if rebind {
         host.bind_toggle(&shortcut).map_err(|_| TAKEN.to_string())?;
@@ -123,21 +140,23 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
+    const MACOS: Os = Os::MacOs;
+
     #[test]
     fn normalizes_any_spelling() {
-        assert_eq!(normalize("alt+space"), Ok("Alt+Space".to_string()));
-        assert_eq!(normalize(" Option + Space "), Ok("Alt+Space".to_string()));
-        assert_eq!(normalize("Cmd+Shift+K"), Ok("Shift+Super+K".to_string()));
-        assert_eq!(normalize("super+shift+control+alt+Digit1"), Ok("Ctrl+Alt+Shift+Super+1".to_string()));
-        assert_eq!(normalize("CTRL+ArrowUp"), Ok("Ctrl+ArrowUp".to_string()));
-        assert_eq!(normalize("Command+KeyK"), Ok("Super+K".to_string()));
+        assert_eq!(normalize("alt+space", MACOS), Ok("Alt+Space".to_string()));
+        assert_eq!(normalize(" Option + Space ", MACOS), Ok("Alt+Space".to_string()));
+        assert_eq!(normalize("Cmd+Shift+K", MACOS), Ok("Shift+Super+K".to_string()));
+        assert_eq!(normalize("super+shift+control+alt+Digit1", MACOS), Ok("Ctrl+Alt+Shift+Super+1".to_string()));
+        assert_eq!(normalize("CTRL+ArrowUp", MACOS), Ok("Ctrl+ArrowUp".to_string()));
+        assert_eq!(normalize("Command+KeyK", MACOS), Ok("Super+K".to_string()));
     }
 
     #[test]
     fn a_normalized_shortcut_reads_back_as_the_same_keys() {
         for spelling in ["Alt+Space", "Cmd+Shift+K", "ctrl+alt+Digit7", "F5", "Shift+F12", "Super+Slash"] {
-            let normalized = normalize(spelling).unwrap();
-            assert_eq!(normalize(&normalized), Ok(normalized.clone()), "{spelling}");
+            let normalized = normalize(spelling, MACOS).unwrap();
+            assert_eq!(normalize(&normalized, MACOS), Ok(normalized.clone()), "{spelling}");
             assert!(same_keys(spelling, &normalized), "{spelling}");
         }
     }
@@ -145,37 +164,61 @@ mod tests {
     #[test]
     fn refuses_what_it_cannot_read() {
         for text in ["", "   ", "Alt+", "Alt+Shift", "Hyper+K", "Alt+K+J", "Ctrl+Nope"] {
-            assert_eq!(normalize(text), Err(UNREADABLE.to_string()), "{text:?}");
+            assert_eq!(normalize(text, MACOS), Err(UNREADABLE.to_string()), "{text:?}");
         }
     }
 
     #[test]
     fn needs_a_modifier_unless_it_is_a_function_key() {
-        assert_eq!(normalize("K"), Err(NEEDS_MODIFIER.to_string()));
-        assert_eq!(normalize("Space"), Err(NEEDS_MODIFIER.to_string()));
-        assert_eq!(normalize("Digit1"), Err(NEEDS_MODIFIER.to_string()));
-        assert_eq!(normalize("F1"), Ok("F1".to_string()));
-        assert_eq!(normalize("f24"), Ok("F24".to_string()));
+        assert_eq!(normalize("K", MACOS), Err(needs_modifier(MACOS).to_string()));
+        assert_eq!(normalize("Space", MACOS), Err(needs_modifier(MACOS).to_string()));
+        assert_eq!(normalize("Digit1", MACOS), Err(needs_modifier(MACOS).to_string()));
+        assert_eq!(normalize("F1", MACOS), Ok("F1".to_string()));
+        assert_eq!(normalize("f24", MACOS), Ok("F24".to_string()));
         // Shift alone would capture typing (⇧K is a capital K in every app).
-        assert_eq!(normalize("Shift+K"), Err(NEEDS_MODIFIER.to_string()));
-        assert_eq!(normalize("Shift+Space"), Err(NEEDS_MODIFIER.to_string()));
-        assert_eq!(normalize("Shift+F5"), Ok("Shift+F5".to_string()));
-        assert_eq!(normalize("Ctrl+Shift+K"), Ok("Ctrl+Shift+K".to_string()));
+        assert_eq!(normalize("Shift+K", MACOS), Err(needs_modifier(MACOS).to_string()));
+        assert_eq!(normalize("Shift+Space", MACOS), Err(needs_modifier(MACOS).to_string()));
+        assert_eq!(normalize("Shift+F5", MACOS), Ok("Shift+F5".to_string()));
+        assert_eq!(normalize("Ctrl+Shift+K", MACOS), Ok("Ctrl+Shift+K".to_string()));
     }
 
     #[test]
     fn refuses_the_panic_shortcut_in_any_spelling() {
         for text in ["Alt+Shift+Escape", "shift+option+esc", "Shift + Alt + ESC"] {
-            assert_eq!(normalize(text), Err(RESERVED_PANIC.to_string()), "{text}");
+            assert_eq!(normalize(text, MACOS), Err(reserved_panic(MACOS).to_string()), "{text}");
         }
         // Other modifiers with Esc are not the panic shortcut.
-        assert_eq!(normalize("Ctrl+Shift+Escape"), Ok("Ctrl+Shift+Escape".to_string()));
+        assert_eq!(normalize("Ctrl+Shift+Escape", MACOS), Ok("Ctrl+Shift+Escape".to_string()));
     }
 
     #[test]
     fn refuses_esc_alone() {
-        assert_eq!(normalize("Escape"), Err(ESC_ALONE.to_string()));
-        assert_eq!(normalize("esc"), Err(ESC_ALONE.to_string()));
+        assert_eq!(normalize("Escape", MACOS), Err(ESC_ALONE.to_string()));
+        assert_eq!(normalize("esc", MACOS), Err(ESC_ALONE.to_string()));
+    }
+
+    #[test]
+    fn refusal_wording_follows_the_os() {
+        // macOS keeps its modifier glyphs.
+        assert!(needs_modifier(Os::MacOs).contains('⌘'));
+        assert!(needs_modifier(Os::MacOs).contains('⌥'));
+        assert!(reserved_panic(Os::MacOs).contains('⌥'));
+        // Windows and Linux name the keys instead; no glyph is left to read wrong there.
+        for os in [Os::Windows, Os::Linux] {
+            let wants = needs_modifier(os);
+            let reserved = reserved_panic(os);
+            assert!(wants.contains("Ctrl") && wants.contains("Alt") && wants.contains("Super"), "{os:?}");
+            assert!(reserved.starts_with("Alt+Shift+Esc"), "{os:?}");
+            for glyph in ['⌘', '⌥', '⌃', '⇧'] {
+                assert!(!wants.contains(glyph), "{os:?} keeps glyph {glyph:?} in {wants:?}");
+                assert!(!reserved.contains(glyph), "{os:?} keeps glyph {glyph:?} in {reserved:?}");
+            }
+        }
+        // The rule is the same everywhere, only the words change.
+        for os in [Os::MacOs, Os::Windows, Os::Linux] {
+            assert_eq!(normalize("K", os), Err(needs_modifier(os).to_string()), "{os:?}");
+            assert_eq!(normalize("Alt+Shift+Escape", os), Err(reserved_panic(os).to_string()), "{os:?}");
+        }
     }
 
     /// Records what `apply` asks of the app, in order.
@@ -215,7 +258,7 @@ mod tests {
     fn applies_a_new_shortcut_live_and_releases_the_old_one() {
         // The changed shortcut is the one that toggles the panel, and the tray's Open item shows it.
         let host = FakeHost::default();
-        assert_eq!(apply(&host, Some("Alt+Space"), "cmd+shift+k"), Ok("Shift+Super+K".to_string()));
+        assert_eq!(apply(&host, Some("Alt+Space"), "cmd+shift+k", MACOS), Ok("Shift+Super+K".to_string()));
         assert_eq!(
             calls(&host),
             ["bind Shift+Super+K", "save Shift+Super+K", "unbind Alt+Space", "tray Shift+Super+K"]
@@ -225,22 +268,28 @@ mod tests {
     #[test]
     fn keeps_the_old_shortcut_when_the_new_one_is_taken() {
         let host = FakeHost { taken: vec!["Ctrl+Alt+K"], ..FakeHost::default() };
-        assert_eq!(apply(&host, Some("Alt+Space"), "Ctrl+Alt+K"), Err(TAKEN.to_string()));
+        assert_eq!(apply(&host, Some("Alt+Space"), "Ctrl+Alt+K", MACOS), Err(TAKEN.to_string()));
         assert_eq!(calls(&host), ["bind Ctrl+Alt+K"]);
     }
 
     #[test]
     fn keeps_the_old_shortcut_when_it_cannot_be_saved() {
         let host = FakeHost { save_error: Some("config.json is not valid JSON"), ..FakeHost::default() };
-        assert_eq!(apply(&host, Some("Alt+Space"), "Ctrl+Alt+K"), Err("config.json is not valid JSON".to_string()));
+        assert_eq!(
+            apply(&host, Some("Alt+Space"), "Ctrl+Alt+K", MACOS),
+            Err("config.json is not valid JSON".to_string())
+        );
         assert_eq!(calls(&host), ["bind Ctrl+Alt+K", "save Ctrl+Alt+K", "unbind Ctrl+Alt+K"]);
     }
 
     #[test]
     fn refused_combinations_never_reach_the_app() {
         let host = FakeHost::default();
-        assert_eq!(apply(&host, Some("Alt+Space"), "Alt+Shift+Esc"), Err(RESERVED_PANIC.to_string()));
-        assert_eq!(apply(&host, Some("Alt+Space"), "K"), Err(NEEDS_MODIFIER.to_string()));
+        assert_eq!(
+            apply(&host, Some("Alt+Space"), "Alt+Shift+Esc", MACOS),
+            Err(reserved_panic(MACOS).to_string())
+        );
+        assert_eq!(apply(&host, Some("Alt+Space"), "K", MACOS), Err(needs_modifier(MACOS).to_string()));
         assert!(calls(&host).is_empty());
     }
 
@@ -248,14 +297,14 @@ mod tests {
     fn the_same_keys_in_another_spelling_are_only_saved() {
         // Binding the shortcut that is already bound would fail as "taken".
         let host = FakeHost::default();
-        assert_eq!(apply(&host, Some("option+space"), "Alt+Space"), Ok("Alt+Space".to_string()));
+        assert_eq!(apply(&host, Some("option+space"), "Alt+Space", MACOS), Ok("Alt+Space".to_string()));
         assert_eq!(calls(&host), ["save Alt+Space", "tray Alt+Space"]);
     }
 
     #[test]
     fn binds_without_releasing_when_nothing_was_bound() {
         let host = FakeHost::default();
-        assert_eq!(apply(&host, None, "F5"), Ok("F5".to_string()));
+        assert_eq!(apply(&host, None, "F5", MACOS), Ok("F5".to_string()));
         assert_eq!(calls(&host), ["bind F5", "save F5", "tray F5"]);
     }
 }
