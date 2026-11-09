@@ -252,6 +252,7 @@ The user changes the main assistant's model from the chat, in the panel and the 
 ### The panel (expanded)
 
 - 420 × 640 px, rounded 20 px, translucent (macOS vibrancy), anchored to the Dot.
+- Cmd or Ctrl with + and - scale its content (the window keeps its size; the scale resets at each launch).
 - Header (one continuous chat): the rose glyph and "Gentle Dot", then Accounts, Profiles, Connectors (a plug; also `/connectors`), Settings (a gear), Hide the rose (an eye) and Full screen (desktop panel only), and Hide as 18 px stroke icons with tooltips. The web UI has no Settings for now. With `features.conversations` on, the conversation title, the conversations list, and New conversation return.
 - "Show earlier" at the top of the chat loads the previous page; a subtle "Earlier messages" divider marks where the chat's earlier session ends.
 - Body: message list with streaming Markdown and code blocks; activity rows are collapsed one-liners grouped under the assistant turn ("Read 3 files · Ran tests").
