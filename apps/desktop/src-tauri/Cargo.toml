@@ -69,6 +69,14 @@ dbus-secret-service = "4.1"
 # The Screenshot portal (computer/linux.rs, S24 Linux): org.freedesktop.portal over the
 # session bus, same blocking `dbus` the store's tests already build errors with.
 dbus = "0.9"
+# Pointer input (computer/linux_input.rs, odd/tasks/linux-input-control.md S2): the unprivileged
+# wayland protocol Hyprland and other wlroots compositors expose for virtual devices. The
+# protocol bindings need their `client` side only. Pinned to the versions in the local cache.
+wayland-client = "=0.31.15"
+wayland-protocols-wlr = { version = "=0.3.12", features = ["client"] }
+# Keyboard input (T2): `zwp_virtual_keyboard_v1` and its manager live in the misc protocols, the
+# else-unpublished ones the virtual keyboard stayed in.
+wayland-protocols-misc = { version = "=0.3.12", features = ["client"] }
 
 # The store's tests build D-Bus errors (the same `dbus` that dbus-secret-service uses).
 [target.'cfg(target_os = "linux")'.dev-dependencies]
