@@ -1034,6 +1034,46 @@ html[data-effects="none"] .chat-panel {
 	color: var(--text);
 }
 
+.message-copy {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 24px;
+	margin: 2px 0 0;
+	padding: 0;
+	border: 0;
+	border-radius: var(--radius-sm);
+	background: none;
+	color: var(--muted);
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 120ms ease;
+}
+
+.message-copy svg {
+	width: 15px;
+	height: 15px;
+}
+
+.message:hover .message-copy,
+.message-copy:focus-visible,
+.message-copy-result {
+	opacity: 1;
+}
+
+.message-copy:hover,
+.message-copy:focus-visible {
+	color: var(--text);
+}
+
+/* Touch screens have no hover to reveal it. */
+@media (hover: none) {
+	.message-copy {
+		opacity: 1;
+	}
+}
+
 .message-note {
 	margin: 6px 0 0;
 	font-size: 12px;
