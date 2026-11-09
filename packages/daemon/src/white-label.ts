@@ -15,23 +15,30 @@ export const HIDDEN_NAMES: RegExp[] = [
 	/\bpi[ -]coding[ -]agent\b/i,
 ];
 
-const REWRITES: [RegExp, string][] = [
-	[/\/gentle:[\w:-]+/gi, ""],
-	[/\bel gentleman\b/gi, "Gentle Dot"],
-	[/\bgentle[ -]?(?:shell|ai|pi)\b/gi, "Gentle Dot"],
-	[/\bpi[ -]coding[ -]agent\b/gi, "assistant"],
-	[/\bPi (?:coding agent|agent|runtime|harness)\b/g, "assistant"],
-	[/\borganic driven development\b/gi, "my workflow"],
-	[/\bODD\b/g, "workflow"],
-	[/\bengram\b/gi, "memory"],
-	[/\breceipt-driven development\b/gi, "review"],
-	[/\bRDD\b/g, "review"],
-];
+export const DEFAULT_ASSISTANT_NAME = "Gentle Dot";
+
+export function rewritesFor(assistantName: string = DEFAULT_ASSISTANT_NAME): [RegExp, string][] {
+	return [
+		[/\/gentle:[\w:-]+/gi, ""],
+		[/\bel gentleman\b/gi, assistantName],
+		[/\bgentle[ -]?(?:shell|ai|pi)\b/gi, assistantName],
+		[/\bpi[ -]coding[ -]agent\b/gi, "assistant"],
+		[/\bPi (?:coding agent|agent|runtime|harness)\b/g, "assistant"],
+		[/\borganic driven development\b/gi, "my workflow"],
+		[/\bODD\b/g, "workflow"],
+		[/\bengram\b/gi, "memory"],
+		[/\breceipt-driven development\b/gi, "review"],
+		[/\bRDD\b/g, "review"],
+	];
+}
+
+const DEFAULT_REWRITES = rewritesFor(DEFAULT_ASSISTANT_NAME);
 
 /** Rewrites internal names in harness-generated text shown to the user. */
-export function presentText(text: string): string {
+export function presentText(text: string, assistantName?: string): string {
 	let shown = text;
-	for (const [pattern, replacement] of REWRITES) shown = shown.replace(pattern, replacement);
+	const rewrites = assistantName ? rewritesFor(assistantName) : DEFAULT_REWRITES;
+	for (const [pattern, replacement] of rewrites) shown = shown.replace(pattern, replacement);
 	return shown.replace(/ {2,}/g, " ").replace(/ +([.,;:!?])/g, "$1");
 }
 
@@ -48,9 +55,13 @@ export function isBlockedInput(text: string): boolean {
 export const IDENTITY_SOURCE = new URL("./identity.md", import.meta.url);
 
 /** Writes the identity prompt to `<dataDir>/identity.md` and returns the agent arguments that load it. */
-export function identityArgs(dataDir: string): string[] {
+export function identityArgs(dataDir: string, assistantName: string = DEFAULT_ASSISTANT_NAME): string[] {
 	mkdirSync(dataDir, { recursive: true });
 	const path = join(dataDir, "identity.md");
-	writeFileSync(path, readFileSync(IDENTITY_SOURCE, "utf8"));
+	let content = readFileSync(IDENTITY_SOURCE, "utf8");
+	if (assistantName !== DEFAULT_ASSISTANT_NAME) {
+		content = content.replaceAll("Gentle Dot", assistantName);
+	}
+	writeFileSync(path, content);
 	return ["--append-system-prompt", path];
 }

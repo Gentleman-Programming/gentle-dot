@@ -1878,3 +1878,76 @@ html[data-surface="glow"] body {
 	border-color: var(--accent);
 	color: var(--accent);
 }
+
+/* ==========================================================================
+   Dot Skins (ADR 0001)
+   Default: gentle-rose (pink accent).
+   Presets:
+     - toto: warm gold/amber accent, dark espresso surface
+     - nord: arctic ice-blue frost
+     - matrix: vibrant cyber green
+   ========================================================================== */
+
+:root[data-skin="toto"],
+body[data-skin="toto"] {
+	--bg: #151210;
+	--bg-glass: rgba(21, 18, 16, 0.85);
+	--surface: #1e1915;
+	--surface-2: #25201a;
+	--line: #382e25;
+	--text: #f7f3ec;
+	--muted: #a69888;
+	--accent: #f5b041;
+	--accent-ink: #151210;
+	--accent-soft: rgba(245, 176, 65, 0.14);
+	--accent-line: rgba(245, 176, 65, 0.38);
+	--accent-shadow: 0 10px 30px rgba(245, 176, 65, 0.35);
+}
+
+:root[data-skin="toto"] body,
+body[data-skin="toto"] {
+	background: radial-gradient(900px 480px at 12% -12%, rgba(245, 176, 65, 0.12), transparent 70%), var(--bg);
+}
+
+:root[data-skin="nord"],
+body[data-skin="nord"] {
+	--bg: #0f141c;
+	--bg-glass: rgba(15, 20, 28, 0.85);
+	--surface: #171e2a;
+	--surface-2: #1e2636;
+	--line: #2b364c;
+	--text: #eceff4;
+	--muted: #8892b0;
+	--accent: #88c0d0;
+	--accent-ink: #0f141c;
+	--accent-soft: rgba(136, 192, 208, 0.14);
+	--accent-line: rgba(136, 192, 208, 0.38);
+	--accent-shadow: 0 10px 30px rgba(136, 192, 208, 0.35);
+}
+
+:root[data-skin="nord"] body,
+body[data-skin="nord"] {
+	background: radial-gradient(900px 480px at 12% -12%, rgba(136, 192, 208, 0.12), transparent 70%), var(--bg);
+}
+
+:root[data-skin="matrix"],
+body[data-skin="matrix"] {
+	--bg: #0a110d;
+	--bg-glass: rgba(10, 17, 13, 0.85);
+	--surface: #101c15;
+	--surface-2: #16241b;
+	--line: #1f3627;
+	--text: #eafaf1;
+	--muted: #7ca88b;
+	--accent: #2ecc71;
+	--accent-ink: #0a110d;
+	--accent-soft: rgba(46, 204, 113, 0.14);
+	--accent-line: rgba(46, 204, 113, 0.38);
+	--accent-shadow: 0 10px 30px rgba(46, 204, 113, 0.35);
+}
+
+:root[data-skin="matrix"] body,
+body[data-skin="matrix"] {
+	background: radial-gradient(900px 480px at 12% -12%, rgba(46, 204, 113, 0.12), transparent 70%), var(--bg);
+}
+

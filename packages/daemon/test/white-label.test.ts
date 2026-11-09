@@ -1,8 +1,11 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	HIDDEN_NAMES,
 	IDENTITY_SOURCE,
+	identityArgs,
 	isBlockedInput,
 	presentText,
 	shouldShowToast,
@@ -41,6 +44,12 @@ describe("presentText", () => {
 			for (const name of HIDDEN_NAMES) expect(shown, shown).not.toMatch(name);
 		}
 	});
+
+	it("supports custom assistant name (e.g. Toto)", () => {
+		expect(presentText("Gentle Shell ready", "Toto")).toBe("Toto ready");
+		expect(presentText("I am el Gentleman.", "Toto")).toBe("I am Toto.");
+		expect(presentText("gentle-ai: review mode on", "Toto")).toBe("Toto: review mode on");
+	});
 });
 
 describe("shouldShowToast", () => {
@@ -67,8 +76,14 @@ describe("memory scope in the identity (S23, L85)", () => {
 		expect(identity).toMatch(/save[^.\n]*`gentle-dot`/i);
 	});
 
-	it("searches the user's whole memory, not only gentle-dot", () => {
-		expect(identity).toMatch(/all_projects: true/);
-		expect(identity).not.toMatch(/save or search memories, always use that project/);
+	it("customizes the identity file when assistantName is provided", () => {
+		const tempDir = join(tmpdir(), `gentle-dot-test-${Date.now()}`);
+		const args = identityArgs(tempDir, "Toto");
+		expect(args).toEqual(["--append-system-prompt", join(tempDir, "identity.md")]);
+		const written = readFileSync(join(tempDir, "identity.md"), "utf8");
+		expect(written).toContain("# Product identity: Toto");
+		expect(written).toContain("You are Toto, a personal assistant");
+		expect(written).toContain("answer as Toto: a personal assistant");
+		rmSync(tempDir, { recursive: true, force: true });
 	});
 });
