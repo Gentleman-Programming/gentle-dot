@@ -2113,9 +2113,14 @@ export class ConnectorManager {
 		this.waiting.delete(draftId);
 		if (!approve) return undefined;
 		const id = this.newId(draft.name);
+		// An http server only gets a secret through a header, so the first one signs in as a bearer token.
+		const bearer = draft.transport === "http" && !draft.needsOAuth ? draft.envNames[0] : undefined;
 		const server: ServerTemplate =
 			draft.transport === "http"
-				? { url: draft.url ?? "" }
+				? {
+						url: draft.url ?? "",
+						...(bearer ? { headers: { Authorization: `Bearer ${placeholder(bearer)}` } } : {}),
+					}
 				: {
 						command: draft.command ?? "",
 						...(draft.args?.length ? { args: draft.args } : {}),

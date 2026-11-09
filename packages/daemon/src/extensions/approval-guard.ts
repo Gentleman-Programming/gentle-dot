@@ -50,7 +50,7 @@ export const PROPOSE_TOOL = {
 	name: "propose_connector",
 	label: "Propose a connector",
 	description:
-		"Draft a new connector (an MCP server) for the user to review in the app. Give the server's name, what it does, and either its command (stdio) or its URL (http). List the secrets it needs by environment variable name only; the app asks the user for their values. The user decides; nothing is added until they approve.",
+		"Draft a new connector (an MCP server) for the user to review in the app. Give the server's name, what it does, and either its command (stdio) or its URL (http). List the secrets it needs by environment variable name only; the app asks the user for their values. An http server that does not use OAuth receives the first secret as a bearer token. The user decides; nothing is added until they approve.",
 	promptGuidelines: [
 		"When the user wants to connect another app or service, find its MCP server (prefer the official one, with a pinned version) and call propose_connector. Never edit connector files, never run `mcp add`, and never ask for tokens or keys in the chat.",
 	],
@@ -66,7 +66,8 @@ export const PROPOSE_TOOL = {
 			env_names: {
 				type: "array",
 				items: { type: "string" },
-				description: "Environment variable names of the secrets it needs (no values).",
+				description:
+					"Environment variable names of the secrets it needs (no values). For http without OAuth, list the access token first.",
 			},
 			needs_oauth: { type: "boolean", description: "For http: the server signs in with OAuth." },
 		},

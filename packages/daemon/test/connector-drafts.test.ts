@@ -280,6 +280,43 @@ describe("connector drafts", () => {
 		expect(store.proxyView("github")).toMatchObject({ mode: "read_write", readOnlyTools: [] });
 	});
 
+	it("sends a non-OAuth http draft's first secret as a bearer token, to that server only", async () => {
+		const { manager, store, owner, emit, sent, prompts, dataDir } = setup();
+		const draft = manager.propose(
+			JSON.stringify({
+				name: "Docs",
+				transport: "http",
+				url: "https://docs.example.com/mcp",
+				env_names: ["DOCS_TOKEN"],
+			}),
+		);
+		manager.decideDraft(owner, draft?.draftId ?? "", true, emit);
+		const prompt = await waitFor(() => prompts()[0]);
+		manager.reply(owner, prompt.flowId, { value: SECRET });
+		await waitFor(() => sent.find((m) => m.type === "auth_done"));
+		expect(store.state().connectors.docs?.custom?.server).toEqual({
+			url: "https://docs.example.com/mcp",
+			headers: { Authorization: "Bearer ${input:DOCS_TOKEN}" },
+		});
+		expect(readFileSync(join(dataDir, "connectors.json"), "utf8")).not.toContain(SECRET);
+		// With its own Authorization the proxy sends the token, not an OAuth sign-in.
+		expect(await store.credentials("docs")).toEqual({ headers: { Authorization: `Bearer ${SECRET}` } });
+	});
+
+	it("leaves an http draft that signs in with OAuth or has no secret without a header", () => {
+		const { manager, store, owner, emit } = setup();
+		const approve = (fields: Record<string, unknown>) => {
+			const draft = manager.propose(
+				JSON.stringify({ transport: "http", url: "https://docs.example.com/mcp", ...fields }),
+			);
+			manager.decideDraft(owner, draft?.draftId ?? "", true, emit);
+		};
+		approve({ name: "Plain" });
+		expect(store.state().connectors.plain?.custom?.server).toEqual({ url: "https://docs.example.com/mcp" });
+		approve({ name: "Signed", needs_oauth: true, env_names: ["CLIENT_HINT"] });
+		expect(store.state().connectors.signed?.custom?.server).toEqual({ url: "https://docs.example.com/mcp" });
+	});
+
 	it("gives a draft with a taken name its own id, and signs in when it needs OAuth", async () => {
 		const { manager, store, owner, emit, sent } = setup();
 		store.update((state) => {
