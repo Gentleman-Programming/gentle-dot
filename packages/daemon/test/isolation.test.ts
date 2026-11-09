@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import {
 	existsSync,
 	mkdirSync,
@@ -11,6 +12,7 @@ import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import {
+	ensureGitBoundary,
 	ensureMemoryProject,
 	isolatedAgentEnv,
 	MEMORY_PROJECT,
@@ -245,6 +247,58 @@ describe("isolatedAgentEnv temporary folder", () => {
 	});
 });
 
+describe("ensureGitBoundary", () => {
+	it("creates a git repo in the workspace so git never resolves upward to the user's HOME (#51)", () => {
+		// The workspace sits inside a parent that is itself a git repo, like a HOME dotfiles repo.
+		const outer = tempDir();
+		spawnGit(outer, ["init", "-q"]);
+		const workspace = join(outer, ".gentle-dot", "workspace");
+		mkdirSync(workspace, { recursive: true });
+		ensureGitBoundary(workspace);
+		// git rev-parse from the workspace now stops at the workspace, not at the parent repo.
+		const top = gitOut(["rev-parse", "--show-toplevel"], workspace);
+		/** realpathSync.native expands NTFS 8.3 names, which is how git answers. */
+const canonical = (path: string) => realpathSync.native(path);
+
+expect(canonical(top)).toBe(canonical(workspace));
+	});
+
+	it("leaves an existing workspace repo as it is", () => {
+		const workspace = tempDir();
+		spawnGit(workspace, ["init", "-q"]);
+		writeFileSync(join(workspace, ".git", "sentinel"), "keep me");
+		ensureGitBoundary(workspace);
+		expect(readFileSync(join(workspace, ".git", "sentinel"), "utf8")).toBe("keep me");
+	});
+
+	it("writes a minimal .git when no git binary is available", () => {
+		const outer = tempDir();
+		spawnGit(outer, ["init", "-q"]);
+		const workspace = join(outer, "workspace");
+		mkdirSync(workspace, { recursive: true });
+		ensureGitBoundary(workspace, undefined, () => {
+			throw Object.assign(new Error("spawn git ENOENT"), { code: "ENOENT" });
+		});
+		expect(readFileSync(join(workspace, ".git", "HEAD"), "utf8")).toContain("refs/heads/");
+		const top = gitOut(["rev-parse", "--show-toplevel"], workspace);
+		/** realpathSync.native expands NTFS 8.3 names, which is how git answers. */
+const canonical = (path: string) => realpathSync.native(path);
+
+expect(canonical(top)).toBe(canonical(workspace));
+	});
+});
+
+function spawnGit(cwd: string, args: string[]): void {
+	const result = spawnSync("git", args, { cwd });
+	if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+}
+
+function gitOut(args: string[], cwd: string): string {
+	const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+	if (result.status !== 0) throw new Error(`git failed: ${result.stderr}`);
+	return String(result.stdout).trim();
+}
+
 describe("ensureMemoryProject", () => {
 	it("names the workspace's memory project gentle-dot, replacing any other name", () => {
 		const workspace = tempDir();
@@ -329,5 +383,34 @@ describe("engine memory and folders", () => {
 			`The user's preferred working folder is ${folder}. Use absolute paths there unless told otherwise.`,
 		);
 		expect(readdirSync(folder)).toEqual([]);
+	});
+});
+
+describe("isolatedAgentEnv git ceiling", () => {
+	it("keeps git from climbing out of the data folder to the repository above it (#51)", () => {
+		// The user's $HOME is a git repository (dotfiles, or another tool's identity).
+		const outer = tempDir();
+		spawnGit(outer, ["init", "-q"]);
+		const dataDir = join(outer, ".gentle-dot");
+		const workspace = join(dataDir, "workspace");
+		mkdirSync(workspace, { recursive: true });
+
+		const toplevel = (env: NodeJS.ProcessEnv) =>
+			spawnSync("git", ["rev-parse", "--show-toplevel"], {
+				cwd: workspace,
+				encoding: "utf8",
+				env: { ...process.env, ...env },
+			});
+
+		// Control: with the plain environment git climbs to the user's home repository.
+		expect(toplevel({}).status).toBe(0);
+		// The rule: the engine's environment must not let it climb at all.
+		expect(toplevel(isolatedAgentEnv({ HOME: outer, PATH: process.env["PATH"] }, dataDir)).status).not.toBe(0);
+	});
+
+	it("puts the data folder first and keeps the user's own ceiling entries", () => {
+		const dataDir = tempDir();
+		const env = isolatedAgentEnv({ GIT_CEILING_DIRECTORIES: "/somewhere/else" }, dataDir);
+		expect(env.GIT_CEILING_DIRECTORIES).toBe([dataDir, "/somewhere/else"].join(delimiter));
 	});
 });
