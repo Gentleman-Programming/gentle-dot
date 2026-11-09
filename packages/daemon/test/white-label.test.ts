@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-	DEFAULT_ASSISTANT_NAME,
 	HIDDEN_NAMES,
 	IDENTITY_SOURCE,
 	identityArgs,
@@ -84,7 +83,7 @@ describe("memory scope in the identity (S23, L85)", () => {
 		const written = readFileSync(join(tempDir, "identity.md"), "utf8");
 		expect(written).toContain("# Product identity: Toto");
 		expect(written).toContain("You are Toto, a personal assistant");
-		expect(written).toContain('answer as Toto: a personal assistant');
+		expect(written).toContain("answer as Toto: a personal assistant");
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 });
