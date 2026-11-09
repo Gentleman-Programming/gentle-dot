@@ -1,0 +1,70 @@
+# Gentle Dot — pruebas locales con la arquitectura nueva.
+# Funciona igual en Debian, Fedora, Arch y Omarchy: el host solo necesita Docker;
+# la imagen (Debian bookworm-slim + Node 24) estandariza todo lo demás.
+#
+# Requisitos en el host:
+#   1. Docker (y el grupo docker para tu usuario, o sudo)
+#   2. ~/.gentle-dot/agent/auth.json con tus providers (el engine usa nan)
+#   3. Un .env junto a este compose con las keys de conectores que quieras
+#      (LINEAR_API_KEY, DISCORD_BOT_TOKEN, TELEGRAM_BOT_TOKEN_ROSITA, ...)
+#
+# Uso:
+#   docker compose up -d --build     # construir y levantar
+#   docker compose logs -f daemon    # ver el daemon
+#   findmnt no aplica: el WS de bridges queda en ws://localhost:4318/ws
+#
+# NOTA de seguridad: en modo server real (S25.8) el engine corre como usuario
+# `dot` separado del daemon; para pruebas locales el engine corre como el
+# usuario del contenedor — endurecer antes de exponer puertos públicamente.
+
+services:
+  daemon:
+    build: .
+    image: gentle-dot:dev
+    container_name: gentle-dot-dev
+    ports:
+      - "4318:4317"           # host 4318 → no choca con el daemon local de producción
+    env_file:
+      - path: .env
+        required: false
+      - path: ${HOME}/.env
+        required: false
+    environment:
+      GENTLE_DOT_AGENT_HOME: /home/dot/.gentle-dot/agent
+      # Modelo del engine. Acá va deepseek-v4-flash porque la cuota mensual de
+      # glm5.3-flash está agotada (402 insufficient_balance, renueva 2026-12-02);
+      # cuando se renueve o haya pack, exportá GENTLE_DOT_ENGINE_MODEL=nan/glm5.3-flash.
+      # Solo estos ids existen para la key nan: deepseek-v4-flash, glm5.3-flash,
+      # minimax-h3, flux-2-klein, qwen-image-2.1 (un id inexistente da 401).
+      GENTLE_DOT_ENGINE_MODEL: ${GENTLE_DOT_ENGINE_MODEL:-nan/deepseek-v4-flash}
+      BRIDGE_AUTH_TOKEN: ${BRIDGE_AUTH_TOKEN:-gentle-dot-bridge-secret}
+      GENTLE_DOT_NO_SHELL: "0"
+      # El primer arranque en un agent home nuevo instala los companion packages
+      # de gentle-ai y tarda minutos. 30s (default) mata el engine a mitad del
+      # provisioning y el daemon entra en loop: acá se da margen de sobra.
+      GENTLE_DOT_ENGINE_READY_TIMEOUT_MS: ${GENTLE_DOT_ENGINE_READY_TIMEOUT_MS:-900000}
+    volumes:
+      # Auth del engine (nan y los providers que tengas en el agent home)
+      - ${HOME}/.gentle-dot/agent:/home/dot/.gentle-dot/agent
+      # El agent home del host trae una extensión que la app de producción
+      # reescribe en cada arranque con un import absoluto a SU instalación
+      # (/usr/lib/Gentle Dot/runtime/daemon/extensions/approval-guard.ts).
+      # Esa ruta no existe en el contenedor y el engine muere al cargarla
+      # (loop de reinicio). Un volumen propio aísla al contenedor de esas
+      # extensiones del host: portable, sin depender de la app instalada.
+      - gentle-dot-agent-extensions:/home/dot/.gentle-dot/agent/extensions
+      # Sesiones y workspace del engine, persistentes entre pruebas
+      - gentle-dot-sessions:/home/dot/.gentle-dot/sessions
+      - gentle-dot-workspace:/home/dot/workspace
+      # Extensiones del agent home: importan módulos del repo por ruta absoluta
+      # (packages/daemon/src/extensions/*.ts), así que el repo se monta en la
+      # misma ruta que en el host para que el import resuelva dentro del contenedor.
+      - /run/media/bladimir/Datos/Datos/proyectos/work/gentleman/gentle-dot:/run/media/bladimir/Datos/Datos/proyectos/work/gentleman/gentle-dot:ro
+      # Config de conectores del repo (opcional: quitá el mount y usá env vars)
+      - ./docker/connectors.docker.yaml:/app/packages/daemon/connectors.yaml:ro
+    restart: unless-stopped
+
+volumes:
+  gentle-dot-sessions:
+  gentle-dot-agent-extensions:
+  gentle-dot-workspace:

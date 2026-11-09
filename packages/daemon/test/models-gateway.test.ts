@@ -2,17 +2,20 @@ import { existsSync, readFileSync } from "node:fs";
 import { request } from "node:http";
 import { join } from "node:path";
 import type { ServerMessage, UploadedFile } from "@gentle-dot/protocol";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
-import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { BRIDGE_KEY, bootDaemon } from "./harness.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
-import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { tempDir, waitFor } from "./helpers.ts";
+
+// Every case boots a daemon and waits for the engine.
+vi.setConfig({ testTimeout: 180_000 });
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 1, 2, 3]);
 
-const daemons: DotDaemon[] = [];
+const daemons: { stop(): Promise<void> }[] = [];
 afterEach(async () => {
-	await Promise.all(daemons.splice(0).map((d) => d.close()));
+	await Promise.all(daemons.splice(0).map((d) => d.stop()));
 });
 
 const lines = (file: string) =>
@@ -28,25 +31,19 @@ async function setup() {
 	const agentHome = join(dataDir, "agent");
 	const commandsFile = join(dataDir, "commands.jsonl");
 	const promptsFile = join(dataDir, "prompts.jsonl");
-	const d = await startDaemon({
-		port: 0,
-		host: "127.0.0.1",
+	const booted = await bootDaemon({
 		dataDir,
 		workspace: join(dataDir, "workspace"),
-		uiDir: dataDir,
-		agentCommand: process.execPath,
-		agentArgs: [FAKE_AGENT],
-		agentEnv: {
-			...process.env,
+		env: {
 			FAKE_AGENT_COMMANDS_FILE: commandsFile,
 			FAKE_AGENT_PROMPTS_FILE: promptsFile,
+			GENTLE_DOT_AGENT_HOME: agentHome,
 		},
-		agentHome,
 		profilesImportPath: join(tempDir(), "profiles.json"),
-		backoffMs: [50],
 		authRuntime: async () => fakeAuthRuntime().runtime,
 	});
-	daemons.push(d);
+	daemons.push(booted);
+	const d = booted.daemon;
 	const upload = (name: string, body: Buffer) =>
 		new Promise<UploadedFile>((resolve, reject) => {
 			const req = request(
@@ -55,7 +52,7 @@ async function setup() {
 					port: d.port,
 					path: "/upload",
 					method: "POST",
-					headers: { Authorization: `Bearer ${d.token}`, "X-File-Name": encodeURIComponent(name) },
+					headers: { Authorization: `Bearer ${BRIDGE_KEY}`, "X-File-Name": encodeURIComponent(name) },
 				},
 				(res) => {
 					let text = "";
@@ -80,12 +77,12 @@ async function setup() {
 	};
 }
 
-async function connect(d: DotDaemon) {
+async function connect(d: { port: number }) {
 	const ws = new WebSocket(`ws://127.0.0.1:${d.port}/ws`);
 	const messages: ServerMessage[] = [];
 	ws.on("message", (data) => messages.push(JSON.parse(String(data)) as ServerMessage));
 	await new Promise((resolve) => ws.on("open", resolve));
-	ws.send(JSON.stringify({ type: "hello", token: d.token, protocol: 1 }));
+	ws.send(JSON.stringify({ type: "hello", token: BRIDGE_KEY, protocol: 1 }));
 	await waitFor(() => messages.some((m) => m.type === "ready"));
 	const send = (m: object) => ws.send(JSON.stringify(m));
 	function find<T extends ServerMessage["type"]>(

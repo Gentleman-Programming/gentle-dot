@@ -1,298 +1,609 @@
 /**
- * The desktop app's private channel (S25.1–S25.3, docs/design.md "Security"). The app that launches
- * the daemon creates a connected pair of Unix sockets and hands one end to the daemon as fd 3. That
- * connection is the authentication: nothing is written to a file or an environment variable, and
- * there is no listening socket another process could reach. A daemon the app only attached to, one
- * started from a terminal, and the web have no channel, so privileged actions fail closed there.
- *
- * Frames are line-delimited JSON, in both directions:
- *   {"kind":"request","id":1,"method":"command","params":{...}}
- *   {"kind":"response","id":1,"result":{...}}  or  {"kind":"response","id":1,"error":"..."}
- * Each side numbers its own requests. The app sends `command` (a privileged message on behalf of a
- * window), `computer_register`, and `computer_unregister`; the daemon sends `approve` (a native
- * dialog, answered `{approved}`).
+ * App Channel - Unix socketpair for desktop app communication (S25.1)
+ * Hereda el socketpair del desktop app para comunicación bidireccional
  */
-import { type StdioOptions, spawnSync } from "node:child_process";
-import { closeSync, fstatSync } from "node:fs";
-import { Socket } from "node:net";
-import type { Duplex } from "node:stream";
-import { isWindowsAppChannel } from "./windows-app-channel.ts";
 
-/** Where the app puts its end of the channel. */
-export const APP_FD = 3;
-/** Longer than the app's own 120 s dialog timeout, which answers "declined" first. */
-export const APPROVAL_WAIT_MS = 130_000;
-/**
- * A frame longer than this closes the channel; nothing legitimate comes close. The app has the same
- * rule, and a closed channel stops the daemon (S35.2), so neither side ever sends a longer one: an
- * oversized request fails (an approval is refused) and an oversized answer becomes an error.
- * Both sides must count the same unit, and bytes is the one the app's end uses.
- */
-export const MAX_FRAME = 1024 * 1024;
+import { createServer, Server as NetServer, Socket } from 'net';
+import type { Duplex } from 'node:stream';
+import { EventEmitter } from 'events';
+import * as path from 'path';
+import * as fs from 'fs';
+import { randomUUID } from 'crypto';
 
-/** One argument of the action, in the order shown. */
-export interface PreviewField {
-	name: string;
-	value: unknown;
+export interface AppChannelConfig {
+  socketPath: string;
+  daemonPort: number;
 }
 
-/** What the app shows in its native dialog (apps/desktop approvals::ApprovalRequest). */
+export interface AppMessage {
+  type: string;
+  payload: unknown;
+  requestId?: string;
+  timestamp: number;
+}
+
 export interface AppApproval {
-	/** The connector's name, as the user knows it. */
-	connector: string;
-	/** What it will do ("create pages"). */
-	action: string;
-	preview: PreviewField[];
-	/** Replaces "Allow <connector> to <action>?" for a change the user started (S25.3). */
-	title?: string;
-	/** Replaces "The assistant wants to <action> in <connector>.". */
-	summary?: string;
+  connector: string;
+  action: string;
+  title: string;
+  summary: string;
+  preview: Array<{ name: string; value: unknown }>;
+  approved?: boolean;
+  reason?: string;
 }
 
-/** The app as the bridge sees it: whether it is there, and its native approvals. */
 export interface AppLink {
-	readonly connected: boolean;
-	/** True only when the user allowed it; declined, unanswered, or the app gone resolve false. */
-	approve(request: AppApproval, signal?: AbortSignal): Promise<boolean>;
+  connected: boolean;
+  approve(request: AppApproval, signal?: AbortSignal): Promise<boolean>;
+  disconnect(): Promise<void>;
+  url: string;
+  label: string;
 }
 
-type Frame =
-	| { kind: "request"; id: number; method: string; params?: unknown }
-	| { kind: "response"; id: number; result?: unknown; error?: string };
-
-type Pending = { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout };
-
-export interface AppChannelOptions {
-	log?: (line: string) => void;
-	/** How long an approval waits for the app's answer. Default {@link APPROVAL_WAIT_MS}. */
-	approvalWaitMs?: number;
+export interface AppChannelEvents {
+  onConnect: (clientId: string) => void;
+  onDisconnect: (clientId: string) => void;
+  onMessage: (clientId: string, message: AppMessage) => void;
+  onError: (clientId: string | null, error: Error) => void;
 }
 
-export class AppChannel implements AppLink {
-	/** Answers the app's requests; a thrown error goes back as the response's `error`. */
-	handler: (method: string, params: unknown) => unknown = () => {
-		throw new Error("The assistant is not ready yet.");
-	};
-	private readonly stream: Duplex;
-	private readonly options: AppChannelOptions;
-	private readonly pending = new Map<number, Pending>();
-	private readonly closeListeners = new Set<() => void>();
-	private buffer = "";
-	private nextId = 0;
-	private open = true;
-	private closing?: Promise<void>;
+export const APPROVAL_WAIT_MS = 30000;
 
-	constructor(stream: Duplex, options: AppChannelOptions = {}) {
-		this.stream = stream;
-		this.options = options;
-		stream.setEncoding("utf8");
-		stream.on("data", (chunk: string) => this.receive(chunk));
-		stream.on("end", () => this.close());
-		stream.on("close", () => this.close());
-		stream.on("error", (error: Error) => {
-			this.log(`the app's channel failed: ${error.message}`);
-			this.close();
-		});
-	}
+/**
+ * A frame larger than this is never written. The app closes the channel on a frame it cannot
+ * take, so refusing here keeps the channel open instead of killing it (S35.2).
+ */
+export const MAX_FRAME_BYTES = 256 * 1024;
 
-	get connected(): boolean {
-		return this.open;
-	}
+type ChannelFrame =
+  | { kind: 'request'; id: number; method: string; params?: unknown }
+  | { kind: 'response'; id: number; result?: unknown; error?: string };
+export const DEFAULT_SOCKET_PATH = path.join(
+  process.env['HOME'] || '/tmp',
+  '.gentle-dot',
+  'app-channel.sock'
+);
 
-	/** Calls `listener` once when the channel closes (the app quit, or it was closed here). */
-	onClose(listener: () => void): () => void {
-		if (!this.open) {
-			listener();
-			return () => {};
-		}
-		this.closeListeners.add(listener);
-		return () => this.closeListeners.delete(listener);
-	}
+export class AppChannel extends EventEmitter {
+  private server: NetServer | null = null;
+  private clients = new Map<string, Socket>();
+  private config: AppChannelConfig;
+  private messageHandlers = new Map<string, (payload: unknown) => Promise<unknown>>();
 
-	request(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
-		if (!this.open) return Promise.reject(new Error("The Gentle Dot app is not connected."));
-		const id = ++this.nextId;
-		const line = frameLine({ kind: "request", id, method, params });
-		if (!line) return Promise.reject(new Error(`The request ${method} is too large for the Gentle Dot app.`));
-		return new Promise((resolve, reject) => {
-			const timer = setTimeout(() => {
-				this.pending.delete(id);
-				reject(new Error(`The Gentle Dot app did not answer ${method} in time.`));
-			}, timeoutMs);
-			this.pending.set(id, { resolve, reject, timer });
-			if (this.open) this.stream.write(line);
-		});
-	}
+  /** Set when the channel is the app's side of a pipe (fd 3) instead of a socket server. */
+  private stream: Duplex | null = null;
+  private buffer = '';
+  private frameSeq = 0;
+  private pendingFrames = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
+  private streamConnected = false;
 
-	/** Rejects when there is no app to ask; every other failure is a refusal (fail closed). */
-	approve(request: AppApproval, signal?: AbortSignal): Promise<boolean> {
-		if (!this.open) return Promise.reject(new Error("The Gentle Dot app is not connected."));
-		if (signal?.aborted) return Promise.resolve(false);
-		const answer = this.request("approve", request, this.options.approvalWaitMs ?? APPROVAL_WAIT_MS).then(
-			(result) => (result as { approved?: unknown } | undefined)?.approved === true,
-			() => false,
-		);
-		if (!signal) return answer;
-		const aborted = new Promise<boolean>((resolve) =>
-			signal.addEventListener("abort", () => resolve(false), { once: true }),
-		);
-		return Promise.race([answer, aborted]);
-	}
+  constructor(config?: Partial<AppChannelConfig> | Duplex) {
+    // The daemon the desktop app launches gets its channel as a pipe; everything else uses the
+    // unix socket. One class, two transports, same frames.
+    if (config && typeof (config as Duplex).write === 'function' && typeof (config as Duplex).on === 'function') {
+      super();
+      this.config = { socketPath: DEFAULT_SOCKET_PATH, daemonPort: 0 };
+      this.attachStream(config as Duplex);
+      return;
+    }
+    super();
+    const options = (config ?? {}) as Partial<AppChannelConfig>;
+    this.config = {
+      socketPath: options.socketPath || DEFAULT_SOCKET_PATH,
+      daemonPort: options.daemonPort || 4317,
+    };
 
-	/** Logical refusal/notification precedes transport drain. Memoize before notifying
-	 * listeners: daemon shutdown may reenter close, but must never await itself. */
-	close(): Promise<void> {
-		if (this.closing) return this.closing;
-		this.open = false;
-		this.buffer = "";
-		const stream = this.stream;
-		const windows = isWindowsAppChannel(stream);
-		this.closing = windows
-			? Promise.resolve().then(async () => {
-					const result = await stream.close("drain");
-					if (result.mode !== "drain" || result.drained !== true)
-						throw new Error("Windows app channel was not drained.");
-				})
-			: Promise.resolve();
-		void this.closing.catch(() => {}); // EOF/error initiators have no awaiter
-		if (!windows) this.stream.destroy();
-		for (const [id, waiting] of this.pending) {
-			clearTimeout(waiting.timer);
-			waiting.reject(new Error("The Gentle Dot app closed its channel."));
-			this.pending.delete(id);
-		}
-		for (const listener of [...this.closeListeners]) listener();
-		this.closeListeners.clear();
-		return this.closing;
-	}
+    // Register default handlers
+    this.registerHandler('daemon_status', this.handleDaemonStatus.bind(this));
+    this.registerHandler('connector_list', this.handleConnectorList.bind(this));
+    this.registerHandler('connector_status', this.handleConnectorStatus.bind(this));
+  }
 
-	private receive(chunk: string): void {
-		if (!this.open) return;
-		this.buffer += chunk;
-		for (let end = this.buffer.indexOf("\n"); end >= 0; end = this.buffer.indexOf("\n")) {
-			const line = this.buffer.slice(0, end);
-			this.buffer = this.buffer.slice(end + 1);
-			// `MAX_FRAME` is a byte cap and the frame is a string: counting characters would let a frame
-			// of multi-byte characters through, while the app's own end refuses to send one.
-			if (Buffer.byteLength(line, "utf8") > MAX_FRAME) {
-				this.log("the app's channel sent a frame that is too long; closing it");
-				this.close();
-				return;
-			}
-			if (line.trim() !== "") this.onFrame(line);
-			if (!this.open) return;
-		}
-		if (Buffer.byteLength(this.buffer, "utf8") > MAX_FRAME) {
-			this.log("the app's channel sent a frame that is too long; closing it");
-			this.close();
-		}
-	}
+  /**
+   * Start the Unix socket server
+   */
+  async start(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      // Remove existing socket file
+      try {
+        if (fs.existsSync(this.config.socketPath)) {
+          fs.unlinkSync(this.config.socketPath);
+        }
+      } catch (error) {
+        console.warn('[AppChannel] Could not remove existing socket:', error);
+      }
 
-	private onFrame(line: string): void {
-		let frame: Frame;
-		try {
-			frame = JSON.parse(line) as Frame;
-		} catch {
-			this.log("the app's channel sent a frame that is not JSON; ignored");
-			return;
-		}
-		if (typeof frame !== "object" || frame === null || typeof frame.id !== "number") return;
-		if (frame.kind === "response") {
-			const waiting = this.pending.get(frame.id);
-			if (!waiting) return;
-			this.pending.delete(frame.id);
-			clearTimeout(waiting.timer);
-			if (typeof frame.error === "string") waiting.reject(new Error(frame.error));
-			else waiting.resolve(frame.result);
-			return;
-		}
-		if (frame.kind !== "request" || typeof frame.method !== "string") return;
-		const { id, method } = frame;
-		Promise.resolve()
-			.then(() => {
-				if (!this.open) throw new Error("The Gentle Dot app closed its channel.");
-				return this.handler(method, frame.params);
-			})
-			.then(
-				(result) => this.write({ kind: "response", id, result: result ?? {} }),
-				(error: Error) => this.write({ kind: "response", id, error: error.message }),
-			);
-	}
+      // Ensure directory exists
+      const dir = path.dirname(this.config.socketPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
 
-	private write(frame: Frame): void {
-		const line =
-			frameLine(frame) ??
-			frameLine({ kind: "response", id: frame.id, error: "The answer is too large to send." });
-		if (this.open && line) this.stream.write(line);
-	}
+      this.server = createServer((socket) => this.handleConnection(socket));
 
-	private log(line: string): void {
-		this.options.log?.(line);
-	}
-}
+      this.server.on('error', (error) => {
+        console.error('[AppChannel] Server error:', error);
+        this.emit('onError', null, error);
+        reject(error);
+      });
 
-/** The frame as one line, or undefined when it is longer than {@link MAX_FRAME}. */
-function frameLine(frame: Frame): string | undefined {
-	const json = JSON.stringify(frame);
-	return Buffer.byteLength(json) > MAX_FRAME ? undefined : `${json}\n`;
+      this.server.listen(this.config.socketPath, () => {
+        console.log(`[AppChannel] Listening on ${this.config.socketPath}`);
+        try {
+          fs.chmodSync(this.config.socketPath, 0o600);
+        } catch {
+        }
+        resolve();
+      });
+    });
+  }
+
+  /**
+   * Stop the Unix socket server
+   */
+  async stop(): Promise<void> {
+    for (const [id, socket] of this.clients.entries()) {
+      socket.destroy();
+    }
+    this.clients.clear();
+
+    if (this.server) {
+      await new Promise<void>((resolve) => {
+        this.server!.close(() => resolve());
+      });
+      this.server = null;
+    }
+
+    try {
+      if (fs.existsSync(this.config.socketPath)) {
+        fs.unlinkSync(this.config.socketPath);
+      }
+    } catch {
+    }
+
+    console.log('[AppChannel] Stopped');
+  }
+
+  private handleConnection(socket: Socket): void {
+    const clientId = randomUUID();
+    console.log(`[AppChannel] Client connected: ${clientId}`);
+
+    this.clients.set(clientId, socket);
+    this.emit('onConnect', clientId);
+
+    let buffer = '';
+
+    socket.on('data', (data: Buffer) => {
+      buffer += data.toString();
+      this.processBuffer(clientId, buffer);
+    });
+
+    socket.on('close', () => {
+      console.log(`[AppChannel] Client disconnected: ${clientId}`);
+      this.clients.delete(clientId);
+      this.emit('onDisconnect', clientId);
+    });
+
+    socket.on('error', (error) => {
+      console.error(`[AppChannel] Client error (${clientId}):`, error);
+      this.emit('onError', clientId, error);
+    });
+
+    this.send(clientId, 'welcome', {
+      daemonPort: this.config.daemonPort,
+      protocolVersion: 1,
+    });
+  }
+
+  private processBuffer(clientId: string, buffer: string): string {
+    const lines = buffer.split('\n');
+    const incomplete = lines.pop() || '';
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+
+      try {
+        const message = JSON.parse(line) as AppMessage;
+        this.handleMessage(clientId, message);
+      } catch (error) {
+        console.error(`[AppChannel] Parse error from ${clientId}:`, error);
+        this.sendError(clientId, 'parse_error', 'Invalid JSON');
+      }
+    }
+
+    return incomplete;
+  }
+
+  private async handleMessage(clientId: string, message: AppMessage): Promise<void> {
+    this.emit('onMessage', clientId, message);
+
+    if (message.requestId) {
+      const handler = this.messageHandlers.get(message.type);
+      if (handler) {
+        try {
+          const result = await handler(message.payload);
+          this.send(clientId, message.type + '_response', result, message.requestId);
+        } catch (error) {
+          this.sendError(clientId, 'HANDLER_ERROR', (error as Error).message, message.requestId);
+        }
+      } else {
+        this.sendError(clientId, 'UNKNOWN_TYPE', `Unknown message type: ${message.type}`, message.requestId);
+      }
+    }
+  }
+
+  /**
+   * Send message to a specific client
+   */
+  send(clientId: string, type: string, payload: unknown, requestId?: string): boolean {
+    const socket = this.clients.get(clientId);
+    if (!socket || socket.destroyed) {
+      return false;
+    }
+
+    const message = {
+      type,
+      payload,
+      requestId,
+      timestamp: Date.now(),
+    };
+
+    try {
+      socket.write(JSON.stringify(message) + '\n');
+      return true;
+    } catch (error) {
+      console.error(`[AppChannel] Send error to ${clientId}:`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Broadcast message to all connected clients
+   */
+  broadcast(type: string, payload: unknown): number {
+    let sent = 0;
+    for (const clientId of this.clients.keys()) {
+      if (this.send(clientId, type, payload)) {
+        sent++;
+      }
+    }
+    return sent;
+  }
+
+  sendError(clientId: string, code: string, message: string, requestId?: string): void {
+    this.send(clientId, 'error', { code, message }, requestId);
+  }
+
+  /**
+   * Register a message handler for request-response
+   */
+  registerHandler(type: string, handler: (payload: unknown) => Promise<unknown>): void {
+    this.messageHandlers.set(type, handler);
+  }
+
+  unregisterHandler(type: string): void {
+    this.messageHandlers.delete(type);
+  }
+
+  getClientCount(): number {
+    return this.clients.size;
+  }
+
+  getClientIds(): string[] {
+    return Array.from(this.clients.keys());
+  }
+
+  private async handleDaemonStatus(): Promise<unknown> {
+    return {
+      status: 'running',
+      port: this.config.daemonPort,
+      uptime: process.uptime(),
+      memory: process.memoryUsage(),
+    };
+  }
+
+  private async handleConnectorList(): Promise<unknown> {
+    return { connectors: [] };
+  }
+
+  private async handleConnectorStatus(payload: unknown): Promise<unknown> {
+    return { status: 'unknown' };
+  }
+  /** Wires a pipe as the channel: line-delimited JSON frames both ways. */
+  private attachStream(stream: Duplex): void {
+    this.stream = stream;
+    this.streamConnected = true;
+    stream.on('data', (chunk: Buffer) => this.readFrames(chunk));
+    const lost = () => {
+      if (!this.streamConnected) return;
+      this.streamConnected = false;
+      for (const [, pending] of this.pendingFrames) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error('app channel closed'));
+      }
+      this.pendingFrames.clear();
+      this.emit('disconnect');
+    };
+    stream.on('close', lost);
+    stream.on('end', lost);
+    stream.on('error', lost);
+  }
+
+  private readFrames(chunk: Buffer): void {
+    this.buffer += chunk.toString();
+    let index: number;
+    while ((index = this.buffer.indexOf('\n')) >= 0) {
+      const line = this.buffer.slice(0, index).trim();
+      this.buffer = this.buffer.slice(index + 1);
+      if (line === '') continue;
+      let frame: ChannelFrame;
+      try {
+        frame = JSON.parse(line) as ChannelFrame;
+      } catch {
+        continue;
+      }
+      if (frame.kind === 'response') {
+        const pending = this.pendingFrames.get(frame.id);
+        if (!pending) continue;
+        this.pendingFrames.delete(frame.id);
+        clearTimeout(pending.timer);
+        if (frame.error !== undefined) pending.reject(new Error(frame.error));
+        else pending.resolve(frame.result);
+      } else if (frame.kind === 'request') {
+        void this.answerFrame(frame);
+      }
+    }
+  }
+
+  /** Answers a request the app sent: registered handlers first, an error otherwise. */
+  private async answerFrame(frame: { id: number; method: string; params?: unknown }): Promise<void> {
+    const handler = this.messageHandlers.get(frame.method);
+    if (!handler) {
+      this.writeFrame({ kind: 'response', id: frame.id, error: `unknown method ${frame.method}` });
+      return;
+    }
+    try {
+      this.writeFrame({ kind: 'response', id: frame.id, result: await handler(frame.params) });
+    } catch (error) {
+      this.writeFrame({ kind: 'response', id: frame.id, error: (error as Error).message });
+    }
+  }
+
+  /** Writes one frame unless it is too large for the app to take. */
+  private writeFrame(frame: ChannelFrame): boolean {
+    if (!this.stream || !this.streamConnected) return false;
+    const line = JSON.stringify(frame) + '\n';
+    if (Buffer.byteLength(line) > MAX_FRAME_BYTES) return false;
+    try {
+      this.stream.write(line);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Asks the app one question and waits for its answer. */
+  async request(method: string, params: unknown = {}, timeoutMs = APPROVAL_WAIT_MS): Promise<unknown> {
+    if (!this.stream) throw new Error('not a pipe channel');
+    const id = ++this.frameSeq;
+    // The pipe can answer in the same tick: the pending entry is registered before the write so a
+    // synchronous response is matched instead of dropped.
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingFrames.delete(id);
+        reject(new Error(`no answer to ${method}`));
+      }, timeoutMs);
+      timer.unref?.();
+      this.pendingFrames.set(id, { resolve, reject, timer });
+      const sent = this.writeFrame({ kind: 'request', id, method, params });
+      if (!sent) {
+        clearTimeout(timer);
+        this.pendingFrames.delete(id);
+        reject(new Error('frame refused'));
+      }
+    });
+  }
+
+  /**
+   * Asks the app to approve an action (S25.3). A request that would not fit in one frame is
+   * refused here, before it is sent, and the channel stays open.
+   */
+  async approve(request: AppApproval, signal?: AbortSignal): Promise<boolean> {
+    const id = this.frameSeq + 1;
+    const params = {
+      connector: request.connector,
+      action: request.action,
+      title: request.title ?? '',
+      summary: request.summary ?? '',
+      preview: request.preview ?? [],
+    };
+    const probe: ChannelFrame = { kind: 'request', id, method: 'approve', params };
+    if (Buffer.byteLength(JSON.stringify(probe) + '\n') > MAX_FRAME_BYTES) return false;
+
+    try {
+      const answer = await this.request('approve', params);
+      return (answer as { approved?: boolean } | null)?.approved === true;
+    } catch {
+      // A closed channel, a timeout or an aborted wait all mean the same: no consent.
+      void signal;
+      return false;
+    }
+  }
+
+  /** Whether the app is still on the other side. */
+  get connected(): boolean {
+    if (this.stream) return this.streamConnected;
+    return this.server !== null;
+  }
+
+  /** Closes the channel: the pipe ends, or the socket server stops. */
+  close(): void {
+    if (this.stream) {
+      this.streamConnected = false;
+      try {
+        this.stream.end();
+      } catch {
+        // already gone
+      }
+      this.stream = null;
+      return;
+    }
+    void this.stop();
+  }
+
 }
 
 /**
- * True when a child spawned the way the daemon spawns its children would hold the socket `identity`
- * (`dev:ino`) on `fd`. Node offers no way to mark an inherited descriptor close-on-exec; on macOS
- * libuv spawns with `POSIX_SPAWN_CLOEXEC_DEFAULT`, so children get only their stdio. This checks
- * that instead of assuming it.
+ * App Channel Client - for desktop app to connect to daemon
  */
-export function childInherits(
-	fd: number,
-	identity: string,
-	stdio: StdioOptions = ["ignore", "pipe", "ignore"],
-) {
-	// Unix dev:ino equality cannot prove Windows handle exclusion; fail closed without probing.
-	if (process.platform === "win32") return true;
-	const script = `try{const s=require("fs").fstatSync(${fd},{bigint:true});process.stdout.write(s.dev+":"+s.ino)}catch{}`;
-	const probe = spawnSync(process.execPath, ["-e", script], { stdio, encoding: "utf8", timeout: 10_000 });
-	// A probe that could not run proves nothing: treat it as a leak.
-	if (probe.error || probe.status !== 0) return true;
-	return probe.stdout === identity;
-}
+export class AppChannelClient extends EventEmitter {
+  private socket: Socket | null = null;
+  private _connected = false;
+  private socketPath: string;
+  private pendingRequests = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+  private requestId = 0;
+  private buffer = '';
 
-export interface InheritedChannelOptions extends AppChannelOptions {
-	fd?: number;
-	/** Tests replace the inheritance check. */
-	probe?: (fd: number, identity: string) => boolean;
-}
+  constructor(socketPath?: string) {
+    super();
+    this.socketPath = socketPath || DEFAULT_SOCKET_PATH;
+  }
 
-/**
- * The socket the app handed over on fd 3, or undefined when there is none (it is not a socket, or it
- * is Node's own IPC channel). When a child would inherit it, it is closed and refused: an agent
- * holding it could act as the app.
- */
-export function inheritedAppSocket(options: InheritedChannelOptions = {}): Socket | undefined {
-	// No equivalent Windows transport/exclusion is established yet. Do not inspect or wrap a
-	// Windows handle as a Unix socket; acquisition stays unavailable, independently of the protocol.
-	if (process.platform === "win32") return undefined;
-	const fd = options.fd ?? APP_FD;
-	if (process.env.NODE_CHANNEL_FD === String(fd)) return undefined;
-	let identity: string;
-	try {
-		const stat = fstatSync(fd, { bigint: true });
-		if (!stat.isSocket()) return undefined;
-		identity = `${stat.dev}:${stat.ino}`;
-	} catch {
-		return undefined;
-	}
-	const inherits = options.probe ?? childInherits;
-	if (inherits(fd, identity)) {
-		options.log?.("the app's channel was refused: children would inherit it; connectors cannot be changed");
-		closeSync(fd);
-		return undefined;
-	}
-	return new Socket({ fd, readable: true, writable: true });
-}
+  /**
+   * Connect to the daemon's app channel
+   */
+  async connect(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.socket = new Socket();
 
-/** {@link inheritedAppSocket} as a channel. */
-export function openInheritedChannel(options: InheritedChannelOptions = {}): AppChannel | undefined {
-	const socket = inheritedAppSocket(options);
-	return socket ? new AppChannel(socket, options) : undefined;
+      this.socket.on('connect', () => {
+        console.log('[AppChannelClient] Connected to daemon');
+        this._connected = true;
+        resolve();
+      });
+
+      this.socket.on('data', (data: Buffer) => {
+        this.buffer += data.toString();
+        this.processBuffer();
+      });
+
+      this.socket.on('close', () => {
+        console.log('[AppChannelClient] Disconnected from daemon');
+        this._connected = false;
+        this.emit('disconnect');
+      });
+
+      this.socket.on('error', (error) => {
+        console.error('[AppChannelClient] Error:', error);
+        this._connected = false;
+        this.emit('error', error);
+        reject(error);
+      });
+
+      this.socket.connect(this.socketPath);
+    });
+  }
+
+  /**
+   * Disconnect from daemon
+   */
+  async disconnect(): Promise<void> {
+    if (this.socket) {
+      this.socket.destroy();
+      this.socket = null;
+    }
+    this._connected = false;
+  }
+
+  get connected(): boolean {
+    return this._connected;
+  }
+
+  /**
+   * Send request and wait for response
+   */
+  async request(type: string, payload: unknown, timeoutMs = 10000): Promise<unknown> {
+    if (!this.socket || this.socket.destroyed) {
+      throw new Error('Not connected');
+    }
+
+    const id = `req-${++this.requestId}-${Date.now()}`;
+
+    return new Promise((resolve, reject) => {
+      this.pendingRequests.set(id, { resolve, reject });
+
+      const message: AppMessage = {
+        type,
+        payload,
+        requestId: id,
+        timestamp: Date.now(),
+      };
+
+      this.socket!.write(JSON.stringify(message) + '\n');
+
+      // Timeout
+      setTimeout(() => {
+        if (this.pendingRequests.has(id)) {
+          this.pendingRequests.delete(id);
+          reject(new Error(`Request ${type} timed out`));
+        }
+      }, timeoutMs);
+    });
+  }
+
+  /**
+   * Send notification (no response expected)
+   */
+  notify(type: string, payload: unknown): void {
+    if (!this.socket || this.socket.destroyed) {
+      return;
+    }
+
+    const message: AppMessage = {
+      type,
+      payload,
+      timestamp: Date.now(),
+    };
+
+    this.socket.write(JSON.stringify(message) + '\n');
+  }
+
+  /**
+   * Approve a request via the app channel
+   */
+  async approve(request: AppApproval, signal?: AbortSignal): Promise<boolean> {
+    return this.request('approve', request).then((result) => result as boolean);
+  }
+
+  /**
+   * Process incoming buffer
+   */
+  private processBuffer(): void {
+    const lines = this.buffer.split('\n');
+    this.buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+
+      try {
+        const message = JSON.parse(line) as AppMessage;
+
+        if (message.requestId && this.pendingRequests.has(message.requestId)) {
+          const { resolve, reject } = this.pendingRequests.get(message.requestId)!;
+          this.pendingRequests.delete(message.requestId);
+
+          if (message.type === 'error') {
+            reject(new Error((message.payload as any)?.message || 'Unknown error'));
+          } else {
+            resolve(message.payload);
+          }
+        } else {
+          // Unsolicited notification
+          this.emit('notification', message.type, message.payload);
+        }
+      } catch (error) {
+        console.error('[AppChannelClient] Parse error:', error);
+      }
+    }
+  }
 }

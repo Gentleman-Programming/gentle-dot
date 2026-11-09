@@ -50,6 +50,11 @@ export interface AuthRuntime {
 	 * OpenAI documents that sign-in does not support transcription.
 	 */
 	openAIApiKey?(): Promise<string | undefined>;
+	/**
+	 * The connected NVIDIA API key, for voice speech synthesis (S30.2). Local
+	 * transcription needs no key; only read-aloud speech goes to NVIDIA.
+	 */
+	nvidiaApiKey?(): Promise<string | undefined>;
 }
 
 /** The assistant's own engine home: never the user's Gentle Shell or Pi home unless explicitly overridden. */
@@ -99,6 +104,10 @@ export async function createModelAuthRuntime(agentHome: string, cwd: string): Pr
 			// Checked first: resolving a sign-in could refresh its token over the network.
 			if ((await runtime.checkAuth("openai"))?.type !== "api_key") return undefined;
 			return (await runtime.getAuth("openai"))?.auth.apiKey || undefined;
+		},
+		nvidiaApiKey: async () => {
+			if ((await runtime.checkAuth("nvidia"))?.type !== "api_key") return undefined;
+			return (await runtime.getAuth("nvidia"))?.auth.apiKey || undefined;
 		},
 	};
 }
@@ -224,6 +233,12 @@ export class AuthManager {
 	async openAIApiKey(): Promise<string | undefined> {
 		const runtime = await this.options.runtime();
 		return runtime.openAIApiKey?.();
+	}
+
+	/** The connected NVIDIA API key, read fresh; for the daemon's own speech requests to NVIDIA. */
+	async nvidiaApiKey(): Promise<string | undefined> {
+		const runtime = await this.options.runtime();
+		return runtime.nvidiaApiKey?.();
 	}
 
 	/** True when at least one provider has a credential. */

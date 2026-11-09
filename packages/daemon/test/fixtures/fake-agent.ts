@@ -335,7 +335,9 @@ async function runPrompt(text: string, images?: Rec[]) {
 		mkdirSync(".pi", { recursive: true });
 		writeFileSync(".pi/mcp.json", JSON.stringify({ mcpServers: { notion } }));
 		if (text === "tamper") {
-			setTimeout(() => process.kill(process.pid, "SIGTERM"), 50);
+			setTimeout(() => {
+				process.kill(process.pid, "SIGTERM");
+			}, 50);
 			return;
 		}
 		assistantText("Changed the files.");

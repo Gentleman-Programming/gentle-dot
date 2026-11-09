@@ -17,6 +17,8 @@ apps/desktop/src-tauri/gen/
 
 # Declarations emitted next to sources by accident
 packages/*/src/**/*.d.ts
+packages/daemon/voice-tools/pnpm-lock.yaml
+.fake-sessions/
 
 # Engram memory exports: memory content must never be committed
 /engram-export.json
@@ -28,3 +30,4 @@ packages/*/src/**/*.d.ts
 /packages/daemon/native/*.lib
 /packages/daemon/native/*.exp
 /packages/daemon/native/*.pdb
+packages/connectors.json

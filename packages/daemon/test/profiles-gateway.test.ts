@@ -1,16 +1,19 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ServerMessage } from "@gentle-dot/protocol";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
-import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { BRIDGE_KEY, bootDaemon } from "./harness.ts";
 import { HIDDEN_NAMES } from "../src/white-label.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
-import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { tempDir, waitFor } from "./helpers.ts";
 
-const daemons: DotDaemon[] = [];
+// Every case boots a daemon and waits for the engine.
+vi.setConfig({ testTimeout: 180_000 });
+
+const daemons: { stop(): Promise<void> }[] = [];
 afterEach(async () => {
-	await Promise.all(daemons.splice(0).map((d) => d.close()));
+	await Promise.all(daemons.splice(0).map((d) => d.stop()));
 });
 
 async function setup() {
@@ -23,21 +26,15 @@ async function setup() {
 		join(agentHome, "agents", "gentle-ai-worker.md"),
 		"---\nname: gentle-ai-worker\n---\nWorker\n",
 	);
-	const d = await startDaemon({
-		port: 0,
-		host: "127.0.0.1",
+	const booted = await bootDaemon({
 		dataDir,
 		workspace: dataDir,
-		uiDir: dataDir,
-		agentCommand: process.execPath,
-		agentArgs: [FAKE_AGENT],
-		agentEnv: { ...process.env, FAKE_AGENT_COMMANDS_FILE: commandsFile },
-		agentHome,
+		env: { FAKE_AGENT_COMMANDS_FILE: commandsFile, GENTLE_DOT_AGENT_HOME: agentHome },
 		profilesImportPath: join(shellHome, "profiles.json"),
-		backoffMs: [50],
 		authRuntime: async () => fakeAuthRuntime().runtime,
 	});
-	daemons.push(d);
+	daemons.push(booted);
+	const d = booted.daemon;
 	const json = (path: string) => JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
 	const commands = () =>
 		existsSync(commandsFile)
@@ -59,12 +56,12 @@ async function setup() {
 	};
 }
 
-async function connect(d: DotDaemon) {
+async function connect(d: { port: number }) {
 	const ws = new WebSocket(`ws://127.0.0.1:${d.port}/ws`);
 	const messages: ServerMessage[] = [];
 	ws.on("message", (data) => messages.push(JSON.parse(String(data)) as ServerMessage));
 	await new Promise((resolve) => ws.on("open", resolve));
-	ws.send(JSON.stringify({ type: "hello", token: d.token, protocol: 1 }));
+	ws.send(JSON.stringify({ type: "hello", token: BRIDGE_KEY, protocol: 1 }));
 	await waitFor(() => messages.some((m) => m.type === "ready"));
 	const send = (m: object) => ws.send(JSON.stringify(m));
 	/** Waits for a matching message; `after` skips messages received before that index. */

@@ -1,0 +1,169 @@
+{
+  "kind": "gentle-pi.agent_model_profiles",
+  "version": 1,
+  "active": "nan-full-power",
+  "profiles": {
+    "nan-full-power": {
+      "orchestrator": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "high"
+      },
+      "gentle-ai-explore": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "low"
+      },
+      "gentle-ai-worker": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "medium"
+      },
+      "gentle-ai-verify": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "low"
+      },
+      "review-refuter": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "high"
+      },
+      "review-validator": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "high"
+      },
+      "jd-judge-a": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "medium"
+      },
+      "jd-judge-b": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "medium"
+      },
+      "jd-fix-agent": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "medium"
+      },
+      "review-readability": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "medium"
+      },
+      "review-reliability": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "medium"
+      },
+      "review-resilience": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "medium"
+      },
+      "review-risk": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "medium"
+      }
+    },
+    "nan-review-hard": {
+      "orchestrator": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "medium"
+      },
+      "gentle-ai-explore": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "low"
+      },
+      "gentle-ai-worker": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "medium"
+      },
+      "gentle-ai-verify": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "low"
+      },
+      "review-refuter": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "high"
+      },
+      "review-validator": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "high"
+      },
+      "jd-judge-a": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "medium"
+      },
+      "jd-judge-b": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "medium"
+      },
+      "jd-fix-agent": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "medium"
+      },
+      "review-readability": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "medium"
+      },
+      "review-reliability": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "medium"
+      },
+      "review-resilience": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "medium"
+      },
+      "review-risk": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "medium"
+      }
+    },
+    "nan-eco-flash": {
+      "orchestrator": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "low"
+      },
+      "gentle-ai-explore": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "off"
+      },
+      "gentle-ai-worker": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "low"
+      },
+      "gentle-ai-verify": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "off"
+      },
+      "review-refuter": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "low"
+      },
+      "review-validator": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "low"
+      },
+      "jd-judge-a": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "off"
+      },
+      "jd-judge-b": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "off"
+      },
+      "jd-fix-agent": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "low"
+      },
+      "review-readability": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "low"
+      },
+      "review-reliability": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "low"
+      },
+      "review-resilience": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "low"
+      },
+      "review-risk": {
+        "model": "nan/deepseek-v4-flash",
+        "thinking": "low"
+      }
+    }
+  }
+}
