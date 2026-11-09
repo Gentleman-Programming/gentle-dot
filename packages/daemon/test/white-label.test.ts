@@ -43,6 +43,22 @@ describe("presentText", () => {
 	});
 });
 
+describe("engine hints written for its terminal", () => {
+	it("points to Connectors instead of a command the app does not have", () => {
+		const shown = presentText(
+			"MCP servers need attention:\n github: failed: GitHub needs the user to sign in again.\nRun /mcp to fix.",
+		);
+		expect(shown).toBe(
+			"MCP servers need attention:\n github: failed: GitHub needs the user to sign in again.\nOpen Connectors to fix it.",
+		);
+	});
+
+	it("leaves other mentions of mcp alone", () => {
+		const text = "The server is at https://example.com/mcp and docs/mcp.md explains it.";
+		expect(presentText(text)).toBe(text);
+	});
+});
+
 describe("shouldShowToast", () => {
 	it("hides informational chatter and keeps warnings and errors", () => {
 		expect(shouldShowToast("info")).toBe(false);

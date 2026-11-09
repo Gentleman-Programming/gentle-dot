@@ -642,7 +642,7 @@ export class DotBridge {
 		}
 	}
 
-	/** `/login`, `/profiles`, and `/connectors` open their screen instead of reaching the assistant. */
+	/** `/login`, `/profiles`, `/connectors`, and `/mcp` open their screen instead of reaching the assistant. */
 	private async openScreen(client: BridgeClient, text: string): Promise<boolean> {
 		if (/^\s*\/login\s*$/i.test(text)) {
 			await this.sendProviders(client, true);
@@ -652,7 +652,7 @@ export class DotBridge {
 			await this.sendProfiles(client, true);
 			return true;
 		}
-		if (/^\s*\/connectors\s*$/i.test(text)) {
+		if (/^\s*\/(?:connectors|mcp)\s*$/i.test(text)) {
 			this.deliver(client, { type: "connectors", connectors: this.requireConnectors().list(), open: true });
 			return true;
 		}

@@ -124,7 +124,7 @@ Daemon to client:
 | `auth_prompt` | `flowId`, `kind` (`text`, `secret`, `select`, `manual_code`), `message`, `options` — sent only to the window that started the flow |
 | `auth_event` | `auth_url`, `device_code`, `progress`, or `info` |
 | `auth_done` | `ok`, plain-language `message` on failure or cancellation |
-| `connectors` | `connectors` (`id`, `name`, `reads`, `sends`, `added`, `enabled`, `mode`, `status`: `off` \| `needs_signin` \| `connected` \| `error`); `open: true` when the user typed `/connectors` |
+| `connectors` | `connectors` (`id`, `name`, `reads`, `sends`, `added`, `enabled`, `mode`, `status`: `off` \| `needs_signin` \| `connected` \| `error`); `open: true` when the user typed `/connectors` or `/mcp` |
 
 ### Sign-in (S10) and own instance (S12)
 
@@ -252,7 +252,7 @@ The user changes the main assistant's model from the chat, in the panel and the 
 ### The panel (expanded)
 
 - 420 × 640 px, rounded 20 px, translucent (macOS vibrancy), anchored to the Dot.
-- Header (one continuous chat): the rose glyph and "Gentle Dot", then Accounts, Profiles, Connectors (a plug; also `/connectors`), Settings (a gear), Hide the rose (an eye) and Full screen (desktop panel only), and Hide as 18 px stroke icons with tooltips. The web UI has no Settings for now. With `features.conversations` on, the conversation title, the conversations list, and New conversation return.
+- Header (one continuous chat): the rose glyph and "Gentle Dot", then Accounts, Profiles, Connectors (a plug; also `/connectors` or `/mcp`), Settings (a gear), Hide the rose (an eye) and Full screen (desktop panel only), and Hide as 18 px stroke icons with tooltips. The web UI has no Settings for now. With `features.conversations` on, the conversation title, the conversations list, and New conversation return.
 - "Show earlier" at the top of the chat loads the previous page; a subtle "Earlier messages" divider marks where the chat's earlier session ends.
 - Body: message list with streaming Markdown and code blocks; activity rows are collapsed one-liners grouped under the assistant turn ("Read 3 files · Ran tests").
 - Ask cards: when the agent needs the user, an inline card with the question and buttons (select and confirm) or a text field (input and editor). The Dot turns amber until the user answers.

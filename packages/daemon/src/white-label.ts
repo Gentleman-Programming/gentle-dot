@@ -26,6 +26,8 @@ const REWRITES: [RegExp, string][] = [
 	[/\bengram\b/gi, "memory"],
 	[/\breceipt-driven development\b/gi, "review"],
 	[/\bRDD\b/g, "review"],
+	// The engine's connector warning is written for its terminal; the app has a screen for it.
+	[/\bRun \/mcp to fix\./g, "Open Connectors to fix it."],
 ];
 
 /** Rewrites internal names in harness-generated text shown to the user. */
