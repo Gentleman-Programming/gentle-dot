@@ -985,10 +985,10 @@ export class ConnectorStore {
 		const { spec, server } = await this.unlocked(id);
 		const env = this.options.env ?? process.env;
 		if ("command" in server) {
-			const resolved = resolveRecord(server.env, env, spec.name);
+			const resolved = resolveRecord(server.env, env, spec.name, this.options.log);
 			return resolved ? { env: resolved } : {};
 		}
-		const headers = resolveRecord(server.headers, env, spec.name);
+		const headers = resolveRecord(server.headers, env, spec.name, this.options.log);
 		const ownAuthorization = Object.keys(server.headers ?? {}).some(
 			(h) => h.toLowerCase() === "authorization",
 		);
@@ -997,7 +997,12 @@ export class ConnectorStore {
 			server.url,
 			{ load: () => this.signInState(id), save: (state) => this.saveSignIn(id, state) },
 			() => {
-				const { clientId, clientSecret, callbackUrl } = oauthSettings(spec.name, server, env);
+				const { clientId, clientSecret, callbackUrl } = oauthSettings(
+					spec.name,
+					server,
+					env,
+					this.options.log,
+				);
 				return {
 					...(clientId ? { clientId } : {}),
 					...(clientSecret ? { clientSecret } : {}),
@@ -1015,7 +1020,7 @@ export class ConnectorStore {
 		const stored = this.signInState(id);
 		return {
 			serverUrl: server.url,
-			settings: oauthSettings(spec.name, server, this.options.env ?? process.env),
+			settings: oauthSettings(spec.name, server, this.options.env ?? process.env, this.options.log),
 			...(stored ? { stored } : {}),
 		};
 	}
@@ -1626,12 +1631,13 @@ function oauthSettings(
 	name: string,
 	server: Extract<ServerTemplate, { url: string }>,
 	env: NodeJS.ProcessEnv,
+	log?: (line: string) => void,
 ): OAuthSettings {
 	const { oauth } = server;
 	return {
 		...(oauth?.clientId ? { clientId: oauth.clientId } : {}),
 		...(oauth?.clientSecret
-			? { clientSecret: resolveValue(oauth.clientSecret, env, `${name} client secret`) }
+			? { clientSecret: resolveValue(oauth.clientSecret, env, `${name} client secret`, log) }
 			: {}),
 		...(oauth?.callbackUrl ? { callbackUrl: oauth.callbackUrl } : {}),
 		...(oauth?.callbackPort !== undefined ? { callbackPort: oauth.callbackPort } : {}),

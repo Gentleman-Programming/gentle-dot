@@ -67,9 +67,9 @@ const ASK_METHODS = new Set(['select', 'confirm', 'input', 'editor']);
 export class Daemon {
   private config: AppConfig;
   private wsServer: WsServer;
-  private mcpProxy!: McpProxy;
   private registry: ConnectorRegistry;
   private shellSpawner: GentleShellSpawner;
+  private mcpProxy!: McpProxy;
   private appChannel: AppChannel;
   private configWatcher: ReturnType<typeof watchConfig> | null = null;
   private shutdown = false;
@@ -95,7 +95,7 @@ export class Daemon {
     // One spawner per daemon: a shared singleton makes a second daemon in the same process
     // fail with "Gentle Shell already running", which is how tests boot several.
     this.shellSpawner = new GentleShellSpawner();
-        this.closed = new Promise<void>((resolve) => {
+    this.closed = new Promise<void>((resolve) => {
       this.resolveClosed = resolve;
     });
     // A pipe from the app replaces the socket server: one class, two transports.
@@ -1599,23 +1599,11 @@ export class Daemon {
     // The engine never inherits the daemon's environment wholesale: it gets the isolated one
     // (own HOME/XDG, the user's Engram, no daemon-only secrets), the way the bundled daemon
     // always did. The spawner's own keys (project, policy, subagent gate) still win on top.
-    const engineEnv = isolatedAgentEnv(process.env, this.config.daemon.data_dir, directAccess, {
+    const engineEnv = isolatedAgentEnv(process.env, this.config.daemon.data_dir, directAccess, undefined, {
       platform: process.platform,
     });
     engineEnv.GENTLE_PI_CONFIG_HOME = path.join(this.config.daemon.data_dir, 'gentle-ai');
     shellConfig.agentEnv = engineEnv as Record<string, string>;
-
-    // The proxy speaks the real MCP protocol per connector at /mcp/<id>; it asks the windows for
-    // every write through the approval callback, and stdio servers start from the engine's own
-    // environment (the isolated one), never from the daemon's.
-    this.mcpProxy = new McpProxy({
-      connector: (id) => this.connectorStore?.proxyView(id),
-      credentials: (id) => this.connectorStore!.credentials(id),
-      approve: (preview, signal) => this.approveProxied(preview, signal),
-      env: engineEnv,
-      cwd: this.config.daemon.workspace,
-      log: (line) => console.log(`[McpProxy] ${line}`),
-    });
     // The engine is about to read its server list: whatever the assistant changed is put back
     // first, and the report says so in the log.
     this.engineStarts += 1;

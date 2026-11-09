@@ -164,7 +164,8 @@ export async function finishWindowsShutdown(
 /**
  * Install the authenticated listener before start() can create descendants. Windows startup
  * always requires the private, exact-current-process record validated by the native module.
- * Neither its capability nor native exception details are sent to argv, env, or logs.
+ * The capability never reaches argv, env, or logs; native failure causes are static strings
+ * and are kept in the thrown message so daemon.log names the failing check.
  */
 export async function startWithWindowsStop<T extends Stoppable>(
 	recordPath: string,
@@ -249,7 +250,7 @@ export async function startWithWindowsStop<T extends Stoppable>(
 			throw new Error("invalid listener");
 		}
 		capability = Buffer.from(listener.capability);
-	} catch {
+	} catch (error) {
 		if (typeof listener?.close === "function") {
 			try {
 				await listener.close();
@@ -257,7 +258,13 @@ export async function startWithWindowsStop<T extends Stoppable>(
 				failedWindowsOwners.add(lifetimeOwner);
 			}
 		}
-		throw new Error("Windows stop listener initialization failed");
+		// Native failures carry static cause strings only ("Stop record does not identify this
+		// process", "Unsafe record path", Win32 codes) — never the capability, which exists only
+		// as listener.capability above. Keeping the cause in the message is what makes the
+		// `failed to start:` daemon.log line diagnosable without a debugger; every distinct
+		// failure mode collapsing into one sentence hid real regressions behind noise.
+		const detail = error instanceof Error ? error.message : String(error);
+		throw new Error(`Windows stop listener initialization failed: ${detail}`, { cause: error });
 	}
 	for (const frame of preinitFrames) handler.onRequest(frame);
 	preinitFrames.length = 0;
