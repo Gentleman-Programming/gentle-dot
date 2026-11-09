@@ -586,6 +586,9 @@ pub fn computer_request_permission(kind: PermissionKind) -> Result<(), String> {
     #[cfg(windows)]
     { let _ = kind; Ok(()) }
     // The Linux portal prompts at request time; there is nothing to pre-grant (S24 Linux).
+    // Accessibility is not granted either: it mirrors whether this Wayland session's compositor
+    // has the virtual input protocols (odd/tasks/linux-input-control.md S4), which no dialog can
+    // change, so asking is a no-op and `permissions` keeps reporting the compositor's answer.
     #[cfg(target_os = "linux")]
     { let _ = kind; Ok(()) }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
