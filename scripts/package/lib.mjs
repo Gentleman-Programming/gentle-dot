@@ -37,7 +37,7 @@ function archiveExtension(target) {
 }
 
 /** The Node release staged when `.nvmrc` names only a major version; it must stay on that major. */
-export const PINNED_NODE_VERSION = "24.14.1";
+export const PINNED_NODE_VERSION = "24.22.1";
 
 export const USAGE =
 	"usage: stage-runtime --target <darwin-arm64|linux-arm64|linux-x64|win-x64|win-arm64> [--out <dir>] " +

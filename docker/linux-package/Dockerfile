@@ -4,7 +4,7 @@
 #   docker build --platform linux/arm64 -t gentle-dot-linux-builder:arm64 docker/linux-package
 FROM debian:bookworm
 
-ARG NODE_VERSION=24.14.1
+ARG NODE_VERSION=24.22.1
 ARG PNPM_VERSION=11.5.0
 ARG RUST_TOOLCHAIN=stable
 
