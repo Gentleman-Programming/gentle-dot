@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import type { ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -12,6 +12,7 @@ import {
 } from "../src/daemon.ts";
 import { HIDDEN_NAMES, presentText } from "../src/white-label.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
+import { expectPosixMode } from "./support/posix-modes.ts";
 
 const daemons: DotDaemon[] = [];
 afterEach(async () => {
@@ -519,6 +520,7 @@ describe("own instance", () => {
 		daemons.push(d);
 		const env = JSON.parse(readFileSync(envFile, "utf8")) as Record<string, string | undefined>;
 		const home = join(dataDir, "home");
+		const bundledPi = escapeRegExp(join("node_modules", ".bin"));
 		expect(env).toEqual({
 			GENTLE_PI_CONFIG_HOME: join(dataDir, "gentle-ai"),
 			HOME: home,
@@ -529,7 +531,7 @@ describe("own instance", () => {
 			GIT_CONFIG_GLOBAL: join(realHome, ".gitconfig"),
 			// The bundled `pi` folder first, then the user's PATH unchanged.
 			PATH: expect.stringMatching(
-				new RegExp(`node_modules/\\.bin${delimiter}${escapeRegExp(process.env.PATH ?? "")}$`),
+				new RegExp(`${bundledPi}${escapeRegExp(delimiter)}${escapeRegExp(process.env.PATH ?? "")}$`),
 			),
 			// The user's global Engram: its data dir, so the memory plugin accepts the user's server.
 			ENGRAM_DATA_DIR: join(realHome, ".engram"),
@@ -539,7 +541,7 @@ describe("own instance", () => {
 			// Subagents on, behind the proxy and with the guard (S25.4).
 			GENTLE_PI_AGENTS: "1",
 		});
-		expect(statSync(home).mode & 0o777).toBe(0o700);
+		expectPosixMode(home, 0o700);
 		expect(existsSync(join(dataDir, "workspace"))).toBe(true);
 	});
 
@@ -550,16 +552,19 @@ describe("own instance", () => {
 		writeFileSync(join(dataDir, "token"), `${"k".repeat(43)}\n`, { mode: 0o644 });
 		chmodSync(join(dataDir, "token"), 0o644);
 		expect(ensureToken(dataDir)).toBe("k".repeat(43));
-		expect(statSync(dataDir).mode & 0o777).toBe(0o700);
-		expect(statSync(join(dataDir, "token")).mode & 0o777).toBe(0o600);
+		expectPosixMode(dataDir, 0o700);
+		expectPosixMode(join(dataDir, "token"), 0o600);
 	});
 
 	it("shows the access key only on an interactive terminal", () => {
 		const url = "http://127.0.0.1:4317/#token=secret-token";
-		expect(startupMessage(url, "/data", true)).toBe(`Gentle Dot is running at ${url}`);
-		const piped = startupMessage(url, "/data", false);
+		const dataDir = join(tempDir(), "data");
+		expect(startupMessage(url, dataDir, true)).toBe(`Gentle Dot is running at ${url}`);
+		const piped = startupMessage(url, dataDir, false);
 		expect(piped).not.toContain("secret-token");
-		expect(piped).toBe("Gentle Dot is running at http://127.0.0.1:4317/ (the access key is in /data/token)");
+		expect(piped).toBe(
+			`Gentle Dot is running at http://127.0.0.1:4317/ (the access key is in ${join(dataDir, "token")})`,
+		);
 	});
 });
 

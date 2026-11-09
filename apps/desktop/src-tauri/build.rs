@@ -27,6 +27,8 @@ const COMMANDS: &[&str] = &[
     "voice_model_remove",
     "shortcut_get",
     "shortcut_set",
+    "memory_get",
+    "memory_set",
     "connector_command",
 ];
 
