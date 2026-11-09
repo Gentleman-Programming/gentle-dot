@@ -11,6 +11,7 @@ import { oauthOptions } from "./fake-oauth.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
 const GUARD = fileURLToPath(new URL("../src/extensions/approval-guard.ts", import.meta.url));
+const COMMAND_CODE = fileURLToPath(new URL("../src/extensions/command-code.ts", import.meta.url));
 
 /** The engine's mcp.json without the proxy key, which changes with every engine launch. */
 const withoutKey = (text: string) => text.replace(/Bearer [^"]+/g, "Bearer <key>");
@@ -224,9 +225,10 @@ describe("connectors over the protocol", () => {
 		const { agentArgs, agentEnv } = await setup({ home: true });
 		const args = agentArgs();
 		expect(args[args.indexOf("-e") + 1]).toBe(GUARD);
+		expect(args.some((arg) => arg.endsWith(join("extensions", "command-code.ts")))).toBe(true);
 		expect(JSON.parse(agentEnv().GENTLE_DOT_CONNECTOR_POLICY ?? "{}")).toMatchObject({
 			connectors: {},
-			protectedPaths: expect.arrayContaining([GUARD]),
+			protectedPaths: expect.arrayContaining([GUARD, COMMAND_CODE]),
 		});
 	});
 });

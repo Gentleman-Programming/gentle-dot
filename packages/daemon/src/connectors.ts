@@ -637,6 +637,8 @@ export interface ConnectorStoreOptions {
 	 * `.pi`, the engine's old `mcp-auth.json`); in server mode as the engine's user (S25.8, B1).
 	 */
 	engineAccess?: EngineAccess;
+	/** Extra engine extensions (`-e`), protected like the guard (S34). */
+	extensionPaths?: string[];
 	log?: (line: string) => void;
 }
 
@@ -1157,6 +1159,7 @@ export class ConnectorStore {
 				join(this.options.dataDir, "token"),
 				...(this.options.guardPath ? [this.options.guardPath] : []),
 				...(this.childGuard ? [this.childGuard.file] : []),
+				...(this.options.extensionPaths ?? []),
 			],
 			...(this.computer ? { builtin: [COMPUTER_ID] } : {}),
 		};
