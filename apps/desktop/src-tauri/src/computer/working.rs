@@ -361,6 +361,7 @@ mod tests {
 
     type Log = Arc<Mutex<Vec<String>>>;
     type Hook = Box<dyn Fn(u64) + Send + Sync>;
+    type CallAffinity = (Option<u64>, (Part, u32));
 
     const SHORT: Duration = Duration::from_millis(100);
 
@@ -369,7 +370,7 @@ mod tests {
         visible: Mutex<Visibility>,
         rose_hidden: AtomicBool,
         fails: Mutex<Option<Part>>,
-        call_affinities: Mutex<Vec<(Option<u64>, (Part, u32))>>,
+        call_affinities: Mutex<Vec<CallAffinity>>,
         affinities: Mutex<[u32; 2]>,
         handles: Mutex<[Option<usize>; 2]>,
         unrelated_affinity: Mutex<u32>,

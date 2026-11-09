@@ -230,6 +230,51 @@ Some things Wayland does not allow at all, and we already work around them: apps
 
 For a quick comparison on GNOME, you can start the app as a native Wayland client with `GDK_BACKEND=wayland gentle-dot` (from source: `GDK_BACKEND=wayland ~/.local/bin/gentle-dot`), and note which steps change.
 
+## Testing screenshots (capture-only Linux backend)
+
+On Hyprland, the app asks xdg-desktop-portal for screenshots (S24 Linux, capture only:
+the assistant cannot move the pointer or press keys). To verify:
+
+1. Run the app under Hyprland (`GDK_BACKEND=x11`, see above) with `HYPRLAND_INSTANCE_SIGNATURE` in the environment.
+2. Ask the assistant to "take a screenshot". The portal shows its own permission dialog the first time: allow it.
+3. The assistant describes what it sees: the screenshot matches the focused monitor, downscaled, and clicks/typing are refused with a message saying this Linux backend only captures screenshots.
+4. Deny the portal dialog once and ask again: the assistant reports the refusal, and the permissions screen stops offering screenshots until a capture is allowed again.
+5. Switch to another monitor and ask again: the capture follows the focused monitor (coordinates map to the focused monitor's position).
+
+`hyprctl monitors -j` must work in the app's environment; the portal request needs the session bus (no `sudo`).
+
+## Testing computer input (Hyprland, phase 2)
+
+On Hyprland the assistant can also operate the computer: move the pointer, click, scroll and
+press keys, through the compositor's Wayland virtual-input protocols (no privileged daemon).
+The safety model is the shared one: a session grant before acting, the blocklist, the risk
+check, and the rate limit (odd/tasks/linux-input-control.md S4). GNOME and KDE have no
+virtual-input protocols: there the assistant reports that input is unavailable and only
+screenshots work (they need the RemoteDesktop portal, recorded as future work, S3).
+
+To verify on Hyprland (verified live on Hyprland 0.56.2 / Omarchy 4):
+
+1. The permissions screen reports accessibility as available (`WAYLAND_DISPLAY` set, Hyprland
+   compositor). On GNOME/KDE it reports input as unavailable, and asking anyway refuses with
+   a message naming the missing Wayland protocol.
+2. Ask the assistant to "move the mouse to the middle of the screen": the grant appears the
+   first time (allow it), then the cursor lands in the middle. A screenshot taken afterwards
+   shows it there.
+3. Ask it to "click on a neutral area": the click lands where the cursor is, nothing opens.
+4. Focus a terminal and ask it to "type 'hello from gentle' in the terminal": the text
+   appears key by key, including the Enter. Characters outside the US layout (for example
+   accents) are refused by name, with a message saying the built-in keymap cannot type them.
+5. Ask it to type into a password manager (for example KeePassXC): it must refuse by the
+   blocklist, naming the app, whatever the prompt says.
+6. Deny the input session grant once: the assistant reports the refusal, and the next input
+   request asks again.
+
+Known limits of this phase (S2, L3/L7 of the task log): US layout only, no "working" overlay
+rings (sessions still grant, expire, and stop), no panic shortcut on Linux (only Stop), the
+z-order of stacked tiles is approximated (a click on a fully covered window may name the
+wrong owner and be refused rather than misdirected), and a compositor restart needs an app
+restart (the capability is cached per process).
+
 ## Troubleshooting
 
 | Symptom | Try |

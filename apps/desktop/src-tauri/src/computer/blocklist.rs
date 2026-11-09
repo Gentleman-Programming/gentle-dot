@@ -90,23 +90,79 @@ const WINDOWS: &[Entry] = &[
     Entry { label: "an app Windows does not identify", bundles: &[], names: &[UNIDENTIFIED] },
 ];
 
-/// Each build uses its own platform's list; the tests check both.
+/// Linux: the same things no action may target, under the app ids a Hyprland session reports.
+///
+/// A client's `class` is its app id (reverse-DNS for GTK/Qt apps, the executable's name for
+/// others), so a listed id also blocks its helpers by the macOS prefix rule and names match the
+/// Windows way. Layer surfaces are not clients at all: the bar, launchers, the lock screen and
+/// the polkit prompts that draw themselves as layers never appear in `hyprctl clients`, so no
+/// action can target them and they need no entry. The password managers set their class to their
+/// own name (`1Password`, `Bitwarden`, `KeePassXC`), which is why both that and the reverse-DNS id
+/// are listed: an app may switch between them as it updates.
+const LINUX: &[Entry] = &[
+    // This app: its windows are `Gentle-dot` (the app id the bundle ships with).
+    Entry {
+        label: "Gentle Dot",
+        bundles: &["gentle-dot", GENTLE_DOT_BUNDLE],
+        names: &["Gentle Dot", "Gentle-dot"],
+    },
+    // The desktop's own settings, the surface macOS and Windows block: display, sound, privacy.
+    Entry {
+        label: "Settings",
+        bundles: &["org.gnome.settings", "gnome-control-center", "systemsettings"],
+        names: &["Settings", "System Settings"],
+    },
+    // The keyring's unlock prompt and the stores that show saved secrets (GNOME's Passwords and
+    // Keys, KWallet Manager) — the Linux shape of Keychain Access and `com.apple.Passwords`.
+    Entry {
+        label: "Passwords and Keys",
+        bundles: &["org.gnome.seahorse", "seahorse", "gcr-prompter", "gnome-keyring-prompt", "kwalletmanager"],
+        names: &["Passwords and Keys", "Seahorse", "KWalletManager"],
+    },
+    // The agent that asks for the user's own password to authorize a privileged action.
+    Entry {
+        label: "the authentication prompt",
+        bundles: &["polkit-gnome-authentication-agent-1", "polkit-kde-authentication-agent-1", "lxpolkit"],
+        names: &[],
+    },
+    Entry { label: "1Password", bundles: &["1password", "com.onepassword.1password"], names: &["1Password"] },
+    Entry { label: "Bitwarden", bundles: &["bitwarden", "com.bitwarden.desktop"], names: &["Bitwarden"] },
+    Entry { label: "KeePassXC", bundles: &["keepassxc", "org.keepassxc.keepassxc"], names: &["KeePassXC"] },
+    Entry { label: "KeePass", bundles: &["keepass"], names: &["KeePass", "KeePass Password Safe"] },
+];
+
+/// Each build uses its own platform's list; the tests check every list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(test), allow(dead_code))]
 enum Platform {
     MacOs,
     Windows,
+    Linux,
 }
 
-#[cfg(not(windows))]
-const PLATFORM: Platform = Platform::MacOs;
-#[cfg(windows)]
-const PLATFORM: Platform = Platform::Windows;
+/// Which list a build selects: Windows and Linux use their own, every other target uses macOS.
+///
+/// A *test* build on Linux keeps macOS, because the shared `mcp` tests carry macOS app identities
+/// (`mcp.rs`'s `SETTINGS`, `PASSWORDS` and `KEYCHAIN` constants) and this module may not edit
+/// them. The Linux list is covered here through `blocked_reason_on(Platform::Linux, …)`, the very
+/// function the shipped build runs, and `select` is what a release build resolves.
+const fn select(windows: bool, linux: bool, test: bool) -> Platform {
+    if windows {
+        Platform::Windows
+    } else if linux && !test {
+        Platform::Linux
+    } else {
+        Platform::MacOs
+    }
+}
+
+const PLATFORM: Platform = select(cfg!(windows), cfg!(target_os = "linux"), cfg!(test));
 
 fn entries(platform: Platform) -> &'static [Entry] {
     match platform {
         Platform::MacOs => MACOS,
         Platform::Windows => WINDOWS,
+        Platform::Linux => LINUX,
     }
 }
 
@@ -155,6 +211,13 @@ fn app_name(platform: Platform, name_or_bundle: &str) -> &str {
                 .find(|suffix| lower.ends_with(*suffix))
                 .map_or(name, |suffix| &name[..name.len() - suffix.len()])
         }
+        // A Hyprland class carries no suffix; `open_app` may also be given the executable's path
+        // or the `.desktop` file that names the same app.
+        Platform::Linux => {
+            let name = name_or_bundle.trim().trim_end_matches('/');
+            let name = name.rsplit('/').next().unwrap_or(name);
+            name.strip_suffix(".desktop").unwrap_or(name)
+        }
     }
 }
 
@@ -188,6 +251,14 @@ mod tests {
 
     fn windows_name(name: &str) -> Option<&'static str> {
         blocked_name_on(Platform::Windows, name)
+    }
+
+    fn linux_reason(app: &AppIdentity) -> Option<&'static str> {
+        blocked_reason_on(Platform::Linux, app, OWN_PID)
+    }
+
+    fn linux_name(name: &str) -> Option<&'static str> {
+        blocked_name_on(Platform::Linux, name)
     }
 
     fn app(bundle: Option<&str>, name: &str) -> AppIdentity {
@@ -272,7 +343,84 @@ mod tests {
 
     #[test]
     fn the_platform_list_is_the_one_this_build_targets() {
-        assert_eq!(PLATFORM, if cfg!(windows) { Platform::Windows } else { Platform::MacOs });
+        assert_eq!(PLATFORM, select(cfg!(windows), cfg!(target_os = "linux"), cfg!(test)));
+    }
+
+    #[test]
+    fn a_release_build_selects_each_platforms_own_list() {
+        assert_eq!(select(true, false, false), Platform::Windows);
+        assert_eq!(select(false, true, false), Platform::Linux);
+        assert_eq!(select(false, false, false), Platform::MacOs);
+        // A test build on Linux keeps macOS, for the shared `mcp` tests' macOS identities.
+        assert_eq!(select(false, true, true), Platform::MacOs);
+        // Windows is Windows either way.
+        assert_eq!(select(true, false, true), Platform::Windows);
+    }
+
+    #[test]
+    fn every_listed_linux_class_is_blocked() {
+        let cases = [
+            ("Gentle-dot", "Gentle Dot"),
+            ("dev.gentleman.gentle-dot", "Gentle Dot"),
+            ("org.gnome.Settings", "Settings"),
+            ("gnome-control-center", "Settings"),
+            ("systemsettings", "Settings"),
+            ("org.gnome.seahorse.application", "Passwords and Keys"),
+            ("gcr-prompter", "Passwords and Keys"),
+            ("gnome-keyring-prompt", "Passwords and Keys"),
+            ("polkit-gnome-authentication-agent-1", "the authentication prompt"),
+            ("1Password", "1Password"),
+            ("com.onepassword.1password", "1Password"),
+            ("Bitwarden", "Bitwarden"),
+            ("com.bitwarden.desktop", "Bitwarden"),
+            ("KeePassXC", "KeePassXC"),
+            ("org.keepassxc.keepassxc", "KeePassXC"),
+            ("keepass", "KeePass"),
+        ];
+        for (class, label) in cases {
+            // The class is the identity's bundle id (Linux's stable app id).
+            assert_eq!(linux_reason(&app(Some(class), "x")), Some(label), "{class}");
+        }
+    }
+
+    #[test]
+    fn ordinary_linux_apps_are_allowed() {
+        for class in [
+            "com.mitchellh.ghostty",
+            "google-chrome",
+            "firefox",
+            "org.gnome.Nautilus",
+            "kitty",
+            "keepassx-not-x",
+            "settings-manager",
+        ] {
+            assert_eq!(linux_reason(&app(Some(class), "x")), None, "{class}");
+        }
+    }
+
+    #[test]
+    fn a_helpers_class_is_blocked_and_similar_prefixes_are_not() {
+        // The same prefix rule as macOS: a listed id blocks its helpers, but not lookalikes.
+        assert_eq!(linux_reason(&app(Some("org.gnome.Settings.Helper"), "x")), Some("Settings"));
+        assert_eq!(linux_reason(&app(Some("org.gnome.SettingsX"), "x")), None);
+        assert_eq!(linux_reason(&app(Some("1passwordish"), "x")), None);
+    }
+
+    #[test]
+    fn gentle_dot_is_blocked_on_linux_by_its_own_pid_too() {
+        let unbundled = AppIdentity { pid: OWN_PID, bundle_id: None, name: "unnamed".into() };
+        assert_eq!(linux_reason(&unbundled), Some("Gentle Dot"));
+    }
+
+    #[test]
+    fn linux_open_app_names_paths_and_desktop_files_are_checked() {
+        assert_eq!(linux_name("Bitwarden"), Some("Bitwarden"));
+        assert_eq!(linux_name(" bitwarden "), Some("Bitwarden"));
+        assert_eq!(linux_name("bitwarden.desktop"), Some("Bitwarden"));
+        assert_eq!(linux_name("/usr/bin/gnome-control-center"), Some("Settings"));
+        assert_eq!(linux_name("org.gnome.Seahorse.Application"), Some("Passwords and Keys"));
+        assert_eq!(linux_name("firefox"), None);
+        assert_eq!(linux_name("com.mitchellh.ghostty"), None);
     }
 
     #[test]
@@ -342,10 +490,14 @@ mod tests {
 
     #[test]
     fn the_lists_stay_apart() {
-        // macOS keeps exactly its list; Windows names do not block anything there, and back.
+        // Each platform keeps exactly its list; one's names do not block anything on another.
         assert_eq!(mac_name("Control Panel"), None);
         assert_eq!(mac_name("KeePass"), None);
+        assert_eq!(mac_name("gnome-control-center"), None);
         assert_eq!(windows_name("Keychain Access"), None);
         assert_eq!(windows_name("System Settings"), None);
+        assert_eq!(windows_name("gnome-control-center"), None);
+        assert_eq!(linux_name("Keychain Access"), None);
+        assert_eq!(linux_name("Control Panel"), None);
     }
 }

@@ -31,10 +31,13 @@ pub const GLOW_WINDOW: &str = "glow";
 pub const GLOW_TITLE: &str = "Gentle Dot Glow";
 /// ⌥⇧Esc ends the session from anywhere (S24.3).
 pub const PANIC_SHORTCUT: &str = "Alt+Shift+Escape";
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
 pub const GRANT_TEXT: &str = "Allow Gentle Dot to see and control this Mac for 30 minutes?";
 #[cfg(windows)]
 pub const GRANT_TEXT: &str = "Allow Gentle Dot to see and control this PC for 30 minutes?";
+// Linux phase 1 captures only: the dialog says so, instead of promising control.
+#[cfg(target_os = "linux")]
+pub const GRANT_TEXT: &str = "Allow Gentle Dot to take a screenshot of this computer's screen for 30 minutes?";
 /// Every computer-control dialog defaults to its refusing button (L75 A2).
 pub const GRANT_CHOICE: Choice = Choice { allow: "Allow", refuse: "Deny" };
 pub const CONFIRM_CHOICE: Choice = Choice { allow: "Allow", refuse: "Cancel" };
@@ -84,7 +87,7 @@ pub struct YoloMenuItem(pub tauri::menu::CheckMenuItem<tauri::Wry>);
 pub struct Computer {
     control: Arc<Control>,
     endpoint: Option<Endpoint>,
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
     desktop: Arc<dyn super::Desktop>,
     #[cfg(any(target_os = "macos", windows))]
     working: Arc<Working>,
@@ -238,11 +241,47 @@ pub fn start(app: &AppHandle, windows: Arc<dyn Windows>) -> Computer {
         }
         Computer { control, endpoint, desktop, working }
     }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
         drop((overlay, marks));
         Computer { control, endpoint: None }
     }
+    // Capture-only Linux backend (S24 Linux): the portal prompts per request, so there is no
+    // glow overlay or working rings (L4) — `NoPreparation` stays the Linux behavior.
+    #[cfg(target_os = "linux")]
+    {
+        drop((overlay, marks));
+        let desktop: Arc<dyn super::Desktop> = Arc::new(super::linux::LinuxDesktop::new());
+        let endpoint = if crate::platform::is_hyprland_compositor() {
+            start_linux_helper(app, control.clone(), desktop.clone())
+                .map_err(|error| eprintln!("gentle-dot: computer control is unavailable: {error}"))
+                .ok()
+        } else {
+            None
+        };
+        watch_timeout(control.clone());
+        Computer { control, endpoint, desktop }
+    }
+}
+
+/// The Linux computer server, without the glow/working extras macOS and Windows pass
+/// (odd/tasks/linux-screenshot-capture.md S5).
+#[cfg(target_os = "linux")]
+fn start_linux_helper(
+    app: &AppHandle,
+    control: Arc<Control>,
+    desktop: Arc<dyn super::Desktop>,
+) -> std::io::Result<Endpoint> {
+    let token = super::server::new_token();
+    let helper = super::mcp::Helper::new(
+        desktop,
+        Arc::new(NativeDialogs { app: app.clone() }),
+        Arc::new(SystemClock),
+        control,
+        token.clone(),
+        std::process::id() as i32,
+    );
+    super::server::start(Arc::new(helper), token)
 }
 
 #[cfg(any(target_os = "macos", windows))]
@@ -498,7 +537,7 @@ fn run_glow(app: AppHandle, window: tauri::WebviewWindow, control: Arc<Control>,
 }
 
 /// Reports the timeout when it happens, not only at the next tool call.
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 fn watch_timeout(control: Arc<Control>) {
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -520,9 +559,9 @@ pub fn computer_endpoint(computer: State<'_, Computer>) -> Option<Endpoint> {
 
 #[tauri::command]
 pub fn computer_permissions(computer: State<'_, Computer>) -> PermissionsAnswer {
-    #[cfg(any(target_os = "macos", windows))]
+    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
     let permissions = computer.desktop.permissions();
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     let permissions = {
         let _ = computer;
         Permissions { accessibility: false, screen_recording: false, screenshots_supported: false, screenshots_unsupported: None }
@@ -546,7 +585,13 @@ pub fn computer_request_permission(kind: PermissionKind) -> Result<(), String> {
     return super::request_permission(kind);
     #[cfg(windows)]
     { let _ = kind; Ok(()) }
-    #[cfg(not(any(target_os = "macos", windows)))]
+    // The Linux portal prompts at request time; there is nothing to pre-grant (S24 Linux).
+    // Accessibility is not granted either: it mirrors whether this Wayland session's compositor
+    // has the virtual input protocols (odd/tasks/linux-input-control.md S4), which no dialog can
+    // change, so asking is a no-op and `permissions` keeps reporting the compositor's answer.
+    #[cfg(target_os = "linux")]
+    { let _ = kind; Ok(()) }
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
         let _ = kind;
         Err("Computer control is only available on macOS.".into())
@@ -610,19 +655,19 @@ pub fn computer_status(computer: State<'_, Computer>) -> StateEvent {
 }
 
 /// Dialogs shown by the app itself (an `NSAlert`, see `alert`), never the webview.
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 struct NativeDialogs {
     app: AppHandle,
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 impl NativeDialogs {
     fn ask(&self, message: &str, choice: Choice) -> bool {
         crate::alert::ask(&self.app, "Gentle Dot", message, choice)
     }
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 impl super::Dialogs for NativeDialogs {
     fn ask_grant(&self) -> bool {
         self.ask(GRANT_TEXT, GRANT_CHOICE)
@@ -642,9 +687,19 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     fn the_grant_dialog_asks_exactly_what_the_spec_says() {
         assert_eq!(GRANT_TEXT, "Allow Gentle Dot to see and control this Mac for 30 minutes?");
+        assert_eq!(GRANT_CHOICE, Choice { allow: "Allow", refuse: "Deny" });
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_linux_grant_dialog_offers_a_screenshot_not_control() {
+        assert_eq!(
+            GRANT_TEXT,
+            "Allow Gentle Dot to take a screenshot of this computer's screen for 30 minutes?"
+        );
         assert_eq!(GRANT_CHOICE, Choice { allow: "Allow", refuse: "Deny" });
     }
 

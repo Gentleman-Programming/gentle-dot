@@ -979,6 +979,12 @@ pub fn run() {
     if let Some(backend) = platform::forced_gdk_backend(|key| std::env::var(key).ok()) {
         std::env::set_var("GDK_BACKEND", backend);
     }
+    // Same boundary: GDK_SCALE must be pinned before GTK starts, or the transparent windows
+    // composite broken (see `gdk_scale_override`).
+    #[cfg(target_os = "linux")]
+    if let Some(scale) = platform::gdk_scale_override(|key| std::env::var(key).ok()) {
+        std::env::set_var("GDK_SCALE", scale);
+    }
     let places_windows = !platform::compositor_places_windows(|key| std::env::var(key).ok());
     // No home folder and no `GENTLE_DOT_DATA_DIR`: there is nowhere to keep anything, and
     // guessing a relative folder is the W22 bug. Fail before a window exists rather than after.

@@ -1766,7 +1766,9 @@ screenshots and computer control is unavailable on this PC."
         assert_eq!(rig.desktop.events(), vec![InputEvent::Key(parse_combo("ctrl+t").unwrap())]);
     }
 
-    const POINTER_ACTIONS: [(&str, fn() -> Value); 3] = [
+    type PointerAction = (&'static str, fn() -> Value);
+
+    const POINTER_ACTIONS: [PointerAction; 3] = [
         ("click", || json!({"x": 10, "y": 10})),
         ("drag", || json!({"fromX": 10, "fromY": 20, "toX": 30, "toY": 40})),
         ("scroll", || json!({"x": 5, "y": 6, "dx": 0, "dy": 120})),

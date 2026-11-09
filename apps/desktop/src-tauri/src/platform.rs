@@ -268,6 +268,12 @@ fn is_hyprland(env: &impl Fn(&str) -> Option<String>) -> bool {
         || set(env, "XDG_CURRENT_DESKTOP").is_some_and(|desktop| desktop.to_lowercase().contains("hyprland"))
 }
 
+/// Whether this Linux session runs under Hyprland, from the real environment: the computer
+/// backend's capability gate (S24 Linux, S4).
+pub fn is_hyprland_compositor() -> bool {
+    is_hyprland(&|name| std::env::var(name).ok())
+}
+
 fn is_wayland(env: &impl Fn(&str) -> Option<String>) -> bool {
     set(env, "WAYLAND_DISPLAY").is_some() || set(env, "XDG_SESSION_TYPE").as_deref() == Some("wayland")
 }
@@ -282,6 +288,21 @@ pub fn forced_gdk_backend(env: impl Fn(&str) -> Option<String>) -> Option<&'stat
         && set(&env, "DISPLAY").is_some()
         && set(&env, "GDK_BACKEND").is_none();
     wanted.then_some("x11")
+}
+
+/// The GDK scale to pin, if any. Desktops like Omarchy export `GDK_SCALE=2` for HiDPI, but with
+/// scale != 1 the transparent Dot and panel windows composite broken on X11/XWayland and land at
+/// doubled coordinates (the scale is for the monitor, which reports its own factor to Tauri).
+/// `GENTLE_DOT_GDK_SCALE` overrides the pin for anyone who really needs another value.
+pub fn gdk_scale_override(env: impl Fn(&str) -> Option<String>) -> Option<String> {
+    if let Some(scale) = set(&env, "GENTLE_DOT_GDK_SCALE") {
+        return Some(scale);
+    }
+    match set(&env, "GDK_SCALE") {
+        // Already 1: keep it (and the environment untouched).
+        Some(scale) if scale.trim() != "1" => Some("1".into()),
+        _ => None,
+    }
 }
 
 /// Whether the app runs as a native Wayland client, where the compositor (Hyprland window
@@ -361,6 +382,24 @@ mod tests {
             &[("WAYLAND_DISPLAY", "wayland-1"), ("DISPLAY", ":1"), ("HYPRLAND_INSTANCE_SIGNATURE", "abc")];
         assert_eq!(forced_gdk_backend(env_of(bare)), None);
         assert!(compositor_places_windows(env_of(bare)));
+    }
+
+    #[test]
+    fn a_global_hidpi_gdk_scale_is_normalized_for_transparent_windows() {
+        // Omarchy sets GDK_SCALE=2 desktop-wide; with scale 2 the transparent Dot and panel
+        // windows composite broken and land at doubled coordinates. The app pins scale 1.
+        let omarchy: &[(&str, &str)] =
+            &[("GDK_BACKEND", "x11"), ("GDK_SCALE", "2")];
+        assert_eq!(gdk_scale_override(env_of(omarchy)), Some("1".to_string()));
+        // No scale set: nothing to do.
+        assert_eq!(gdk_scale_override(env_of(&[("GDK_BACKEND", "x11")])), None);
+        // Already 1: keep it (and the environment untouched).
+        assert_eq!(gdk_scale_override(env_of(&[("GDK_SCALE", "1")])), None);
+        // An explicit app override wins over everything.
+        assert_eq!(
+            gdk_scale_override(env_of(&[("GDK_SCALE", "2"), ("GENTLE_DOT_GDK_SCALE", "1.5")])),
+            Some("1.5".to_string())
+        );
     }
 
     #[test]

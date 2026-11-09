@@ -24,14 +24,26 @@ pub mod session;
 pub mod windows;
 #[cfg(windows)]
 pub(crate) mod win;
+// The Linux desktop's pure parts, tested everywhere: the portal Screenshot response mapping
+// and Hyprland monitor geometry. The Linux backend widens each to `any(linux, test)` once
+// it uses it (odd/tasks/linux-screenshot-capture.md S2).
+#[cfg(any(target_os = "linux", test))]
+pub mod linux;
+// The Linux pointer's and keyboard's pure parts, tested everywhere: what the virtual pointer and
+// the virtual keyboard post for each input event, the virtual screen absolute moves map into, the
+// built-in US keymap the keyboard uploads, and the evdev keycodes its plan sends
+// (odd/tasks/linux-input-control.md S2). The Wayland connection inside connects only on Linux.
+#[cfg(any(target_os = "linux", test))]
+pub mod linux_input;
 // The Windows desktop's pure parts, tested everywhere: UI Automation element mapping, which
 // processes are apps, and what Windows posts for each input event. The Windows desktop backend
-// widens each to `any(windows, test)` once it uses it.
+// widens each to `any(windows, test)` once it uses it. The plan compiles on Linux too, where the
+// pointer reuses its drag and wheel constants.
 #[cfg(any(windows, test))]
 pub mod winaccess;
 #[cfg(any(windows, test))]
 pub mod winapps;
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "linux", test))]
 pub mod winput;
 pub mod working;
 
