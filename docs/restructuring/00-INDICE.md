@@ -20,6 +20,7 @@
 | 13 | [MIGRACION-DESPLIEGUE.md](./13-MIGRACION-DESPLIEGUE.md) | Plan de Migración y Despliegue | ✅ |
 | 14 | [CHECKLIST-AGENTE.md](./14-CHECKLIST-AGENTE.md) | Checklist para el Agente | ✅ |
 | 15 | [REGLAS-ORO.md](./15-REGLAS-ORO.md) | Reglas de Oro - No Romper | ✅ |
+| 16 | [RECONCILIACION-2026-11-08.md](./16-RECONCILIACION-2026-11-08.md) | El stack vs. lo mergeado (4.7.0) + contratos nuevos | ✅ |
 
 ---
 
