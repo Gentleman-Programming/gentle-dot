@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** Internal names that must never reach the user (docs/design.md §5). */
@@ -52,5 +52,7 @@ export function identityArgs(dataDir: string): string[] {
 	mkdirSync(dataDir, { recursive: true });
 	const path = join(dataDir, "identity.md");
 	writeFileSync(path, readFileSync(IDENTITY_SOURCE, "utf8"));
+	// The engine can run as another user, and the mode of a new file depends on the umask.
+	chmodSync(path, 0o644);
 	return ["--append-system-prompt", path];
 }
