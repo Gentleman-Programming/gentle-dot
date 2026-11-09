@@ -33,33 +33,59 @@ jobs:
         with:
           workspaces: apps/desktop/src-tauri
 
-      # `rust-cache` hashes every Cargo.toml, so any dependency change restores an older cache
-      # by prefix, and sherpa-onnx-sys skips its download when `target/sherpa-onnx-prebuilt`
-      # exists even without the library. Drop an incomplete tree so it fetches it again.
-      - name: Drop an incomplete sherpa-onnx prebuilt cache
-        shell: pwsh
-        run: |
-          $root = Join-Path 'apps/desktop/src-tauri/target' 'sherpa-onnx-prebuilt'
-          if (-not (Test-Path $root)) { exit 0 }
-          $lib = Get-ChildItem -Path $root -Recurse -File -Include 'sherpa-onnx-c-api.lib', 'libsherpa-onnx-c-api.a'
-          if (-not $lib) {
-            Remove-Item -Recurse -Force $root
-            Write-Output 'removed an incomplete sherpa-onnx prebuilt cache'
-          }
-
       # `tauri.conf.json` points `frontendDist` at the built UI. A debug build does not embed it,
       # but the folder has to exist, and building the UI here would add the whole pnpm install.
       - name: UI folder for the build script
         shell: pwsh
         run: New-Item -ItemType Directory -Force -Path packages/ui/dist/app | Out-Null
 
+      # sherpa-onnx-sys's build script trusts a restored `sherpa-onnx-prebuilt` tree blindly: a
+      # present `lib` directory short-circuits the download without checking the static libraries
+      # are in it (#92's poisoned-cache class). A partial rust-cache restore then passes
+      # `cargo check` (no linking) and fails `cargo test` with "could not find native static
+      # library sherpa-onnx-c-api". Purge the restored tree so the script downloads it fresh.
+      - name: Purge restored sherpa-onnx prebuilt tree
+        working-directory: apps/desktop/src-tauri
+        shell: pwsh
+        run: Remove-Item -Recurse -Force target/sherpa-onnx-prebuilt -ErrorAction SilentlyContinue
+
       - name: cargo check
         working-directory: apps/desktop/src-tauri
         run: cargo check --locked --all-targets
 
+      # The test binary has ended with STATUS_ACCESS_VIOLATION (0xC0000005) after every test
+      # passed, and nothing explains it yet. Windows Error Reporting writes a full dump of a
+      # crashing process when LocalDumps is configured, so the next occurrence leaves evidence.
+      # The test binary's name carries a hash (`gentle_dot_lib-<hash>.exe`) that no registry key
+      # can wildcard, so this sets the machine-wide default rather than a per-exe key; DumpCount
+      # keeps only the newest few. Settings under HKLM need the runner's administrator token.
+      - name: Collect crash dumps (WER LocalDumps)
+        shell: pwsh
+        run: |
+          $dumps = Join-Path $env:RUNNER_TEMP 'wer-dumps'
+          New-Item -ItemType Directory -Force -Path $dumps | Out-Null
+          $key = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps'
+          New-Item -Path $key -Force | Out-Null
+          New-ItemProperty -Path $key -Name DumpFolder -Value $dumps -PropertyType ExpandString -Force | Out-Null
+          New-ItemProperty -Path $key -Name DumpType -Value 2 -PropertyType DWord -Force | Out-Null
+          New-ItemProperty -Path $key -Name DumpCount -Value 5 -PropertyType DWord -Force | Out-Null
+
       - name: cargo test
         working-directory: apps/desktop/src-tauri
         run: cargo test --locked --lib
+
+      # A dump is only readable next to the binary and symbols that produced it.
+      - name: Upload crash dumps
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-test-crash-dumps
+          path: |
+            ${{ runner.temp }}/wer-dumps
+            apps/desktop/src-tauri/target/debug/deps/gentle_dot_lib-*.exe
+            apps/desktop/src-tauri/target/debug/deps/gentle_dot_lib-*.pdb
+          if-no-files-found: ignore
+          retention-days: 14
 
   app-channel:
     name: Native app channel
@@ -113,5 +139,5 @@ jobs:
 
       # The daemon test files that run on Windows (the runtime build uses the addon built above).
       - name: Daemon tests
-        run: pnpm exec vitest run packages/daemon/test/windows-stop.test.ts packages/daemon/test/windows-app-channel.test.ts packages/daemon/test/app-channel-platform.test.ts packages/daemon/test/app-channel.test.ts packages/daemon/test/app-channel-fd.test.ts packages/daemon/test/windows-app-channel-addon.test.ts packages/daemon/test/process-tree.test.ts packages/daemon/test/supervisor.test.ts packages/daemon/test/runtime.test.ts packages/daemon/test/config.test.ts packages/daemon/test/isolation.test.ts packages/daemon/test/private-memory.test.ts packages/daemon/test/lifecycle.test.ts packages/daemon/test/cli.test.ts packages/daemon/test/runtime-build.test.ts scripts/package/test/lib.test.ts scripts/package/test/package-windows.test.ts
+        run: pnpm exec vitest run packages/daemon/test/windows-stop.test.ts packages/daemon/test/windows-app-channel.test.ts packages/daemon/test/app-channel-platform.test.ts packages/daemon/test/app-channel.test.ts packages/daemon/test/app-channel-fd.test.ts packages/daemon/test/windows-app-channel-addon.test.ts packages/daemon/test/windows-stop-addon.test.ts packages/daemon/test/process-tree.test.ts packages/daemon/test/supervisor.test.ts packages/daemon/test/runtime.test.ts packages/daemon/test/config.test.ts packages/daemon/test/isolation.test.ts packages/daemon/test/private-memory.test.ts packages/daemon/test/lifecycle.test.ts packages/daemon/test/cli.test.ts packages/daemon/test/runtime-build.test.ts scripts/package/test/lib.test.ts scripts/package/test/package-windows.test.ts
 
