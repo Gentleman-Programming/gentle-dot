@@ -43,14 +43,14 @@ pub struct ModelSpec {
 }
 
 impl ModelSpec {
-    /// The official sherpa-onnx release asset (tag `asr-models`), published 2025-08-16. The
-    /// SHA-256 was computed from the downloaded asset on 2026-10-09 and matches the digest
+    /// The official sherpa-onnx release asset (tag `asr-models`), replaced 2026-11-07.
+    /// Its SHA-256 was computed from the downloaded replacement and matches the digest
     /// GitHub lists for it.
     pub fn parakeet() -> Self {
         ModelSpec {
             url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2".into(),
-            sha256: "5793d0fd397c5778d2cf2126994d58e9d56b1be7c04d13c7a15bb1b4eafb16bf".into(),
-            size: 487_170_055,
+            sha256: "1495e91b59d7fc53ddca91f3431758ec99f8fa253fdb0e1e851be0f72b14b0f9".into(),
+            size: 487_211_443,
             archive_root: "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8".into(),
             dir: "parakeet-tdt-0.6b-v3-int8".into(),
             files: ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"].map(String::from).to_vec(),
@@ -665,8 +665,8 @@ mod tests {
             spec.url,
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2"
         );
-        assert_eq!(spec.sha256, "5793d0fd397c5778d2cf2126994d58e9d56b1be7c04d13c7a15bb1b4eafb16bf");
-        assert_eq!(spec.size, 487_170_055);
+        assert_eq!(spec.size, 487_211_443);
+        assert_eq!(spec.sha256, "1495e91b59d7fc53ddca91f3431758ec99f8fa253fdb0e1e851be0f72b14b0f9");
         assert_eq!(spec.archive_root, "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8");
         assert_eq!(spec.dir, "parakeet-tdt-0.6b-v3-int8");
         assert_eq!(spec.files, FILES.map(String::from).to_vec());
@@ -744,10 +744,25 @@ mod tests {
         let mut spec = spec_for(&body);
         spec.size += 1;
         let rig = rig("size", body, spec, None);
-        rig.manager.download().unwrap();
-        let last = rig.until_done().pop().unwrap();
-        assert_eq!(last.state, ModelState::Failed);
-        assert!(rig.leftovers().is_empty());
+        // A failed download must release the manager so the user can retry.
+        for _ in 0..2 {
+            rig.manager.download().unwrap();
+            let last = rig.until_done().pop().unwrap();
+            assert_eq!(last, ModelEvent::failed("The download was not the expected size."));
+            assert_eq!(rig.manager.installed(), None);
+            assert_eq!(
+                rig.manager.status(),
+                ModelStatus {
+                    installed: false,
+                    bytes: None,
+                    downloading: false,
+                    received: None,
+                    total: None,
+                    engine: EngineName::Apple,
+                }
+            );
+            assert!(rig.leftovers().is_empty());
+        }
         let _ = std::fs::remove_dir_all(&rig.root);
     }
 
@@ -898,7 +913,7 @@ mod tests {
         };
         eprintln!("installed in {:?}: {:?}", started.elapsed(), manager.status());
         assert_eq!(last.state, ModelState::Installed, "{:?}", last.message);
-        assert_eq!(manager.status().bytes, Some(670_478_772));
+        assert_eq!(manager.status().bytes, Some(670_576_784));
         let _ = std::fs::remove_dir_all(&root);
     }
 
