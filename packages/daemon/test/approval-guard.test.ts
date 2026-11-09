@@ -316,6 +316,38 @@ describe("credential and control files (B2)", () => {
 			expect(decide(at("bash", { command }), guarded), command).toEqual({ action: "pass" });
 		}
 	});
+
+	it("lets commands name the engine's workspace inside the data folder, where attachments are saved", () => {
+		const { guarded } = credentialTree();
+		const posix = "/home/me/.gentle-dot/workspace";
+		const windows = "C:\\Users\\me\\.gentle-dot\\workspace";
+		const bash = (cwd: string, command: string) =>
+			decide({ toolName: "bash", input: { command }, cwd }, guarded).action;
+		for (const [cwd, command] of [
+			[posix, "pdftotext -layout '/home/me/.gentle-dot/workspace/uploads/u_1/Manual - Windows 11.pdf' -"],
+			[posix, "cat ~/.gentle-dot/workspace/notes.md"],
+			[
+				windows,
+				`unzip -p "C:\\Users\\me\\.gentle-dot\\workspace\\uploads\\u_1\\Manual.docx" word/document.xml`,
+			],
+			[windows, "pdftotext 'C:/Users/me/.Gentle-Dot/Workspace/uploads/u_1/Manual.pdf' -"],
+		] as const) {
+			expect(bash(cwd, command), command).toBe("pass");
+		}
+		for (const [cwd, command] of [
+			// Climbing out of the workspace, another folder of the data folder, or a look-alike name.
+			[posix, "cat ~/.gentle-dot/workspace/../sessions/a.jsonl"],
+			[posix, "cat ~/.gentle-dot/workspace/notes.md ~/.gentle-dot/state.json"],
+			[posix, "cat ~/.gentle-dot/workspace-old/notes.md"],
+			[windows, "type C:\\Users\\me\\.gentle-dot\\workspace\\..\\sessions\\a.jsonl"],
+			// A protected file is still blocked by name, also inside the workspace.
+			[posix, "cat ~/.gentle-dot/workspace/uploads/u_1/mcp-auth.json"],
+			// A workspace outside the data folder lifts nothing.
+			["/data/workspace", "cat ~/.gentle-dot/workspace/notes.md"],
+		] as const) {
+			expect(bash(cwd, command), command).toBe("block");
+		}
+	});
 });
 
 type Handler = (event: Record<string, unknown>, ctx: unknown) => Promise<unknown> | unknown;
