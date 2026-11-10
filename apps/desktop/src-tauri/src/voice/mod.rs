@@ -35,6 +35,8 @@ pub mod parakeet;
 #[cfg(any(windows, test))]
 #[allow(dead_code)]
 mod speech_wave;
+#[cfg(windows)]
+pub mod windows_speech;
 #[cfg(unix)]
 pub mod pipe;
 #[cfg_attr(not(windows), allow(dead_code))]
