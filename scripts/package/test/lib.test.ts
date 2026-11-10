@@ -38,7 +38,7 @@ describe("host target", () => {
 	it("maps Node's platform and arch to a target", () => {
 		expect(hostTarget("darwin", "arm64")).toBe("darwin-arm64");
 		expect(hostTarget("linux", "x64")).toBe("linux-x64");
-		expect(hostTarget("darwin", "x64")).toBeUndefined();
+		expect(hostTarget("darwin", "x64")).toBe("darwin-x64");
 	});
 
 	it("refuses to stage another platform's runtime, naming the way out", () => {

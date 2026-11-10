@@ -18,7 +18,13 @@ export function inventory(root, relative = '', result = {}) {
   }
   return result;
 }
-export function seal(root) {
+class WindowsRuntimeTargetError extends Error {}
+export function windowsPlatform(target = 'windows-x64') {
+  if (!['windows-x64', 'windows-arm64'].includes(target)) throw new WindowsRuntimeTargetError(`Unsupported Windows runtime target: ${target}`);
+  return target.replace('windows-', 'win32-');
+}
+export function seal(root, target) {
+  const platform = windowsPlatform(target);
   const files = inventory(root);
   for (const path of REQUIRED) if (!files[path]) throw new Error(`Missing runtime file: ${path}`);
   const native = Object.keys(files).filter(p => p.startsWith('daemon/node_modules/gentle-pi/.gentle-ai/') && p.endsWith('/gentle-ai.exe'));
@@ -26,20 +32,29 @@ export function seal(root) {
   for (const path of ['node/node.exe', 'bin/engram.exe', 'bin/pi.exe', 'bin/private-storage.exe', ...native]) {
     if (readFileSync(join(root,path)).subarray(0,2).toString() !== 'MZ') throw new Error(`Not a Windows executable: ${path}`);
   }
-  const data = {schema:1, platform:'win32-x64', files};
+  const data = {schema:1, platform, files};
   writeFileSync(join(root,MANIFEST),JSON.stringify(data,null,2)+'\n');
   return data;
 }
-export function verify(root, expected) {
+export function verify(root, expected, target) {
+  const platform = windowsPlatform(target);
+  if (expected.schema !== 1 || !['win32-x64', 'win32-arm64'].includes(expected.platform)) throw new Error('Invalid Windows runtime manifest');
+  if (expected.platform !== platform) throw new WindowsRuntimeTargetError(`Windows runtime target mismatch: expected ${platform}, got ${expected.platform}`);
   const actual=inventory(root);
-  if (expected.schema !== 1 || expected.platform !== 'win32-x64') throw new Error('Invalid Windows runtime manifest');
   for (const key of new Set([...Object.keys(expected.files), ...Object.keys(actual)])) {
     if (actual[key] !== expected.files[key]) throw new Error(`Runtime integrity mismatch: ${key}`);
   }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  const [mode,root,reference]=process.argv.slice(2);
-  if (mode==='seal' && root) seal(root);
-  else if (mode==='verify' && root && reference) verify(root,JSON.parse(readFileSync(reference,'utf8')));
-  else throw new Error('Usage: runtime-integrity.mjs seal ROOT | verify ROOT REFERENCE_MANIFEST');
+  try {
+    const [mode, root, ...args] = process.argv.slice(2);
+    if (mode === 'seal' && root && args.length <= 1) seal(root, args[0]);
+    else if (mode === 'verify' && root && args[0] && args.length <= 2)
+      verify(root, JSON.parse(readFileSync(args[0], 'utf8')), args[1]);
+    else throw new Error('Usage: runtime-integrity.mjs seal ROOT [TARGET] | verify ROOT REFERENCE_MANIFEST [TARGET]');
+  } catch (error) {
+    if (!(error instanceof WindowsRuntimeTargetError)) throw error;
+    console.error(error.message);
+    process.exitCode = 2;
+  }
 }

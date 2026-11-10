@@ -10,14 +10,14 @@ export const DIRECTORY_LIMIT = 247;
 const manifestName = 'WINDOWS-INTEGRITY.json';
 const safeKey = key => typeof key === 'string' && key.split('/').every(part =>
   part && part !== '.' && part !== '..' && !/[<>:"\\|?*\x00-\x1f]/.test(part) && !/[. ]$/.test(part));
-export function stagedBudget(root) {
+export function stagedBudget(root, target) {
   const manifest = JSON.parse(readFileSync(resolve(root, manifestName), 'utf8'));
-  if (manifest.schema !== 1 || manifest.platform !== 'win32-x64' ||
+  if (manifest.schema !== 1 ||
       !manifest.files || Array.isArray(manifest.files) || typeof manifest.files !== 'object' ||
       !Object.keys(manifest.files).length || Object.entries(manifest.files).some(([key, hash]) =>
         !safeKey(key) || !/^[a-f0-9]{64}$/.test(hash))) throw new Error('Invalid Windows runtime manifest');
   // Reuse the inventory verifier: never derive permission from a stale/fake manifest.
-  verify(root, manifest);
+  verify(root, manifest, target);
   const files = [...Object.keys(manifest.files).map(key => `runtime/${key}`),
     `runtime/${manifestName}`, 'gentle-dot.exe', 'uninstall.exe'];
   const directories = new Set(['runtime']);
@@ -158,10 +158,10 @@ SectionEnd
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
-    const [mode, root, target] = process.argv.slice(2);
-    if (!root || !target || !['hook', 'destination'].includes(mode)) throw new Error('Usage: installer-path-guard.mjs hook STAGED_ROOT OUTPUT.nsh | destination STAGED_ROOT ABSOLUTE_DESTINATION');
-    const budget = stagedBudget(root);
-    if (mode === 'hook') writeFileSync(target, renderHook(budget));
-    else console.log(destination(target, budget));
+    const [mode, root, output, target, ...extra] = process.argv.slice(2);
+    if (!root || !output || extra.length || !['hook', 'destination'].includes(mode)) throw new Error('Usage: installer-path-guard.mjs hook STAGED_ROOT OUTPUT.nsh [TARGET] | destination STAGED_ROOT ABSOLUTE_DESTINATION [TARGET]');
+    const budget = stagedBudget(root, target);
+    if (mode === 'hook') writeFileSync(output, renderHook(budget));
+    else console.log(destination(output, budget));
   } catch (error) { console.error(error.message); process.exitCode = 2; }
 }

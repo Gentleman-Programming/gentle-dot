@@ -73,7 +73,7 @@ test('public helper CLI preserves valid paths, rejects before writes, and docume
   assert.equal(rejected.stderr, `Gentle Dot destination is too long for this staged payload. Choose a shorter local installation folder (maximum ${stagedBudget(root).maxDestination} UTF-16 characters, excluding trailing separators) and run setup again.\n`);
   const usage = invoke([]);
   assert.equal(usage.status, 2); assert.equal(usage.stdout, '');
-  assert.equal(usage.stderr, 'Usage: installer-path-guard.mjs hook STAGED_ROOT OUTPUT.nsh | destination STAGED_ROOT ABSOLUTE_DESTINATION\n');
+  assert.equal(usage.stderr, 'Usage: installer-path-guard.mjs hook STAGED_ROOT OUTPUT.nsh [TARGET] | destination STAGED_ROOT ABSOLUTE_DESTINATION [TARGET]\n');
   assert.equal(readFileSync(join(root, 'ui/index.html'), 'utf8'), 'fixture');
 });
 test('native NSIS boundary: reject before sentinel changes; preserve valid extraction', { skip: process.platform !== 'win32' }, async () => {
