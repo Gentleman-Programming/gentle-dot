@@ -1,5 +1,5 @@
 import type { ClientMessage } from "@gentle-dot/protocol";
-import { type DragEvent, useState } from "react";
+import { type DragEvent, useEffect, useState } from "react";
 import { openUrl as openExternal } from "../desktop.ts";
 import { activeTitle, type DotAction, type DotState, isBusy, needsAccount } from "../store.ts";
 import type { Uploader } from "../uploads.ts";
@@ -137,7 +137,14 @@ export function ChatSurface({
 		: {};
 	/** A switch that waits for the user to confirm stopping the running answer. */
 	const [pendingSwitch, setPendingSwitch] = useState<SwitchMessage | undefined>(undefined);
+	useEffect(() => {
+		if (!state.features.conversations) {
+			setShowConversations(false);
+			setPendingSwitch(undefined);
+		}
+	}, [state.features.conversations]);
 	const switchTo = (message: SwitchMessage) => {
+		if (!state.features.conversations) return;
 		setShowConversations(false);
 		if (isBusy(state.agentState)) setPendingSwitch(message);
 		else send(message);
@@ -284,7 +291,7 @@ export function ChatSurface({
 
 			{settingsShown ? (
 				<main className="chat-body">
-					<SettingsPanel close={() => setShowSettings(false)} />
+					<SettingsPanel close={() => setShowSettings(false)} state={state} send={send} />
 				</main>
 			) : null}
 
@@ -369,7 +376,7 @@ export function ChatSurface({
 				</div>
 			) : null}
 
-			{pendingSwitch ? (
+			{conversations && pendingSwitch ? (
 				<div className="switch-confirm" role="alertdialog" aria-label="Stop and switch?">
 					<p>The assistant is still answering. Stop it and open the other conversation?</p>
 					<div className="switch-actions">

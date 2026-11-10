@@ -13,6 +13,7 @@ const h = vi.hoisted(() => ({
 	memoryError: undefined as string | undefined,
 	setResult: undefined as undefined | ((shortcut: string) => Promise<unknown>),
 	invoke: vi.fn(),
+	send: vi.fn(),
 	state: undefined as unknown as DotState,
 }));
 
@@ -32,7 +33,7 @@ vi.mock("../src/desktop.ts", async (importOriginal) => ({
 }));
 
 vi.mock("../src/useDot.ts", () => ({
-	useDot: () => ({ state: h.state, send: () => {}, dismiss: () => {}, dispatch: () => {} }),
+	useDot: () => ({ state: h.state, send: h.send, dismiss: () => {}, dispatch: () => {} }),
 }));
 
 const MAC_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)";
@@ -61,6 +62,7 @@ async function startRecording() {
 }
 
 beforeEach(() => {
+	h.send = vi.fn();
 	h.tauri = true;
 	h.shortcut = "Alt+Space";
 	h.memory = "shared";
@@ -200,6 +202,26 @@ describe("the Settings screen (S33.1)", () => {
 		h.shortcut = "Shift+Super+K";
 		await openSettings();
 		expect(await screen.findByText("Shift+Super+K")).toBeInTheDocument();
+	});
+});
+
+describe("Separate conversations", () => {
+	it("sends an explicit preference, waits for authoritative features and disables while disconnected", async () => {
+		const view = await renderApp("?surface=panel");
+		await openPanelMenu();
+		await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+		const toggle = screen.getByRole("switch", { name: "Separate conversations" });
+		expect(toggle).not.toBeChecked();
+		await userEvent.click(toggle);
+		expect(h.send.mock.calls).toEqual([[{ type: "settings_conversations_set", enabled: true }]]);
+		expect(toggle).not.toBeChecked();
+		h.state = { ...h.state, features: { conversations: true } };
+		const { App } = await import("../src/App.tsx");
+		view.rerender(<App />);
+		expect(screen.getByRole("switch", { name: "Separate conversations" })).toBeChecked();
+		h.state = { ...h.state, connection: "closed" };
+		view.rerender(<App />);
+		expect(screen.getByRole("switch", { name: "Separate conversations" })).toBeDisabled();
 	});
 });
 

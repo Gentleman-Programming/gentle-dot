@@ -146,9 +146,17 @@ export function PanelMenuDrawer({
 								}}
 							/>
 						</>
-					) : (
-						<Row icon={<ConversationsIcon />} label="Conversations" hint="Pronto" disabled />
-					)}
+					) : settings && openSettings ? (
+						<Row
+							icon={<ConversationsIcon />}
+							label="Conversations"
+							hint="Settings"
+							onClick={() => {
+								onClose();
+								openSettings();
+							}}
+						/>
+					) : null}
 				</section>
 				<section>
 					<div className="menu-group">Integrations</div>

@@ -9,8 +9,10 @@ import {
 	type ShortcutInfo,
 	saveShortcut,
 } from "../shortcut.ts";
+import type { DotState } from "../store.ts";
 import { setVoiceLanguage, VOICE_LANGUAGES, voiceLanguage } from "../voice-language.ts";
 import { SelectMenu } from "./SelectMenu.tsx";
+import type { Send } from "./types.ts";
 import "../settings.css";
 
 type Status =
@@ -27,7 +29,7 @@ function reasonOf(error: unknown, fallback = "Gentle Dot could not change the sh
 }
 
 /** The desktop panel's settings (S33.1): the panel shortcut, the memory mode, and the voice language. */
-export function SettingsPanel({ close }: { close: () => void }) {
+export function SettingsPanel({ close, state, send }: { close: () => void; state: DotState; send: Send }) {
 	const [language, setLanguage] = useState(() => voiceLanguage() ?? "");
 	const mac = isMac();
 	const show = (accelerator: string) => formatShortcut(accelerator, mac);
@@ -183,6 +185,35 @@ export function SettingsPanel({ close }: { close: () => void }) {
 				>
 					Reset to default
 				</button>
+			</section>
+
+			<section className="provider-section" aria-labelledby="settings-conversations">
+				<h3 id="settings-conversations">Conversations</h3>
+				<p className="muted">
+					Choose separate conversations or one continuous chat. Changes apply right away without interrupting
+					the assistant. Your current chat and saved conversations are kept.
+				</p>
+				<div className="shortcut-row">
+					<button
+						id="settings-separate-conversations"
+						type="button"
+						role="switch"
+						className="switch"
+						aria-checked={state.features.conversations}
+						aria-labelledby="settings-separate-conversations-label"
+						disabled={state.connection !== "open"}
+						onClick={() => {
+							if (state.connection === "open")
+								send({ type: "settings_conversations_set", enabled: !state.features.conversations });
+						}}
+					>
+						<span className="switch-knob" aria-hidden="true" />
+					</button>
+					<label id="settings-separate-conversations-label" htmlFor="settings-separate-conversations">
+						Separate conversations
+					</label>
+				</div>
+				<p className="muted">Saved for this assistant until you change it again.</p>
 			</section>
 
 			<section className="provider-section" aria-labelledby="settings-memory">

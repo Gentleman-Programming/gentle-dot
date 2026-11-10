@@ -141,13 +141,15 @@ describe("the panel menu drawer", () => {
 		expect(screen.getByRole("button", { name: "Profiles" }).className).not.toContain("active");
 	});
 
-	it("gates the conversation rows: without the feature only a Pronto row shows", async () => {
+	it("routes the off conversation row to Settings instead of promising Pronto", async () => {
 		render(<Harness initial={single} send={vi.fn()} />);
 		await openMenu();
 		expect(screen.queryByRole("button", { name: "New conversation" })).not.toBeInTheDocument();
 		const conversations = screen.getByRole("button", { name: /Conversations/ });
-		expect(conversations).toBeDisabled();
-		expect(conversations.textContent).toContain("Pronto");
+		expect(conversations).toBeEnabled();
+		expect(conversations.textContent).toContain("Settings");
+		await userEvent.click(conversations);
+		expect(screen.getByRole("region", { name: "Settings" })).toBeInTheDocument();
 	});
 
 	it("keeps the drawer honest to the variant: no window rows in the browser", async () => {

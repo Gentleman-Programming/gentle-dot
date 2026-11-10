@@ -136,6 +136,9 @@ struct RoseMenuItem(MenuItem<tauri::Wry>);
 /// The tray's "Open" item, whose accelerator label follows the shortcut (S33.3).
 struct OpenMenuItem(MenuItem<tauri::Wry>);
 
+/// Always present, disabled until the Dot reports connected daemon features.
+struct NewConversationMenuItem(MenuItem<tauri::Wry>);
+
 /// On native Wayland the desktop binds `gentle-dot --toggle` itself.
 const DESKTOP_OWNS_SHORTCUTS: &str =
     "On this desktop, global shortcuts are set in the system keyboard settings: bind `gentle-dot --toggle` there.";
@@ -500,12 +503,22 @@ fn label_tray_open(app: &AppHandle, shortcut: &str) {
 }
 
 #[tauri::command]
-fn set_dot_state(app: AppHandle, state: String) -> CommandResult {
+fn set_dot_state(
+    app: AppHandle,
+    state: String,
+    conversations_enabled: Option<bool>,
+) -> CommandResult {
     let status = tray_status(&state).ok_or_else(|| format!("unknown state `{state}`"))?;
     let tray = app.tray_by_id(TRAY).ok_or("tray icon is missing")?;
     tray.set_tooltip(Some(&status.tooltip)).map_err(err)?;
     tray.set_icon(Some(Image::from_bytes(status.glyph.image(Os::CURRENT)).map_err(err)?)).map_err(err)?;
-    tray.set_icon_as_template(is_template(Os::CURRENT)).map_err(err)
+    tray.set_icon_as_template(is_template(Os::CURRENT)).map_err(err)?;
+    if let Some(enabled) = conversations_enabled {
+        if let Some(item) = app.try_state::<NewConversationMenuItem>() {
+            item.0.set_enabled(enabled).map_err(err)?;
+        }
+    }
+    Ok(())
 }
 
 /// The window frame in points. Tao reports it in pixels of the window's current scale factor.
@@ -767,21 +780,12 @@ fn build_windows(
     Ok(())
 }
 
-/// Whether the conversations list is on, read like the daemon reads it (`GENTLE_DOT_CONVERSATIONS=1`).
-fn conversations_on(value: Option<&str>) -> bool {
-    value == Some("1")
-}
-
-/// The tray menu, top to bottom (`-` is a separator). "New conversation" only exists with the
-/// conversations list on; in the single continuous chat there is nothing new to start.
+/// The tray menu, top to bottom (`-` is a separator). "New conversation" always exists,
+/// initially disabled; only the Dot's live daemon features enable it.
 /// "Stop computer control" and "Yolo mode" exist where computer control does (macOS, S24.3, S24.9).
 /// "rose" hides or shows the floating Dot (S26.1).
-fn tray_menu_ids(conversations: bool, computer_control: bool) -> Vec<&'static str> {
-    let mut ids = vec!["open"];
-    if conversations {
-        ids.push("new");
-    }
-    ids.extend(["browser", "rose"]);
+fn tray_menu_ids(computer_control: bool) -> Vec<&'static str> {
+    let mut ids = vec!["open", "new", "browser", "rose"];
     if computer_control {
         ids.extend(["computer-stop", "computer-yolo"]);
     }
@@ -796,11 +800,14 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tau
         .or_else(|_| MenuItem::with_id(app, "open", "Open", true, None::<&str>))?;
     app.manage(OpenMenuItem(open.clone()));
     let menu = Menu::new(app)?;
-    let conversations = conversations_on(std::env::var("GENTLE_DOT_CONVERSATIONS").ok().as_deref());
-    for id in tray_menu_ids(conversations, cfg!(any(target_os = "macos", windows))) {
+    for id in tray_menu_ids(cfg!(any(target_os = "macos", windows))) {
         match id {
             "open" => menu.append(&open)?,
-            "new" => menu.append(&MenuItem::with_id(app, "new", "New conversation", true, None::<&str>)?)?,
+            "new" => {
+                let item = MenuItem::with_id(app, "new", "New conversation", false, None::<&str>)?;
+                menu.append(&item)?;
+                app.manage(NewConversationMenuItem(item));
+            }
             "browser" => menu.append(&MenuItem::with_id(app, "browser", "Open in browser", true, None::<&str>)?)?,
             "rose" => {
                 let item = MenuItem::with_id(app, "rose", rose_menu_label(rose_hidden), true, None::<&str>)?;
@@ -1128,17 +1135,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tray_hides_new_conversation_in_the_single_chat() {
+    fn tray_keeps_new_conversation_present_before_features_arrive() {
         assert_eq!(
-            tray_menu_ids(false, false),
-            vec!["open", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
+            tray_menu_ids(false),
+            vec!["open", "new", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
         );
     }
 
     #[test]
     fn tray_shows_new_conversation_with_the_conversations_list() {
         assert_eq!(
-            tray_menu_ids(true, false),
+            tray_menu_ids(false),
             vec!["open", "new", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
         );
     }
@@ -1146,8 +1153,8 @@ mod tests {
     #[test]
     fn tray_offers_stop_computer_control_where_it_exists() {
         assert_eq!(
-            tray_menu_ids(false, true),
-            vec!["open", "browser", "rose", "computer-stop", "computer-yolo", "-", "restart", "autostart", "-", "quit"]
+            tray_menu_ids(true),
+            vec!["open", "new", "browser", "rose", "computer-stop", "computer-yolo", "-", "restart", "autostart", "-", "quit"]
         );
     }
 
@@ -1221,11 +1228,29 @@ mod tests {
     }
 
     #[test]
-    fn conversations_flag_reads_like_the_daemon() {
-        assert!(conversations_on(Some("1")));
-        assert!(!conversations_on(None));
-        assert!(!conversations_on(Some("0")));
-        assert!(!conversations_on(Some("true")));
+    fn tray_new_is_initially_disabled_and_updates_from_optional_live_features() {
+        // Structural contract: no display server or user desktop is opened by this test.
+        let source = include_str!("shell.rs");
+        let build = source
+            .split("fn build_tray(")
+            .nth(1)
+            .unwrap()
+            .split("fn rose_hidden_state")
+            .next()
+            .unwrap();
+        assert!(build.contains("\"New conversation\", false"));
+        assert!(build.contains("app.manage(NewConversationMenuItem(item))"));
+        assert!(!build.contains("GENTLE_DOT_CONVERSATIONS"));
+        let command = source
+            .split("fn set_dot_state(")
+            .nth(1)
+            .unwrap()
+            .split("fn rect_of")
+            .next()
+            .unwrap();
+        assert!(command.contains("conversations_enabled: Option<bool>"));
+        assert!(command.contains("if let Some(enabled) = conversations_enabled"));
+        assert!(command.contains("item.0.set_enabled(enabled)"));
     }
 
     #[test]

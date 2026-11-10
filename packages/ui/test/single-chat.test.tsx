@@ -42,8 +42,7 @@ describe("one continuous chat", () => {
 		expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Gentle Dot");
 		expect(container.querySelector(".chat-header .rose-glyph")).not.toBeNull();
 		await openPanelMenu();
-		const pronto = screen.getByRole("button", { name: /Conversations/ });
-		expect(pronto).toBeDisabled();
+		expect(screen.queryByRole("button", { name: /Conversations/ })).toBeNull();
 		for (const name of ["Accounts", "Profiles", "Hide"]) {
 			expect(screen.getByRole("button", { name })).toBeInTheDocument();
 		}
@@ -55,6 +54,29 @@ describe("one continuous chat", () => {
 		expect(screen.getByRole("button", { name: "New conversation" })).toBeInTheDocument();
 		expect(screen.getByRole("button", { name: "Conversations" })).toBeInTheDocument();
 		expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("New conversation");
+	});
+});
+
+describe("live disable", () => {
+	it("clears the list and pending Stop-and-switch without sending or reviving them", async () => {
+		const send = vi.fn();
+		const props = { variant: "web" as const, send, dismiss: vi.fn() };
+		const busy = { ...withList, agentState: "thinking" as const };
+		const view = render(<ChatSurface {...props} state={busy} />);
+		await openPanelMenu();
+		await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
+		expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+		view.rerender(<ChatSurface {...props} state={{ ...busy, features: { conversations: false } }} />);
+		expect(screen.queryByRole("alertdialog")).toBeNull();
+		view.rerender(<ChatSurface {...props} state={busy} />);
+		expect(screen.queryByRole("alertdialog")).toBeNull();
+		await openPanelMenu();
+		await userEvent.click(screen.getByRole("button", { name: "Conversations" }));
+		expect(screen.getByRole("navigation", { name: "Earlier conversations" })).toBeInTheDocument();
+		view.rerender(<ChatSurface {...props} state={single} />);
+		view.rerender(<ChatSurface {...props} state={busy} />);
+		expect(screen.queryByRole("navigation", { name: "Earlier conversations" })).toBeNull();
+		expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "new_conversation" }));
 	});
 });
 
