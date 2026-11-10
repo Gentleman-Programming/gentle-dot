@@ -35,7 +35,7 @@ test('parsed workflow is manual or exact-branch/read-only QA with a fail-closed 
  const steps = native.steps;
  const build = steps.find(s => s.run === '${{ matrix.build }}');
  const collect = steps.find(s => s.run?.startsWith('node scripts/package/ci-native.mjs collect'));
- const upload = steps.find(s => s.uses === 'actions/upload-artifact@v4');
+ const upload = steps.find(s => s.uses === 'actions/upload-artifact@v4' && !s.if);
  const plan = steps.find(s => s.id === 'plan');
  assert.ok(steps.indexOf(plan) < steps.indexOf(build));
  assert.ok(steps.indexOf(build) < steps.indexOf(collect));
@@ -78,6 +78,16 @@ test('installer checks consume the matching metadata and state unsupported ARM64
    assert.equal(smoke.if, "matrix.target == 'windows-x64'");
    assert.match(smoke.run, /plan.installers\[0\].directory/);
    assert.match(smoke.run, /Count -ne 1/);
+   assert.match(smoke.run, /-DiagnosticsPath "\$env:RUNNER_TEMP\/windows-smoke-diagnostics.json"/);
+   const diagnostics = steps.find(s => s.name === 'Sanitized Windows startup diagnostics');
+   assert.deepEqual(diagnostics, {
+    name: 'Sanitized Windows startup diagnostics',
+    if: "failure() && matrix.target == 'windows-x64'",
+    uses: 'actions/upload-artifact@v4',
+    with: { name: 'windows-x64-startup-diagnostics', path: '${{ runner.temp }}/windows-smoke-diagnostics.json', 'if-no-files-found': 'warn', 'retention-days': 7 },
+   });
+   assert.equal(steps.filter(s => s.uses === 'actions/upload-artifact@v4').length, 2);
+   assert.ok(steps.indexOf(diagnostics) > steps.indexOf(smoke));
   } else {
    const unsupported = steps.find(s => s.if === "matrix.target == 'windows-arm64'");
    assert.match(unsupported.run, /UNSUPPORTED installed smoke/);

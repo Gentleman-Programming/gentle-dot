@@ -89,6 +89,41 @@ Missing upstream checksums, installers or producer runtime manifests fail the jo
 there is no `continue-on-error` fallback. ARM64 runner/tool availability is still a
 native CI prerequisite, not proven by the structural tests.
 
+### Sanitized Windows startup diagnostics
+
+`smoke-install.ps1 -Installer <setup.exe> [-DiagnosticsPath <new-file.json>]`
+keeps the old invocation inert when the optional path is omitted. The opt-in file
+is UTF-8 JSON, at most 1024 bytes, created without overwriting an existing file.
+Only the existing smoke's newly created isolated CI data directory is used; no
+personal/local profile, credential file or log is read for diagnostics.
+
+| Fields | Allowed evidence |
+| --- | --- |
+| `schema`, `outcome` | Version 1; success, timeout, earlyexit, agenterror, or other |
+| `processAlive`, `exitCode`, `pollCount` | Pre-cleanup boolean/nullable integer and bounded poll count |
+| `listenerReachable`, `httpStatus` | HTTP response observed, nullable numeric status; null means unavailable, not proof of no listener |
+| `healthShape`, `healthOk` | missing/array/object/other; nullable boolean |
+| `agentState` | starting/idle/thinking/working/needs_you/restarting/error/unknown |
+| `errorKind` | none/timeout/transport/other, selected by exception type only |
+
+Successful REST requests establish reachability but their status is unavailable
+from the existing request helper; failed HTTP responses may expose a numeric status.
+Unknown strings become fixed enums. Arbitrary content is never recursively redacted
+or serialized: no stdout/stderr, app/daemon logs, health error text, exception
+messages, URLs, headers, tokens, profiles, environment, usernames, paths or commands.
+Unavailable metadata stays null/unknown; write failures emit only a fixed warning
+and do not replace the original smoke failure. No secret fallback is attempted.
+
+Only the Windows x64 job requests `$RUNNER_TEMP/windows-smoke-diagnostics.json`;
+on failure it uploads that single file for seven days, never a profile/log/build
+glob. A failure before the smoke runs can leave no file. Success creates the file
+but does not upload this diagnostic artifact. The 240-second idle deadline,
+success rules, cleanup, reinstall/uninstall ordering and ARM64 unsupported boundary
+are unchanged. This is diagnostic instrumentation, **not an application fix**:
+run `42847087853` timed out after building x64 NSIS; the startup cause remains
+unknown. A new native QA run is still needed; pure helper/parsed-workflow tests
+cannot establish installed readiness or effective Stop.
+
 ### CI helper commands
 
 These commands never build, install, download, activate or publish anything:

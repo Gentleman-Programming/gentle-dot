@@ -3,10 +3,17 @@
 Runs the explicitly authorized NSIS lifecycle with repo-local isolated test data.
 .PARAMETER Installer
 Path to the setup executable. Destination must fit the verified staged runtime budget.
+.PARAMETER DiagnosticsPath
+Optional new JSON file for bounded sanitized startup metadata (no logs or profile contents).
+Omit to retain the existing invocation without diagnostic output.
 #>
-param([Parameter(Mandatory=$true)][string]$Installer)
+param([Parameter(Mandatory=$true)][string]$Installer, [string]$DiagnosticsPath = '')
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$outcome = 'other'; $pollCount = 0; $health = $null
+$alive = $null; $exitCode = $null; $reachable = $null; $httpStatus = $null; $errorKind = 'none'
+try {
+if ($DiagnosticsPath) { Import-Module "$PSScriptRoot/smoke-diagnostics.psm1" -Force }
 $repo = (Resolve-Path "$PSScriptRoot/../..").Path
 $scratch = Join-Path $repo ('build/windows/qa-' + [guid]::NewGuid().ToString('N'))
 $destination = Join-Path $scratch 'Installed Gentle Dot'
@@ -51,17 +58,42 @@ try {
     $deadline = [DateTime]::UtcNow.AddSeconds(240)
     $ready = $false
     while ([DateTime]::UtcNow -lt $deadline) {
-        if ($app.HasExited) { throw "Installed app exited early: $($app.ExitCode)" }
+        if ($app.HasExited) { $outcome = 'earlyexit'; throw "Installed app exited early: $($app.ExitCode)" }
+        $pollCount++
+        $httpStatus = $null; $reachable = $null
         try {
             $health = Invoke-RestMethod "http://127.0.0.1:$port/health" -TimeoutSec 2
-        } catch { $health = $null }
-        if ($null -ne $health -and $health.agentState -eq 'error') { throw 'Agent startup returned error' }
+            $reachable = $true; $errorKind = 'none'
+        } catch {
+            $health = $null
+            if ($DiagnosticsPath) {
+                # Exception type and numeric status only; never serialize the error record.
+                try {
+                    $errorKind = Get-SmokeErrorKind $_.Exception
+                    $response = $_.Exception.PSObject.Properties['Response']
+                    if ($null -ne $response -and $null -ne $response.Value) {
+                        $httpStatus = [int]$response.Value.StatusCode
+                        $reachable = $true
+                    }
+                } catch { $errorKind = 'other' }
+            }
+        }
+        if ($null -ne $health -and $health.agentState -eq 'error') { $outcome = 'agenterror'; throw 'Agent startup returned error' }
         if ($null -ne $health -and $health.agentState -eq 'idle') { $ready = $true; break }
         Start-Sleep -Milliseconds 500
     }
-    if (-not $ready) { throw 'Installed app did not reach agentState=idle within 240 seconds' }
+    if (-not $ready) { $outcome = 'timeout'; throw 'Installed app did not reach agentState=idle within 240 seconds' }
     VerifyRuntime
 } finally {
+    # Capture before existing forced cleanup, without masking the original smoke failure.
+    if ($DiagnosticsPath) {
+        try {
+            if ($null -ne $app) {
+                $alive = -not $app.HasExited
+                if (-not $alive) { $exitCode = $app.ExitCode }
+            }
+        } catch { $alive = $null; $exitCode = $null }
+    }
     # CI cleanup, NOT evidence of the product's graceful shutdown or panic-stop behavior.
     if ($null -ne $app -and -not $app.HasExited) {
         & taskkill.exe /PID $app.Id /T /F | Out-Null
@@ -81,4 +113,13 @@ $deadline = [DateTime]::UtcNow.AddSeconds(30)
 while ((Test-Path $binary) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 300 }
 if (Test-Path $binary) { throw 'Uninstall left the desktop executable installed' }
 if (-not (Test-Path $canary)) { throw 'Uninstall removed user data' }
+$outcome = 'success'
 Write-Output 'Installation, runtime hashes, daemon readiness, stopped-app reinstall and uninstall passed.'
+} finally {
+    if ($DiagnosticsPath) {
+        try {
+            $diagnostic = New-SmokeDiagnostic -Outcome $outcome -Alive $alive -ExitCode $exitCode -PollCount $pollCount -Reachable $reachable -HttpStatus $httpStatus -Health $health -ErrorKind $errorKind
+            Write-SmokeDiagnostic -Path $DiagnosticsPath -Diagnostic $diagnostic
+        } catch { Write-Warning 'Sanitized smoke diagnostics unavailable' -WarningAction Continue }
+    }
+}

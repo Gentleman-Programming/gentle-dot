@@ -72,7 +72,15 @@ jobs:
           $plan = Get-Content "$env:RUNNER_TEMP/native-plan.json" -Raw | ConvertFrom-Json
           $installers = @(Get-ChildItem -LiteralPath $plan.installers[0].directory -Filter '*-setup.exe' -File)
           if ($installers.Count -ne 1) { throw 'Expected exactly one NSIS installer' }
-          ./scripts/windows/smoke-install.ps1 -Installer $installers[0].FullName
+          ./scripts/windows/smoke-install.ps1 -Installer $installers[0].FullName -DiagnosticsPath "$env:RUNNER_TEMP/windows-smoke-diagnostics.json"
+      - name: Sanitized Windows startup diagnostics
+        if: failure() && matrix.target == 'windows-x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-startup-diagnostics
+          path: ${{ runner.temp }}/windows-smoke-diagnostics.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Windows ARM64 smoke boundary
         if: matrix.target == 'windows-arm64'
         run: echo 'UNSUPPORTED installed smoke on ARM64. Do not run the x64/default-path smoke. Build artifact only; not installed acceptance.'
