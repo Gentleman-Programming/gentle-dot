@@ -1,4 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 /** One selectable row of the menu. */
 export interface SelectOption {
@@ -34,7 +35,7 @@ const flat = (props: Pick<SelectMenuProps, "options" | "groups">): SelectOption[
 	...(props.groups ?? []).flatMap((group) => group.options),
 ];
 
-/** The theme's select: a trigger button plus an owned listbox, so the popup is drawn by our
+/** The theme's select: a trigger button plus a portaled listbox, so the popup is drawn by our
  * theme instead of the browser's native one (the four native `<select>` the app had drew the
  * OS dropdown). Keyboard: arrows move, Enter picks, Escape and Tab close; clicking outside
  * closes; focus stays on the trigger the whole time, like a native combobox. */
@@ -46,20 +47,27 @@ export function SelectMenu({ label, value, onChange, options, groups, compact, d
 			flat({ options, groups }).findIndex((o) => o.value === value),
 		),
 	);
-	/** The popup is `position: fixed` (cards and panels clip absolute children), anchored to the
-	 * trigger's viewport rect, measured the moment it opens. */
-	const [anchor, setAnchor] = useState<{ top: number; left: number; width: number } | null>(null);
+	/** Portal to body: panels with backdrop-filter establish fixed containing blocks and clip
+	 * descendants. Viewport coordinates only work outside those panels. */
+	const [anchor, setAnchor] = useState<{ top?: number; bottom?: number; left: number; width: number } | null>(
+		null,
+	);
 	const root = useRef<HTMLDivElement>(null);
 	const trigger = useRef<HTMLButtonElement>(null);
+	const popup = useRef<HTMLDivElement>(null);
 
+	/** Anchor the actual list edge, not an estimated height (short upward lists are shorter). */
 	const measure = useCallback(() => {
 		const box = trigger.current?.getBoundingClientRect();
 		if (!box) return;
 		const height = Math.min(320, (window.innerHeight || 900) * 0.6);
-		// Not enough room below (or more room above): open upwards, the way a native select does.
 		const below = window.innerHeight - box.bottom;
-		const top = below < height + 12 && box.top > below ? box.top - height - 4 : box.bottom + 4;
-		setAnchor({ top, left: box.left, width: box.width });
+		const top = below < height + 12 && box.top > below ? null : box.bottom + 4;
+		setAnchor(
+			top === null
+				? { bottom: window.innerHeight - box.top + 4, left: box.left, width: box.width }
+				: { top, left: box.left, width: box.width },
+		);
 	}, []);
 	const all = flat({ options, groups });
 	const current = all.find((option) => option.value === value);
@@ -70,9 +78,14 @@ export function SelectMenu({ label, value, onChange, options, groups, compact, d
 			if (event.key === "Escape" || event.key === "Tab") setOpen(false);
 		};
 		const onClick = (event: MouseEvent) => {
-			if (!root.current?.contains(event.target as Node)) setOpen(false);
+			const target = event.target as Node;
+			if (!root.current?.contains(target) && !popup.current?.contains(target)) setOpen(false);
 		};
-		const onMove = () => measure();
+		const onMove = (event: Event) => {
+			// Scrolling options does not move the trigger; scrolling its ancestors does.
+			if (event.target instanceof Node && popup.current?.contains(event.target)) return;
+			measure();
+		};
 		window.addEventListener("keydown", onKey);
 		window.addEventListener("mousedown", onClick);
 		window.addEventListener("resize", onMove);
@@ -170,24 +183,34 @@ export function SelectMenu({ label, value, onChange, options, groups, compact, d
 					<path d="M6 9l6 6 6-6" />
 				</svg>
 			</button>
-			{open && anchor ? (
-				<div
-					className="select-menu-list"
-					role="listbox"
-					aria-label={label}
-					style={{ top: anchor.top, left: anchor.left, minWidth: anchor.width }}
-				>
-					{(options ?? []).map(optionRow)}
-					{(groups ?? []).map((group) => (
-						<div key={group.label} className="select-menu-group">
-							<div className="select-menu-heading" id={`select-group-${slug(group.label)}`}>
-								{group.label}
-							</div>
-							{group.options.map((option, index) => optionRow(option, index + (options?.length ?? 0)))}
-						</div>
-					))}
-				</div>
-			) : null}
+			{open && anchor
+				? createPortal(
+						<div
+							ref={popup}
+							// Keep enclosing popovers' document-level outside-pointer handlers from closing us.
+							onPointerDown={(event) => event.stopPropagation()}
+							className="select-menu-list"
+							role="listbox"
+							aria-label={label}
+							style={
+								anchor.bottom !== undefined
+									? { bottom: anchor.bottom, left: anchor.left, minWidth: anchor.width }
+									: { top: anchor.top, left: anchor.left, minWidth: anchor.width }
+							}
+						>
+							{(options ?? []).map(optionRow)}
+							{(groups ?? []).map((group) => (
+								<div key={group.label} className="select-menu-group">
+									<div className="select-menu-heading" id={`select-group-${slug(group.label)}`}>
+										{group.label}
+									</div>
+									{group.options.map((option, index) => optionRow(option, index + (options?.length ?? 0)))}
+								</div>
+							))}
+						</div>,
+						document.body,
+					)
+				: null}
 		</div>
 	);
 }
