@@ -123,7 +123,7 @@ pnpm package:linux --arch amd64
 pnpm package:windows            # add --check to verify both payloads, which needs 7-Zip
 ```
 
-Then follow **[docs/install.md](docs/install.md)**: opening an unsigned app on macOS 15 and later goes through **System Settings → Privacy & Security → Open Anyway**, the Windows installers are unsigned too so Windows shows its own warning, and the guide covers permissions, where your data lives, and uninstalling. Windows support is in progress: it builds and runs, but connectors that need a secret or an approval, voice, and computer control are not there yet. See **[docs/install.md](docs/install.md)** for the Windows section and **[docs/windows-testing.md](docs/windows-testing.md)** for the tester checklist.
+Then follow **[docs/install.md](docs/install.md)**: opening an unsigned app on macOS 15 and later goes through **System Settings → Privacy & Security → Open Anyway**, the Windows installers are unsigned too so Windows shows its own warning, and the guide covers permissions, where your data lives, and uninstalling. Windows support is in progress: it builds and runs, but connectors that need a secret or an approval and computer control are not there yet. Windows voice supports local transcription and spoken replies using installed Windows voices; see **[docs/windows-voice-output.md](docs/windows-voice-output.md)** for requirements and limits. See **[docs/install.md](docs/install.md)** for the Windows section and **[docs/windows-testing.md](docs/windows-testing.md)** for the tester checklist.
 
 Prefer to run it from the source?
 

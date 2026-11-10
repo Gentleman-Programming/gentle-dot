@@ -161,11 +161,15 @@ cargo test --lib
 
 **Expected** (measured on Windows 11): the suite passes, 399 passed / 0 failed / 4 ignored. A connector secret is written as its own DPAPI-protected `<64 hex digits>.bin` file (the name is a hash of the secret's id) in a hashed-name subfolder of `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\`; you do not need to create one for this check. To clear every connector secret after testing, quit Gentle Dot and delete that whole folder.
 
-### 15. Voice — not yet on Windows
+### 15. Voice
 
-Voice capture is W12 and not done.
+Allow microphone access and install the optional local transcription model in Connectors. For a local-only check, use an account without an OpenAI API key.
 
-**Expected today:** the mic button reports voice as unavailable. Write **N/A**.
+1. Press the mic, say a short sentence, then press it again. By default, review the transcript in the input before sending it.
+2. Enable **Send when I stop**, speak again, and pause. About two seconds of observed silence after speech should stop recording and send the transcript without another button press. Background noise or very quiet speech can affect this audio-level heuristic; manual stop remains available.
+3. With spoken replies unmuted and an appropriate Windows speech voice installed, check that the assistant's reply is read aloud. Stop or mute should retire pending output. A typed-only turn should stay silent.
+
+**Expected:** recording, transcript review, opt-in pause-to-send and spoken replies work without an OpenAI key. Missing microphone permission, local model or speech voice should produce the relevant availability/error message rather than a false success. Record the actual result and installed voices; automated fake-port and memory-WAV tests do not establish microphone or audible-output acceptance. See [Windows voice output](windows-voice-output.md) for supported formats and cancellation limits.
 
 ### 16. Computer control — not yet on Windows
 
