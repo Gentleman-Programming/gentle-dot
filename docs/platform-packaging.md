@@ -65,8 +65,10 @@ not advertise those providers as ARM64-supported or substitute x64 payloads.
 ## Manual native QA artifacts
 
 **Implemented, not remotely executed:** `.github/workflows/native-distributions.yml`
-is manual-only (`workflow_dispatch`), read-only, fail-fast disabled and artifact-only.
-It does not publish, run on push/PR, or replace `windows-native.yml`. The metadata
+supports manual execution (`workflow_dispatch`) and pushes only to the exact
+`qa/arise-native-installers-20261110` branch. It is read-only, fail-fast disabled
+and artifact-only: no deployment, release publication, PR trigger or replacement
+of `windows-native.yml`. The metadata
 helper supplies all six native runners, target toolchains, build commands and
 expected installer paths. A mismatched Node host fails before build output;
 Rust must report the selected native host. Windows Go architecture is explicit.

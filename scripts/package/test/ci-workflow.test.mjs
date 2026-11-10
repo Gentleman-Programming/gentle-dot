@@ -12,8 +12,11 @@ assert.ok(installed, 'Existing workspace YAML parser is required for structural 
 const { parse } = await import(pathToFileURL(resolve(store, installed, 'node_modules/yaml/dist/index.js')));
 const workflow = parse(readFileSync('.github/workflows/native-distributions.yml', 'utf8'));
 
-test('parsed workflow is manual/read-only QA with a fail-closed six-target metadata matrix', () => {
- assert.deepEqual(workflow.on, { workflow_dispatch: null });
+test('parsed workflow is manual or exact-branch/read-only QA with a fail-closed six-target metadata matrix', () => {
+ assert.deepEqual(workflow.on, {
+  workflow_dispatch: null,
+  push: { branches: ['qa/arise-native-installers-20261110'] },
+ });
  assert.deepEqual(workflow.permissions, { contents: 'read' });
  assert.deepEqual(Object.keys(workflow.jobs), ['targets', 'native']);
  const scripts = JSON.parse(readFileSync('package.json', 'utf8')).scripts;

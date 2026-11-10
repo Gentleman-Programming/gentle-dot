@@ -1,6 +1,9 @@
-name: Manual native installer QA (not a release)
+name: Native installer QA (not a release)
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - qa/arise-native-installers-20261110
 permissions:
   contents: read
 jobs:
