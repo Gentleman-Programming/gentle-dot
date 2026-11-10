@@ -212,17 +212,23 @@ export function SettingsPanel({ close }: { close: () => void }) {
 						</div>
 					</>
 				) : (
-					<label className="shortcut-row">
-						<input
-							type="checkbox"
+					<div className="shortcut-row">
+						<button
+							id="settings-private-memory"
+							type="button"
 							role="switch"
+							className="switch"
 							aria-checked={memory === "private"}
-							checked={memory === "private"}
+							aria-labelledby="settings-private-memory-label"
 							disabled={memory === undefined || memoryApplying}
-							onChange={(event) => applyMemory(event.target.checked ? "private" : "shared")}
-						/>
-						<span>Private memory</span>
-					</label>
+							onClick={() => applyMemory(memory === "private" ? "shared" : "private")}
+						>
+							<span className="switch-knob" aria-hidden="true" />
+						</button>
+						<label id="settings-private-memory-label" htmlFor="settings-private-memory">
+							Private memory
+						</label>
+					</div>
 				)}
 				{memoryReason ? (
 					<p className="settings-error" role="alert">

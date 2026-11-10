@@ -204,6 +204,93 @@ describe("the Settings screen (S33.1)", () => {
 });
 
 describe("the Private memory toggle (SW9)", () => {
+	it("uses the existing visual switch with an explicitly associated visible label", async () => {
+		await openSettings();
+		const toggle = await screen.findByRole("switch", { name: "Private memory" });
+		await waitFor(() => expect(toggle).toBeEnabled());
+		expect(toggle.tagName).toBe("BUTTON");
+		expect(toggle).toHaveAttribute("type", "button");
+		expect(toggle).toHaveClass("switch");
+		expect(toggle).toHaveAttribute("aria-checked", "false");
+		const label = screen.getByText("Private memory");
+		expect(label.tagName).toBe("LABEL");
+		expect(label).toHaveAttribute("for", toggle.id);
+		expect(toggle.id).not.toBe("");
+		expect(toggle).toHaveAttribute("aria-labelledby", label.id);
+		expect(label.id).not.toBe("");
+		expect(toggle.querySelector(".switch-knob")).toHaveAttribute("aria-hidden", "true");
+		await userEvent.click(label);
+		await waitFor(() => expect(toggle).toBeChecked());
+		expect(invoked("memory_set").map(([, args]) => args)).toEqual([{ memory: "private" }]);
+	});
+
+	it("supports native Space and Enter activation", async () => {
+		await openSettings();
+		const toggle = await screen.findByRole("switch", { name: "Private memory" });
+		await waitFor(() => expect(toggle).toBeEnabled());
+		toggle.focus();
+		await userEvent.keyboard(" ");
+		await waitFor(() => expect(toggle).toBeChecked());
+		await waitFor(() => expect(toggle).toBeEnabled());
+		await userEvent.keyboard("{Enter}");
+		await waitFor(() => expect(toggle).not.toBeChecked());
+		expect(invoked("memory_set").map(([, args]) => args)).toEqual([
+			{ memory: "private" },
+			{ memory: "shared" },
+		]);
+	});
+
+	it("stays disabled until the stored memory loads", async () => {
+		let answer: (value: { memory: "private" }) => void = () => {};
+		const base = h.invoke.getMockImplementation();
+		h.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+			if (command === "memory_get") return new Promise((resolve) => (answer = resolve));
+			return base?.(command, args);
+		});
+		await openSettings();
+		const toggle = await screen.findByRole("switch", { name: "Private memory" });
+		expect(toggle).toBeDisabled();
+		await userEvent.click(toggle);
+		expect(invoked("memory_set")).toHaveLength(0);
+		await act(async () => answer({ memory: "private" }));
+		expect(toggle).toBeEnabled();
+		expect(toggle).toBeChecked();
+	});
+
+	it("keeps the confirmed choice during a save, prevents duplicates, and recovers from failure", async () => {
+		let rejectSave: (reason: string) => void = () => {};
+		const base = h.invoke.getMockImplementation();
+		h.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+			if (command === "memory_set") return new Promise((_, reject) => (rejectSave = reject));
+			return base?.(command, args);
+		});
+		await openSettings();
+		const toggle = await screen.findByRole("switch", { name: "Private memory" });
+		await waitFor(() => expect(toggle).toBeEnabled());
+		await userEvent.click(toggle);
+		expect(toggle).toBeDisabled();
+		expect(toggle).not.toBeChecked();
+		await userEvent.click(toggle);
+		await userEvent.click(screen.getByText("Private memory"));
+		toggle.focus();
+		await userEvent.keyboard(" {Enter}");
+		expect(invoked("memory_set").map(([, args]) => args)).toEqual([{ memory: "private" }]);
+		await act(async () => rejectSave("Gentle Dot cannot save config.json (denied)."));
+		expect(await screen.findByRole("alert")).toHaveTextContent(
+			"Gentle Dot cannot save config.json (denied).",
+		);
+		expect(toggle).not.toBeChecked();
+		expect(toggle).toBeEnabled();
+		await userEvent.click(screen.getByRole("button", { name: "Close settings" }));
+		await openPanelMenu();
+		await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
+		const reopened = await screen.findByRole("switch", { name: "Private memory" });
+		await waitFor(() => expect(reopened).toBeEnabled());
+		expect(reopened).not.toBeChecked();
+		expect(invoked("memory_get")).toHaveLength(2);
+		expect(invoked("memory_set")).toHaveLength(1);
+	});
+
 	it("shows the stored value and flips it through the app", async () => {
 		h.memory = "private";
 		await openSettings();
@@ -226,6 +313,14 @@ describe("the Private memory toggle (SW9)", () => {
 		await waitFor(() => expect(invoked("memory_set")).toHaveLength(1));
 		expect(invoked("memory_set")[0]?.[1]).toEqual({ memory: "private" });
 		await waitFor(() => expect(toggle).toBeChecked());
+		await userEvent.click(screen.getByRole("button", { name: "Close settings" }));
+		await openPanelMenu();
+		await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
+		const reopened = await screen.findByRole("switch", { name: "Private memory" });
+		await waitFor(() => expect(reopened).toBeEnabled());
+		expect(reopened).toBeChecked();
+		expect(invoked("memory_get")).toHaveLength(2);
+		expect(invoked("memory_set")).toHaveLength(1);
 	});
 });
 
