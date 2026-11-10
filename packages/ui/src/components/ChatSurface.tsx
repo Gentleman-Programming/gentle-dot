@@ -85,22 +85,26 @@ export function ChatSurface({
 	const pin = state.pin;
 	const changeSend: Send | undefined = appSend ?? (pin ? setPinPending : undefined);
 	const openAccounts = () => {
+		setShowConversations(false);
 		setShowSettings(false);
 		send({ type: "auth_list" });
 		dispatch({ type: "accounts", open: true });
 	};
 	const openProfiles = () => {
+		setShowConversations(false);
 		setShowSettings(false);
 		send({ type: "profiles_list" });
 		dispatch({ type: "profiles", open: true });
 	};
 	const openConnectors = () => {
+		setShowConversations(false);
 		setShowSettings(false);
 		send({ type: "connectors_list" });
 		dispatch({ type: "connectors", open: true });
 	};
 	/** Settings is a screen like the others: opening it closes them, except a sign-in waiting for an answer. */
 	const openSettings = () => {
+		setShowConversations(false);
 		if (state.auth.open && !state.auth.flow?.prompt) dispatch({ type: "accounts", open: false });
 		if (state.profiles.open) dispatch({ type: "profiles", open: false });
 		if (state.connectors.open && !state.connectors.flow?.prompt)
@@ -181,7 +185,10 @@ export function ChatSurface({
 					conversations={conversations}
 					ready={ready}
 					showConversations={showConversations}
-					onNewConversation={() => switchTo({ type: "new_conversation" })}
+					onNewConversation={() => {
+						setShowConversations(false);
+						switchTo({ type: "new_conversation" });
+					}}
 					onToggleConversations={() => {
 						if (!showConversations) send({ type: "list_conversations" });
 						setShowConversations(!showConversations);
@@ -206,26 +213,36 @@ export function ChatSurface({
 			) : null}
 
 			{conversations && showConversations ? (
-				<nav className="conversations" aria-label="Earlier conversations">
-					<p className="eyebrow">Conversations</p>
-					{state.conversations.length === 0 ? <p className="muted">No conversations yet.</p> : null}
-					{state.conversations.map((conversation) => (
-						<button
-							key={conversation.id}
-							type="button"
-							className={conversation.id === state.conversationId ? "active" : ""}
-							onClick={() => {
-								if (conversation.id === state.conversationId) setShowConversations(false);
-								else switchTo({ type: "open_conversation", conversationId: conversation.id });
-							}}
-						>
-							<span>{conversation.title}</span>
-							<time dateTime={conversation.updatedAt}>
-								{new Date(conversation.updatedAt).toLocaleString()}
-							</time>
-						</button>
-					))}
-				</nav>
+				<>
+					{/* Clicking anywhere outside the list closes it: the toggle lives in the drawer now, */}
+					{/* so the list must not trap the user. */}
+					<div
+						className="conversations-scrim"
+						role="presentation"
+						aria-hidden="true"
+						onClick={() => setShowConversations(false)}
+					/>
+					<nav className="conversations" aria-label="Earlier conversations">
+						<p className="eyebrow">Conversations</p>
+						{state.conversations.length === 0 ? <p className="muted">No conversations yet.</p> : null}
+						{state.conversations.map((conversation) => (
+							<button
+								key={conversation.id}
+								type="button"
+								className={conversation.id === state.conversationId ? "active" : ""}
+								onClick={() => {
+									if (conversation.id === state.conversationId) setShowConversations(false);
+									else switchTo({ type: "open_conversation", conversationId: conversation.id });
+								}}
+							>
+								<span>{conversation.title}</span>
+								<time dateTime={conversation.updatedAt}>
+									{new Date(conversation.updatedAt).toLocaleString()}
+								</time>
+							</button>
+						))}
+					</nav>
+				</>
 			) : null}
 
 			{status ? (

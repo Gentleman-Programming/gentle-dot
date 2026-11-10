@@ -99,6 +99,26 @@ describe("the panel menu drawer", () => {
 		expect(screen.queryByRole("navigation", { name: "Panel menu" })).not.toBeInTheDocument();
 	});
 
+	it("closes the conversations list when another screen opens from the drawer", async () => {
+		render(<Harness initial={ready} send={vi.fn()} />);
+		await openMenu();
+		await userEvent.click(screen.getByRole("button", { name: "Conversations" }));
+		expect(screen.getByRole("navigation", { name: "Earlier conversations" })).toBeInTheDocument();
+		await openMenu();
+		await userEvent.click(screen.getByRole("button", { name: "Profiles" }));
+		expect(screen.getByRole("region", { name: "Profiles" })).toBeInTheDocument();
+		expect(screen.queryByRole("navigation", { name: "Earlier conversations" })).not.toBeInTheDocument();
+	});
+
+	it("closes the conversations list when clicking outside it", async () => {
+		render(<Harness initial={ready} send={vi.fn()} />);
+		await openMenu();
+		await userEvent.click(screen.getByRole("button", { name: "Conversations" }));
+		expect(screen.getByRole("navigation", { name: "Earlier conversations" })).toBeInTheDocument();
+		await userEvent.click(document.querySelector(".conversations-scrim") as HTMLElement);
+		expect(screen.queryByRole("navigation", { name: "Earlier conversations" })).not.toBeInTheDocument();
+	});
+
 	it("opens the screens from the drawer and closes it afterwards", async () => {
 		const send = vi.fn();
 		render(<Harness initial={ready} send={send} />);
