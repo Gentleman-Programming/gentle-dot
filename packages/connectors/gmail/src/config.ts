@@ -24,6 +24,8 @@ export interface Config {
   pollIntervalMs: number;
   /** Allowed labels to trigger notifications (default: INBOX). */
   watchLabels: string[];
+  /** Webhook URL for Gmail push notifications (optional). */
+  webhookUrl?: string;
 }
 
 /** A configuration problem; the message names the variable and never repeats its value. */
@@ -62,6 +64,8 @@ export function loadConfig(env: Record<string, string | undefined>, home: string
     .map(s => s.trim())
     .filter(Boolean);
 
+  const webhookUrl = env.GMAIL_WEBHOOK_URL?.trim();
+
   return {
     connectorId: env.DOT_GMAIL_CONNECTOR_ID?.trim() || 'gmail',
     oauth: {
@@ -75,5 +79,6 @@ export function loadConfig(env: Record<string, string | undefined>, home: string
     tokenPath,
     pollIntervalMs,
     watchLabels,
+    webhookUrl,
   };
 }

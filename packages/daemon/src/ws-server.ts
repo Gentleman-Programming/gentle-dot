@@ -7,6 +7,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage, Server as HttpServer } from 'http';
 import { URL } from 'url';
 import { EventEmitter } from 'events';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { CloseCode } from '@gentle-dot/protocol';
 import { CONNECTOR_TYPES, ConnectorRegistry, type ConnectorInfo, type ConnectorType } from './connector-registry.ts';
 import type { UploadStore } from './uploads.ts';
@@ -285,6 +286,11 @@ export class WsServer extends EventEmitter {
       return;
     }
 
+    if (url.pathname === '/webhook/gmail') {
+      this.handleGmailWebhook(req, res);
+      return;
+    }
+
     // The daemon no longer ships a window (the desktop app does), but the root answers so a
     // browser or a health check that lands here sees something alive instead of a 404.
     if (url.pathname === '/' && req.method === 'GET') {
@@ -301,6 +307,112 @@ export class WsServer extends EventEmitter {
     }
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not found' }));
+  }
+
+  /**
+   * Handle Gmail push notification webhook
+   * Gmail sends Pub/Sub push notifications to this endpoint when watched labels change.
+   */
+  private async handleGmailWebhook(req: IncomingMessage, res: import('http').ServerResponse): Promise<void> {
+    if (req.method !== 'POST') {
+      res.writeHead(405, { Allow: 'POST' });
+      res.end();
+      return;
+    }
+
+    // Read the raw body for signature verification
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+      chunks.push(chunk as Buffer);
+    }
+    const body = Buffer.concat(chunks).toString('utf8');
+
+    // Verify the HMAC signature
+    const signatureHeader = req.headers['x-goog-signature'] as string | undefined;
+    const webhookSecret = process.env.GMAIL_WEBHOOK_SECRET;
+    
+    if (!webhookSecret) {
+      console.error('[Gmail Webhook] GMAIL_WEBHOOK_SECRET not configured');
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Webhook secret not configured' }));
+      return;
+    }
+
+    if (!signatureHeader) {
+      console.error('[Gmail Webhook] Missing x-goog-signature header');
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing signature' }));
+      return;
+    }
+
+    const separator = signatureHeader.indexOf('=');
+    if (separator === -1) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid signature format' }));
+      return;
+    }
+    const algorithm = signatureHeader.slice(0, separator);
+    const signature = signatureHeader.slice(separator + 1);
+    if (algorithm !== 'sha256' || !signature) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid signature algorithm' }));
+      return;
+    }
+
+    const expectedSignature = createHmac('sha256', webhookSecret).update(body).digest('base64');
+    const signatureBuffer = Buffer.from(signature, 'base64');
+    const expectedBuffer = Buffer.from(expectedSignature, 'base64');
+
+    if (signatureBuffer.length !== expectedBuffer.length || !timingSafeEqual(signatureBuffer, expectedBuffer)) {
+      console.error('[Gmail Webhook] Invalid signature');
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid signature' }));
+      return;
+    }
+
+    // Parse the Pub/Sub envelope
+    let notification: { emailAddress: string; historyId: string } | null = null;
+    try {
+      const envelope = JSON.parse(body) as { message?: { data?: string } };
+      if (typeof envelope.message?.data === 'string') {
+        const decoded = Buffer.from(envelope.message.data, 'base64').toString('utf-8');
+        const parsed = JSON.parse(decoded) as { emailAddress?: string; historyId?: string };
+        if (typeof parsed.emailAddress === 'string' && typeof parsed.historyId === 'string') {
+          notification = { emailAddress: parsed.emailAddress, historyId: parsed.historyId };
+        }
+      }
+    } catch {
+      // Ignore parse errors
+    }
+
+    if (!notification) {
+      console.error('[Gmail Webhook] Failed to parse notification');
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid notification format' }));
+      return;
+    }
+
+    console.log(`[Gmail Webhook] Received notification for ${notification.emailAddress}, historyId: ${notification.historyId}`);
+
+    // Find the Gmail connector and trigger a history poll
+    const gmailConnector = this.registry.getByType('gmail')[0];
+    if (gmailConnector) {
+      // Send a command to the bridge to poll for new messages
+      const success = this.sendToConnector(gmailConnector.connectorId, 'command', {
+        commandId: `webhook-${Date.now()}`, 
+        action: 'webhook_notification',
+        params: notification,
+      });
+      if (!success) {
+        console.warn('[Gmail Webhook] Gmail connector not connected or failed to send command');
+      }
+    } else {
+      console.warn('[Gmail Webhook] No Gmail connector registered');
+    }
+
+    // Always respond 204 to acknowledge receipt (Gmail will retry on non-2xx)
+    res.writeHead(204);
+    res.end();
   }
 
   /**

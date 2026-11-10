@@ -40,9 +40,9 @@ const entry = (id: string) => {
 };
 
 describe("guided catalog entries", () => {
-	it("adds Discord, Slack, and Gmail after the one-click servers, each with a guide", () => {
-		expect(CATALOG.map((e) => e.id)).toEqual(["notion", "linear", "atlassian", "discord", "slack", "gmail"]);
-		for (const id of ["discord", "slack", "gmail"]) {
+	it("adds Discord, Slack, Gmail, and WhatsApp after the one-click servers, each with a guide", () => {
+		expect(CATALOG.map((e) => e.id)).toEqual(["notion", "linear", "atlassian", "discord", "slack", "gmail", "whatsapp"]);
+		for (const id of ["discord", "slack", "gmail", "whatsapp"]) {
 			const guided = entry(id);
 			expect(guided.guide?.steps.length, id).toBeGreaterThanOrEqual(4);
 			expect(guided.guide?.links.length, id).toBeGreaterThan(0);

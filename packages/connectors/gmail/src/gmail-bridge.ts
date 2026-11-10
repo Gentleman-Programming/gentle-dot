@@ -12,6 +12,10 @@ const SOURCE_LABEL = "📧 [Gmail] ";
 const UNREACHABLE = "Gentle Dot no está disponible ahora.";
 const MAX_NOTIFY_TEXT = 4000;
 
+// Watch expires after 7 days (604800 seconds), renew at 6 days (518400 seconds)
+const WATCH_EXPIRATION_SECONDS = 604800;
+const WATCH_RENEWAL_SECONDS = 518400;
+
 interface Turn {
   buffer: string;
   requestId: string;
@@ -45,6 +49,10 @@ export class GmailBridge extends BaseBridge {
   private pollInterval: NodeJS.Timeout | null = null;
   private connected = false;
   private shouldPoll = true;
+
+  // Watch renewal timer
+  private watchRenewalInterval: NodeJS.Timeout | null = null;
+  private watchExpiration: number | null = null;
 
   constructor(options: GmailBridgeOptions) {
     const bridgeConfig: BridgeConfig = {
@@ -91,6 +99,11 @@ export class GmailBridge extends BaseBridge {
     this.logFn('Gmail bridge ready - starting history polling');
     this.connected = true;
     await this.startHistoryPolling();
+    // Set up Gmail push notifications watch if webhook URL is configured
+    if (this.options.config.webhookUrl) {
+      await this.setupWatch();
+      this.startWatchRenewalTimer();
+    }
   }
 
   async onStop(): Promise<void> {
@@ -98,6 +111,7 @@ export class GmailBridge extends BaseBridge {
     this.connected = false;
     this.shouldPoll = false;
     this.stopHistoryPolling();
+    this.stopWatchRenewalTimer();
   }
 
   // ============ BaseBridge Overrides ============
@@ -256,6 +270,45 @@ export class GmailBridge extends BaseBridge {
     }
   }
 
+  // ============ Watch Setup and Renewal ============
+
+  /** Set up Gmail push notifications watch */
+  private async setupWatch(): Promise<void> {
+    if (!this.options.config.webhookUrl) return;
+
+    try {
+      this.logFn(`Setting up Gmail watch for ${this.options.config.watchLabels.join(', ')}`);
+      const watchResult = await this.gmailClient.watch(
+        this.options.config.webhookUrl,
+        this.options.config.watchLabels
+      );
+      this.watchExpiration = Date.now() + (parseInt(watchResult.expiration) - Date.now()) || Date.now() + WATCH_EXPIRATION_SECONDS * 1000;
+      this.logFn(`Gmail watch set up successfully, expires: ${new Date(this.watchExpiration).toISOString()}`);
+    } catch (e) {
+      this.logFn(`Failed to set up Gmail watch: ${(e as Error).message}`);
+    }
+  }
+
+  /** Start the watch renewal timer (renew at 6 days) */
+  private startWatchRenewalTimer(): void {
+    // Check every hour if renewal is needed
+    this.watchRenewalInterval = setInterval(() => {
+      if (this.watchExpiration && Date.now() > this.watchExpiration - (WATCH_EXPIRATION_SECONDS - WATCH_RENEWAL_SECONDS) * 1000) {
+        this.logFn('Gmail watch approaching expiration, renewing...');
+        void this.setupWatch();
+      }
+    }, 60 * 60 * 1000); // Check every hour
+  }
+
+  /** Stop the watch renewal timer */
+  private stopWatchRenewalTimer(): void {
+    if (this.watchRenewalInterval) {
+      clearInterval(this.watchRenewalInterval);
+      this.watchRenewalInterval = null;
+    }
+    this.watchExpiration = null;
+  }
+
   // ============ Command Handling ============
 
   protected async handleCommand(payload: CommandPayload): Promise<void> {
@@ -309,6 +362,16 @@ export class GmailBridge extends BaseBridge {
             commandId: payload.commandId,
             success: true,
             result: watchResult,
+          };
+          break;
+        }
+        case 'webhook_notification': {
+          // Trigger a history poll when a webhook notification arrives
+          await this.pollGmailHistory();
+          result = {
+            commandId: payload.commandId,
+            success: true,
+            result: { polled: true },
           };
           break;
         }

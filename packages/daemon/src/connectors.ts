@@ -106,6 +106,7 @@ export interface CatalogEntry {
 /** Fixed loopback redirects for sign-ins with the user's own OAuth app, so they can be registered once. */
 export const SLACK_REDIRECT = "http://localhost:38417/callback";
 export const GMAIL_REDIRECT = "http://localhost:38418/callback";
+export const WHATSAPP_REDIRECT = "http://localhost:38419/callback";
 
 const CLIENT_ID: SetupField = { key: "client_id", label: "Client ID", secret: false };
 
@@ -323,6 +324,53 @@ export const CATALOG: readonly CatalogEntry[] = [
 			],
 			redirectUrl: GMAIL_REDIRECT,
 			note: "Gmail's server is a Developer Preview: your account must be in the Google Workspace Developer Preview Program. While the app is in testing, Google asks you to sign in again every 7 days. The gmail.compose permission lets the assistant draft and send mail: each draft or message asks for your approval first, and read only hides them.",
+		},
+	},
+	{
+		id: "whatsapp",
+		name: "WhatsApp",
+		server: {
+			url: "https://graph.facebook.com/v21.0",
+			oauth: {
+				clientId: placeholder("phone_number_id"),
+				clientSecret: placeholder("access_token"),
+				callbackUrl: WHATSAPP_REDIRECT,
+			},
+		},
+		fields: [
+			{ key: "phone_number_id", label: "Phone Number ID", secret: false },
+			{ key: "access_token", label: "Access Token", secret: true },
+			{ key: "verify_token", label: "Webhook Verify Token", secret: true },
+			{ key: "app_secret", label: "App Secret", secret: true },
+		],
+		oauth: false,
+		reads: "Receive and read WhatsApp messages.",
+		sends: "Send WhatsApp messages via Meta Cloud API.",
+		readOnlyTools: [
+			"whatsapp_list_contacts",
+			"whatsapp_get_contact",
+			"whatsapp_list_templates",
+			"whatsapp_get_template",
+			"whatsapp_get_message_status",
+			"whatsapp_get_media",
+		],
+		guide: {
+			steps: [
+				"Open Meta Business Manager and create (or select) a Business Account.",
+				"In the Business Account, go to WhatsApp > Getting Started > Create a WhatsApp Business Profile.",
+				"Copy the Phone Number ID and the Permanent Access Token from the WhatsApp settings page.",
+				"Set a Webhook Verify Token (any random string) and configure the webhook callback URL to point to this computer (e.g., via ngrok or Cloudflare Tunnel).",
+				"Copy the App Secret from the Meta App settings (Basic Information).",
+				"Choose Continue here, paste the Phone Number ID, Access Token, Verify Token, and App Secret.",
+				"Verify the webhook receives events by sending a test message.",
+				"Test sending a template message from the assistant.",
+			],
+			links: [
+				{ label: "Meta Business Manager", url: "https://business.facebook.com/" },
+				{ label: "WhatsApp Cloud API docs", url: "https://developers.facebook.com/docs/whatsapp/cloud-api" },
+			],
+			redirectUrl: WHATSAPP_REDIRECT,
+			note: "Uses Meta's official WhatsApp Cloud API. Requires a verified Meta Business Account. The webhook verify token and app secret secure the webhook endpoint. Baileys mode (WebSocket to WhatsApp Web) is also available as an alternative via the connector's config.",
 		},
 	},
 ];
