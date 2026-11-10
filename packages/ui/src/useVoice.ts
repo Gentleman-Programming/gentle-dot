@@ -71,19 +71,24 @@ const REASONS = {
 type Source = { kind: "daemon" | "native" } | { kind: "none"; reason?: string };
 
 /**
- * Where speech becomes text: the daemon (an OpenAI key) when it can and the page may record,
- * else the desktop recognizer. The web offers only the daemon, over HTTPS or localhost.
+ * Where speech becomes text: on the desktop its own local recognizer first (no browser
+ * media permission involved, the same model everywhere), with the daemon's WebView
+ * recording as the fallback when the native one is not reported. The web offers only
+ * the daemon, over HTTPS or localhost.
  */
 function chooseSource(desktop: boolean, transcribe: boolean, native: NativeVoiceStatus | undefined): Source {
 	const secure = desktop || window.isSecureContext === true;
 	const recorder = typeof MediaRecorder !== "undefined" && navigator.mediaDevices?.getUserMedia !== undefined;
-	if (transcribe && secure && recorder) return { kind: "daemon" };
 	if (desktop) {
-		if (!native) return { kind: "none" };
-		return native.available
-			? { kind: "native" }
-			: { kind: "none", reason: native.reason ?? REASONS.noRecorder };
+		if (native) {
+			return native.available
+				? { kind: "native" }
+				: { kind: "none", reason: native.reason ?? REASONS.noRecorder };
+		}
+		if (transcribe && secure && recorder) return { kind: "daemon" };
+		return { kind: "none" };
 	}
+	if (transcribe && secure && recorder) return { kind: "daemon" };
 	if (!transcribe) return { kind: "none" };
 	return { kind: "none", reason: secure ? REASONS.noRecorder : REASONS.insecure };
 }
