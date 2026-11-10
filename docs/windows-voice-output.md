@@ -1,6 +1,17 @@
 # Windows speech-to-WAV bridge
 
-The panel-only native bridge converts local literal text into in-memory WAV bytes using classic desktop SAPI on a blocking worker. It does not play audio, write temporary audio files, or use WinRT. Existing voice input is unchanged; UI playback integration and audible/hardware acceptance are separate work.
+The panel-only native bridge converts local literal text into in-memory WAV bytes using classic desktop SAPI on a blocking worker. The panel plays validated bytes through a temporary Blob URL; the native worker never plays audio, writes temporary audio files, or uses WinRT. Existing WASAPI capture and local transcription are unchanged.
+
+## Replies and playback controls
+
+Only a completed assistant reply to a spoken turn is read aloud. Typed turns stay silent; editing a reviewed dictation does not remove its spoken-turn eligibility when sent. Markdown filtering, text limits and existing language/region selection are preserved.
+
+- When daemon speech is available, its existing audio path remains preferred. A matching unavailable response falls back to local output once; stale or duplicate replies do not restart playback.
+- Local Windows output uses the compiled SAPI bridge, independently of microphone/model availability. Unsupported platforms retain browser/system speech and regional voice selection, waiting up to 1500 ms for late browser voices.
+- Stop, mute, cancellation, a new recording, user typing and unmount retire pending speech and playback. Late native, daemon, browser and media callbacks cannot revive retired output. Temporary native WAV URLs are released once on completion, failure or retirement.
+- Native invocation failures do not silently select another backend. The existing Voice note shows actionable failures, including `Local speech failed. Check installed speech voices and audio output, then retry.` Busy and session-limit messages below remain distinct.
+
+Local transcription requires the optional Parakeet model. See [voice-model download integrity](voice-model-download.md) for the exact size-mismatch error and verified release pins. Compiled synthesis support is not a claim that a microphone, installed SAPI voice or audible device is ready.
 
 ## Panel commands
 
@@ -38,4 +49,4 @@ Admission happens before the first await. Its lease moves into the blocking work
 | Unsupported/missing PCM, no audio, or truncated stream | Surface synthesis failure; do not play malformed bytes or silently switch backends. |
 | `Windows speech <stage> failed (HRESULT ...)`, worker start/panic, or purge failure | Surface the bounded error. A purge error does not prove successful cancellation. |
 
-Portable guard/WAV and fake-renderer lease/handshake tests need no speech engine. Bridge GREEN execution and end-to-end UI verification remain separate evidence. The default-ignored Windows integration fixture uses only “A short synthesis test.” in `en-US` and checks in-memory WAV/data; installed SAPI voices are not guaranteed in CI. Select only that exact fixture after memory-only source audit. Test presence is not execution evidence. A passing memory fixture demonstrates WAV generation, not audibility, IPC/UI readiness, or live hardware acceptance.
+Portable guard/WAV and fake-renderer lease/handshake tests need no speech engine. Deterministic UI tests use fake capture, IPC, browser and media ports; they do not establish real-device behavior. The default-ignored Windows integration fixture uses only “A short synthesis test.” in `en-US` and checks in-memory WAV/data; installed SAPI voices are not guaranteed in CI. Select only that exact fixture after memory-only source audit. Test presence is not execution evidence. A passing memory fixture demonstrates WAV generation, not audibility, IPC/UI readiness, or live hardware acceptance.

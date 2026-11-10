@@ -180,6 +180,7 @@ export function Composer({
 						value={text}
 						disabled={disabled}
 						onChange={(event) => {
+							voice?.typed();
 							if (text === "" && event.target.value !== "") onStartTyping?.();
 							setText(event.target.value);
 						}}

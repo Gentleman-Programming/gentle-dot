@@ -94,7 +94,7 @@ If Gentle Dot is running, the installer says **Gentle Dot is running! Click OK t
 
 ### First open
 
-Open **Gentle Dot** from the Start menu. The first open needs the network once: the engine installs its companion packages. The computer-control emergency stop is **Alt+Shift+Esc**. Voice input is not available on Windows yet.
+Open **Gentle Dot** from the Start menu. The first open needs the network once: the engine installs its companion packages. The computer-control emergency stop is **Alt+Shift+Esc**. Voice input uses shared-mode WASAPI capture and the optional local Parakeet model. Spoken turns can receive spoken replies through the Windows SAPI-to-WAV bridge; typed turns stay silent. See [Windows voice output](windows-voice-output.md) and [model download integrity](voice-model-download.md) for requirements, controls and verification limits.
 
 ### Where data lives
 
@@ -235,7 +235,7 @@ On Windows, connector secrets (tokens, client secrets, imported header and envir
 The port is incomplete on purpose. Each item names the unit that carries it.
 
 - **Connectors that need a secret or an approval work over the private channel** (W7). The app hands the daemon its end of the private channel as fd 3 through a native handle-inheritance launch (stop record and owner record written before the child executes), so a daemon the app did not start is refused rather than answered. A connector that needs a secret asks for it in the app and the value reaches the daemon over that channel; a connector whose secret is missing fails closed rather than falling back to a file.
-- **Voice** (W12) and **computer control** (W13, macOS-only today) are not available.
+- **Computer control** (W13, macOS-only today) is not available. Windows voice capture and spoken replies are described in [Windows voice output](windows-voice-output.md); live microphone and audible playback acceptance still need a device check.
 - **The panel's blur is gated and unverified** (W8d): the app asks for `Mica` only on Windows 11 (build ≥ 22000) with transparency effects on, a local session, and DWM composition on; otherwise the panel is opaque. Tauri gives no readback, so the blur can still silently fail even when those facts hold — the gate is the mitigation, and confirming it is the tester's visual check in [docs/windows-testing.md](windows-testing.md).
 
 Nothing else in the Windows install path is missing: the self-contained installer is built by `pnpm package:windows` (W11), its payload is verified, and the engine it carries is the project's own Go SumDB source build of the pinned Gentle AI module — unsigned, hash-pinned in `integrity.json`, and not an upstream release asset, because upstream stopped publishing unsigned Windows builds.
