@@ -42,7 +42,7 @@ type Rec = Record<string, unknown>;
 /** An MCP server behind an in-memory transport: every request it got, and how often it was closed. */
 function memoryUpstream() {
 	const requests: { method: string; params: Rec }[] = [];
-	const state = { closed: 0, connects: 0, dropNext: false };
+	const state = { closed: 0, connects: 0, dropNext: false, failNextConnects: 0 };
 	const answer = (method: string, params: Rec): { result?: unknown; error?: Rec } => {
 		switch (method) {
 			case "initialize":
@@ -74,6 +74,8 @@ function memoryUpstream() {
 	};
 	const transport = (): McpTransport => {
 		state.connects++;
+		const failing = state.failNextConnects > 0;
+		if (failing) state.failNextConnects--;
 		const { client, server } = createInMemoryTransportPair();
 		server.onClose(() => {
 			state.closed++;
@@ -81,6 +83,14 @@ function memoryUpstream() {
 		server.onMessage((message: JsonRpcMessage) => {
 			if (!("method" in message) || !("id" in message)) return;
 			const params = (message.params ?? {}) as Rec;
+			if (failing && message.method === "initialize") {
+				void server.send({
+					jsonrpc: "2.0",
+					id: message.id,
+					error: { code: -32000, message: "connector connect failed" },
+				} as JsonRpcMessage);
+				return;
+			}
 			requests.push({ method: message.method, params });
 			if (state.dropNext && message.method === "tools/call") {
 				state.dropNext = false;
@@ -136,6 +146,8 @@ async function setup(
 		credentials?: (id: string) => Promise<UpstreamCredentials>;
 		upstream?: ReturnType<typeof memoryUpstream>;
 		inMemory?: boolean;
+		connectMaxRetries?: number;
+		connectRetryBaseMs?: number;
 	} = {},
 ) {
 	const views = new Map((options.connectors ?? [connector()]).map((c) => [c.id, c]));
@@ -150,6 +162,8 @@ async function setup(
 			return options.approve ? options.approve(preview) : true;
 		},
 		...(options.inMemory === false ? {} : { transport: upstream.transport }),
+		connectMaxRetries: options.connectMaxRetries,
+		connectRetryBaseMs: options.connectRetryBaseMs,
 		env: process.env,
 		cwd: tempDir(),
 		log: (line) => logs.push(line),
@@ -544,5 +558,53 @@ describe("MCP proxy: upstream connections", () => {
 		const client = await open();
 		const error = await rpcError(client.listTools());
 		expect(error.message).toMatch(/sign in/i);
+	});
+});
+
+describe("connector-connect retry (bounded, exponential, cancellable)", () => {
+	it("retries a failing connect with backoff and succeeds", async () => {
+		const upstream = memoryUpstream();
+		upstream.state.failNextConnects = 2;
+		const { open } = await setup({ upstream, connectRetryBaseMs: 10 });
+		const client = await open();
+		const tools = await client.listTools();
+		expect(upstream.state.connects).toBe(3);
+		expect(tools.map((t) => t.name)).toContain("search");
+	});
+
+	it("gives up after the bounded retries and surfaces the last error", async () => {
+		const upstream = memoryUpstream();
+		upstream.state.failNextConnects = 99;
+		const { open } = await setup({ upstream, connectRetryBaseMs: 10 });
+		const client = await open();
+		await expect(client.listTools()).rejects.toThrow();
+		expect(upstream.state.connects).toBe(3);
+	});
+
+	it("aborts a pending backoff when the proxy closes", async () => {
+		const upstream = memoryUpstream();
+		upstream.state.failNextConnects = 99;
+		const { proxy, open } = await setup({ upstream, connectRetryBaseMs: 5_000 });
+		const client = await open();
+		const pending = client.listTools().then(
+			() => "connected",
+			(e: unknown) => String((e as Error).message ?? e),
+		);
+		await waitFor(() => upstream.state.connects >= 1);
+		await proxy.close();
+		const outcome = await pending;
+		expect(outcome).not.toBe("connected");
+		// The backoff aborted: no further connect attempts after close.
+		expect(upstream.state.connects).toBe(1);
+	});
+
+	it("opens a single connect chain for concurrent callers", async () => {
+		const upstream = memoryUpstream();
+		upstream.state.failNextConnects = 2;
+		const { open } = await setup({ upstream, connectRetryBaseMs: 10 });
+		const [a, b] = await Promise.all([open().then((c) => c.listTools()), open().then((c) => c.listTools())]);
+		expect(upstream.state.connects).toBe(3);
+		expect(a.map((t) => t.name)).toContain("search");
+		expect(b.map((t) => t.name)).toContain("search");
 	});
 });

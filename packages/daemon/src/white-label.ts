@@ -28,11 +28,18 @@ const REWRITES: [RegExp, string][] = [
 	[/\bRDD\b/g, "review"],
 ];
 
-/** Rewrites internal names in harness-generated text shown to the user. */
+/** Rewrites internal names in harness-generated prose shown to the user.
+ *  Text inside fenced code blocks (```...```) is preserved verbatim: the
+ *  user needs exact commands and code for copy-paste, and the white-label
+ *  rewrites are designed for prose, not for literal instructions. */
 export function presentText(text: string): string {
-	let shown = text;
-	for (const [pattern, replacement] of REWRITES) shown = shown.replace(pattern, replacement);
-	return shown.replace(/ {2,}/g, " ").replace(/ +([.,;:!?])/g, "$1");
+	const parts = text.split(/(`{3}[\s\S]*?`{3})/);
+	return parts.map((part, i) => {
+		if (i % 2 === 1) return part;
+		let shown = part;
+		for (const [pattern, replacement] of REWRITES) shown = shown.replace(pattern, replacement);
+		return shown.replace(/ {2,}/g, " ").replace(/ +([.,;:!?])/g, "$1");
+	}).join("");
 }
 
 /** Informational notifications are harness chatter; warnings and errors still reach the user. */
