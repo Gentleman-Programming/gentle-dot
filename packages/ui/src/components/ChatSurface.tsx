@@ -5,29 +5,15 @@ import { activeTitle, type DotAction, type DotState, isBusy, needsAccount } from
 import type { Uploader } from "../uploads.ts";
 import { useAttachments } from "../useAttachments.ts";
 import type { PanelWindowControls } from "../usePanelWindow.ts";
-import { useVoice, type VoiceControls } from "../useVoice.ts";
+import { useVoice } from "../useVoice.ts";
 import { AccountsPanel } from "./AccountsPanel.tsx";
 import { AskCard } from "./AskCard.tsx";
 import { Composer } from "./Composer.tsx";
 import { ComputerBanner, type ComputerControls } from "./Computer.tsx";
 import { ConnectorDraftCard } from "./ConnectorDraftCard.tsx";
 import { ConnectorsPanel } from "./ConnectorsPanel.tsx";
-import {
-	AccountsIcon,
-	CollapseIcon,
-	ConnectorsIcon,
-	ConversationsIcon,
-	ExpandIcon,
-	EyeIcon,
-	EyeOffIcon,
-	MinusIcon,
-	PlusIcon,
-	ProfilesIcon,
-	RoseGlyph,
-	SettingsIcon,
-	SpeakerIcon,
-	SpeakerOffIcon,
-} from "./icons.tsx";
+import { MenuToggle, PanelMenuDrawer } from "./HeaderMenu.tsx";
+import { RoseGlyph } from "./icons.tsx";
 import { MessageList } from "./MessageList.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
 import { describePinCommand, PinForm } from "./PinForm.tsx";
@@ -168,6 +154,7 @@ export function ChatSurface({
 	const status = statusText(state);
 	const ready =
 		state.connection === "open" && state.agentState !== "restarting" && state.agentState !== "starting";
+	const [menuOpen, setMenuOpen] = useState(false);
 
 	return (
 		<div
@@ -178,80 +165,41 @@ export function ChatSurface({
 			<header className="chat-header" data-tauri-drag-region={variant === "panel" ? "" : undefined}>
 				<span className={`state-dot state-${state.agentState}`} aria-hidden="true" />
 				{conversations ? (
-					<>
-						<h1 className="gradient-text">{activeTitle(state)}</h1>
-						<button
-							type="button"
-							className="icon"
-							aria-label="Conversations"
-							title="Conversations"
-							aria-expanded={showConversations}
-							onClick={() => {
-								if (!showConversations) send({ type: "list_conversations" });
-								setShowConversations(!showConversations);
-							}}
-						>
-							<ConversationsIcon />
-						</button>
-					</>
+					<h1 className="gradient-text">{activeTitle(state)}</h1>
 				) : (
 					<h1 className="assistant-name">
 						<RoseGlyph />
 						<span className="gradient-text">Gentle Dot</span>
 					</h1>
 				)}
-				<button type="button" className="icon" aria-label="Accounts" title="Accounts" onClick={openAccounts}>
-					<AccountsIcon />
-				</button>
-				<button type="button" className="icon" aria-label="Profiles" title="Profiles" onClick={openProfiles}>
-					<ProfilesIcon />
-				</button>
-				<button
-					type="button"
-					className="icon"
-					aria-label="Connectors"
-					title="Connectors"
-					onClick={openConnectors}
-				>
-					<ConnectorsIcon />
-				</button>
-				{voice.mic ? <MuteButton voice={voice} /> : null}
-				{conversations ? (
-					<button
-						type="button"
-						className="icon"
-						aria-label="New conversation"
-						title="New conversation"
-						disabled={!ready}
-						onClick={() => switchTo({ type: "new_conversation" })}
-					>
-						<PlusIcon />
-					</button>
-				) : null}
-				{settings ? (
-					<button
-						type="button"
-						className="icon"
-						aria-label="Settings"
-						title="Settings"
-						aria-expanded={settingsShown}
-						onClick={() => (settingsShown ? setShowSettings(false) : openSettings())}
-					>
-						<SettingsIcon />
-					</button>
-				) : null}
-				{panelWindow ? (
-					<>
-						<RoseButton controls={panelWindow} />
-						<FullscreenButton controls={panelWindow} />
-					</>
-				) : null}
-				{onHide ? (
-					<button type="button" className="icon" aria-label="Hide" title="Hide" onClick={onHide}>
-						<MinusIcon />
-					</button>
-				) : null}
+				<MenuToggle open={menuOpen} onToggle={() => setMenuOpen(!menuOpen)} />
 			</header>
+
+			{menuOpen ? (
+				<PanelMenuDrawer
+					onClose={() => setMenuOpen(false)}
+					conversations={conversations}
+					ready={ready}
+					showConversations={showConversations}
+					onNewConversation={() => switchTo({ type: "new_conversation" })}
+					onToggleConversations={() => {
+						if (!showConversations) send({ type: "list_conversations" });
+						setShowConversations(!showConversations);
+					}}
+					openAccounts={openAccounts}
+					openProfiles={openProfiles}
+					openConnectors={openConnectors}
+					settings={settings}
+					settingsShown={settingsShown}
+					openSettings={openSettings}
+					voice={voice}
+					panelWindow={panelWindow}
+					onHide={onHide}
+					accountsOpen={state.auth.open}
+					profilesOpen={state.profiles.open}
+					connectorsOpen={state.connectors.open}
+				/>
+			) : null}
 
 			{computer?.session ? (
 				<ComputerBanner session={computer.session} yolo={computer.yolo !== undefined} stop={computer.stop} />
@@ -455,53 +403,5 @@ export function ChatSurface({
 				{...(attachments ? { attachments } : {})}
 			/>
 		</div>
-	);
-}
-
-/** Spoken replies on or off (S30.3); the choice is remembered. */
-function MuteButton({ voice }: { voice: VoiceControls }) {
-	const label = voice.muted ? "Unmute spoken replies" : "Mute spoken replies";
-	return (
-		<button
-			type="button"
-			className="icon"
-			aria-label={label}
-			title={label}
-			aria-pressed={voice.muted}
-			onClick={() => voice.setMuted(!voice.muted)}
-		>
-			{voice.muted ? <SpeakerOffIcon /> : <SpeakerIcon />}
-		</button>
-	);
-}
-
-function RoseButton({ controls }: { controls: PanelWindowControls }) {
-	const label = controls.roseHidden ? "Show the rose" : "Hide the rose";
-	return (
-		<button
-			type="button"
-			className="icon"
-			aria-label={label}
-			title={label}
-			onClick={() => controls.setRoseHidden(!controls.roseHidden)}
-		>
-			{controls.roseHidden ? <EyeIcon /> : <EyeOffIcon />}
-		</button>
-	);
-}
-
-function FullscreenButton({ controls }: { controls: PanelWindowControls }) {
-	const label = controls.fullscreen ? "Exit full screen" : "Full screen";
-	return (
-		<button
-			type="button"
-			className="icon"
-			aria-label={label}
-			title={`${label} (⌘⇧F)`}
-			aria-pressed={controls.fullscreen}
-			onClick={() => controls.setFullscreen(!controls.fullscreen)}
-		>
-			{controls.fullscreen ? <CollapseIcon /> : <ExpandIcon />}
-		</button>
 	);
 }

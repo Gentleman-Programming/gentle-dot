@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { formatShortcut, recordKey } from "../src/shortcut.ts";
 import { type DotState, initialState } from "../src/store.ts";
+import { openPanelMenu } from "./panel-menu.ts";
 
 /** The Settings screen and its keyboard shortcut (S33), through the panel and mocked Tauri commands. */
 const h = vi.hoisted(() => ({
@@ -47,6 +48,7 @@ const invoked = (command: string) => h.invoke.mock.calls.filter(([c]) => c === c
 
 async function openSettings() {
 	await renderApp("?surface=panel");
+	await openPanelMenu();
 	await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
 	return screen.findByRole("region", { name: "Settings" });
 }
@@ -187,6 +189,7 @@ describe("the Settings screen (S33.1)", () => {
 	it("the web UI shows no gear", async () => {
 		h.tauri = false;
 		await renderApp("?surface=web#token=abc");
+		await openPanelMenu();
 		await screen.findByRole("button", { name: "Accounts" });
 		expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
 		expect(invoked("shortcut_get")).toHaveLength(0);

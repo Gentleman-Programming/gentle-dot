@@ -16,15 +16,25 @@ function apply(state: DotState, ...payloads: ServerPayload[]): DotState {
 const providers = [{ id: "openai", name: "OpenAI", methods: ["api_key" as const], configured: true }];
 
 const ready = apply(
-	// The conversations list is on here; single-chat.test.tsx covers the default header.
 	{ ...initialState, connection: "open", agentState: "idle", features: { conversations: true } },
 	{ type: "auth_providers", providers },
 	{ type: "profiles", profiles: [{ name: "daily", roles: {} }], roles: [], models: [], importable: false },
 );
 
+const single = apply(
+	{ ...initialState, connection: "open", agentState: "idle" },
+	{ type: "auth_providers", providers },
+);
+
 /** ChatSurface wired to the real reducer, so opening and closing actually happen. */
 function Harness({ initial, send }: { initial: DotState; send: (m: ClientMessage) => void }) {
 	const [state, dispatch] = useReducer(reduce, initial);
+	const panelWindow = {
+		roseHidden: false,
+		setRoseHidden: vi.fn(),
+		fullscreen: false,
+		setFullscreen: vi.fn(),
+	};
 	return (
 		<ChatSurface
 			variant="panel"
@@ -33,40 +43,109 @@ function Harness({ initial, send }: { initial: DotState; send: (m: ClientMessage
 			dismiss={vi.fn()}
 			dispatch={dispatch}
 			onHide={vi.fn()}
+			settings
+			panelWindow={panelWindow}
 		/>
 	);
 }
 
 const box = () => screen.getByRole("textbox", { name: "Message" });
+const openMenu = () => userEvent.click(screen.getByRole("button", { name: "Panel menu" }));
+const drawer = () => screen.getByRole("navigation", { name: "Panel menu" });
 
-describe("header icons", () => {
-	it("uses one set of 18 px stroke SVG icons with names and tooltips instead of text glyphs", () => {
+describe("the panel menu drawer", () => {
+	it("collapses the header icon row into one menu button, with the drawer closed until asked", () => {
 		const { container } = render(<Harness initial={ready} send={vi.fn()} />);
-		const names = ["Conversations", "Accounts", "Profiles", "New conversation", "Hide"];
-		for (const name of names) {
-			const button = screen.getByRole("button", { name });
-			expect(button).toHaveAttribute("title", name);
-			const icons = button.querySelectorAll("svg");
-			expect(icons).toHaveLength(1);
-			const icon = icons[0];
-			expect(icon).toHaveAttribute("width", "18");
-			expect(icon).toHaveAttribute("height", "18");
-			expect(icon).toHaveAttribute("fill", "none");
-			expect(icon).toHaveAttribute("stroke", "currentColor");
-			expect(icon).toHaveAttribute("aria-hidden", "true");
-			expect(button.textContent).toBe("");
+		const menu = screen.getByRole("button", { name: "Panel menu" });
+		expect(menu).toHaveAttribute("aria-expanded", "false");
+		// The old loose icon row is gone: the actions live in the drawer now.
+		for (const name of ["Accounts", "Profiles", "Connectors", "Settings", "Hide"]) {
+			expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
 		}
-		const header = container.querySelector(".chat-header");
-		for (const glyph of ["☰", "⚿", "◐", "＋", "–"]) expect(header?.textContent).not.toContain(glyph);
-		// Each action has its own drawing.
-		const drawings = names.map((name) => screen.getByRole("button", { name }).innerHTML);
-		expect(new Set(drawings).size).toBe(names.length);
+		expect(screen.queryByRole("navigation", { name: "Panel menu" })).not.toBeInTheDocument();
+		// The header keeps only the state dot, the name and the menu button (plus the drag region).
+		expect(container.querySelector(".chat-header")).not.toBeNull();
+		expect(container.querySelectorAll(".chat-header .icon")).toHaveLength(1);
 	});
 
-	it("shows no Hide button in the browser", () => {
+	it("opens a drawer with every action grouped, and closes it by scrim, close button and Escape", async () => {
+		render(<Harness initial={ready} send={vi.fn()} />);
+		await openMenu();
+		expect(drawer()).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "Panel menu" })).toHaveAttribute("aria-expanded", "true");
+		for (const name of [
+			"New conversation",
+			"Conversations",
+			"Accounts",
+			"Profiles",
+			"Connectors",
+			"Settings",
+			"Hide the rose",
+			"Full screen",
+			"Hide",
+		]) {
+			expect(screen.getByRole("button", { name })).toBeInTheDocument();
+		}
+
+		await userEvent.click(screen.getByRole("button", { name: "Close menu" }));
+		expect(screen.queryByRole("navigation", { name: "Panel menu" })).not.toBeInTheDocument();
+
+		await openMenu();
+		await userEvent.keyboard("{Escape}");
+		expect(screen.queryByRole("navigation", { name: "Panel menu" })).not.toBeInTheDocument();
+
+		await openMenu();
+		await userEvent.click(document.querySelector(".header-menu-scrim") as HTMLElement);
+		expect(screen.queryByRole("navigation", { name: "Panel menu" })).not.toBeInTheDocument();
+	});
+
+	it("opens the screens from the drawer and closes it afterwards", async () => {
+		const send = vi.fn();
+		render(<Harness initial={ready} send={send} />);
+		await openMenu();
+		await userEvent.click(screen.getByRole("button", { name: "Accounts" }));
+		expect(screen.getByRole("region", { name: "Accounts" })).toBeInTheDocument();
+		expect(screen.queryByRole("navigation", { name: "Panel menu" })).not.toBeInTheDocument();
+
+		await openMenu();
+		await userEvent.click(screen.getByRole("button", { name: "Conversations" }));
+		expect(screen.getByRole("navigation", { name: "Earlier conversations" })).toBeInTheDocument();
+		expect(screen.queryByRole("navigation", { name: "Panel menu" })).not.toBeInTheDocument();
+	});
+
+	it("marks the open screen with the active rail", async () => {
+		const s = reduce(ready, { type: "accounts", open: true });
+		render(<Harness initial={s} send={vi.fn()} />);
+		await openMenu();
+		expect(screen.getByRole("button", { name: "Accounts" }).className).toContain("active");
+		expect(screen.getByRole("button", { name: "Profiles" }).className).not.toContain("active");
+	});
+
+	it("gates the conversation rows: without the feature only a Pronto row shows", async () => {
+		render(<Harness initial={single} send={vi.fn()} />);
+		await openMenu();
+		expect(screen.queryByRole("button", { name: "New conversation" })).not.toBeInTheDocument();
+		const conversations = screen.getByRole("button", { name: /Conversations/ });
+		expect(conversations).toBeDisabled();
+		expect(conversations.textContent).toContain("Pronto");
+	});
+
+	it("keeps the drawer honest to the variant: no window rows in the browser", async () => {
 		render(<ChatSurface variant="web" state={ready} send={vi.fn()} dismiss={vi.fn()} />);
-		expect(screen.queryByRole("button", { name: "Hide" })).not.toBeInTheDocument();
-		expect(screen.getByRole("button", { name: "Profiles" })).toHaveAttribute("title", "Profiles");
+		await openMenu();
+		for (const name of ["Hide the rose", "Full screen", "Hide"]) {
+			expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+		}
+		// The drawer still carries what the browser has: integrations and the conversations row.
+		expect(screen.getByRole("button", { name: "Accounts" })).toBeInTheDocument();
+	});
+
+	it("keeps a live session row working from the drawer", async () => {
+		const onHide = vi.fn();
+		render(<ChatSurface variant="panel" state={ready} send={vi.fn()} dismiss={vi.fn()} onHide={onHide} />);
+		await openMenu();
+		await userEvent.click(screen.getByRole("button", { name: "Hide" }));
+		expect(onHide).toHaveBeenCalled();
 	});
 });
 
@@ -75,20 +154,22 @@ describe("typing closes open options", () => {
 		const send = vi.fn();
 		render(<Harness initial={ready} send={send} />);
 
+		await openMenu();
 		await userEvent.click(screen.getByRole("button", { name: "Conversations" }));
 		expect(screen.getByRole("navigation", { name: "Earlier conversations" })).toBeInTheDocument();
 		await userEvent.type(box(), "h");
 		expect(screen.queryByRole("navigation", { name: "Earlier conversations" })).not.toBeInTheDocument();
-		expect(screen.getByRole("button", { name: "Conversations" })).toHaveAttribute("aria-expanded", "false");
 		expect(box()).toHaveValue("h");
 
 		await userEvent.clear(box());
+		await openMenu();
 		await userEvent.click(screen.getByRole("button", { name: "Accounts" }));
 		expect(screen.getByRole("region", { name: "Accounts" })).toBeInTheDocument();
 		await userEvent.type(box(), "hi");
 		expect(screen.queryByRole("region", { name: "Accounts" })).not.toBeInTheDocument();
 
 		await userEvent.clear(box());
+		await openMenu();
 		await userEvent.click(screen.getByRole("button", { name: "Profiles" }));
 		expect(screen.getByRole("region", { name: "Profiles" })).toBeInTheDocument();
 		await userEvent.type(box(), "x");
@@ -100,6 +181,7 @@ describe("typing closes open options", () => {
 	it("leaves an option opened while text is already typed until the box is emptied and typing starts again", async () => {
 		render(<Harness initial={ready} send={vi.fn()} />);
 		await userEvent.type(box(), "draft");
+		await openMenu();
 		await userEvent.click(screen.getByRole("button", { name: "Profiles" }));
 		await userEvent.type(box(), " more");
 		expect(screen.getByRole("region", { name: "Profiles" })).toBeInTheDocument();
@@ -116,6 +198,7 @@ describe("typing closes open options", () => {
 			prompt: { flowId: "f1", kind: "secret", message: "Paste your API key" },
 		});
 		render(<Harness initial={s} send={vi.fn()} />);
+		await openMenu();
 		await userEvent.click(screen.getByRole("button", { name: "Conversations" }));
 		await userEvent.type(box(), "o");
 		expect(screen.getByRole("region", { name: "Accounts" })).toBeInTheDocument();

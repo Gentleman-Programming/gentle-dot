@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatSurface } from "../src/components/ChatSurface.tsx";
 import { type DotState, initialState, reduce } from "../src/store.ts";
+import { openPanelMenu } from "./panel-menu.ts";
 
 function apply(state: DotState, ...payloads: ServerPayload[]): DotState {
 	return payloads.reduce(
@@ -33,21 +34,24 @@ describe("one continuous chat", () => {
 		expect(apply(withList, { type: "ready", agentState: "idle" }).features.conversations).toBe(false);
 	});
 
-	it("shows the assistant in the header, with no new-conversation button or conversations list", () => {
+	it("shows the assistant in the header, with no new-conversation button or conversations list", async () => {
 		const { container } = render(
 			<ChatSurface variant="panel" state={single} send={vi.fn()} dismiss={vi.fn()} onHide={vi.fn()} />,
 		);
 		expect(screen.queryByRole("button", { name: "New conversation" })).not.toBeInTheDocument();
-		expect(screen.queryByRole("button", { name: "Conversations" })).not.toBeInTheDocument();
 		expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Gentle Dot");
 		expect(container.querySelector(".chat-header .rose-glyph")).not.toBeNull();
+		await openPanelMenu();
+		const pronto = screen.getByRole("button", { name: /Conversations/ });
+		expect(pronto).toBeDisabled();
 		for (const name of ["Accounts", "Profiles", "Hide"]) {
 			expect(screen.getByRole("button", { name })).toBeInTheDocument();
 		}
 	});
 
-	it("brings the conversations back when the flag is on", () => {
+	it("brings the conversations back when the flag is on", async () => {
 		render(<ChatSurface variant="web" state={withList} send={vi.fn()} dismiss={vi.fn()} />);
+		await openPanelMenu();
 		expect(screen.getByRole("button", { name: "New conversation" })).toBeInTheDocument();
 		expect(screen.getByRole("button", { name: "Conversations" })).toBeInTheDocument();
 		expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("New conversation");
