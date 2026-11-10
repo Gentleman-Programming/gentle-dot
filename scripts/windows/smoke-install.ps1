@@ -11,7 +11,7 @@ param([Parameter(Mandatory=$true)][string]$Installer, [string]$DiagnosticsPath =
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $outcome = 'other'; $pollCount = 0; $health = $null
-$alive = $null; $exitCode = $null; $reachable = $null; $httpStatus = $null; $errorKind = 'none'
+$alive = $null; $exitCode = $null; $reachable = $null; $httpStatus = $null; $errorKind = 'none'; $probe = $null
 try {
 if ($DiagnosticsPath) { Import-Module "$PSScriptRoot/smoke-diagnostics.psm1" -Force }
 $repo = (Resolve-Path "$PSScriptRoot/../..").Path
@@ -85,8 +85,10 @@ try {
     if (-not $ready) { $outcome = 'timeout'; throw 'Installed app did not reach agentState=idle within 240 seconds' }
     VerifyRuntime
 } finally {
-    # Capture before existing forced cleanup, without masking the original smoke failure.
+    # One bounded diagnostic-only observation after the readiness decision, before cleanup.
+    # It must never become a readiness input or replace the original failure.
     if ($DiagnosticsPath) {
+        try { $probe = Get-SmokeObservation -Port $port } catch { $probe = @{} }
         try {
             if ($null -ne $app) {
                 $alive = -not $app.HasExited
@@ -118,7 +120,7 @@ Write-Output 'Installation, runtime hashes, daemon readiness, stopped-app reinst
 } finally {
     if ($DiagnosticsPath) {
         try {
-            $diagnostic = New-SmokeDiagnostic -Outcome $outcome -Alive $alive -ExitCode $exitCode -PollCount $pollCount -Reachable $reachable -HttpStatus $httpStatus -Health $health -ErrorKind $errorKind
+            $diagnostic = New-SmokeDiagnostic -Outcome $outcome -Alive $alive -ExitCode $exitCode -PollCount $pollCount -Reachable $reachable -HttpStatus $httpStatus -Health $health -ErrorKind $errorKind -Probe $probe
             Write-SmokeDiagnostic -Path $DiagnosticsPath -Diagnostic $diagnostic
         } catch { Write-Warning 'Sanitized smoke diagnostics unavailable' -WarningAction Continue }
     }

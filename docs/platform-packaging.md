@@ -104,10 +104,34 @@ personal/local profile, credential file or log is read for diagnostics.
 | `listenerReachable`, `httpStatus` | HTTP response observed, nullable numeric status; null means unavailable, not proof of no listener |
 | `healthShape`, `healthOk` | missing/array/object/other; nullable boolean |
 | `agentState` | starting/idle/thinking/working/needs_you/restarting/error/unknown |
-| `errorKind` | none/timeout/transport/other, selected by exception type only |
+| `errorKind` | none/timeout/transport/other, selected by exception type only (unchanged legacy meaning) |
+| Optional `probe.tcpState` | connected/refused/connecttimeout/unreachable/other/unknown |
+| `probe.httpState`, `probe.httpStatus` | notattempted/response/statuserror/timeout/failure/other; nullable status 100–599 |
+| `probe.jsonState` | notattempted/valid/invalid/oversize/other |
+| `probe.healthShape`, `probe.healthState` | missing/array/object/other; notattempted/valid/invalidshape/other |
 
-Successful REST requests establish reachability but their status is unavailable
-from the existing request helper; failed HTTP responses may expose a numeric status.
+Legacy fields describe the existing readiness loop: successful REST requests
+establish reachability but their status is unavailable from that helper; failed
+HTTP responses may expose a numeric status. They are not reinterpreted.
+
+The optional `probe` is a **single later snapshot**, after the readiness decision
+and before existing cleanup, only when diagnostics are requested. A loopback-only
+TCP connection has a 2500 ms cancellation budget (allowing Windows to report a
+refusal rather than prematurely cancelling); a separate HTTP GET has a 500 ms
+budget covering headers and body. No proxy, cookies, authentication, redirects or
+retry is used. The response-header limit is 8 KiB; body reads stop at 4097 bytes
+(4096 accepted, 4097 means oversize), with JSON parsing depth capped at 16. Only
+allowlisted metadata leaves memory. `valid` health shape requires an object with a
+boolean `ok` and a known agent-state enum; it does **not** assert idle/readiness.
+
+TCP refusal, connect timeout and network/host unreachable are classified from
+exception types/socket codes, never exception text. HTTP status errors, request/body
+timeouts, other HTTP failures, invalid JSON and invalid health shapes are separate.
+Unknown observation failures stay fixed categories; pre-launch failures may have
+no `probe`. TCP and HTTP use separate connections and can race with process exit;
+a connected TCP check is not proof that the earlier readiness request connected.
+This small bounded extra observation does not retry readiness, restart the app,
+change its 240-second deadline or feed success/failure decisions.
 Unknown strings become fixed enums. Arbitrary content is never recursively redacted
 or serialized: no stdout/stderr, app/daemon logs, health error text, exception
 messages, URLs, headers, tokens, profiles, environment, usernames, paths or commands.
@@ -120,8 +144,9 @@ glob. A failure before the smoke runs can leave no file. Success creates the fil
 but does not upload this diagnostic artifact. The 240-second idle deadline,
 success rules, cleanup, reinstall/uninstall ordering and ARM64 unsupported boundary
 are unchanged. This is diagnostic instrumentation, **not an application fix**:
-run `42847087853` timed out after building x64 NSIS; the startup cause remains
-unknown. A new native QA run is still needed; pure helper/parsed-workflow tests
+runs `42847087853` and `42865400061` timed out after building x64 NSIS. The latter
+recorded 96 polls, process alive, and no recorded health response; null listener
+metadata did not prove TCP refusal. The startup cause remains unknown. A new native QA run is still needed; pure helper/parsed-workflow tests
 cannot establish installed readiness or effective Stop.
 
 ### CI helper commands
