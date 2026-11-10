@@ -10,6 +10,7 @@ import {
 	saveShortcut,
 } from "../shortcut.ts";
 import { setVoiceLanguage, VOICE_LANGUAGES, voiceLanguage } from "../voice-language.ts";
+import { SelectMenu } from "./SelectMenu.tsx";
 import "../settings.css";
 
 type Status =
@@ -235,20 +236,15 @@ export function SettingsPanel({ close }: { close: () => void }) {
 				<p className="muted">
 					The language macOS speech listens in. The local voice model detects it by itself.
 				</p>
-				<select
-					aria-label="Voice language"
+				<SelectMenu
+					label="Voice language"
 					value={language}
-					onChange={(event) => {
-						setLanguage(event.target.value);
-						setVoiceLanguage(event.target.value);
+					onChange={(value) => {
+						setLanguage(value);
+						setVoiceLanguage(value);
 					}}
-				>
-					{VOICE_LANGUAGES.map(([locale, label]) => (
-						<option key={locale || "auto"} value={locale}>
-							{label}
-						</option>
-					))}
-				</select>
+					options={VOICE_LANGUAGES.map(([locale, label]) => ({ value: locale, label }))}
+				/>
 			</section>
 		</section>
 	);

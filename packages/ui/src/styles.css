@@ -1995,3 +1995,122 @@ button.menu-row.active {
 	z-index: 2;
 	background: transparent;
 }
+
+/* The theme's select menu (SelectMenu.tsx): the trigger mirrors the old native select's chrome
+   (theme border, background, focus ring) and the popup is drawn by the theme, not the OS. */
+.select-menu {
+	position: relative;
+}
+
+.select-menu-trigger {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	width: 100%;
+	padding: 7px 10px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-sm);
+	background: var(--bg);
+	color: var(--text);
+	font: inherit;
+	font-size: 14px;
+	cursor: pointer;
+	transition: box-shadow 120ms var(--ease);
+}
+
+.select-menu.compact .select-menu-trigger {
+	width: auto;
+	padding: 4px 8px;
+	font-size: 12.5px;
+	background: var(--surface-2);
+}
+
+.select-menu-trigger:hover:not(:disabled) {
+	border-color: var(--accent-line);
+}
+
+.select-menu-trigger:focus-visible {
+	outline: none;
+	border-color: var(--accent-line);
+	box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.select-menu-trigger[aria-expanded="true"] {
+	border-color: var(--accent-line);
+}
+
+.select-menu-trigger:disabled {
+	opacity: 0.55;
+	cursor: default;
+}
+
+.select-menu-value {
+	flex: 1;
+	text-align: left;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.select-menu-caret {
+	flex: none;
+	color: var(--muted);
+}
+
+.select-menu-trigger[aria-expanded="true"] .select-menu-caret {
+	color: var(--accent);
+}
+
+.select-menu-list {
+	position: fixed;
+	min-width: 100%;
+	width: max-content;
+	max-width: min(340px, calc(100vw - 24px));
+	max-height: min(320px, 60vh);
+	overflow-y: auto;
+	padding: 6px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius-md);
+	background: var(--surface-2);
+	box-shadow: var(--shadow-elevated);
+	z-index: 40;
+}
+
+.select-menu-group {
+	margin: 0 0 6px;
+}
+
+.select-menu-group:last-child {
+	margin: 0;
+}
+
+.select-menu-heading {
+	padding: 6px 8px 4px;
+	font-size: 10px;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--muted);
+}
+
+.select-menu-option {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	padding: 6px 8px;
+	border-radius: var(--radius-sm);
+	font-size: 13.5px;
+	color: var(--text);
+	cursor: pointer;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.select-menu-option.active {
+	background: var(--accent-soft);
+}
+
+.select-menu-option[aria-selected="true"] {
+	color: var(--accent);
+	font-weight: 600;
+}

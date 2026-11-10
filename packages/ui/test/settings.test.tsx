@@ -281,15 +281,15 @@ describe("voice language (S30.6)", () => {
 	it("does not offer macOS voice language on Windows", async () => {
 		vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Windows NT 10.0");
 		await openSettings();
-		expect(screen.queryByRole("combobox", { name: "Voice language" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Voice language" })).toBeNull();
 	});
 	it("defaults to the system language and remembers the one chosen for macOS speech", async () => {
 		await openSettings();
-		const picker = screen.getByRole("combobox", { name: "Voice language" });
-		expect(picker).toHaveValue("");
-		await userEvent.selectOptions(picker, "es-ES");
+		await userEvent.click(screen.getByRole("button", { name: "Voice language" }));
+		await userEvent.click(screen.getByRole("option", { name: "Español" }));
 		expect(localStorage.getItem("gentle-dot-voice-language")).toBe("es-ES");
-		await userEvent.selectOptions(picker, "");
+		await userEvent.click(screen.getByRole("button", { name: "Voice language" }));
+		await userEvent.click(screen.getByRole("option", { name: "Automatic (system language)" }));
 		expect(localStorage.getItem("gentle-dot-voice-language")).toBeNull();
 	});
 });
