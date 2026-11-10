@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-synthesis-status"
+description = "Enables the voice_synthesis_status command without any pre-configured scope."
+commands.allow = ["voice_synthesis_status"]
+
+[[permission]]
+identifier = "deny-voice-synthesis-status"
+description = "Denies the voice_synthesis_status command without any pre-configured scope."
+commands.deny = ["voice_synthesis_status"]

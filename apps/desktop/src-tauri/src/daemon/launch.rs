@@ -204,8 +204,8 @@ fn where_git() -> Vec<String> {
         .collect()
 }
 
-/// The Windows `PATH` for a bundled runtime: its own folders first so the packaged Node keeps
-/// winning, then the machine's Git, and the system folders last.
+/// The Windows `PATH` prefix for a bundled runtime: its own folders first so packaged Node
+/// keeps winning, then the machine's Git and system folders. Inherited entries follow it.
 #[cfg(windows)]
 fn windows_bundled_path(runtime: &Path, git_dirs: Vec<PathBuf>, system: &Path) -> Vec<PathBuf> {
     [runtime.join("bin"), runtime.join("node/bin")]
@@ -216,8 +216,9 @@ fn windows_bundled_path(runtime: &Path, git_dirs: Vec<PathBuf>, system: &Path) -
 }
 
 /// `<node> <daemon script>` (S29.5). With a bundled runtime (`<runtime>/daemon/cli.mjs`
-/// exists) that is the runtime's own Node and daemon, a PATH of the runtime plus the
-/// system folders, and `GENTLE_DOT_RUNTIME`; otherwise the build-time paths and PATH.
+/// exists) that is the runtime's own Node and daemon and `GENTLE_DOT_RUNTIME`.
+/// Bundled Windows keeps its tool/system PATH prefix, then all nonempty inherited entries;
+/// otherwise the platform's existing runtime or build-time paths and PATH stay unchanged.
 /// `GENTLE_DOT_NODE` and `GENTLE_DOT_DAEMON_SCRIPT` override the program and script in both.
 pub fn launch_spec(env: impl Fn(&str) -> Option<String>, dev: bool, runtime: Option<&Path>) -> LaunchSpec {
     // Git is resolved once, here, and only a Windows bundled runtime puts it on PATH.
@@ -257,10 +258,19 @@ fn launch_spec_with(
                 let system = PathBuf::from(env("SystemRoot").filter(|v| !v.is_empty())
                     .unwrap_or_else(|| r"C:\Windows".into()));
                 let entries = windows_bundled_path(dir, git_dirs(), &system);
+                let mut path = entries.iter().map(|entry| entry.display().to_string()).collect::<Vec<_>>().join(";");
+                // Keep the trusted prefix, but do not discard other user/system tools (e.g. Git).
+                // Preserve inherited spelling and order; empty entries must not add a cwd search.
+                if let Some(inherited) = env("PATH") {
+                    for entry in inherited.split(';').filter(|entry| !entry.is_empty()) {
+                        path.push(';');
+                        path.push_str(entry);
+                    }
+                }
                 (
                     dir.join("node/bin/node.exe").display().to_string(),
                     dir.join("daemon/cli.mjs").display().to_string(),
-                    entries.iter().map(|entry| entry.display().to_string()).collect::<Vec<_>>().join(";"),
+                    path,
                 )
             };
             (
@@ -461,6 +471,70 @@ mod packaged_runtime_tests {
             "{};{};D:\\Windows\\System32;D:\\Windows",
             runtime.join("bin").display(), runtime.join("node/bin").display(),
         )));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundled_windows_launch_spec_preserves_inherited_path_after_the_existing_prefix() {
+        let runtime = fixture("inherited-path");
+        let git = PathBuf::from(r"C:\Git\cmd");
+        let prefix = format!("{};{};{};D:\\Windows\\System32;D:\\Windows",
+            runtime.join("bin").display(), runtime.join("node/bin").display(), git.display());
+        for (inherited, suffix) in [
+            (r"C:\Users\example\scoop\apps\git\current\cmd;D:\Tools With Spaces\bin",
+             r"C:\Users\example\scoop\apps\git\current\cmd;D:\Tools With Spaces\bin"),
+            (r";c:\MixedCase\Bin;;D:\not-created\tools;c:\MixedCase\Bin;",
+             r"c:\MixedCase\Bin;D:\not-created\tools;c:\MixedCase\Bin"),
+        ] {
+            let spec = launch_spec_with(|key| match key {
+                "SystemRoot" => Some(r"D:\Windows".into()),
+                "PATH" => Some(inherited.into()),
+                _ => None,
+            }, false, Some(&runtime), || vec![git.clone()]);
+            assert_eq!(spec.envs[0], ("PATH".into(), format!("{prefix};{suffix}")));
+            assert_eq!(spec.program, runtime.join("node/bin/node.exe").display().to_string());
+            assert_eq!(spec.args, vec![runtime.join("daemon/cli.mjs").display().to_string()]);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundled_windows_empty_inherited_path_keeps_the_prefix_and_explicit_launches() {
+        let runtime = fixture("empty-inherited-path");
+        for inherited in [None, Some(""), Some(";;")] {
+            let spec = launch_spec_with(|key| match key {
+                "SystemRoot" => Some(r"D:\Windows".into()),
+                "PATH" => inherited.map(str::to_string),
+                "GENTLE_DOT_NODE" => Some(r"E:\custom\node.exe".into()),
+                "GENTLE_DOT_DAEMON_SCRIPT" => Some(r"E:\custom\cli.mjs".into()),
+                _ => None,
+            }, false, Some(&runtime), Vec::new);
+            assert_eq!(spec.envs[0], ("PATH".into(), format!("{};{};D:\\Windows\\System32;D:\\Windows",
+                runtime.join("bin").display(), runtime.join("node/bin").display())));
+            assert_eq!(spec.program, r"E:\custom\node.exe");
+            assert_eq!(spec.args, vec![r"E:\custom\cli.mjs"]);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundled_windows_inherited_git_remains_discoverable_without_selected_git() {
+        let runtime = fixture("inherited-git-lookup");
+        let git_dir = runtime.join("external Git").join("cmd");
+        fs::create_dir_all(&git_dir).unwrap();
+        // where.exe only discovers this synthetic fixture; Git itself is never executed.
+        let executable = git_dir.join("git.exe");
+        fs::write(&executable, b"").unwrap();
+        let inherited = git_dir.display().to_string();
+        let spec = launch_spec_with(|key| (key == "PATH").then(|| inherited.clone()),
+            false, Some(&runtime), Vec::new);
+        let system = std::env::var_os("SystemRoot").map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        let output = std::process::Command::new(system.join("System32/where.exe"))
+            .arg("git.exe").env("PATH", &spec.envs[0].1).current_dir(&runtime).output().unwrap();
+        assert!(output.status.success(), "inherited Git disappeared: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.stderr.is_empty());
+        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), executable.display().to_string());
     }
 
     fn fixture(name: &str) -> PathBuf {

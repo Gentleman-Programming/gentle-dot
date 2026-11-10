@@ -68,7 +68,7 @@ With your permission, Gentle Dot sees the screen and operates your apps: clicks,
 
 ### Talk to it
 
-Press the mic and speak: the transcript lands in the input for you to review, or goes out as soon as you stop if you prefer. Replies to what you said are read aloud. Speech runs on your Mac by default; download the optional local model (NVIDIA Parakeet, 25 languages including Spanish) to keep your voice fully offline, or connect an OpenAI API key.
+Press the mic and speak: by default, tap again to review the transcript. Enable **Send when I stop** to send automatically after about two seconds of silence following speech; tapping again sends sooner. The pause detector uses audio levels: very quiet speech or background noise can affect it, and missing meter samples do not count as silence. Replies to what you said are read aloud. Speech runs on your Mac by default; download the optional local model (NVIDIA Parakeet, 25 languages including Spanish) to keep your voice fully offline, or connect an OpenAI API key.
 
 ---
 
@@ -123,7 +123,7 @@ pnpm package:linux --arch amd64
 pnpm package:windows            # add --check to verify both payloads, which needs 7-Zip
 ```
 
-Then follow **[docs/install.md](docs/install.md)**: opening an unsigned app on macOS 15 and later goes through **System Settings → Privacy & Security → Open Anyway**, the Windows installers are unsigned too so Windows shows its own warning, and the guide covers permissions, where your data lives, and uninstalling. Windows support is in progress: it builds and runs, but connectors that need a secret or an approval, voice, and computer control are not there yet. See **[docs/install.md](docs/install.md)** for the Windows section and **[docs/windows-testing.md](docs/windows-testing.md)** for the tester checklist.
+Then follow **[docs/install.md](docs/install.md)**: opening an unsigned app on macOS 15 and later goes through **System Settings → Privacy & Security → Open Anyway**, the Windows installers are unsigned too so Windows shows its own warning, and the guide covers permissions, where your data lives, and uninstalling. Windows support is in progress: it builds and runs, but connectors that need a secret or an approval and computer control are not there yet. Windows voice supports local transcription and spoken replies using installed Windows voices; see **[docs/windows-voice-output.md](docs/windows-voice-output.md)** for requirements and limits. See **[docs/install.md](docs/install.md)** for the Windows section and **[docs/windows-testing.md](docs/windows-testing.md)** for the tester checklist.
 
 Prefer to run it from the source?
 
