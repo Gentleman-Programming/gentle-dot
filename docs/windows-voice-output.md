@@ -1,10 +1,24 @@
-# Windows speech-to-WAV foundation
+# Windows speech-to-WAV bridge
 
-The native foundation converts local literal text into in-memory WAV bytes using classic desktop SAPI. It does not play audio, write temporary audio files, or use WinRT. IPC commands, exclusive synthesis leases, UI playback and cancellation integration are later units; existing voice input is unchanged.
+The panel-only native bridge converts local literal text into in-memory WAV bytes using classic desktop SAPI on a blocking worker. It does not play audio, write temporary audio files, or use WinRT. Existing voice input is unchanged; UI playback integration and audible/hardware acceptance are separate work.
 
-## Contract and limits
+## Panel commands
 
-`synthesize_wav(text, locale, Arc<AtomicBool>) -> Result<Vec<u8>, String>` blocks its caller while a fresh worker owns and releases every COM interface in its own apartment. A later adapter must keep this off the UI thread.
+| Command and arguments | Reply |
+| --- | --- |
+| `voice_synthesis_status({})` | `{supported: boolean}`: compiled Windows support, not a microphone or installed-voice probe. |
+| `voice_synthesize({requestId, text, locale})` | WAV bytes (`number[]`); explicitly unsupported on non-Windows. |
+| `voice_synthesize_cancel({requestId})` | No value; marks only that request ID, without releasing a running worker's slot. |
+
+All three require the invoking Tauri window to be `panel`, in addition to the existing local, panel-only `voice` capability. Neither a caller-supplied window label nor an arbitrary webview grants access. Status does not promise a suitable installed voice or audible output. Non-Windows callers retain their existing browser behavior and must not invoke the Windows synthesis path.
+
+Request IDs are unique for the app session: 1–128 ASCII letters/digits, `-`, or `_`. Text/locale and IDs are validated before admission mutates history or reserves the single active slot. A cancellation arriving before admission permanently retires that ID. Completed, cancelled and failed IDs are never reusable. History stops at 1024 distinct IDs rather than evicting tombstones or growing indefinitely.
+
+Admission happens before the first await. Its lease moves into the blocking worker and is released on return, error or unwind, even if the IPC waiter was dropped. Cancel is cooperative, not worker termination; a late successful WAV is discarded after cancellation. Renderer/purge failures remain errors rather than being hidden as cancellation.
+
+## Foundation contract and limits
+
+`synthesize_wav(text, locale, Arc<AtomicBool>) -> Result<Vec<u8>, String>` blocks its caller while a fresh worker owns and releases every COM interface in its own apartment. The bridge invokes it through `spawn_blocking`, never on the UI thread.
 
 - Text must be nonblank, NUL-free and at most 4000 UTF-16 units. Locale must be nonempty, NUL-free and at most 85 bytes; Windows then validates its language identifier.
 - SAPI language matching prefers exact, then primary-language matches; no match retains the fresh voice's default voice. Catalog errors are reported, not hidden. This never falls back to speaker output.
@@ -18,8 +32,10 @@ The native foundation converts local literal text into in-memory WAV bytes using
 | Result | Caller action |
 | --- | --- |
 | Empty/NUL/overlong text or invalid locale | Correct the request before retrying; do not synthesize boundary-length fixtures. |
+| `Speech synthesis is busy` | Wait for the current worker to exit; cancellation alone does not free the slot. |
+| `Speech request session limit reached; restart the app` | Restart the app to begin a new bounded session; do not reuse retired IDs. |
 | Cancelled, timed out, or memory limit exceeded | Retire the result; shorten any deliberate retry. Do not treat it as empty success. |
 | Unsupported/missing PCM, no audio, or truncated stream | Surface synthesis failure; do not play malformed bytes or silently switch backends. |
 | `Windows speech <stage> failed (HRESULT ...)`, worker start/panic, or purge failure | Surface the bounded error. A purge error does not prove successful cancellation. |
 
-Portable guard/WAV tests need no speech engine. The default-ignored Windows integration fixture uses only “A short synthesis test.” in `en-US` and checks in-memory WAV/data; installed SAPI voices are not guaranteed in CI. Select only that exact fixture after memory-only source audit. Test presence is not execution evidence. A passing memory fixture demonstrates WAV generation, not audibility, IPC/UI readiness, or live hardware acceptance.
+Portable guard/WAV and fake-renderer lease/handshake tests need no speech engine. Bridge GREEN execution and end-to-end UI verification remain separate evidence. The default-ignored Windows integration fixture uses only “A short synthesis test.” in `en-US` and checks in-memory WAV/data; installed SAPI voices are not guaranteed in CI. Select only that exact fixture after memory-only source audit. Test presence is not execution evidence. A passing memory fixture demonstrates WAV generation, not audibility, IPC/UI readiness, or live hardware acceptance.

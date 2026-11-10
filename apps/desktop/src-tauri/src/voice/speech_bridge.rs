@@ -133,6 +133,49 @@ pub fn require_panel(window_label: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Compiled Windows support only; does not probe microphones or installed voices.
+#[tauri::command]
+pub fn voice_synthesis_status(
+    webview: tauri::WebviewWindow,
+    state: tauri::State<'_, SpeechSynthesis>,
+) -> Result<SynthesisStatus, String> {
+    require_panel(webview.label())?;
+    Ok(state.status())
+}
+
+/// Returns WAV bytes without native playback; admission precedes the first await.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn voice_synthesize(
+    webview: tauri::WebviewWindow,
+    state: tauri::State<'_, SpeechSynthesis>,
+    request_id: String,
+    text: String,
+    locale: String,
+) -> Result<Vec<u8>, String> {
+    require_panel(webview.label())?;
+    let job = state.prepare(&request_id, &text, &locale)?;
+    tauri::async_runtime::spawn_blocking(move || job.render(|text, locale, cancelled| {
+        #[cfg(windows)]
+        return super::windows_speech::synthesize_wav(text, locale, cancelled);
+        #[cfg(not(windows))]
+        {
+            let _ = (text, locale, cancelled);
+            Err("Native speech synthesis is unsupported on this platform".into())
+        }
+    })).await.map_err(|_| "Speech worker failed".to_string())?
+}
+
+/// Marks this ID only; a running worker keeps the exclusive slot until it exits.
+#[tauri::command(rename_all = "camelCase")]
+pub fn voice_synthesize_cancel(
+    webview: tauri::WebviewWindow,
+    state: tauri::State<'_, SpeechSynthesis>,
+    request_id: String,
+) -> Result<(), String> {
+    require_panel(webview.label())?;
+    state.cancel(&request_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
