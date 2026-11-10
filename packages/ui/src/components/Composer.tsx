@@ -156,6 +156,7 @@ export function Composer({
 							type="button"
 							role="switch"
 							aria-checked={voice.sendOnStop}
+							title="Send after 2 seconds of silence following speech"
 							className={`voice-send-option${voice.sendOnStop ? " on" : ""}`}
 							onClick={() => voice.setSendOnStop(!voice.sendOnStop)}
 						>
@@ -208,7 +209,7 @@ export function Composer({
 						title={
 							voice.mic.available
 								? voice.sendOnStop
-									? "Tap to talk, tap again to send"
+									? "Tap to talk; pause for 2 seconds or tap again to send"
 									: "Tap to talk, tap again to review before sending"
 								: voice.mic.reason
 						}

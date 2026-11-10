@@ -17,6 +17,7 @@ import {
 	stopNativeVoice,
 } from "./voice-native.ts";
 import { createVoiceOutput, type VoiceOutput } from "./voice-output.ts";
+import { VoiceSilence } from "./voice-silence.ts";
 
 export type VoicePhase = "idle" | "recording" | "transcribing";
 
@@ -45,7 +46,7 @@ export interface VoiceControls {
 	setMuted(muted: boolean): void;
 	/** User editing retires output and disarms an old spoken turn, without discarding dictation. */
 	typed(): void;
-	/** Whether a dictation is sent when recording stops, or left in the input for review. */
+	/** Auto-stop after a speech pause and send, or stop manually and leave text for review. */
 	sendOnStop: boolean;
 	setSendOnStop(send: boolean): void;
 	/** A dictation waiting in the input for review; `id` changes with each one. */
@@ -59,7 +60,7 @@ export interface VoiceControls {
 /** Recordings stop on their own so they fit the daemon's WebSocket limit (S30.2). */
 const MAX_RECORDING_MS = 60_000;
 const MUTED_KEY = "gentle-dot-voice-muted";
-/** Set when a dictation is sent on stop; otherwise it stays in the input for review. */
+/** Opt in to send after a two-second speech pause; otherwise stop manually to review. */
 const SEND_KEY = "gentle-dot-voice-send";
 const RECORDING_TYPES = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
 const REASONS = {
@@ -93,6 +94,7 @@ function chooseSource(desktop: boolean, transcribe: boolean, native: NativeVoice
 interface Recording {
 	kind: "daemon" | "native";
 	cancelled: boolean;
+	silence: VoiceSilence;
 	recorder?: MediaRecorder;
 	ticker?: ReturnType<typeof setInterval>;
 	limit?: ReturnType<typeof setTimeout>;
@@ -101,6 +103,7 @@ interface Recording {
 
 /** Stops the elapsed-time ticker, the length limit, and the level meter. */
 function stopTimers(entry: Recording): void {
+	entry.silence.reset();
 	clearInterval(entry.ticker);
 	clearTimeout(entry.limit);
 	entry.stopMeter?.();
@@ -270,6 +273,8 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 	);
 
 	const setSendOnStop = useCallback((next: boolean) => {
+		sendOnStopNow.current = next;
+		recording.current?.silence.reset();
 		setSendOnStopState(next);
 		try {
 			if (next) localStorage.setItem(SEND_KEY, "1");
@@ -302,9 +307,11 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 	);
 
 	const upload = useCallback(
-		async (blob: Blob, mime: string) => {
+		async (entry: Recording, blob: Blob, mime: string) => {
+			if (entry.cancelled || recording.current !== entry) return;
 			setPhase("transcribing");
 			const data = await toBase64(blob);
+			if (entry.cancelled || recording.current !== entry) return;
 			if (data.length > MAX_VOICE_AUDIO) {
 				finish(REASONS.tooLong);
 				return;
@@ -320,13 +327,30 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 		const current = recording.current;
 		if (!current || phaseNow.current !== "recording") return;
 		stopTimers(current);
+		// MediaRecorder.onstop is asynchronous too: retire recording before requesting either stop.
+		setPhase("transcribing");
 		if (current.kind === "daemon") {
 			current.recorder?.stop();
 			return;
 		}
-		setPhase("transcribing");
-		stopNativeVoice().then(sendTranscript, (error: unknown) => finish(startRefusal(error)));
+		void stopNativeVoice().then(
+			(text) => {
+				if (!current.cancelled && recording.current === current) sendTranscript(text);
+			},
+			(error: unknown) => {
+				if (!current.cancelled && recording.current === current) finish(startRefusal(error));
+			},
+		);
 	}, [finish, sendTranscript, setPhase]);
+
+	const stopNow = useRef(stop);
+	stopNow.current = stop;
+	const observeLevel = useCallback((entry: Recording, value: number) => {
+		if (recording.current !== entry || entry.cancelled || phaseNow.current !== "recording") return;
+		setLevel(value);
+		if (!sendOnStopNow.current) entry.silence.reset();
+		else if (entry.silence.sample(value, Date.now())) stopNow.current();
+	}, []);
 
 	const startDaemon = useCallback(async () => {
 		let stream: MediaStream;
@@ -338,22 +362,27 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 		}
 		const type = RECORDING_TYPES.find((t) => MediaRecorder.isTypeSupported?.(t));
 		const recorder = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
-		const entry: Recording = { kind: "daemon", cancelled: false, recorder };
+		const entry: Recording = {
+			kind: "daemon",
+			cancelled: false,
+			silence: new VoiceSilence("daemon"),
+			recorder,
+		};
 		const chunks: Blob[] = [];
 		recorder.ondataavailable = (event) => {
 			if (event.data.size > 0) chunks.push(event.data);
 		};
 		recorder.onstop = () => {
 			for (const track of stream.getTracks()) track.stop();
-			if (entry.cancelled) return;
+			if (entry.cancelled || recording.current !== entry) return;
 			const mime = recorder.mimeType || type || "audio/webm";
-			void upload(new Blob(chunks, { type: mime }), mime);
+			void upload(entry, new Blob(chunks, { type: mime }), mime);
 		};
 		recorder.start();
-		entry.stopMeter = startMeter(stream, setLevel);
 		begin(entry);
+		entry.stopMeter = startMeter(stream, (value) => observeLevel(entry, value));
 		entry.limit = setTimeout(stop, MAX_RECORDING_MS);
-	}, [begin, finish, stop, upload]);
+	}, [begin, finish, observeLevel, stop, upload]);
 
 	const startNative = useCallback(async () => {
 		try {
@@ -363,7 +392,7 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 			finish(startRefusal(error));
 			return;
 		}
-		begin({ kind: "native", cancelled: false });
+		begin({ kind: "native", cancelled: false, silence: new VoiceSilence("native") });
 	}, [begin, finish]);
 
 	const start = useCallback(() => {
@@ -382,8 +411,9 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 		const current = recording.current;
 		if (!current) return;
 		current.cancelled = true;
-		if (current.kind === "daemon") current.recorder?.stop();
-		else void cancelNativeVoice().catch(() => {});
+		if (current.kind === "daemon") {
+			if (current.recorder && current.recorder.state !== "inactive") current.recorder.stop();
+		} else void cancelNativeVoice().catch(() => {});
 		finish();
 	}, [finish, stopSpeaking]);
 
@@ -418,7 +448,8 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 				if (phaseNow.current === "recording") setPartial(text);
 			},
 			level: (value) => {
-				if (phaseNow.current === "recording") setLevel(value);
+				const current = recording.current;
+				if (current?.kind === "native") observeLevel(current, value);
 			},
 			error: (message) => {
 				if (recording.current?.kind === "native") finish(message);
@@ -428,7 +459,7 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 			live = false;
 			void off.then((stopListening) => stopListening());
 		};
-	}, [desktop, finish]);
+	}, [desktop, finish, observeLevel]);
 
 	// Installing or removing the local model changes what the recognizer can do (#25).
 	useEffect(() => {

@@ -910,6 +910,7 @@ describe("reviewing a dictation before sending (the default)", () => {
 		await waitFor(() => expect(talk()).toBeEnabled());
 		await userEvent.click(talk());
 		const option = await screen.findByRole("switch", { name: "Send when I stop" });
+		expect(option).toHaveAttribute("title", "Send after 2 seconds of silence following speech");
 		expect(option).toHaveAttribute("aria-checked", "false");
 		await userEvent.click(option);
 		expect(option).toHaveAttribute("aria-checked", "true");
@@ -920,4 +921,168 @@ describe("reviewing a dictation before sending (the default)", () => {
 		);
 		expect(box().value).toBe("");
 	});
+});
+
+/** No microphone: controllable web samples and genuinely asynchronous recorder completion. */
+class MeterContext {
+	static byte = 128;
+	createAnalyser() {
+		return { fftSize: 512, getByteTimeDomainData: (samples: Uint8Array) => samples.fill(MeterContext.byte) };
+	}
+	createMediaStreamSource() {
+		return { connect: () => {} };
+	}
+	close = async () => {};
+}
+class AsyncRecorder extends FakeRecorder {
+	stop = vi.fn(() => {
+		if (this.state !== "recording") throw new Error("Recorder already stopped");
+		this.state = "inactive";
+		setTimeout(() => {
+			this.ondataavailable?.({ data: new Blob(["fake audio"], { type: this.mimeType }) });
+			this.onstop?.();
+		}, 100);
+	});
+}
+
+describe("sending after a speech pause", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		MeterContext.byte = 128;
+		vi.stubGlobal("AudioContext", MeterContext);
+		vi.stubGlobal("MediaRecorder", AsyncRecorder);
+	});
+	async function capture(kind: "daemon" | "native", pending?: ReturnType<typeof deferred<unknown>>) {
+		h.tauri = kind === "native";
+		h.invoke = vi.fn(async (command: string) => {
+			if (command === "voice_status") return { available: true };
+			if (command === "voice_stop") return pending ? pending.promise : { text: "hello" };
+			if (command === "voice_synthesis_status") return { supported: false };
+			return undefined;
+		});
+		const view = renderHook(() => {
+			const [state, dispatch] = useReducer(reduce, withVoice(kind === "daemon", false));
+			h.server = (payload) =>
+				dispatch({ type: "server", message: { ...payload, seq: ++seq } as ServerMessage });
+			return useVoice(state, sendMessage);
+		});
+		await act(async () => {});
+		await act(async () => view.result.current.start());
+		expect(view.result.current.phase).toBe("recording");
+		return view;
+	}
+	async function samples(kind: "daemon" | "native", active: boolean, count: number) {
+		MeterContext.byte = active ? 132 : 128;
+		for (let i = 0; i < count; i++) {
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(100);
+				if (kind === "native") h.listeners.get("voice://level")?.({ payload: { level: active ? 0.4 : 0 } });
+			});
+		}
+	}
+	async function transcript(kind: "daemon" | "native") {
+		if (kind === "daemon") {
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(100);
+			});
+			const request = required(sentOf("voice_transcribe").at(-1), "pause transcription");
+			server({ type: "voice_transcript", requestId: request.requestId, text: "hello" });
+		}
+	}
+	for (const kind of ["daemon", "native"] as const) {
+		it(`${kind}: sends once after two seconds of quiet following speech, without a button`, async () => {
+			const view = await capture(kind);
+			await samples(kind, false, 25);
+			expect(view.result.current.phase).toBe("recording");
+			await samples(kind, true, 1);
+			await samples(kind, false, 20);
+			expect(view.result.current.phase).toBe("recording");
+			await samples(kind, false, 1);
+			await transcript(kind);
+			expect(sentOf("send")).toEqual([{ type: "send", text: "hello", requestId: expect.any(String) }]);
+			await samples(kind, false, 25);
+			expect(sentOf("send")).toHaveLength(1);
+			if (kind === "native") expect(invoked("voice_stop")).toHaveLength(1);
+			else expect(FakeRecorder.instances[0]?.stop).toHaveBeenCalledTimes(1);
+		});
+		it(`${kind}: disabled retains manual review instead of silence sending`, async () => {
+			localStorage.removeItem("gentle-dot-voice-send");
+			const view = await capture(kind);
+			await samples(kind, true, 1);
+			await samples(kind, false, 25);
+			expect(view.result.current.phase).toBe("recording");
+			act(() => view.result.current.stop());
+			await act(async () => {});
+			await transcript(kind);
+			expect(view.result.current.draft?.text).toBe("hello");
+			expect(sentOf("send")).toEqual([]);
+		});
+		it(`${kind}: cancelling retires quiet state and the next recording needs fresh activity`, async () => {
+			const view = await capture(kind);
+			await samples(kind, true, 1);
+			await samples(kind, false, 10);
+			act(() => view.result.current.cancel());
+			await samples(kind, false, 25);
+			expect(sentOf("send")).toEqual([]);
+			expect(sentOf("voice_transcribe")).toEqual([]);
+			expect(invoked("voice_stop")).toHaveLength(0);
+			await act(async () => view.result.current.start());
+			await samples(kind, false, 25);
+			expect(view.result.current.phase).toBe("recording");
+		});
+	}
+	for (const action of ["cancel", "unmount", "replace"] as const) {
+		it(`retires a pending daemon recorder completion after ${action}`, async () => {
+			const view = await capture("daemon");
+			await samples("daemon", true, 1);
+			await samples("daemon", false, 21);
+			expect(FakeRecorder.instances[0]?.stop).toHaveBeenCalledTimes(1);
+			if (action === "unmount") view.unmount();
+			else {
+				act(() => view.result.current.cancel());
+				if (action === "replace") await act(async () => view.result.current.start());
+			}
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(100);
+			});
+			expect(sentOf("voice_transcribe")).toEqual([]);
+			expect(sentOf("send")).toEqual([]);
+			if (action === "replace") expect(view.result.current.phase).toBe("recording");
+		});
+	}
+	it("manual and automatic stop share a single asynchronous recorder stop", async () => {
+		const view = await capture("daemon");
+		await samples("daemon", true, 1);
+		await samples("daemon", false, 21);
+		act(() => view.result.current.stop());
+		await transcript("daemon");
+		expect(FakeRecorder.instances[0]?.stop).toHaveBeenCalledTimes(1);
+		expect(sentOf("voice_transcribe")).toHaveLength(1);
+		expect(sentOf("send")).toHaveLength(1);
+	});
+	for (const action of ["cancel", "unmount", "replace"] as const) {
+		for (const settle of ["resolve", "reject"] as const) {
+			it(`ignores a native stop ${settle} after ${action}`, async () => {
+				const pending = deferred<unknown>();
+				const view = await capture("native", pending);
+				await samples("native", true, 1);
+				await samples("native", false, 21);
+				expect(invoked("voice_stop")).toHaveLength(1);
+				if (action === "unmount") view.unmount();
+				else {
+					act(() => view.result.current.cancel());
+					if (action === "replace") await act(async () => view.result.current.start());
+				}
+				await act(async () => {
+					if (settle === "resolve") pending.resolve({ text: "stale dictation" });
+					else pending.reject(new Error("stale failure"));
+				});
+				expect(sentOf("send")).toEqual([]);
+				if (action === "replace") {
+					expect(view.result.current.phase).toBe("recording");
+					expect(view.result.current.note).toBeUndefined();
+				}
+			});
+		}
+	}
 });

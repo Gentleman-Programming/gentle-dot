@@ -68,7 +68,7 @@ With your permission, Gentle Dot sees the screen and operates your apps: clicks,
 
 ### Talk to it
 
-Press the mic and speak: the transcript lands in the input for you to review, or goes out as soon as you stop if you prefer. Replies to what you said are read aloud. Speech runs on your Mac by default; download the optional local model (NVIDIA Parakeet, 25 languages including Spanish) to keep your voice fully offline, or connect an OpenAI API key.
+Press the mic and speak: by default, tap again to review the transcript. Enable **Send when I stop** to send automatically after about two seconds of silence following speech; tapping again sends sooner. The pause detector uses audio levels: very quiet speech or background noise can affect it, and missing meter samples do not count as silence. Replies to what you said are read aloud. Speech runs on your Mac by default; download the optional local model (NVIDIA Parakeet, 25 languages including Spanish) to keep your voice fully offline, or connect an OpenAI API key.
 
 ---
 
