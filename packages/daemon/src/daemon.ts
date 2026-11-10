@@ -83,11 +83,11 @@ export class Daemon {
     this.config = loadAndValidateConfig(configPath);
 
     // Override config with CLI options
-    if (options.port) this.config.daemon.port = options.port;
-    if (options.host) this.config.daemon.host = options.host;
-    if (options.dataDir) this.config.daemon.data_dir = options.dataDir;
-    if (options.workspace) this.config.daemon.workspace = options.workspace;
-    if (options.logLevel) this.config.daemon.log_level = options.logLevel;
+    if (options.port !== undefined) this.config.daemon.port = options.port;
+    if (options.host !== undefined) this.config.daemon.host = options.host;
+    if (options.dataDir !== undefined) this.config.daemon.data_dir = options.dataDir;
+    if (options.workspace !== undefined) this.config.daemon.workspace = options.workspace;
+    if (options.logLevel !== undefined) this.config.daemon.log_level = options.logLevel;
 
     // Initialize components
     this.registry = connectorRegistry;

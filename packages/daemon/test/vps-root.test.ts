@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import type { ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
-import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { type DotDaemon, createDaemon as startDaemon } from "../src/daemon.ts";
 import { engineAccess } from "../src/engine-access.ts";
 import { writePrivateFile } from "../src/private-file.ts";
 import { lookupUser } from "../src/vps.ts";

@@ -18,7 +18,7 @@ import {
 	SET_ASIDE_NOTICE,
 	secretRef,
 } from "../src/connectors.ts";
-import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { type DotDaemon, createDaemon as startDaemon } from "../src/daemon.ts";
 import { MemorySecretSource } from "../src/secret-source.ts";
 import { fakeApp } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";

@@ -5,7 +5,7 @@ import { MAX_VOICE_AUDIO, MAX_VOICE_TEXT, type ServerMessage } from "@gentle-dot
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { createModelAuthRuntime } from "../src/auth.ts";
-import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { type DotDaemon, createDaemon as startDaemon } from "../src/daemon.ts";
 import { SPEECH_URL, VoiceService } from "../src/voice.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";

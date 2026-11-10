@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import type { ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
-import { type DaemonOptions, type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { type DaemonOptions, type DotDaemon, createDaemon as startDaemon } from "../src/daemon.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 
 // Each case boots a daemon + auth-helper (agent login via jiti); slow hosts cross the 5 s default.
