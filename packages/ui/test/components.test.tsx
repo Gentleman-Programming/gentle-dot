@@ -7,6 +7,7 @@ import { ChatSurface } from "../src/components/ChatSurface.tsx";
 import { Composer } from "../src/components/Composer.tsx";
 import { MessageList } from "../src/components/MessageList.tsx";
 import { type DotState, initialState } from "../src/store.ts";
+import { openPanelMenu } from "./panel-menu.ts";
 
 function state(overrides: Partial<DotState> = {}): DotState {
 	return { ...initialState, connection: "open", agentState: "idle", ...overrides };
@@ -192,8 +193,10 @@ describe("ChatSurface", () => {
 			/>,
 		);
 		expect(screen.getByRole("heading", { name: "Current" })).toBeInTheDocument();
+		await openPanelMenu();
 		await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
 		expect(send).toHaveBeenCalledWith({ type: "new_conversation" });
+		await openPanelMenu();
 		await userEvent.click(screen.getByRole("button", { name: "Conversations" }));
 		await userEvent.click(screen.getByRole("button", { name: /Trip plan/ }));
 		expect(send).toHaveBeenCalledWith({ type: "open_conversation", conversationId: "a.jsonl" });

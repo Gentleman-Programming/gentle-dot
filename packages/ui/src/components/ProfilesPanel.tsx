@@ -11,6 +11,7 @@ import {
 } from "@gentle-dot/protocol";
 import { type FormEvent, useState } from "react";
 import type { DotAction, ProfilesState } from "../store.ts";
+import { SelectMenu } from "./SelectMenu.tsx";
 import type { Send } from "./types.ts";
 import "../profiles.css";
 
@@ -282,42 +283,39 @@ function ProfileEditor({
 				{roles.map((role) => {
 					const route = routes[role.id] ?? {};
 					const known = !route.model || models.some((m) => `${m.provider}/${m.id}` === route.model);
+					const modelGroups = [...groups].map(([provider, options]) => ({
+						label: providerName(provider),
+						options: options.map((m) => ({ value: `${m.provider}/${m.id}`, label: m.name })),
+					}));
+					if (!known) {
+						const stale = { value: route.model ?? "", label: `${route.model} (not available)` };
+						const head = modelGroups[0];
+						if (head) head.options.push(stale);
+						else modelGroups.push({ label: "Unavailable", options: [stale] });
+					}
 					return (
 						<div className="role-route" key={role.id}>
 							<span className="role-label">{role.label}</span>
-							<select
-								aria-label={`${role.label} model`}
+							<SelectMenu
+								label={`${role.label} model`}
 								value={route.model ?? ""}
-								onChange={(event) => update(role.id, { model: event.target.value })}
-							>
-								<option value="">Default</option>
-								{[...groups].map(([provider, options]) => (
-									<optgroup key={provider} label={providerName(provider)}>
-										{options.map((m) => (
-											<option key={m.id} value={`${m.provider}/${m.id}`}>
-												{m.name}
-											</option>
-										))}
-									</optgroup>
-								))}
-								{known ? null : <option value={route.model}>{`${route.model} (not available)`}</option>}
-							</select>
-							<select
-								aria-label={`${role.label} thinking`}
+								onChange={(value) => update(role.id, { model: value })}
+								options={[{ value: "", label: "Default" }]}
+								groups={modelGroups}
+							/>
+							<SelectMenu
+								label={`${role.label} thinking`}
 								value={route.thinking ?? ""}
-								onChange={(event) =>
+								onChange={(value) =>
 									update(role.id, {
-										thinking: (event.target.value || undefined) as ThinkingLevel | undefined,
+										thinking: (value || undefined) as ThinkingLevel | undefined,
 									})
 								}
-							>
-								<option value="">Default</option>
-								{THINKING_LEVELS.map((level) => (
-									<option key={level} value={level}>
-										{THINKING_LABELS[level]}
-									</option>
-								))}
-							</select>
+								options={[
+									{ value: "", label: "Default" },
+									...THINKING_LEVELS.map((level) => ({ value: level, label: THINKING_LABELS[level] })),
+								]}
+							/>
 						</div>
 					);
 				})}

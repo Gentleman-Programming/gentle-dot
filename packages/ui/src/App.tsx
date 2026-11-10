@@ -139,8 +139,9 @@ function Assistant({ surface }: { surface: Surface }) {
 	}, []);
 
 	useEffect(() => {
-		if (surface === "dot") setDotState(state.agentState);
-	}, [surface, state.agentState]);
+		if (surface === "dot")
+			setDotState(state.agentState, state.connection === "open" && state.features.conversations);
+	}, [surface, state.agentState, state.connection, state.features.conversations]);
 
 	useEffect(() => {
 		if (surface !== "panel") return;

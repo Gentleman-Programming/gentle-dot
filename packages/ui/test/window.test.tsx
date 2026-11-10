@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type DotState, initialState } from "../src/store.ts";
+import { openPanelMenu } from "./panel-menu.ts";
 
 /** Hide the rose and full-screen chat (S26), through the panel and its mocked Tauri commands. */
 const h = vi.hoisted(() => ({
@@ -84,6 +85,7 @@ describe("hide the rose (S26.1)", () => {
 	it("the panel header hides the rose and then offers to show it again", async () => {
 		await renderApp("?surface=panel");
 		await waitFor(() => expect(invoked("rose_hidden")).toHaveLength(1));
+		await openPanelMenu();
 		await userEvent.click(await screen.findByRole("button", { name: "Hide the rose" }));
 		expect(h.invoke).toHaveBeenCalledWith("set_rose_hidden", { hidden: true });
 
@@ -97,6 +99,7 @@ describe("hide the rose (S26.1)", () => {
 	it("starts from the remembered choice and follows the tray", async () => {
 		h.roseHidden = true;
 		await renderApp("?surface=panel");
+		await openPanelMenu();
 		await screen.findByRole("button", { name: "Show the rose" });
 
 		await waitFor(() => expect(h.listeners.has("dot://rose")).toBe(true));
@@ -108,7 +111,9 @@ describe("hide the rose (S26.1)", () => {
 		h.roseHidden = true;
 		h.computer = { active: true, endsAt: Date.now() + 60_000, yolo: true };
 		await renderApp("?surface=panel");
+		await openPanelMenu();
 		await screen.findByRole("button", { name: "Show the rose" });
+		await userEvent.click(screen.getByRole("button", { name: "Close menu" }));
 		const banner = await screen.findByRole("region", { name: "Computer control" });
 		expect(banner).toHaveTextContent(/yolo/i);
 	});
@@ -117,6 +122,7 @@ describe("hide the rose (S26.1)", () => {
 describe("full-screen chat (S26.2)", () => {
 	it("the header button fills the screen and the same button restores it", async () => {
 		const { container } = await renderApp("?surface=panel");
+		await openPanelMenu();
 		await userEvent.click(await screen.findByRole("button", { name: "Full screen" }));
 		expect(h.invoke).toHaveBeenCalledWith("set_panel_fullscreen", { on: true });
 		const exit = await screen.findByRole("button", { name: "Exit full screen" });
@@ -130,6 +136,7 @@ describe("full-screen chat (S26.2)", () => {
 
 	it("⌘⇧F toggles full screen while the panel has focus", async () => {
 		const { container } = await renderApp("?surface=panel");
+		await openPanelMenu();
 		await screen.findByRole("button", { name: "Full screen" });
 		fireEvent.keyDown(window, { key: "F", code: "KeyF", metaKey: true, shiftKey: true });
 		await waitFor(() => expect(chat(container)).toHaveClass("chat-fullscreen"));
@@ -143,8 +150,10 @@ describe("full-screen chat (S26.2)", () => {
 
 	it("Esc restores from full screen first and hides the panel only after that", async () => {
 		const { container } = await renderApp("?surface=panel");
+		await openPanelMenu();
 		await userEvent.click(await screen.findByRole("button", { name: "Full screen" }));
 		await waitFor(() => expect(chat(container)).toHaveClass("chat-fullscreen"));
+		await userEvent.click(screen.getByRole("button", { name: "Close menu" }));
 
 		fireEvent.keyDown(window, { key: "Escape" });
 		await waitFor(() => expect(chat(container)).not.toHaveClass("chat-fullscreen"));
@@ -158,8 +167,10 @@ describe("full-screen chat (S26.2)", () => {
 
 	it("leaves an Esc that something inside the panel already handled alone", async () => {
 		const { container } = await renderApp("?surface=panel");
+		await openPanelMenu();
 		await userEvent.click(await screen.findByRole("button", { name: "Full screen" }));
 		await waitFor(() => expect(chat(container)).toHaveClass("chat-fullscreen"));
+		await userEvent.click(screen.getByRole("button", { name: "Close menu" }));
 		const box = screen.getByRole("textbox", { name: "Message" });
 		box.addEventListener("keydown", (event) => event.preventDefault());
 

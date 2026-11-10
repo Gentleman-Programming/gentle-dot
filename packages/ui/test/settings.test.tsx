@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { formatShortcut, recordKey } from "../src/shortcut.ts";
 import { type DotState, initialState } from "../src/store.ts";
+import { openPanelMenu } from "./panel-menu.ts";
 
 /** The Settings screen and its keyboard shortcut (S33), through the panel and mocked Tauri commands. */
 const h = vi.hoisted(() => ({
@@ -12,6 +13,7 @@ const h = vi.hoisted(() => ({
 	memoryError: undefined as string | undefined,
 	setResult: undefined as undefined | ((shortcut: string) => Promise<unknown>),
 	invoke: vi.fn(),
+	send: vi.fn(),
 	state: undefined as unknown as DotState,
 }));
 
@@ -31,7 +33,7 @@ vi.mock("../src/desktop.ts", async (importOriginal) => ({
 }));
 
 vi.mock("../src/useDot.ts", () => ({
-	useDot: () => ({ state: h.state, send: () => {}, dismiss: () => {}, dispatch: () => {} }),
+	useDot: () => ({ state: h.state, send: h.send, dismiss: () => {}, dispatch: () => {} }),
 }));
 
 const MAC_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)";
@@ -47,6 +49,7 @@ const invoked = (command: string) => h.invoke.mock.calls.filter(([c]) => c === c
 
 async function openSettings() {
 	await renderApp("?surface=panel");
+	await openPanelMenu();
 	await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
 	return screen.findByRole("region", { name: "Settings" });
 }
@@ -59,6 +62,7 @@ async function startRecording() {
 }
 
 beforeEach(() => {
+	h.send = vi.fn();
 	h.tauri = true;
 	h.shortcut = "Alt+Space";
 	h.memory = "shared";
@@ -187,6 +191,7 @@ describe("the Settings screen (S33.1)", () => {
 	it("the web UI shows no gear", async () => {
 		h.tauri = false;
 		await renderApp("?surface=web#token=abc");
+		await openPanelMenu();
 		await screen.findByRole("button", { name: "Accounts" });
 		expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
 		expect(invoked("shortcut_get")).toHaveLength(0);
@@ -200,7 +205,114 @@ describe("the Settings screen (S33.1)", () => {
 	});
 });
 
+describe("Separate conversations", () => {
+	it("sends an explicit preference, waits for authoritative features and disables while disconnected", async () => {
+		const view = await renderApp("?surface=panel");
+		await openPanelMenu();
+		await userEvent.click(screen.getByRole("button", { name: "Settings" }));
+		const toggle = screen.getByRole("switch", { name: "Separate conversations" });
+		expect(toggle).not.toBeChecked();
+		await userEvent.click(toggle);
+		expect(h.send.mock.calls).toEqual([[{ type: "settings_conversations_set", enabled: true }]]);
+		expect(toggle).not.toBeChecked();
+		h.state = { ...h.state, features: { conversations: true } };
+		const { App } = await import("../src/App.tsx");
+		view.rerender(<App />);
+		expect(screen.getByRole("switch", { name: "Separate conversations" })).toBeChecked();
+		h.state = { ...h.state, connection: "closed" };
+		view.rerender(<App />);
+		expect(screen.getByRole("switch", { name: "Separate conversations" })).toBeDisabled();
+	});
+});
+
 describe("the Private memory toggle (SW9)", () => {
+	it("uses the existing visual switch with an explicitly associated visible label", async () => {
+		await openSettings();
+		const toggle = await screen.findByRole("switch", { name: "Private memory" });
+		await waitFor(() => expect(toggle).toBeEnabled());
+		expect(toggle.tagName).toBe("BUTTON");
+		expect(toggle).toHaveAttribute("type", "button");
+		expect(toggle).toHaveClass("switch");
+		expect(toggle).toHaveAttribute("aria-checked", "false");
+		const label = screen.getByText("Private memory");
+		expect(label.tagName).toBe("LABEL");
+		expect(label).toHaveAttribute("for", toggle.id);
+		expect(toggle.id).not.toBe("");
+		expect(toggle).toHaveAttribute("aria-labelledby", label.id);
+		expect(label.id).not.toBe("");
+		expect(toggle.querySelector(".switch-knob")).toHaveAttribute("aria-hidden", "true");
+		await userEvent.click(label);
+		await waitFor(() => expect(toggle).toBeChecked());
+		expect(invoked("memory_set").map(([, args]) => args)).toEqual([{ memory: "private" }]);
+	});
+
+	it("supports native Space and Enter activation", async () => {
+		await openSettings();
+		const toggle = await screen.findByRole("switch", { name: "Private memory" });
+		await waitFor(() => expect(toggle).toBeEnabled());
+		toggle.focus();
+		await userEvent.keyboard(" ");
+		await waitFor(() => expect(toggle).toBeChecked());
+		await waitFor(() => expect(toggle).toBeEnabled());
+		await userEvent.keyboard("{Enter}");
+		await waitFor(() => expect(toggle).not.toBeChecked());
+		expect(invoked("memory_set").map(([, args]) => args)).toEqual([
+			{ memory: "private" },
+			{ memory: "shared" },
+		]);
+	});
+
+	it("stays disabled until the stored memory loads", async () => {
+		let answer: (value: { memory: "private" }) => void = () => {};
+		const base = h.invoke.getMockImplementation();
+		h.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+			if (command === "memory_get") return new Promise((resolve) => (answer = resolve));
+			return base?.(command, args);
+		});
+		await openSettings();
+		const toggle = await screen.findByRole("switch", { name: "Private memory" });
+		expect(toggle).toBeDisabled();
+		await userEvent.click(toggle);
+		expect(invoked("memory_set")).toHaveLength(0);
+		await act(async () => answer({ memory: "private" }));
+		expect(toggle).toBeEnabled();
+		expect(toggle).toBeChecked();
+	});
+
+	it("keeps the confirmed choice during a save, prevents duplicates, and recovers from failure", async () => {
+		let rejectSave: (reason: string) => void = () => {};
+		const base = h.invoke.getMockImplementation();
+		h.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+			if (command === "memory_set") return new Promise((_, reject) => (rejectSave = reject));
+			return base?.(command, args);
+		});
+		await openSettings();
+		const toggle = await screen.findByRole("switch", { name: "Private memory" });
+		await waitFor(() => expect(toggle).toBeEnabled());
+		await userEvent.click(toggle);
+		expect(toggle).toBeDisabled();
+		expect(toggle).not.toBeChecked();
+		await userEvent.click(toggle);
+		await userEvent.click(screen.getByText("Private memory"));
+		toggle.focus();
+		await userEvent.keyboard(" {Enter}");
+		expect(invoked("memory_set").map(([, args]) => args)).toEqual([{ memory: "private" }]);
+		await act(async () => rejectSave("Gentle Dot cannot save config.json (denied)."));
+		expect(await screen.findByRole("alert")).toHaveTextContent(
+			"Gentle Dot cannot save config.json (denied).",
+		);
+		expect(toggle).not.toBeChecked();
+		expect(toggle).toBeEnabled();
+		await userEvent.click(screen.getByRole("button", { name: "Close settings" }));
+		await openPanelMenu();
+		await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
+		const reopened = await screen.findByRole("switch", { name: "Private memory" });
+		await waitFor(() => expect(reopened).toBeEnabled());
+		expect(reopened).not.toBeChecked();
+		expect(invoked("memory_get")).toHaveLength(2);
+		expect(invoked("memory_set")).toHaveLength(1);
+	});
+
 	it("shows the stored value and flips it through the app", async () => {
 		h.memory = "private";
 		await openSettings();
@@ -223,6 +335,14 @@ describe("the Private memory toggle (SW9)", () => {
 		await waitFor(() => expect(invoked("memory_set")).toHaveLength(1));
 		expect(invoked("memory_set")[0]?.[1]).toEqual({ memory: "private" });
 		await waitFor(() => expect(toggle).toBeChecked());
+		await userEvent.click(screen.getByRole("button", { name: "Close settings" }));
+		await openPanelMenu();
+		await userEvent.click(await screen.findByRole("button", { name: "Settings" }));
+		const reopened = await screen.findByRole("switch", { name: "Private memory" });
+		await waitFor(() => expect(reopened).toBeEnabled());
+		expect(reopened).toBeChecked();
+		expect(invoked("memory_get")).toHaveLength(2);
+		expect(invoked("memory_set")).toHaveLength(1);
 	});
 });
 
@@ -278,15 +398,15 @@ describe("voice language (S30.6)", () => {
 	it("does not offer macOS voice language on Windows", async () => {
 		vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Windows NT 10.0");
 		await openSettings();
-		expect(screen.queryByRole("combobox", { name: "Voice language" })).toBeNull();
+		expect(screen.queryByRole("button", { name: "Voice language" })).toBeNull();
 	});
 	it("defaults to the system language and remembers the one chosen for macOS speech", async () => {
 		await openSettings();
-		const picker = screen.getByRole("combobox", { name: "Voice language" });
-		expect(picker).toHaveValue("");
-		await userEvent.selectOptions(picker, "es-ES");
+		await userEvent.click(screen.getByRole("button", { name: "Voice language" }));
+		await userEvent.click(screen.getByRole("option", { name: "Español" }));
 		expect(localStorage.getItem("gentle-dot-voice-language")).toBe("es-ES");
-		await userEvent.selectOptions(picker, "");
+		await userEvent.click(screen.getByRole("button", { name: "Voice language" }));
+		await userEvent.click(screen.getByRole("option", { name: "Automatic (system language)" }));
 		expect(localStorage.getItem("gentle-dot-voice-language")).toBeNull();
 	});
 });

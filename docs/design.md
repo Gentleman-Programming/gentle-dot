@@ -85,6 +85,7 @@ Client to daemon:
 | `steer` | `text` | `steer` |
 | `abort` | — | `abort` |
 | `ui_response` | `requestId`, `value` \| `confirmed` \| `cancelled` | `extension_ui_response` |
+| `settings_conversations_set` | `enabled` (boolean only) | daemon persists the user preference, then broadcasts a full `features` snapshot; no engine RPC or restart |
 | `new_conversation` | — | `new_session`; refused with `conversations_off` unless the conversations list is on |
 | `list_conversations` | — | daemon reads the session dir |
 | `open_conversation` | `conversationId` | `switch_session`; refused with `conversations_off` unless the conversations list is on |
@@ -106,6 +107,7 @@ Daemon to client:
 | type | meaning |
 |---|---|
 | `ready` | `agentState`, `conversationId`, `model` (display name only), `features` (`conversations`: the list and new conversation are on; default off); the current `queue`, pending asks, and an `interrupted` notice follow it |
+| `features` | full live feature snapshot; updates controls without resetting the chat |
 | `user_message` | a user message entered from any client |
 | `agent_state` | `starting` \| `idle` \| `thinking` \| `working` \| `needs_you` \| `restarting` \| `error` |
 | `message_delta` | assistant text delta for message `messageId` |
@@ -163,7 +165,9 @@ Every daemon message carries `seq` (monotonic per connection) so the UI can dete
 
 ### One continuous chat (S22)
 
-The UI shows one endless chat: no conversations list, no new conversation, and the header shows the assistant (the rose glyph and "Gentle Dot"). The code and protocol for several conversations stay behind `features.conversations` (`GENTLE_DOT_CONVERSATIONS=1`); with it off, the UI also ignores the menu bar's `dot://new-conversation`. The daemon rotates the session underneath when it grows (§7), and `history` / `get_earlier` read through the chain of session files, so earlier messages, including those before any compaction, stay reachable with "Show earlier".
+The UI shows one endless chat: no conversations list, no new conversation, and the header shows the assistant (the rose glyph and "Gentle Dot"). Settings → **Separate conversations** changes `features.conversations` live. The daemon owns `<dataDir>/user-settings.json`, separate from the desktop's `config.json`: an optional boolean `conversations`, with saved false/true taking precedence over the legacy `GENTLE_DOT_CONVERSATIONS=1` fallback, otherwise false. An explicit `DaemonOptions.conversations` remains a startup override. Reads validate the object and boolean; unreadable or corrupt data is reported rather than replaced. Synchronous read-modify-write preserves unknown keys through `writePrivateFile` (private atomic replacement). Every authenticated client may send `settings_conversations_set {enabled}` over the existing WebSocket; connector privileges and handshake/origin rules are unchanged. Persistence succeeds before the feature update and broadcast; failure sends only the requester an error, leaving live state unchanged. Reconnecting clients receive the latest snapshot in `ready`.
+
+Preference changes never abort, restart, rotate, or switch the assistant, and retain active history and saved sessions. Explicit new/open operations and settings changes share a recovering promise tail, checking the feature inside the operation: a switch accepted first completes before disable; disable first refuses the switch. Ordinary prompts and automatic rotation are not queued on this tail. Disabling clears stale UI conversation lists and Stop-and-switch dialogs, not stored sessions; with it off, the UI also ignores the menu bar's `dot://new-conversation`. The Settings switch follows authoritative features, is disabled while disconnected, and failures use the existing notice rather than an uncorrelated saving indicator. The off desktop Conversations row opens Settings; the web omits it when Settings is unavailable. The daemon rotates the session underneath when it grows (§7), and `history` / `get_earlier` read through the chain of session files, so earlier messages, including those before any compaction, stay reachable with "Show earlier".
 
 ### Computer control (macOS and Windows, S24)
 
@@ -262,7 +266,7 @@ The user changes the main assistant's model from the chat, in the panel and the 
 ### Menu bar
 
 - Template icon: the hand-drawn rose glyph (`docs/brand/rose-glyph.svg`), with one variant per state: ready, working (dashed outer petals; also used while thinking), needs you (a filled badge dot), and unavailable (dimmed; starting, restarting, and error).
-- Menu: Open (`⌥ Space`), Open in browser, Restart assistant, Launch at login (toggle), Quit. New conversation appears after Open only with the conversations list on (`GENTLE_DOT_CONVERSATIONS=1`).
+- Menu: Open (`⌥ Space`), Open in browser, Restart assistant, Launch at login (toggle), Quit. New conversation is always present after Open, initially disabled, and enabled live only while the Dot is connected and the daemon enables separate conversations.
 
 ### Web
 
@@ -324,7 +328,7 @@ When the panel opens, it is placed next to the Dot on the side with more room, a
 | `connection_info` | — | `{ "url": "ws://127.0.0.1:<port>/ws", "token": "…", "webUrl": "http://127.0.0.1:<port>/#token=…" }`, read from `~/.gentle-dot/config.json` and `~/.gentle-dot/token` |
 | `toggle_panel` | — | shows and focuses the panel next to the Dot, or hides it |
 | `hide_panel` | — | hides the panel |
-| `set_dot_state` | `{ "state": AgentState }` | updates the tray tooltip and swaps the tray glyph for the state |
+| `set_dot_state` | `{ "state": AgentState, "conversationsEnabled"?: boolean }` | updates the tray tooltip and glyph; when supplied, enables/disables the retained native New conversation item. Only the Dot reports this state, avoiding panel races; older callers may omit the field. |
 | `rose_hidden` | — | `true` when the user hid the rose |
 | `set_rose_hidden` | `{ "hidden": boolean }` | hides or shows the Dot window, saves the choice, emits `dot://rose`; returns the resulting state |
 | `set_panel_fullscreen` | `{ "on": boolean }` | fills the work area of the panel's display, or restores the frame before; returns the resulting state |
@@ -345,7 +349,7 @@ The Dot drags with `getCurrentWindow().startDragging()` (permission `core:window
 
 ### Menu bar and shortcut
 
-Tray menu: Open (`⌥ Space`), New conversation (only with `GENTLE_DOT_CONVERSATIONS=1`, read like the daemon reads it), Open in browser, Hide the rose / Show the rose, Restart assistant, Launch at login (check item), Quit. The global shortcut is `Alt+Space` on macOS and Linux, and `Ctrl+Alt+Space` on Windows, where `Alt+Space` is the window-menu key a global hotkey would take away (`platform::Os::default_shortcut`, configurable as `shortcut` in `config.json`, or in the panel's Settings); it toggles the panel.
+Tray menu: Open (`⌥ Space`), New conversation (always present, initially disabled; enabled live from the Dot's connected daemon features on Linux, Windows and macOS), Open in browser, Hide the rose / Show the rose, Restart assistant, Launch at login (check item), Quit. The global shortcut is `Alt+Space` on macOS and Linux, and `Ctrl+Alt+Space` on Windows, where `Alt+Space` is the window-menu key a global hotkey would take away (`platform::Os::default_shortcut`, configurable as `shortcut` in `config.json`, or in the panel's Settings); it toggles the panel.
 
 Settings (S33): a gear in the desktop panel header opens a Settings screen styled like Accounts. Its "Keyboard shortcut" section shows the shortcut (⌘ ⌥ ⌃ ⇧ on macOS, names elsewhere); "Change" records the next key combination from the physical key (`code`), Esc alone cancels recording without hiding the panel (the recorder listens in the capture phase and marks the keys it takes as handled), and "Reset to default" sets the platform default (`Alt+Space`, or `Ctrl+Alt+Space` on Windows). `shortcut_set` applies it live, with no restart (`src/shortcut.rs`):
 
