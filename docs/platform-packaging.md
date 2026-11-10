@@ -62,6 +62,70 @@ by these installer changes. There is no new component downloader or activation.
 Existing Windows provider pins do not establish ARM64 eyes/hands artifacts; do
 not advertise those providers as ARM64-supported or substitute x64 payloads.
 
-**Next unit:** wire package commands and native CI matrix/artifact/checksum jobs,
-then obtain platform-native runtime and installed evidence. No `package.json`,
-workflow, Rust, provider, or installed application is changed by this unit.
+## Manual native QA artifacts
+
+**Implemented, not remotely executed:** `.github/workflows/native-distributions.yml`
+is manual-only (`workflow_dispatch`), read-only, fail-fast disabled and artifact-only.
+It does not publish, run on push/PR, or replace `windows-native.yml`. The metadata
+helper supplies all six native runners, target toolchains, build commands and
+expected installer paths. A mismatched Node host fails before build output;
+Rust must report the selected native host. Windows Go architecture is explicit.
+
+| Platform | QA check written into CI | Missing proof |
+| --- | --- | --- |
+| Windows x64 | Existing isolated NSIS lifecycle smoke; explicit target-specific installer path, existing x64 runtime identity | Not run by this unit; physical Stop/provider acceptance separate |
+| Windows ARM64 | Producer's staging checks and target identity; installer required | Installed smoke explicitly unsupported; x64/default smoke is never used |
+| Linux x64/ARM64 | Native Docker server required; existing Debian/Ubuntu checks, plus Arch on x64 | Native Docker daemon/build prerequisites and container runtime checks not executed here |
+| macOS x64/ARM64 | Existing producer `--sign - --check`: nested signatures, DMG mount/copy and daemon smoke | Ad hoc only, not notarized; GUI/installed acceptance separate |
+
+CI uses Node `24.14.1`, pnpm `11.5.0` from `package.json`, Windows Go `1.25.10`,
+existing stable Rust and `pnpm install --frozen-lockfile`. Linux keeps its existing
+Debian Docker recipe, native architecture and Tauri libraries. These are supported
+build inputs, **not a deterministic release lock**: stable Rust/container tags,
+runtime npm ranges/latest Engram selection and postinstall inputs remain gaps.
+Missing upstream checksums, installers or producer runtime manifests fail the job;
+there is no `continue-on-error` fallback. ARM64 runner/tool availability is still a
+native CI prerequisite, not proven by the structural tests.
+
+### CI helper commands
+
+These commands never build, install, download, activate or publish anything:
+
+```sh
+pnpm package:ci:matrix
+pnpm package:ci:plan --target windows-arm64 --source <40-character-lowercase-SHA>
+pnpm package:ci:collect --target windows-arm64 --source <40-character-lowercase-SHA> --out <fresh-QA-directory>
+node scripts/package/ci-native.mjs --help
+```
+
+`plan` and `collect` require a matching native OS/Node architecture. `--root DIR`
+optionally selects the source/build root (default: current directory). Every valued
+option may occur only once. Unknown options/targets, missing values, malformed SHA,
+wrong runtime target identity, duplicate/missing installers and existing output
+are rejected before collection writes. `matrix` accepts no options. There is no
+default target: selectors must be explicit, avoiding accidental x64 smoke/builds.
+
+Each uploaded artifact is `gentle-dot-VERSION-TARGET-FULLSHA-qa`; installer filenames
+also identify that tuple. `QA-MANIFEST.json` records sizes/SHA256 for every installer
+and the unchanged producer runtime manifest (`runtime-manifest.json`). This is
+byte identity, not a publisher signature or an independent full-payload recheck.
+CI check commands describe intended checks, not a manifest assertion that they
+passed. The workflow uploads only after all required steps succeed, but ARM64
+Windows installed acceptance remains explicitly unavailable.
+
+App and runtime identities are represented separately while delivery remains
+monolithic/embedded. Eyes/hands are unavailable in this CI, with no acquisition URL
+and no ARM64 provider claim. A duplicate runtime ZIP would not implement the selected
+lightweight format. See [remaining component acquisition/bootstrap work](distribution.md#what-exists-and-what-remains-planned).
+
+### Deterministic checks only
+
+`pnpm test:package-ci` uses an explicit non-native Node file allowlist. Set
+`GENTLE_DOT_CI_TEST_ROOT` to a human-authorized system-temp directory first. Fixtures
+are inert and retained for orchestrator-controlled cleanup; the test prints each
+run directory. Structural checks parse YAML with the already-installed workspace
+parser (no dependency installation). No full Vitest/native fixture suite is used.
+
+**Next gate (Risk item 5):** independent CI/manifest verification and separate
+platform-native build/runtime/installed acceptance. This unit does not grant remote
+workflow dispatch, release, provider activation or application-install permission.

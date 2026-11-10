@@ -1,0 +1,85 @@
+name: Manual native installer QA (not a release)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  targets:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.1'
+      - id: targets
+        shell: bash
+        run: echo "matrix=$(node scripts/package/ci-native.mjs matrix)" >> "$GITHUB_OUTPUT"
+  native:
+    needs: targets
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.1'
+          architecture: ${{ matrix.arch }}
+      - name: Refuse mismatched native host before build output
+        id: plan
+        run: |
+          node scripts/package/ci-native.mjs plan --target '${{ matrix.target }}' --source '${{ github.sha }}' > "$RUNNER_TEMP/native-plan.json"
+          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP+"/native-plan.json"));fs.appendFileSync(process.env.GITHUB_OUTPUT,"artifact="+p.artifactName+"\n")'
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-go@v5
+        if: runner.os == 'Windows'
+        with:
+          go-version: '1.25.10'
+          architecture: ${{ matrix.arch }}
+          cache: false
+      - name: Matching native Rust toolchain (not cross compilation)
+        run: |
+          rustup set default-host '${{ matrix.rust }}'
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc -vV | grep -Fx 'host: ${{ matrix.rust }}'
+      - name: Docker native architecture prerequisite
+        if: runner.os == 'Linux'
+        run: |
+          docker info
+          test "$(docker info --format '{{.Architecture}}')" = '${{ matrix.arch == 'x64' && 'x86_64' || 'aarch64' }}'
+      - name: Frozen workspace dependencies (runtime lock gap remains)
+        run: pnpm install --frozen-lockfile
+      - name: Build with existing Dot producer and integrity guards
+        run: ${{ matrix.build }}
+      - name: Linux installation and runtime checks in clean containers
+        if: runner.os == 'Linux'
+        run: ${{ matrix.check }}
+      - name: Windows x64 isolated install, hash, readiness, reinstall and uninstall
+        if: matrix.target == 'windows-x64'
+        shell: pwsh
+        run: |
+          $plan = Get-Content "$env:RUNNER_TEMP/native-plan.json" -Raw | ConvertFrom-Json
+          $installers = @(Get-ChildItem -LiteralPath $plan.installers[0].directory -Filter '*-setup.exe' -File)
+          if ($installers.Count -ne 1) { throw 'Expected exactly one NSIS installer' }
+          ./scripts/windows/smoke-install.ps1 -Installer $installers[0].FullName
+      - name: Windows ARM64 smoke boundary
+        if: matrix.target == 'windows-arm64'
+        run: echo 'UNSUPPORTED installed smoke on ARM64. Do not run the x64/default-path smoke. Build artifact only; not installed acceptance.'
+      # macOS producer --check verifies signatures, mounts/copies DMG and exercises runtime.
+      # --sign - is ad hoc, NOT a notarized/publisher-signed distribution.
+      - name: Require installers and collect byte identities (QA only)
+        run: node scripts/package/ci-native.mjs collect --target '${{ matrix.target }}' --source '${{ github.sha }}' --out build/native-qa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.plan.outputs.artifact }}
+          path: build/native-qa/
+          if-no-files-found: error
+          retention-days: 14

@@ -21,6 +21,10 @@
 		"package:mac": "node scripts/package/package-mac.mjs",
 		"package:linux": "node scripts/package/package-linux.mjs",
 		"package:linux:check": "node scripts/package/linux-check.mjs",
+		"package:ci:matrix": "node scripts/package/ci-native.mjs matrix",
+		"package:ci:plan": "node scripts/package/ci-native.mjs plan",
+		"package:ci:collect": "node scripts/package/ci-native.mjs collect",
+		"test:package-ci": "node --test scripts/package/test/ci-native.test.mjs scripts/package/test/ci-workflow.test.mjs",
 		"package:windows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/package.ps1",
 		"test:windows-contracts": "node --test scripts/windows/test/*.test.mjs"
 	},
