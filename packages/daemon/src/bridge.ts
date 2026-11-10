@@ -1173,6 +1173,25 @@ export class DotBridge {
 				this.interrupted = true;
 				this.broadcast({ type: "interrupted" });
 				break;
+			case "turn_timeout":
+				this.broadcast({ type: "turn_timeout", timeoutMs: Number(event.timeoutMs ?? 0) });
+				break;
+			case "turn_timeout_error":
+				this.broadcast({
+					type: "error",
+					code: "turn_timeout",
+					message: typeof event.error === "string" ? event.error : "Turn timed out",
+				});
+				this.interrupted = true;
+				// The engine keeps running the timed-out turn unless it is aborted: without
+				// this the abandoned run burns tokens in the background (review feedback:
+				// the cancellation must reach the actual underlying run).
+				void this.supervisor.request({ type: "abort" }).catch((error: Error) =>
+					this.log(`abort after turn timeout failed: ${error.message}`),
+				);
+				this.clearRun();
+				this.clearQueue();
+				break;
 			case "message_start":
 				this.onMessageStart(event);
 				break;

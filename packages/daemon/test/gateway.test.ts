@@ -329,6 +329,59 @@ describe("gateway", () => {
 		expect(late.messages.some((m) => m.type === "queue")).toBe(false);
 	});
 
+	it("aborts the underlying run when a turn times out, then recovers for the next prompt", async () => {
+		const stdinFile = join(tempDir(), "stdin.jsonl");
+		const d = await daemon(
+			{ ...process.env, FAKE_AGENT_STDIN_FILE: stdinFile },
+			{ conversations: true, turnTimeoutMs: 400 },
+		);
+		const a = await authed(d);
+		send(a, { type: "send", text: "hang" });
+		await find(a, "turn_timeout");
+		await find(a, "error", (m) => m.code === "turn_timeout");
+		// The cancellation must reach the actual underlying run, not just the UI state.
+		await waitFor(() => {
+			if (!existsSync(stdinFile)) return false;
+			const lines = readFileSync(stdinFile, "utf8").split("\n").filter(Boolean);
+			return lines.some((l) => (JSON.parse(l) as { type?: string }).type === "abort");
+		}, 5_000);
+		// The daemon accepts the next prompt right away (recovery).
+		send(a, { type: "send", text: "burst" });
+		await find(a, "message_done", (m) => m.text === "Echo: burst");
+		await find(a, "agent_state", (m) => m.state === "idle");
+	}, 20_000);
+
+	it("reports the queue empty when the turn times out; engine-received steering still completes", async () => {
+		const d = await daemon({ ...process.env }, { conversations: true, turnTimeoutMs: 1_500 });
+		const a = await authed(d);
+		send(a, { type: "send", text: "hang" });
+		await find(a, "agent_state", (m) => m.state === "thinking");
+		send(a, { type: "send", text: "queued one" });
+		await find(a, "queue", (m) => m.steering.length > 0);
+		await find(a, "error", (m) => m.code === "turn_timeout");
+		// The bridge empties its reported queue with the timed-out run.
+		const emptied = await find(a, "queue", (m) => m.steering.length === 0 && m.followUp.length === 0);
+		expect(emptied).toMatchObject({ steering: [], followUp: [] });
+		// Steering the engine already received is engine-owned: it still completes.
+		await find(a, "message_done", (m) => m.text === "Echo: queued one");
+		await find(a, "agent_state", (m) => m.state === "idle");
+	}, 25_000);
+
+	it("keeps the late leftovers of a timed-out turn out of the next turn's answers", async () => {
+		const d = await daemon({ ...process.env }, { conversations: true, turnTimeoutMs: 400 });
+		const a = await authed(d);
+		send(a, { type: "send", text: "hang" });
+		await find(a, "error", (m) => m.code === "turn_timeout");
+		send(a, { type: "send", text: "burst" });
+		await find(a, "message_done", (m) => m.text === "Echo: burst");
+		// After the run settles, no further late answer may surface from the timed-out turn.
+		const doneCount = a.messages.filter((m) => m.type === "message_done").length;
+		await new Promise((resolve) => setTimeout(resolve, 400));
+		const still = a.messages.filter((m) => m.type === "message_done");
+		expect(still.length).toBe(doneCount);
+		expect(still.at(-1)?.text).toBe("Echo: burst");
+	}, 20_000);
+
 	it("clears the queue when the agent restarts", async () => {
 		const d = await daemon();
 		const a = await authed(d);

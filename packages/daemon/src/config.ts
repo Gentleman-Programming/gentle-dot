@@ -21,6 +21,8 @@ export interface DotConfig {
 	/** The assistant's own Gentle Shell home; undefined for a custom agent script. */
 	agentHome: string | undefined;
 	allowedOrigins: string[];
+	/** Timeout for LLM turns in milliseconds. Default 10 minutes (600000). */
+	turnTimeoutMs: number;
 }
 
 const DEFAULT_UI_DIR = fileURLToPath(new URL("../../ui/dist/app", import.meta.url));
@@ -106,6 +108,14 @@ function parsePort(value: unknown, source: string): number {
 	if (!Number.isInteger(port) || port < 0 || port > 65535)
 		throw new Error(`Invalid port in ${source}: ${String(value)}`);
 	return port;
+}
+
+/** Parses a positive duration in milliseconds; a day is the sane ceiling (unit mistakes). */
+function parseDurationMs(value: unknown, source: string): number {
+	const duration = Number(value);
+	if (!Number.isInteger(duration) || duration <= 0 || duration > 86_400_000)
+		throw new Error(`Invalid duration (ms) in ${source}: ${String(value)}`);
+	return duration;
 }
 
 function parseList(value: string | undefined, name: string): string[] {
@@ -194,5 +204,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DotConfig {
 		uiDir: resolve(env.GENTLE_DOT_UI_DIR ?? uiDirOf(env)),
 		...agentConfig(env, dataDir),
 		allowedOrigins: parseList(env.GENTLE_DOT_ALLOWED_ORIGINS, "GENTLE_DOT_ALLOWED_ORIGINS"),
+		turnTimeoutMs: env.GENTLE_DOT_TURN_TIMEOUT_MS
+			? parseDurationMs(env.GENTLE_DOT_TURN_TIMEOUT_MS, "GENTLE_DOT_TURN_TIMEOUT_MS")
+			: (typeof file.turnTimeoutMs === "number"
+				? parseDurationMs(file.turnTimeoutMs, "config.json")
+				: 600_000),
 	};
 }
