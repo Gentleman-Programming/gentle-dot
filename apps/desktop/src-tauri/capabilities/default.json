@@ -27,7 +27,7 @@
 		},
 		{
 			"identifier": "voice",
-			"description": "Voice input (S30.1, S30.5): the panel's mic button records and transcribes natively, and the panel downloads, cancels, and removes the optional local voice model; the Dot never records.",
+			"description": "Panel-only voice: record and transcribe input, manage the optional local model, and synthesize Windows speech to in-memory WAV bytes or cancel it; the Dot never records or synthesizes.",
 			"windows": ["panel"],
 			"permissions": [
 				"allow-voice-status",
@@ -37,7 +37,10 @@
 				"allow-voice-model-status",
 				"allow-voice-model-download",
 				"allow-voice-model-cancel",
-				"allow-voice-model-remove"
+				"allow-voice-model-remove",
+				"allow-voice-synthesis-status",
+				"allow-voice-synthesize",
+				"allow-voice-synthesize-cancel"
 			]
 		},
 		{

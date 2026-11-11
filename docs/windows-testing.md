@@ -171,7 +171,16 @@ Inherited DPAPI source/tests remain separately available; their presence neither
 
 ### 15. Voice — native validation pending
 
-Windows capture source is inherited in this merge. Its presence is not microphone or runtime proof. Use only a separately authorized synthetic voice path; otherwise record **N/A**. Do not access the microphone during integration checks.
+Windows capture, local SAPI-to-WAV output and opt-in pause-to-send source are integrated. Their presence is not microphone, audible playback or runtime proof. During integration checks, use only the authorized synthetic voice path; otherwise record **N/A**. Do not access the microphone, provider accounts or personal profiles.
+
+Expected behavior for a later, separately authorized device check:
+
+1. Native WASAPI capture with the optional local Parakeet model produces a transcript for review before sending by default.
+2. **Send when I stop** opts into stopping and sending after about two seconds of observed silence following speech. This audio-level heuristic can be affected by noise or quiet speech; manual stop remains available.
+3. An appropriate installed Windows speech voice can read replies to spoken turns through SAPI-to-WAV. Stop or mute retires pending output; typed-only turns stay silent. Native COM synthesis does not require an expanded inherited daemon PATH.
+4. Missing microphone permission, model or speech voice produces the relevant availability/error message, not false success. Record actual results only when that check is authorized.
+
+Automated mocked browser/IPC tests and memory-WAV tests do not establish microphone or audible-output acceptance. See [Windows voice output](windows-voice-output.md) for formats and cancellation limits and [model download integrity](voice-model-download.md) for model requirements.
 
 ### 16. Computer control — native validation pending
 

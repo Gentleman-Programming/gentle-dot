@@ -98,6 +98,30 @@ test("producer commands, native required files and payload hashes agree structur
 	assert.ok(!dispatch.includes("WindowsDpapiStore::new"));
 });
 
+test("merged Windows launch retains restricted PATH, native layout and verified Node entry", () => {
+	const launch = read("../../../apps/desktop/src-tauri/src/daemon/launch.rs");
+	assert.doesNotMatch(launch, /^(?:<<<<<<<|=======|>>>>>>>)/m);
+	const bundled = launch.slice(launch.indexOf("fn windows_bundled_path("), launch.indexOf("/// `<node>"));
+	assert.match(bundled, /windows_node_directory\(runtime\)/);
+	assert.ok(bundled.indexOf('system.join("System32")') < bundled.indexOf(".chain(git_dirs)"));
+	assert.match(launch, /dir\.is_absolute\(\) && holds_git\(dir\)/);
+	assert.match(launch, /windows_node_directory\(dir\)\.join\("node.exe"\)/);
+	assert.match(launch, /node_entry_path\(&dir\.join\("daemon\/cli.mjs"\)\)/);
+	assert.match(launch, /std::env::join_paths\(\[entry\]\)/);
+	assert.doesNotMatch(launch, /inherited\.split/);
+	assert.doesNotMatch(launch, /for entry in inherited|path\.push_str\(entry\)/);
+});
+
+test("voice reconciliation retains panel menu and new voice coverage without conflict markers", () => {
+	const voice = read("../../../packages/ui/test/voice.test.tsx");
+	assert.match(voice, /import \{ openPanelMenu \} from "\.\/panel-menu.ts"/);
+	assert.match(voice, /import \{ useVoice \} from "\.\.\/src\/useVoice.ts"/);
+	for (const label of ["local output integration", "sending after a speech pause", "stays silent while muted"])
+		assert.ok(voice.includes(label), label);
+	for (const file of ["../../../packages/ui/test/voice.test.tsx", "../../../docs/install.md", "../../../docs/windows-testing.md"])
+		assert.doesNotMatch(read(file), /^(?:<<<<<<<|=======|>>>>>>>)/m, file);
+});
+
 test("Windows installer isolation uses native Node while POSIX behavior remains unchanged", () => {
 	const source = { SystemRoot: "C:\\Windows", TOKEN: "synthetic-omit", PATH: "C:\\untrusted" };
 	const env = installerEnv("C:\\stage", "C:\\cache", "win-x64", source);

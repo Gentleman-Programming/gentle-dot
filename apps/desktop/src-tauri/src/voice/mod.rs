@@ -32,6 +32,12 @@ mod machine;
 mod macos;
 pub mod model;
 pub mod parakeet;
+pub mod speech_bridge;
+// The bridge validates requests on every platform; this module uses only std.
+#[allow(dead_code)]
+mod speech_wave;
+#[cfg(windows)]
+pub mod windows_speech;
 #[cfg(unix)]
 pub mod pipe;
 #[cfg_attr(not(windows), allow(dead_code))]

@@ -1,10 +1,12 @@
 import type { ClientMessage, ServerMessage, ServerPayload } from "@gentle-dot/protocol";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useReducer } from "react";
+import { StrictMode, useReducer } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatSurface } from "../src/components/ChatSurface.tsx";
+import { Composer } from "../src/components/Composer.tsx";
 import { type DotState, initialState, reduce } from "../src/store.ts";
+import { useVoice } from "../src/useVoice.ts";
 import { openPanelMenu } from "./panel-menu.ts";
 
 /** Talking to the assistant (S30.2–S30.4) through the chat, with the desktop and browser mocked. */
@@ -78,8 +80,9 @@ const synth = {
 
 class FakeAudio {
 	static instances: FakeAudio[] = [];
+	static playNext: (() => Promise<void>) | undefined;
 	onended: (() => void) | null = null;
-	play = vi.fn(async () => {});
+	play = vi.fn(() => FakeAudio.playNext?.() ?? Promise.resolve());
 	pause = vi.fn();
 	readonly src: string;
 	constructor(src: string) {
@@ -131,6 +134,7 @@ beforeEach(() => {
 	sent.length = 0;
 	FakeRecorder.instances = [];
 	FakeAudio.instances = [];
+	FakeAudio.playNext = undefined;
 	synth.speaking = false;
 	synth.current = undefined;
 	synth.speak.mockClear();
@@ -155,15 +159,81 @@ afterEach(() => {
 
 /** A voice turn through the daemon: record, stop, transcript, and the reply's messages. */
 async function voiceTurn(transcript: string) {
+	const previous = sentOf("voice_transcribe").length;
 	await userEvent.click(talk());
 	await userEvent.click(await screen.findByRole("button", { name: "Stop and send" }));
 	const request = await waitFor(() => {
 		const found = sentOf("voice_transcribe").at(-1);
-		if (!found) throw new Error("no voice_transcribe yet");
+		if (!found || sentOf("voice_transcribe").length !== previous + 1)
+			throw new Error("no new voice_transcribe yet");
 		return found;
 	});
 	server({ type: "voice_transcript", requestId: request.requestId, text: transcript });
 	return request;
+}
+
+/** Missing fixture values must fail at runtime, not merely satisfy the type checker. */
+function required<T>(value: T | null | undefined, label: string): T {
+	if (value === null || value === undefined) throw new Error(`Missing ${label}`);
+	return value;
+}
+
+/** Output wiring fixtures: real Blob bytes, but no OS, device, URL allocation, or playback. */
+function deferred<T>() {
+	let resolve!: (value: T) => void;
+	let reject!: (reason: unknown) => void;
+	const promise = new Promise<T>((yes, no) => {
+		resolve = yes;
+		reject = no;
+	});
+	return { promise, resolve, reject };
+}
+
+// RIFF/WAVE, PCM mono, 16 kHz, one 16-bit silent sample.
+const wav = [
+	82, 73, 70, 70, 38, 0, 0, 0, 87, 65, 86, 69, 102, 109, 116, 32, 16, 0, 0, 0, 1, 0, 1, 0, 128, 62, 0, 0, 0,
+	125, 0, 0, 2, 0, 16, 0, 100, 97, 116, 97, 2, 0, 0, 0, 0, 0,
+];
+const invoked = (command: string) => h.invoke.mock.calls.filter(([name]) => name === command);
+const completeReply = (id = "answer", text = "**Hello** there!") =>
+	server(
+		{ type: "agent_state", state: "thinking" },
+		{ type: "message_done", messageId: id, text },
+		{ type: "agent_state", state: "idle" },
+	);
+const sendMessage = (message: ClientMessage) => {
+	sent.push(message);
+};
+
+/** A public hook consumer for cancel(), which is valid even without a recording. */
+function outputHook() {
+	return renderHook(
+		() => {
+			const [state, dispatch] = useReducer(reduce, withVoice(true, true));
+			h.server = (payload) =>
+				dispatch({ type: "server", message: { ...payload, seq: ++seq } as ServerMessage });
+			return useVoice(state, sendMessage);
+		},
+		{ wrapper: StrictMode },
+	);
+}
+
+async function hookReply(view: ReturnType<typeof outputHook>, id = "answer") {
+	const transcripts = sentOf("voice_transcribe").length;
+	const speeches = sentOf("voice_speak").length;
+	act(() => view.result.current.start());
+	await waitFor(() => expect(view.result.current.phase).toBe("recording"));
+	act(() => view.result.current.stop());
+	const request = await waitFor(() => {
+		expect(sentOf("voice_transcribe")).toHaveLength(transcripts + 1);
+		return required(sentOf("voice_transcribe").at(-1), "new transcription request");
+	});
+	server({ type: "voice_transcript", requestId: request.requestId, text: "hi" });
+	completeReply(id);
+	return waitFor(() => {
+		expect(sentOf("voice_speak")).toHaveLength(speeches + 1);
+		return required(sentOf("voice_speak").at(-1), "new daemon speech request");
+	});
 }
 
 describe("the mic in the browser", () => {
@@ -271,6 +341,7 @@ describe("talking on the desktop", () => {
 		h.tauri = true;
 		h.invoke = vi.fn(async (command: string) => {
 			if (command === "voice_status") return status;
+			if (command === "voice_synthesis_status") return { supported: false };
 			if (command === "voice_stop") return { text: stopText };
 			return undefined;
 		});
@@ -301,7 +372,11 @@ describe("talking on the desktop", () => {
 		const noModel = { available: false, reason: "Download the local voice model in Connectors." };
 		let status: unknown = noModel;
 		h.tauri = true;
-		h.invoke = vi.fn(async (command: string) => (command === "voice_status" ? status : undefined));
+		h.invoke = vi.fn(async (command: string) => {
+			if (command === "voice_status") return status;
+			if (command === "voice_synthesis_status") return { supported: false };
+			return undefined;
+		});
 		render(<Harness initial={withVoice(false)} />);
 		await waitFor(() => expect(invoked("voice_status")).toHaveLength(1));
 		await waitFor(() => expect(h.listeners.has("voice://model")).toBe(true));
@@ -456,6 +531,306 @@ describe("spoken replies", () => {
 	});
 });
 
+describe("local output integration", () => {
+	const createURL = vi.fn((_blob: Blob): string => `blob:voice-${createURL.mock.calls.length}`);
+	const revokeURL = vi.fn();
+
+	function desktopOutput(
+		supported = true,
+		synthesize: () => Promise<number[]> = async () => wav,
+		status: () => Promise<{ supported: boolean }> = async () => ({ supported }),
+	) {
+		h.tauri = true;
+		h.invoke = vi.fn(async (command: string) => {
+			if (command === "voice_status") return { available: false, reason: "No microphone model." };
+			if (command === "voice_synthesis_status") return status();
+			if (command === "voice_synthesize") return synthesize();
+			if (command === "voice_synthesize_cancel") return undefined;
+			throw new Error(`Unexpected IPC: ${command}`);
+		});
+	}
+
+	beforeEach(() => {
+		createURL.mockClear();
+		revokeURL.mockClear();
+		vi.stubGlobal(
+			"URL",
+			class extends URL {
+				static createObjectURL = createURL;
+				static revokeObjectURL = revokeURL;
+			},
+		);
+	});
+	afterEach(() => vi.restoreAllMocks());
+
+	it("uses exact native IPC without browser voices or a microphone model, with unique IDs across StrictMode mounts", async () => {
+		desktopOutput();
+		vi.spyOn(synth, "getVoices").mockReturnValue([]);
+		const ids: string[] = [];
+		for (let turn = 0; turn < 2; turn++) {
+			const view = render(
+				<StrictMode>
+					<Harness initial={withVoice(true, false)} />
+				</StrictMode>,
+			);
+			await voiceTurn("hi");
+			completeReply(`native-${turn}`);
+			await waitFor(() => expect(invoked("voice_synthesize")).toHaveLength(turn + 1));
+			const args = invoked("voice_synthesize")[turn]?.[1];
+			expect(args).toEqual({ requestId: expect.any(String), text: "Hello there!", locale: "en" });
+			expect(args.requestId).toMatch(/^[A-Za-z0-9_-]{1,128}$/);
+			ids.push(args.requestId);
+			await waitFor(() => expect(FakeAudio.instances[turn]?.play).toHaveBeenCalledTimes(1));
+			expect(createURL.mock.calls[turn]?.[0]).toBeInstanceOf(Blob);
+			const blob = required(createURL.mock.calls[turn], "native WAV URL call")[0];
+			expect(Array.from(new Uint8Array(await blob.arrayBuffer()))).toEqual(wav);
+			const player = required(FakeAudio.instances[turn], "native playback instance");
+			expect(player.src).toBe(`blob:voice-${turn + 1}`);
+			act(() => player.onended?.());
+			view.unmount();
+			expect(revokeURL.mock.calls.filter(([url]) => url === player.src)).toHaveLength(1);
+		}
+		expect(new Set(ids).size).toBe(2);
+		expect(invoked("voice_synthesis_status").length).toBeGreaterThan(0);
+		for (const call of invoked("voice_synthesis_status"))
+			expect(call).toEqual(["voice_synthesis_status", {}]);
+		expect(synth.speak).not.toHaveBeenCalled();
+		expect(sentOf("voice_speak")).toEqual([]);
+	});
+
+	it.each(["non-Windows desktop", "browser"])("preserves regional browser voices on %s", async (platform) => {
+		if (platform === "non-Windows desktop") desktopOutput(false);
+		vi.spyOn(synth, "getVoices").mockReturnValue([
+			{ name: "Other Spanish", lang: "es-ES" },
+			{ name: "Paulina", lang: "es-MX" },
+		]);
+		vi.spyOn(navigator, "language", "get").mockReturnValue("es-MX");
+		render(<Harness initial={withVoice(true, false)} />);
+		await voiceTurn("hola");
+		completeReply("regional", "¡Hola! ¿Qué necesitás hoy?");
+		await waitFor(() => expect(synth.speak).toHaveBeenCalledTimes(1));
+		expect(synth.current?.lang).toBe("es");
+		expect(synth.current?.voice).toMatchObject({ name: "Paulina", lang: "es-MX" });
+		expect(invoked("voice_synthesize")).toEqual([]);
+		if (platform === "browser") expect(invoked("voice_synthesis_status")).toEqual([]);
+		else expect(invoked("voice_synthesis_status")[0]).toEqual(["voice_synthesis_status", {}]);
+	});
+
+	it.each(["voice_speech", "voice_unavailable"] as const)(
+		"prefers the daemon; matching %s selects local output at most once",
+		async (type) => {
+			desktopOutput();
+			render(<Harness initial={withVoice(true, true)} />);
+			await voiceTurn("hi");
+			completeReply();
+			const request = await waitFor(() => {
+				expect(sentOf("voice_speak")).toHaveLength(1);
+				return required(sentOf("voice_speak")[0], "daemon speech request");
+			});
+			expect(invoked("voice_synthesize")).toEqual([]);
+			server({ type: "voice_unavailable", requestId: "unrelated", reason: "Not this request." });
+			expect(invoked("voice_synthesize")).toEqual([]);
+			const response: ServerPayload =
+				type === "voice_speech"
+					? { type, requestId: request.requestId, mime: "audio/mpeg", data: "QUJD" }
+					: { type, requestId: request.requestId, reason: "Offline." };
+			server(response);
+			await waitFor(() => expect(FakeAudio.instances).toHaveLength(1));
+			server(response);
+			await act(async () => {});
+			expect(invoked("voice_synthesize")).toHaveLength(type === "voice_unavailable" ? 1 : 0);
+			expect(FakeAudio.instances[0]?.src).toBe(
+				type === "voice_speech" ? "data:audio/mpeg;base64,QUJD" : "blob:voice-1",
+			);
+			expect(FakeAudio.instances[0]?.play).toHaveBeenCalledTimes(1);
+			expect(synth.speak).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each(["status", "synthesis"])(
+		"shows a native %s failure without silently switching to browser speech",
+		async (stage) => {
+			const fail = async (): Promise<never> => {
+				throw new Error("Native output failed.");
+			};
+			desktopOutput(
+				true,
+				stage === "synthesis" ? fail : async () => wav,
+				stage === "status" ? fail : async () => ({ supported: true }),
+			);
+			render(<Harness initial={withVoice(true, false)} />);
+			await voiceTurn("hi");
+			completeReply();
+			await waitFor(() =>
+				expect(screen.getByRole("status", { name: "Voice" })).toHaveTextContent(
+					"Local speech failed. Check installed speech voices and audio output, then retry.",
+				),
+			);
+			expect(synth.speak).not.toHaveBeenCalled();
+			expect(FakeAudio.instances).toEqual([]);
+			expect(sentOf("voice_speak")).toEqual([]);
+		},
+	);
+
+	it("calls typed on every user textarea change, but not programmatic dictation", async () => {
+		const hook = outputHook();
+		const typed = vi.fn();
+		const draftTaken = vi.fn();
+		const onStartTyping = vi.fn();
+		render(
+			<Composer
+				busy={false}
+				disabled={false}
+				send={sendMessage}
+				onStartTyping={onStartTyping}
+				voice={{ ...hook.result.current, typed, draftTaken, draft: { id: 1, text: "dictated" } }}
+			/>,
+		);
+		const box = screen.getByRole("textbox", { name: "Message" });
+		await waitFor(() => expect(box).toHaveValue("dictated"));
+		expect(typed).not.toHaveBeenCalled();
+		for (const value of ["dictated edit", "", "new"]) fireEvent.change(box, { target: { value } });
+		expect(typed).toHaveBeenCalledTimes(3);
+		expect(onStartTyping).toHaveBeenCalledTimes(1);
+	});
+
+	it("typing in a nonempty composer retires pending daemon output and disarms its spoken turn", async () => {
+		render(<Harness initial={withVoice(true, true)} />);
+		const box = () => screen.getByRole("textbox", { name: "Message" });
+		fireEvent.change(box(), { target: { value: "already here" } });
+		await voiceTurn("hi");
+		fireEvent.change(box(), { target: { value: "already here edited" } });
+		completeReply("disarmed");
+		await act(async () => {});
+		expect(sentOf("voice_speak")).toEqual([]);
+		await voiceTurn("again");
+		completeReply("pending");
+		const request = await waitFor(() => {
+			expect(sentOf("voice_speak")).toHaveLength(1);
+			return required(sentOf("voice_speak")[0], "pending daemon speech request");
+		});
+		fireEvent.change(box(), { target: { value: "typed instead" } });
+		server({ type: "voice_unavailable", requestId: request.requestId, reason: "Late." });
+		server({ type: "voice_speech", requestId: request.requestId, mime: "audio/mpeg", data: "QUJD" });
+		await userEvent.type(box(), "{Enter}");
+		completeReply("typed-answer");
+		await act(async () => {});
+		expect(sentOf("voice_speak")).toHaveLength(1);
+		expect(synth.speak).not.toHaveBeenCalled();
+		expect(FakeAudio.instances).toEqual([]);
+	});
+
+	const retirements = ["Stop", "mute", "new recording", "cancel", "typing", "unmount"] as const;
+	function retire(view: ReturnType<typeof outputHook>, action: (typeof retirements)[number]) {
+		act(() => {
+			if (action === "Stop") view.result.current.stopSpeaking();
+			if (action === "mute") view.result.current.setMuted(true);
+			if (action === "new recording") view.result.current.start();
+			if (action === "cancel") view.result.current.cancel();
+			if (action === "typing") view.result.current.typed();
+		});
+		if (action === "unmount") view.unmount();
+	}
+
+	it.each(retirements)("%s retires pending daemon output even with no active recording", async (action) => {
+		const view = outputHook();
+		const request = await hookReply(view);
+		retire(view, action);
+		server({ type: "voice_unavailable", requestId: request.requestId, reason: "Late." });
+		server({ type: "voice_speech", requestId: request.requestId, mime: "audio/mpeg", data: "QUJD" });
+		await act(async () => {});
+		expect(synth.speak).not.toHaveBeenCalled();
+		expect(FakeAudio.instances).toEqual([]);
+	});
+
+	it.each(retirements)("%s cancels pending native synthesis and ignores its late WAV", async (action) => {
+		const pending = deferred<number[]>();
+		desktopOutput(true, () => pending.promise);
+		const view = outputHook();
+		const speech = await hookReply(view);
+		server({ type: "voice_unavailable", requestId: speech.requestId, reason: "Use local output." });
+		await waitFor(() => expect(invoked("voice_synthesize")).toHaveLength(1));
+		const requestId = required(invoked("voice_synthesize")[0], "native synthesis call")[1].requestId;
+		retire(view, action);
+		await waitFor(() =>
+			expect(invoked("voice_synthesize_cancel")).toContainEqual(["voice_synthesize_cancel", { requestId }]),
+		);
+		await act(async () => pending.resolve(wav));
+		expect(createURL).not.toHaveBeenCalled();
+		expect(FakeAudio.instances).toEqual([]);
+		expect(synth.speak).not.toHaveBeenCalled();
+	});
+
+	it.each(["Stop", "unmount"] as const)(
+		"%s retires native readiness before synthesis starts",
+		async (action) => {
+			const status = deferred<{ supported: boolean }>();
+			desktopOutput(
+				true,
+				async () => wav,
+				() => status.promise,
+			);
+			const view = outputHook();
+			const speech = await hookReply(view);
+			server({ type: "voice_unavailable", requestId: speech.requestId, reason: "Use local output." });
+			await waitFor(() => expect(invoked("voice_synthesis_status").length).toBeGreaterThan(0));
+			retire(view, action);
+			await act(async () => status.resolve({ supported: true }));
+			expect(invoked("voice_synthesize")).toEqual([]);
+			expect(synth.speak).not.toHaveBeenCalled();
+			expect(createURL).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each(retirements)(
+		"%s releases a native playback URL exactly once despite late ended",
+		async (action) => {
+			desktopOutput();
+			const view = outputHook();
+			const speech = await hookReply(view);
+			server({ type: "voice_unavailable", requestId: speech.requestId, reason: "Use local output." });
+			await waitFor(() => expect(FakeAudio.instances[0]?.play).toHaveBeenCalledTimes(1));
+			expect(createURL).toHaveBeenCalledTimes(1);
+			const player = required(FakeAudio.instances[0], "native playback instance");
+			const ended = player.onended;
+			retire(view, action);
+			expect(player.pause).toHaveBeenCalled();
+			act(() => ended?.());
+			view.unmount();
+			expect(revokeURL.mock.calls.filter(([url]) => url === player.src)).toHaveLength(1);
+			expect(FakeAudio.instances).toHaveLength(1);
+			expect(synth.speak).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each(["ended", "play rejection"])(
+		"ignores a replaced daemon player's late %s without replay or clearing the new output",
+		async (callback) => {
+			const pending = deferred<void>();
+			FakeAudio.playNext = () => pending.promise;
+			const view = outputHook();
+			const first = await hookReply(view, "first");
+			server({ type: "voice_speech", requestId: first.requestId, mime: "audio/mpeg", data: "QUJD" });
+			const old = required(FakeAudio.instances[0], "first daemon playback instance");
+			const ended = old.onended;
+			act(() => view.result.current.stopSpeaking());
+			FakeAudio.playNext = undefined;
+			const second = await hookReply(view, "second");
+			server({ type: "voice_speech", requestId: second.requestId, mime: "audio/mpeg", data: "REVG" });
+			expect(view.result.current.speaking).toBe(true);
+			await act(async () => {
+				if (callback === "ended") {
+					ended?.();
+					pending.resolve();
+				} else pending.reject(new Error("Old play failed after replacement."));
+			});
+			expect(view.result.current.speaking).toBe(true);
+			expect(FakeAudio.instances).toHaveLength(2);
+			expect(synth.speak).not.toHaveBeenCalled();
+		},
+	);
+});
+
 describe("the composer with the mic present", () => {
 	it("still sends typed messages, steers while busy, and stops the run as before", async () => {
 		render(<Harness initial={withVoice(true)} />);
@@ -476,6 +851,7 @@ describe("reviewing a dictation before sending (the default)", () => {
 		h.tauri = true;
 		h.invoke = vi.fn(async (command: string) => {
 			if (command === "voice_status") return { available: true };
+			if (command === "voice_synthesis_status") return { supported: false };
 			if (command === "voice_stop") return { text: stopText };
 			return undefined;
 		});
@@ -518,12 +894,26 @@ describe("reviewing a dictation before sending (the default)", () => {
 		await waitFor(() => expect(synth.speak).toHaveBeenCalledTimes(1));
 	});
 
+	it("keeps an edited reviewed dictation spoken without treating draft insertion as typing", async () => {
+		desktop("hi");
+		render(<Harness initial={withVoice(false, false)} />);
+		await waitFor(() => expect(talk()).toBeEnabled());
+		await userEvent.click(talk());
+		await userEvent.click(await screen.findByRole("button", { name: "Stop and review" }));
+		await waitFor(() => expect(box()).toHaveValue("hi"));
+		await userEvent.type(box(), " edited{Enter}");
+		expect(sentOf("send").at(-1)?.text).toBe("hi edited");
+		completeReply("edited-dictation", "Hello there!");
+		await waitFor(() => expect(synth.speak).toHaveBeenCalledTimes(1));
+	});
+
 	it("offers sending on stop as a remembered option while recording", async () => {
 		desktop("hola");
 		render(<Harness initial={withVoice(false)} />);
 		await waitFor(() => expect(talk()).toBeEnabled());
 		await userEvent.click(talk());
 		const option = await screen.findByRole("switch", { name: "Send when I stop" });
+		expect(option).toHaveAttribute("title", "Send after 2 seconds of silence following speech");
 		expect(option).toHaveAttribute("aria-checked", "false");
 		await userEvent.click(option);
 		expect(option).toHaveAttribute("aria-checked", "true");
@@ -534,4 +924,168 @@ describe("reviewing a dictation before sending (the default)", () => {
 		);
 		expect(box().value).toBe("");
 	});
+});
+
+/** No microphone: controllable web samples and genuinely asynchronous recorder completion. */
+class MeterContext {
+	static byte = 128;
+	createAnalyser() {
+		return { fftSize: 512, getByteTimeDomainData: (samples: Uint8Array) => samples.fill(MeterContext.byte) };
+	}
+	createMediaStreamSource() {
+		return { connect: () => {} };
+	}
+	close = async () => {};
+}
+class AsyncRecorder extends FakeRecorder {
+	stop = vi.fn(() => {
+		if (this.state !== "recording") throw new Error("Recorder already stopped");
+		this.state = "inactive";
+		setTimeout(() => {
+			this.ondataavailable?.({ data: new Blob(["fake audio"], { type: this.mimeType }) });
+			this.onstop?.();
+		}, 100);
+	});
+}
+
+describe("sending after a speech pause", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		MeterContext.byte = 128;
+		vi.stubGlobal("AudioContext", MeterContext);
+		vi.stubGlobal("MediaRecorder", AsyncRecorder);
+	});
+	async function capture(kind: "daemon" | "native", pending?: ReturnType<typeof deferred<unknown>>) {
+		h.tauri = kind === "native";
+		h.invoke = vi.fn(async (command: string) => {
+			if (command === "voice_status") return { available: true };
+			if (command === "voice_stop") return pending ? pending.promise : { text: "hello" };
+			if (command === "voice_synthesis_status") return { supported: false };
+			return undefined;
+		});
+		const view = renderHook(() => {
+			const [state, dispatch] = useReducer(reduce, withVoice(kind === "daemon", false));
+			h.server = (payload) =>
+				dispatch({ type: "server", message: { ...payload, seq: ++seq } as ServerMessage });
+			return useVoice(state, sendMessage);
+		});
+		await act(async () => {});
+		await act(async () => view.result.current.start());
+		expect(view.result.current.phase).toBe("recording");
+		return view;
+	}
+	async function samples(kind: "daemon" | "native", active: boolean, count: number) {
+		MeterContext.byte = active ? 132 : 128;
+		for (let i = 0; i < count; i++) {
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(100);
+				if (kind === "native") h.listeners.get("voice://level")?.({ payload: { level: active ? 0.4 : 0 } });
+			});
+		}
+	}
+	async function transcript(kind: "daemon" | "native") {
+		if (kind === "daemon") {
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(100);
+			});
+			const request = required(sentOf("voice_transcribe").at(-1), "pause transcription");
+			server({ type: "voice_transcript", requestId: request.requestId, text: "hello" });
+		}
+	}
+	for (const kind of ["daemon", "native"] as const) {
+		it(`${kind}: sends once after two seconds of quiet following speech, without a button`, async () => {
+			const view = await capture(kind);
+			await samples(kind, false, 25);
+			expect(view.result.current.phase).toBe("recording");
+			await samples(kind, true, 1);
+			await samples(kind, false, 20);
+			expect(view.result.current.phase).toBe("recording");
+			await samples(kind, false, 1);
+			await transcript(kind);
+			expect(sentOf("send")).toEqual([{ type: "send", text: "hello", requestId: expect.any(String) }]);
+			await samples(kind, false, 25);
+			expect(sentOf("send")).toHaveLength(1);
+			if (kind === "native") expect(invoked("voice_stop")).toHaveLength(1);
+			else expect(FakeRecorder.instances[0]?.stop).toHaveBeenCalledTimes(1);
+		});
+		it(`${kind}: disabled retains manual review instead of silence sending`, async () => {
+			localStorage.removeItem("gentle-dot-voice-send");
+			const view = await capture(kind);
+			await samples(kind, true, 1);
+			await samples(kind, false, 25);
+			expect(view.result.current.phase).toBe("recording");
+			act(() => view.result.current.stop());
+			await act(async () => {});
+			await transcript(kind);
+			expect(view.result.current.draft?.text).toBe("hello");
+			expect(sentOf("send")).toEqual([]);
+		});
+		it(`${kind}: cancelling retires quiet state and the next recording needs fresh activity`, async () => {
+			const view = await capture(kind);
+			await samples(kind, true, 1);
+			await samples(kind, false, 10);
+			act(() => view.result.current.cancel());
+			await samples(kind, false, 25);
+			expect(sentOf("send")).toEqual([]);
+			expect(sentOf("voice_transcribe")).toEqual([]);
+			expect(invoked("voice_stop")).toHaveLength(0);
+			await act(async () => view.result.current.start());
+			await samples(kind, false, 25);
+			expect(view.result.current.phase).toBe("recording");
+		});
+	}
+	for (const action of ["cancel", "unmount", "replace"] as const) {
+		it(`retires a pending daemon recorder completion after ${action}`, async () => {
+			const view = await capture("daemon");
+			await samples("daemon", true, 1);
+			await samples("daemon", false, 21);
+			expect(FakeRecorder.instances[0]?.stop).toHaveBeenCalledTimes(1);
+			if (action === "unmount") view.unmount();
+			else {
+				act(() => view.result.current.cancel());
+				if (action === "replace") await act(async () => view.result.current.start());
+			}
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(100);
+			});
+			expect(sentOf("voice_transcribe")).toEqual([]);
+			expect(sentOf("send")).toEqual([]);
+			if (action === "replace") expect(view.result.current.phase).toBe("recording");
+		});
+	}
+	it("manual and automatic stop share a single asynchronous recorder stop", async () => {
+		const view = await capture("daemon");
+		await samples("daemon", true, 1);
+		await samples("daemon", false, 21);
+		act(() => view.result.current.stop());
+		await transcript("daemon");
+		expect(FakeRecorder.instances[0]?.stop).toHaveBeenCalledTimes(1);
+		expect(sentOf("voice_transcribe")).toHaveLength(1);
+		expect(sentOf("send")).toHaveLength(1);
+	});
+	for (const action of ["cancel", "unmount", "replace"] as const) {
+		for (const settle of ["resolve", "reject"] as const) {
+			it(`ignores a native stop ${settle} after ${action}`, async () => {
+				const pending = deferred<unknown>();
+				const view = await capture("native", pending);
+				await samples("native", true, 1);
+				await samples("native", false, 21);
+				expect(invoked("voice_stop")).toHaveLength(1);
+				if (action === "unmount") view.unmount();
+				else {
+					act(() => view.result.current.cancel());
+					if (action === "replace") await act(async () => view.result.current.start());
+				}
+				await act(async () => {
+					if (settle === "resolve") pending.resolve({ text: "stale dictation" });
+					else pending.reject(new Error("stale failure"));
+				});
+				expect(sentOf("send")).toEqual([]);
+				if (action === "replace") {
+					expect(view.result.current.phase).toBe("recording");
+					expect(view.result.current.note).toBeUndefined();
+				}
+			});
+		}
+	}
 });

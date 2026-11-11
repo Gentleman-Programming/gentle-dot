@@ -18,6 +18,7 @@ use crate::secure_store::{self, SecretStore};
 use crate::shortcut;
 use crate::status::{is_template, tray_status, TrayGlyph};
 use crate::voice::app as voice;
+use crate::voice::speech_bridge as speech;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -1030,7 +1031,10 @@ pub fn run() {
             voice::voice_model_status,
             voice::voice_model_download,
             voice::voice_model_cancel,
-            voice::voice_model_remove
+            voice::voice_model_remove,
+            speech::voice_synthesis_status,
+            speech::voice_synthesize,
+            speech::voice_synthesize_cancel,
         ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]
@@ -1081,6 +1085,7 @@ pub fn run() {
             let (voice_input, voice_model) = voice::start(&handle);
             app.manage(voice_input);
             app.manage(voice_model);
+            app.manage(speech::SpeechSynthesis::default());
             #[cfg(any(target_os = "macos", windows))]
             register_panic_shortcut(&handle);
 
