@@ -1,7 +1,7 @@
 // Connector secrets on a server (S25.8): no desktop app, so the daemon keeps them in a file of its
 // own, each one encrypted with AES-256-GCM under a key that only the daemon's environment holds.
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { FileSecretSource, NO_SECRETS_KEY, parseSecretsKey } from "../src/secret-file.ts";

@@ -6,6 +6,7 @@ coverage/
 test-results/
 playwright-report/
 apps/desktop/src-tauri/target/
+apps/engram-guard/target/
 apps/desktop/src-tauri/gen/
 *.log
 
@@ -19,3 +20,14 @@ packages/*/src/**/*.d.ts
 
 # Local agent skill index cache
 /.atl/
+
+# Engram memory exports: memory content must never be committed
+/engram-export.json
+/engram-*.json
+
+# Explicit Windows addon build outputs
+/packages/daemon/native/*.node
+/packages/daemon/native/*.obj
+/packages/daemon/native/*.lib
+/packages/daemon/native/*.exp
+/packages/daemon/native/*.pdb

@@ -27,7 +27,9 @@ describe("parseArgs", () => {
 
 	it("refuses a missing or unknown target, unknown flags, and a flag without a value", () => {
 		expect(() => parseArgs(["--out", "/tmp/r"])).toThrow(/Missing --target/);
-		expect(() => parseArgs(["--target", "windows-x64"])).toThrow(/Unknown target windows-x64/);
+		expect(parseArgs(["--target", "win-x64"]).target).toBe("win-x64");
+		expect(parseArgs(["--target", "windows-x64"]).target).toBe("win-x64");
+		expect(() => parseArgs(["--target", "plan9-x64"])).toThrow(/Unknown target plan9-x64/);
 		expect(() => parseArgs(["--target", "linux-x64", "--force", "1"])).toThrow(/Unexpected argument --force/);
 		expect(() => parseArgs(["--target", "--out", "/tmp/r"])).toThrow(/Unexpected argument --target/);
 		expect(() => parseArgs(["--target", "linux-x64", "--engram-version", "latest"])).toThrow(/x\.y\.z/);
@@ -58,8 +60,10 @@ describe("versions and asset names", () => {
 
 	it("names the official archives", () => {
 		expect(nodeArchiveName("24.14.1", "linux-x64")).toBe("node-v24.14.1-linux-x64.tar.gz");
+		expect(nodeArchiveName("24.14.1", "win-x64")).toBe("node-v24.14.1-win-x64.zip");
 		expect(engramArchiveName("3.2.1", "linux-x64")).toBe("engram_3.2.1_linux_amd64.tar.gz");
 		expect(engramArchiveName("3.2.1", "darwin-arm64")).toBe("engram_3.2.1_darwin_arm64.tar.gz");
+		expect(engramArchiveName("3.4.0", "win-x64")).toBe("engram_3.4.0_windows_amd64.zip");
 	});
 
 	it("takes a release version from `engram version`, not a development build", () => {

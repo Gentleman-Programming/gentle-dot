@@ -364,10 +364,13 @@ describe("createModelAuthRuntime (Pi's runtime, offline)", () => {
 describe("resolveAgentHome", () => {
 	it("belongs to the assistant: <dataDir>/agent unless overridden, never the user's Gentle Shell home", () => {
 		const dataDir = tempDir();
-		expect(resolveAgentHome({}, dataDir)).toBe(join(dataDir, "agent"));
-		expect(resolveAgentHome({ GENTLE_SHELL_HOME: "/x", PI_CODING_AGENT_DIR: "/z" }, dataDir)).toBe(
-			join(dataDir, "agent"),
-		);
 		expect(resolveAgentHome({ GENTLE_DOT_AGENT_HOME: "/y" }, dataDir)).toBe(resolve("/y"));
+		const assistantHome = join(dataDir, "agent");
+		expect(resolveAgentHome({}, dataDir)).toBe(assistantHome);
+		expect(resolveAgentHome({ GENTLE_SHELL_HOME: "/x", PI_CODING_AGENT_DIR: "/z" }, dataDir)).toBe(
+			assistantHome,
+		);
+		const override = join(dataDir, "y");
+		expect(resolveAgentHome({ GENTLE_DOT_AGENT_HOME: override }, dataDir)).toBe(override);
 	});
 });

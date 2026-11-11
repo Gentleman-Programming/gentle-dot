@@ -1,0 +1,181 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+import {
+	gentleAiProvenance,
+	isGentleAiBinary,
+	parseWindowsArgs,
+	payloadDifferences,
+	RUNTIME_HASH_SAMPLE,
+	sevenZipCandidates,
+	WINDOWS_USAGE,
+	windowsBuildEnv,
+	windowsInstallerNames,
+	windowsReleaseConfig,
+} from "../lib.mjs";
+
+const REPO = fileURLToPath(new URL("../../../", import.meta.url));
+
+describe("parseWindowsArgs", () => {
+	it("defaults to staging and no payload check", () => {
+		expect(parseWindowsArgs([])).toEqual({ skipStage: false, check: false });
+	});
+
+	it("reads --skip-stage and --check, ignores a bare --, and refuses anything else", () => {
+		expect(parseWindowsArgs(["--", "--skip-stage", "--check"])).toEqual({ skipStage: true, check: true });
+		expect(() => parseWindowsArgs(["--sign", "x"])).toThrow(WINDOWS_USAGE);
+	});
+});
+
+describe("windowsReleaseConfig", () => {
+	it("carries the staged runtime as the app's runtime resource, the way macOS does", () => {
+		expect(windowsReleaseConfig({ runtime: "D:\\build\\runtime\\win-x64" })).toEqual({
+			bundle: { resources: { "D:\\build\\runtime\\win-x64": "runtime" } },
+		});
+	});
+
+	it("sets no macOS key: there is no signing identity on Windows", () => {
+		const config = windowsReleaseConfig({ runtime: "/build/runtime/win-x64" });
+		expect(JSON.stringify(config)).not.toContain("signingIdentity");
+		expect(config.bundle).not.toHaveProperty("macOS");
+	});
+
+	it("adds no description key, because the Windows bundlers emit none", () => {
+		// Measured on the built bundles, not assumed: the MSI carries no Comments/ARPCOMMENTS
+		// property and the NSIS version-info block derives every key from PRODUCTNAME, so a
+		// longDescription here would be config with no output.
+		expect(windowsReleaseConfig({ runtime: "/r" }).bundle).not.toHaveProperty("longDescription");
+	});
+
+	it("refuses a config without a runtime", () => {
+		expect(() => windowsReleaseConfig({})).toThrow(/runtime/);
+	});
+});
+
+describe("windowsInstallerNames", () => {
+	it("names the NSIS and MSI files the way Tauri's bundler does", () => {
+		// Measured on this host: W8's bundles are exactly these two names at 0.1.0.
+		expect(windowsInstallerNames("Gentle Dot", "0.1.0")).toEqual({
+			nsis: "Gentle Dot_0.1.0_x64-setup.exe",
+			msi: "Gentle Dot_0.1.0_x64_en-US.msi",
+		});
+	});
+});
+
+describe("payloadDifferences", () => {
+	const staged = ["MANIFEST.json", "bin/pi.cmd", "daemon/cli.mjs"];
+
+	it("reports nothing when the payload holds exactly the staged runtime", () => {
+		expect(payloadDifferences(staged, staged)).toEqual({ missing: [], extra: [] });
+	});
+
+	it("ignores path separators and case, because Windows does", () => {
+		expect(payloadDifferences(staged, ["MANIFEST.JSON", "bin\\pi.cmd", "daemon\\cli.mjs"])).toEqual({
+			missing: [],
+			extra: [],
+		});
+	});
+
+	it("names what the payload dropped and what it added", () => {
+		const differences = payloadDifferences(staged, ["MANIFEST.json", "bin/pi.cmd", "uninstall.exe"]);
+		expect(differences.missing).toEqual(["daemon/cli.mjs"]);
+		expect(differences.extra).toEqual(["uninstall.exe"]);
+	});
+});
+
+describe("the payload hash sample", () => {
+	it("pins the files whose bytes prove the runtime crossed the installer", () => {
+		expect(RUNTIME_HASH_SAMPLE).toContain("MANIFEST.json");
+		expect(RUNTIME_HASH_SAMPLE).toContain("node/node.exe");
+		expect(RUNTIME_HASH_SAMPLE).toContain("bin/pi.exe");
+		expect(RUNTIME_HASH_SAMPLE).toContain("bin/private-storage.exe");
+		expect(RUNTIME_HASH_SAMPLE).toContain("daemon/native/windows-stop.node");
+		expect(RUNTIME_HASH_SAMPLE).toContain("bin/engram.exe");
+		expect(RUNTIME_HASH_SAMPLE).toContain("daemon/cli.mjs");
+	});
+
+	it("finds the engine binary wherever the build nests it, without pinning its version", () => {
+		expect(isGentleAiBinary("daemon/node_modules/gentle-pi/.gentle-ai/v4.0.0/gentle-ai.exe")).toBe(true);
+		expect(isGentleAiBinary("daemon/node_modules/gentle-pi/.gentle-ai/v9.9.9/gentle-ai.exe")).toBe(true);
+		expect(isGentleAiBinary("daemon/node_modules/gentle-pi/.gentle-ai/v4.0.0/integrity.json")).toBe(false);
+		expect(isGentleAiBinary("bin/engram.exe")).toBe(false);
+	});
+});
+
+describe("sevenZipCandidates", () => {
+	it("tries SEVEN_ZIP, then both Program Files, then PATH", () => {
+		const candidates = sevenZipCandidates({
+			SEVEN_ZIP: "D:\\tools\\7z.exe",
+			ProgramFiles: "C:\\Program Files",
+			"ProgramFiles(x86)": "C:\\Program Files (x86)",
+		});
+		expect(candidates[0]).toBe("D:\\tools\\7z.exe");
+		expect(candidates).toContain(join("C:\\Program Files", "7-Zip", "7z.exe"));
+		expect(candidates).toContain(join("C:\\Program Files (x86)", "7-Zip", "7z.exe"));
+		expect(candidates.slice(-2)).toEqual(["7z", "7za"]);
+	});
+
+	it("keeps a bare 7z as the last resort when the environment names nothing", () => {
+		expect(sevenZipCandidates({})).toEqual(["7z", "7za"]);
+	});
+});
+
+describe("gentleAiProvenance", () => {
+	it("keeps the signed-release wording the other platforms already print", () => {
+		expect(gentleAiProvenance({ asset: "gentle-ai_4.0.0_darwin_arm64.tar.gz", assetSha256: "abc123" })).toBe(
+			"from gentle-ai_4.0.0_darwin_arm64.tar.gz (sha256 abc123)",
+		);
+	});
+
+	it("names the Go source build on Windows, which records binarySha256 instead", () => {
+		// L54's advisory: the staged Windows integrity.json has no asset/assetSha256 pair,
+		// so staging used to print `from undefined (sha256 undefined)`.
+		const line = gentleAiProvenance({
+			method: "go-sumdb-source-build",
+			binarySha256: "d736cf22f120ca31549fc47d0455436d273a9c07417757e394cad53a9356208f",
+			goVersion: "go1.27.0",
+			buildMode: "exe",
+		});
+		expect(line).toContain("go-sumdb-source-build");
+		expect(line).toContain("go1.27.0");
+		expect(line).toContain("d736cf22f120");
+		expect(line).not.toContain("undefined");
+	});
+});
+
+describe("Windows producer commands", () => {
+	it("preserves the native producer and names the inherited payload producer separately", () => {
+		const pkg = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8"));
+		expect(pkg.scripts["package:windows"]).toBe("powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/package.ps1");
+		expect(pkg.scripts["package:windows:payload"]).toBe("node scripts/package/package-windows.mjs");
+	});
+});
+
+describe("windowsBuildEnv", () => {
+	it("makes the release app require the packaged runtime, whatever the caller inherited", () => {
+		const env = windowsBuildEnv({ PATH: "C:\\bin", GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED: "0" });
+		expect(env).toEqual({ PATH: "C:\\bin", CI: "true", GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED: "1" });
+	});
+
+	it("is the environment package-windows hands to tauri build", () => {
+		const script = readFileSync(join(REPO, "scripts/package/package-windows.mjs"), "utf8");
+		expect(script).toMatch(/"tauri",\s*"build"[\s\S]*?env: windowsBuildEnv\(process\.env\)/);
+	});
+
+	it("runs tauri build through pnpmInvocation, never a bare pnpm spawn that misses the .cmd shim", () => {
+		const script = readFileSync(join(REPO, "scripts/package/package-windows.mjs"), "utf8");
+		expect(script).not.toMatch(/run\(\s*"pnpm"/);
+		expect(script).toMatch(
+			/pnpmInvocation\(\s*\[\s*"--filter",\s*"@gentle-dot\/desktop",\s*"exec",\s*"tauri",\s*"build"/,
+		);
+	});
+
+	it("is the marker build.rs embeds and the release daemon checks", () => {
+		const build = readFileSync(join(REPO, "apps/desktop/src-tauri/build.rs"), "utf8");
+		const daemon = readFileSync(join(REPO, "apps/desktop/src-tauri/src/daemon.rs"), "utf8");
+		expect(build).toContain("cargo:rerun-if-env-changed=GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED");
+		expect(build).toContain("cargo:rustc-env=GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED=");
+		expect(daemon).toContain('option_env!("GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED") == Some("1")');
+	});
+});

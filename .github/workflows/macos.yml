@@ -1,0 +1,64 @@
+# Native engine/runtime checks, not a signed desktop release or a model/GUI test.
+name: macOS
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine-runtime:
+    name: Engine and staged runtime
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      # Match pnpm-workspace.yaml's exact exception for automatic dependency checks.
+      PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: '["gentle-pi@4.7.0"]'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Reads pnpm 11.5.0 from the repository's packageManager declaration.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      # Keep lifecycle scripts enabled; pnpm-workspace.yaml allows esbuild and gentle-pi.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts=false
+
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Full Vitest suite
+        run: pnpm test
+      - name: Build UI
+        run: pnpm build
+
+      - name: Stage native runtime
+        run: |
+          set -euo pipefail
+          test "$(node -p 'process.platform')" = darwin
+          case "$(node -p 'process.arch')" in
+            arm64) target=darwin-arm64 ;;
+            x64) target=darwin-x64 ;;
+            *) echo "Unsupported macOS Node architecture" >&2; exit 1 ;;
+          esac
+          # The stager validates host/target support before downloads. Currently arm64 only;
+          # an x64 runner must fail explicitly until the existing stager supports that target.
+          # It builds the daemon and UI, verifies downloads, and records runtime versions.
+          node scripts/package/stage-runtime.mjs --target "$target" --out "$RUNNER_TEMP/gentle-dot-runtime"
+
+      # Isolated HOME, engine idle, clean stop, and an unchanged read-only runtime copy.
+      - name: Smoke staged runtime
+        run: node scripts/package/smoke-runtime.mjs --runtime "$RUNNER_TEMP/gentle-dot-runtime" --read-only --timeout 240

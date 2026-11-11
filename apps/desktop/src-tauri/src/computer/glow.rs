@@ -105,9 +105,26 @@ pub fn place(
     Some((display, GlowEvent { x, y, to_x: to.map(|t| t.0), to_y: to.map(|t| t.1), ..event }))
 }
 
+/// Convert physical-pixel marks to the overlay page's CSS pixels.
+#[cfg(any(windows, test))]
+pub fn in_css_pixels(event: GlowEvent, scale: f64) -> GlowEvent {
+    if !scale.is_finite() || scale <= 0.0 || scale == 1.0 { return event; }
+    let css = |value: f64| value / scale;
+    GlowEvent { x: css(event.x), y: css(event.y), to_x: event.to_x.map(css), to_y: event.to_y.map(css), width: event.width.map(css), height: event.height.map(css), ..event }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_marks_are_turned_into_the_pages_css_pixels() {
+        let drag = GlowEvent { kind: GlowKind::Drag, x: 300.0, y: 150.0, to_x: Some(600.0), to_y: Some(90.0), width: None, height: None };
+        assert_eq!(in_css_pixels(drag, 1.5), GlowEvent { kind: GlowKind::Drag, x: 200.0, y: 100.0, to_x: Some(400.0), to_y: Some(60.0), width: None, height: None });
+        let key = GlowEvent { kind: GlowKind::Key, x: 20.0, y: 40.0, to_x: None, to_y: None, width: Some(200.0), height: Some(50.0) };
+        assert_eq!(in_css_pixels(key, 2.0), GlowEvent { kind: GlowKind::Key, x: 10.0, y: 20.0, to_x: None, to_y: None, width: Some(100.0), height: Some(25.0) });
+        for scale in [1.0, 0.0, -1.0, f64::NAN] { assert_eq!(in_css_pixels(key, scale), key, "{scale}"); }
+    }
     use serde_json::json;
 
     /// Two displays side by side: the main one at the origin, a second one to its right.

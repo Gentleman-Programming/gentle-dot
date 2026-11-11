@@ -10,11 +10,14 @@ import {
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
-import { lockedDependencies } from "../src/runtime-build.ts";
+import { lockedDependencies, lockedEnginePackages, piCmdWrapper, piWrapper } from "../src/runtime-build.ts";
 import { tempDir } from "./helpers.ts";
+import { directoryLinkType, symlinkDirectory } from "./support/fixture-capabilities.ts";
+import { WINDOWS_STOP_ADDON } from "./support/windows.ts";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
 const BUILD = join(PACKAGE, "scripts", "build-runtime.ts");
@@ -22,7 +25,17 @@ const ENGINE_CLI = join("@earendil-works", "pi-coding-agent", "dist", "bundle", 
 
 let out: string;
 
+// The real build stages the Windows stop addon, built with MSVC (build:windows-stop), and rightly
+// refuses without it. A local Windows checkout that never ran build:windows-stop has none, so the
+// build tests skip there; CI builds the addon first, so a missing one fails the build instead.
+const skipBuild =
+	process.platform === "win32" &&
+	!process.env.CI &&
+	!existsSync(join(PACKAGE, "native", "windows-stop.node"));
+if (skipBuild) console.info(`Windows-only test skip: ${WINDOWS_STOP_ADDON}`);
+
 beforeAll(() => {
+	if (skipBuild) return;
 	const root = tempDir();
 	out = process.platform === "win32" ? join(root, "runtime Ω &") : root;
 	const build = spawnSync(process.execPath, [BUILD, "--out", out], { encoding: "utf8" });
@@ -35,6 +48,38 @@ beforeAll(() => {
 	expect(build.status).toBe(0);
 }, 60_000);
 
+/**
+ * Puts `PACKAGE/node_modules` beside the output's `cli.mjs` so the self-check resolves the engine.
+ * One directory link does not port: on a plain Windows install `symlinkSync` needs the symlink
+ * privilege, and a **junction** to this pnpm layout does not resolve either — Node cannot follow a
+ * dependency that is itself a symlink when it is reached through a junction (measured on Windows
+ * 11, Node 24). Windows therefore gets a real folder holding one junction per dependency, each
+ * pointing at the dependency's real path, so nothing under the output is a symlink to follow.
+ */
+function linkNodeModules(out: string): void {
+	const link = join(out, "daemon", "node_modules");
+	const source = join(PACKAGE, "node_modules");
+	if (process.platform !== "win32") {
+		symlinkDirectory(source, link);
+		return;
+	}
+	mkdirSync(link, { recursive: true });
+	for (const entry of readdirSync(source, { withFileTypes: true })) {
+		if (entry.name === ".bin") continue;
+		const from = join(source, entry.name);
+		if (entry.name.startsWith("@")) {
+			mkdirSync(join(link, entry.name));
+			for (const sub of readdirSync(from)) {
+				const real = realpathSync(join(from, sub));
+				if (statSync(real).isDirectory()) symlinkSync(real, join(link, entry.name, sub), directoryLinkType());
+			}
+		} else {
+			const real = realpathSync(from);
+			if (statSync(real).isDirectory()) symlinkSync(real, join(link, entry.name), directoryLinkType());
+		}
+	}
+}
+
 function listFiles(dir: string, prefix = ""): string[] {
 	return readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
 		entry.isDirectory()
@@ -43,16 +88,30 @@ function listFiles(dir: string, prefix = ""): string[] {
 	);
 }
 
-describe("build:runtime", () => {
+describe("piWrapper", () => {
+	it("emits a relocatable Windows cmd wrapper without relying on sh or ambient Node", () => {
+		expect(piCmdWrapper("@earendil-works/pi-coding-agent/dist/bundle/cli.js")).toBe(
+			'@echo off\r\nsetlocal DisableDelayedExpansion\r\n"%~dp0..\\node\\bin\\node.exe" "%~dp0..\\daemon\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js" %*\r\nexit /b %errorlevel%\r\n',
+		);
+	});
+
+	it("preserves the Unix shell wrapper for Linux and macOS", () => {
+		const wrapper = piWrapper("@earendil-works/pi-coding-agent/dist/bundle/cli.js");
+		expect(wrapper).toContain("#!/bin/sh\n");
+		expect(wrapper).toContain('exec "$runtime/node/bin/node"');
+		expect(wrapper).toContain('"$@"');
+	});
+});
+
+describe.skipIf(skipBuild)("build:runtime", () => {
 	it("emits the daemon part of the runtime layout, without node_modules", () => {
+		const windows = process.platform === "win32";
 		expect(listFiles(out).sort()).toEqual([
-			...(process.platform === "win32" ? ["bin/pi.exe", "bin/private-storage.exe"] : ["bin/pi"]),
-			"daemon/cli.mjs",
-			"daemon/extensions/approval-guard.ts",
-			"daemon/extensions/screenshot-context.ts",
-			"daemon/identity.md",
-			"daemon/package.json",
-		]);
+			...(windows ? ["bin/pi.exe", "bin/private-storage.exe"] : ["bin/pi"]),
+			"daemon/cli.mjs", "daemon/extensions/approval-guard.ts",
+			"daemon/extensions/screenshot-context.ts", "daemon/identity.md",
+			...(windows ? ["daemon/native/windows-stop.node"] : []), "daemon/package.json",
+		].sort());
 		expect(readFileSync(join(out, "daemon", "identity.md"), "utf8")).toBe(
 			readFileSync(join(PACKAGE, "src", "identity.md"), "utf8"),
 		);
@@ -67,51 +126,50 @@ describe("build:runtime", () => {
 		expect(bundle).not.toContain("@gentle-dot/protocol");
 		expect(bundle).toMatch(/from "ws"/);
 		expect(bundle).toContain('import("@earendil-works/pi-coding-agent")');
+		// The production addon stays external and resolves beside the staged entry,
+		// not relative to the source checkout; Unix's file layout remains unchanged.
+		expect(bundle).toContain("./native/windows-stop.node");
+		expect(bundle).not.toContain("NAPI_MODULE");
 	});
 
 	it("lists the external dependencies with the lockfile's exact versions", () => {
 		const manifest = JSON.parse(readFileSync(join(out, "daemon", "package.json"), "utf8"));
 		expect(manifest).toMatchObject({ private: true, type: "module" });
 		expect(manifest.dependencies).toEqual({
-			"@earendil-works/pi-ai": "1.0.4",
-			"@earendil-works/pi-codemode": "1.0.4",
-			"@earendil-works/pi-coding-agent": "1.0.4",
-			"@earendil-works/pi-mcp": "1.0.4",
-			"@earendil-works/pi-tui": "1.0.4",
-			"gentle-pi": "4.0.0",
+			"@earendil-works/pi-ai": "1.5.0",
+			"@earendil-works/pi-coding-agent": "1.5.0",
+			"@earendil-works/pi-mcp": "1.5.0",
+			"@earendil-works/pi-tui": "1.5.0",
+			"gentle-pi": "4.7.0",
 			jiti: "2.7.0",
 			ws: "8.22.0",
 		});
 	});
 
-	it("pins SDK-compatible codemode in the generated dependencies and npm overrides", () => {
+	it("pins SDK-compatible transitive codemode through npm overrides", () => {
 		const manifest = JSON.parse(readFileSync(join(out, "daemon", "package.json"), "utf8"));
 		const source = JSON.parse(readFileSync(join(PACKAGE, "package.json"), "utf8"));
 		const codemode = "@earendil-works/pi-codemode";
-		expect(manifest.dependencies[codemode]).toBe("1.0.4");
-		expect(source.dependencies[codemode]).toBe(manifest.dependencies[codemode]);
-		expect(lockedDependencies()[codemode]).toBe(manifest.dependencies[codemode]);
-		expect(manifest.overrides).toEqual({ [codemode]: manifest.dependencies[codemode] });
+		expect(manifest.dependencies[codemode]).toBeUndefined();
+		expect(source.dependencies[codemode]).toBeUndefined();
+		expect(lockedDependencies()[codemode]).toBeUndefined();
+		expect(manifest.overrides[codemode]).toBe("1.5.0");
 	});
 
-	it("selects workspace codemode 1.0.4 with the SDK's required public declarations export", () => {
+	it("selects workspace codemode matching the upgraded SDK's locked sibling", () => {
+		// The old 1.0 declarations-subpath assertion belongs to the superseded SDK.
+		// Resolve the upgraded package's public entry without executing SDK/providers.
 		const sdk = realpathSync(join(PACKAGE, "node_modules", "@earendil-works", "pi-coding-agent"));
-		// Resolve the public import from the actual SDK's workspace dependency context.
-		// Only the pure declarations module runs: no SDK/auth, startup or providers.
-		const check = spawnSync(process.execPath, ["--input-type=module", "--eval", `
-			import { readFileSync } from 'node:fs';
-			import { MCP_TYPESCRIPT_PREAMBLE } from '@earendil-works/pi-codemode/declarations';
-			const entry = import.meta.resolve('@earendil-works/pi-codemode/declarations');
-			const manifest = JSON.parse(readFileSync(new URL('../package.json', entry), 'utf8'));
-			process.stdout.write(JSON.stringify({ version: manifest.version, preamble: MCP_TYPESCRIPT_PREAMBLE }));
-		`], { cwd: sdk, encoding: "utf8" });
-		expect(check.error).toBeUndefined();
-		expect(check.status).toBe(0);
-		expect(check.stderr).toBe("");
-		const report = JSON.parse(check.stdout);
-		expect(report.version).toBe("1.0.4");
-		expect(typeof report.preamble).toBe("string");
-		expect(report.preamble).toContain("type CallToolResult<");
+		const require = createRequire(join(sdk, "package.json"));
+		let directory = dirname(require.resolve("@earendil-works/pi-codemode"));
+		while (!existsSync(join(directory, "package.json"))) {
+			const parent = dirname(directory);
+			if (parent === directory) throw new Error("codemode package manifest unavailable");
+			directory = parent;
+		}
+		const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
+		expect(manifest.name).toBe("@earendil-works/pi-codemode");
+		expect(manifest.version).toBe(lockedEnginePackages(lockedDependencies())[manifest.name]);
 	});
 
 	it("keeps lockedDependencies compatible with direct-only fixtures and peer suffixes", () => {
@@ -135,9 +193,58 @@ describe("build:runtime", () => {
 		].join("\n"))).toEqual({ "old-engine": "2.1.0" });
 	});
 
+	// The engine asks for its siblings with `^` ranges; a fresh install would take newer ones
+	// that no longer match it (pi-codemode 1.4.0 broke pi-coding-agent 1.0.4).
+	// The manifest is this suite's boundary: proving npm honours `overrides` needs a real
+	// install from the registry, which the packaging step does (scripts/package/stage-runtime.mjs
+	// installs from this manifest, then scripts/package/smoke-runtime.mjs starts the engine).
+	it("pins the engine's own packages to the lockfile's versions", () => {
+		const manifest = JSON.parse(readFileSync(join(out, "daemon", "package.json"), "utf8"));
+		expect(manifest.overrides).toEqual({
+			"@earendil-works/pi-agent-core": "1.5.0",
+			"@earendil-works/pi-codemode": "1.5.0",
+			"@earendil-works/pi-schema": "1.5.0",
+			"@earendil-works/pi-telemetry": "1.5.0",
+		});
+	});
+
+	it("reads the engine packages from a lockfile, without the direct dependencies", () => {
+		const lockfile = [
+			"importers:",
+			"  '@earendil-works/pi-tui@9.9.9':",
+			"packages:",
+			"  '@earendil-works/pi-coding-agent@1.4.0':",
+			"  '@earendil-works/pi-ai@1.4.0':",
+			"  ws@8.22.0:",
+			"snapshots:",
+			"  '@earendil-works/pi-codemode@2.0.0':",
+			"packages:",
+			"  '@earendil-works/pi-agent-core@1.4.0':",
+			"  '@earendil-works/pi-agent-core@1.4.0(ws@8.22.0)':",
+			"  '@earendil-works/pi-agent-core@1.4.0(undici@8.11.2)(ws@8.22.0)':",
+		].join("\n");
+		expect(lockedEnginePackages({ "@earendil-works/pi-coding-agent": "1.4.0" }, lockfile)).toEqual({
+			"@earendil-works/pi-ai": "1.4.0",
+			"@earendil-works/pi-agent-core": "1.4.0",
+		});
+	});
+
+	it("refuses a lockfile holding two versions of one engine package", () => {
+		const lockfile = [
+			"packages:",
+			"  '@earendil-works/pi-codemode@1.4.0':",
+			"  '@earendil-works/pi-codemode@1.5.0(ws@8.22.0)':",
+		].join("\n");
+		expect(() => lockedEnginePackages({}, lockfile)).toThrow(
+			"The lockfile holds two versions of @earendil-works/pi-codemode.",
+		);
+		// Two versions of a direct dependency are pnpm's business, not an override's.
+		expect(lockedEnginePackages({ "@earendil-works/pi-codemode": "1.4.0" }, lockfile)).toEqual({});
+	});
+
 	it("runs its self-check from the output with the engine resolved inside it", () => {
-		symlinkSync(join(PACKAGE, "node_modules"), join(out, "daemon", "node_modules"));
-		const engramBin = join(tempDir(), "engram.exe");
+		linkNodeModules(out);
+		const engramBin = join(tempDir(), process.platform === "win32" ? "engram.exe" : "engram");
 		writeFileSync(engramBin, "fixture executable");
 		const check = spawnSync(process.execPath, [join(out, "daemon", "cli.mjs"), "--self-check"], {
 			encoding: "utf8",
@@ -246,6 +353,7 @@ describe("build:runtime", () => {
 			expect(statSync(join(out, "bin", "pi")).mode & 0o111).toBe(0o111);
 			const moved = tempDir();
 			mkdirSync(join(moved, "bin"));
+
 			mkdirSync(join(moved, "node", "bin"), { recursive: true });
 			copyFileSync(join(out, "bin", "pi"), join(moved, "bin", "pi"));
 			writeFileSync(join(moved, "node", "bin", "node"), '#!/bin/sh\nprintf "%s\\n" "$0" "$@"\n', {

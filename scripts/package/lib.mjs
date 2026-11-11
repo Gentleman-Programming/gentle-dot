@@ -1,7 +1,17 @@
 // Pure helpers for staging the installed app's runtime (`stage-runtime.mjs`).
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, lstatSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import {
+	copyFileSync,
+	cpSync,
+	createReadStream,
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	readdirSync,
+	writeFileSync,
+} from "node:fs";
+import { join, posix, win32 } from "node:path";
 
 /**
  * The targets a runtime can be staged for, with the names Node's and Engram's
@@ -12,13 +22,27 @@ export const TARGETS = Object.freeze({
 	"darwin-x64": { platform: "darwin", arch: "x64", node: "darwin-x64", engram: "darwin_amd64" },
 	"linux-arm64": { platform: "linux", arch: "arm64", node: "linux-arm64", engram: "linux_arm64" },
 	"linux-x64": { platform: "linux", arch: "x64", node: "linux-x64", engram: "linux_amd64" },
+	"win-x64": { platform: "win32", arch: "x64", node: "win-x64", engram: "windows_amd64" },
+	"win-arm64": { platform: "win32", arch: "arm64", node: "win-arm64", engram: "windows_arm64" },
 });
+
+/**
+ * SW5 names the Windows target `windows-x64`; the canonical key follows the machine
+ * convention the other targets use. Both spellings are accepted.
+ */
+const TARGET_ALIASES = Object.freeze({ "windows-x64": "win-x64" });
+
+/** Node's and Engram's Windows releases are `.zip`; every other target's are `.tar.gz`. */
+function archiveExtension(target) {
+	return TARGETS[target].platform === "win32" ? "zip" : "tar.gz";
+}
 
 /** The Node release staged when `.nvmrc` names only a major version; it must stay on that major. */
 export const PINNED_NODE_VERSION = "24.14.1";
 
 export const USAGE =
-	"usage: stage-runtime --target <darwin-arm64|darwin-x64|linux-arm64|linux-x64> [--out <dir>] [--engram-version <x.y.z>]";
+	"usage: stage-runtime --target <darwin-arm64|darwin-x64|linux-arm64|linux-x64|win-x64|win-arm64> [--out <dir>] " +
+	"[--engram-version <x.y.z>]";
 
 /** Parses the command line; throws with the usage on anything unexpected. */
 export function parseArgs(argv) {
@@ -35,6 +59,8 @@ export function parseArgs(argv) {
 		options[name] = value;
 	}
 	if (!options.target) throw new Error(`Missing --target.\n${USAGE}`);
+	if (!Object.hasOwn(TARGETS, options.target) && TARGET_ALIASES[options.target])
+		options.target = TARGET_ALIASES[options.target];
 	if (!Object.hasOwn(TARGETS, options.target))
 		throw new Error(`Unknown target ${options.target}; expected one of ${Object.keys(TARGETS).join(", ")}.`);
 	if (options.engramVersion !== undefined && !/^\d+\.\d+\.\d+$/.test(options.engramVersion))
@@ -71,11 +97,139 @@ export function nodeVersion(nvmrc, pinned = PINNED_NODE_VERSION) {
 }
 
 export function nodeArchiveName(version, target) {
-	return `node-v${version}-${TARGETS[target].node}.tar.gz`;
+	return `node-v${version}-${TARGETS[target].node}.${archiveExtension(target)}`;
 }
 
-export function engramArchiveName(version, target) {
-	return `engram_${version}_${TARGETS[target].engram}.tar.gz`;
+/**
+ * The Engram release archive for `target`. Windows releases have shipped both ZIP and tar.gz, so
+ * given the release's checksum `listing` the Windows name is the one format it lists, and it must
+ * list exactly one. Without a listing the name is the target's usual extension, unchecked.
+ */
+export function engramArchiveName(version, target, listing) {
+	const base = `engram_${version}_${TARGETS[target].engram}`;
+	if (TARGETS[target].platform !== "win32" || listing === undefined)
+		return `${base}.${archiveExtension(target)}`;
+	const candidates = ["zip", "tar.gz"]
+		.map((extension) => `${base}.${extension}`)
+		.filter((name) => {
+			try {
+				checksumFor(listing, name);
+				return true;
+			} catch {
+				return false;
+			}
+		});
+	if (candidates.length !== 1)
+		throw new Error(
+			"Windows Engram needs exactly one supported archive in the release checksum list (ZIP or tar.gz).",
+		);
+	return candidates[0];
+}
+
+/** Explicit build prerequisite only; never search or inherit the user's entire PATH. */
+export function windowsBuildGo(source, isFile) {
+	const exe = source.GENTLE_DOT_BUILD_GO;
+	if (
+		!exe ||
+		!win32.isAbsolute(exe) ||
+		win32.basename(exe).toLowerCase() !== "go.exe" ||
+		/[;\r\n"]/.test(exe)
+	)
+		throw new Error(
+			"GENTLE_DOT_BUILD_GO must be the full path of the real go.exe in GOROOT\\bin (not a Scoop or Chocolatey shim), such as C:\\Program Files\\Go\\bin\\go.exe.",
+		);
+	if (!isFile(exe)) throw new Error(`GENTLE_DOT_BUILD_GO names ${exe}, which is not an existing file.`);
+	return exe;
+}
+
+/** Child-only environment: installers do not inherit the user's home or credentials. */
+export function installerEnv(out, cache, target, source = process.env, goExecutable) {
+	const windows = TARGETS[target].platform === "win32";
+	const path = windows ? win32.join : posix.join;
+	const home = path(cache, "npm-home");
+	const env = {
+		HOME: home,
+		PATH: `${path(out, "node", "bin")}:/usr/bin:/bin:/usr/sbin:/sbin`,
+		TMPDIR: source.TMPDIR ?? "/tmp",
+		npm_config_userconfig: path(cache, "npmrc"),
+		npm_config_cache: path(cache, "npm-cache"),
+		npm_config_registry: "https://registry.npmjs.org/",
+		npm_config_update_notifier: "false",
+	};
+	if (windows) {
+		const get = (key) =>
+			Object.entries(source).find(([name]) => name.toLowerCase() === key.toLowerCase())?.[1];
+		const root = get("SystemRoot");
+		if (!root) throw new Error("Windows installers require SystemRoot.");
+		delete env.TMPDIR;
+		Object.assign(env, {
+			USERPROFILE: home,
+			LOCALAPPDATA: path(home, "AppData", "Local"),
+			APPDATA: path(home, "AppData", "Roaming"),
+			SystemRoot: root,
+			ComSpec: path(root, "System32", "cmd.exe"),
+			PATH: [
+				path(out, "node"),
+				path(root, "System32"),
+				root,
+				...(goExecutable ? [win32.dirname(goExecutable)] : []),
+			].join(";"),
+			TEMP: get("TEMP") ?? get("TMP") ?? path(home, "Temp"),
+			TMP: get("TMP") ?? get("TEMP") ?? path(home, "Temp"),
+		});
+	}
+	return env;
+}
+
+/**
+ * No shell quoting or direct `.cmd` spawn: on Windows pnpm supplies its JavaScript entry through
+ * `npm_execpath`, which Node runs. Spawning `pnpm` itself fails with ENOENT there, as it is a `.cmd` shim.
+ */
+export function pnpmInvocation(
+	args,
+	platform = process.platform,
+	env = process.env,
+	node = process.execPath,
+) {
+	if (platform !== "win32") return { command: "pnpm", args };
+	if (!/pnpm\.(?:c?js|mjs)$/i.test(env.npm_execpath ?? ""))
+		throw new Error("Run Windows staging through pnpm so npm_execpath names pnpm's JavaScript entry.");
+	return { command: node, args: [env.npm_execpath, ...args] };
+}
+
+/**
+ * The files a staged Windows runtime must hold, relative to its root: what `launch.rs`
+ * `validate_packaged_runtime` requires of the installed copy, and what `windows-layout.test.ts`
+ * keeps in step with it. Windows retains the Go launcher's `node/node.exe` layout.
+ */
+export const WINDOWS_RUNTIME_FILES = Object.freeze([
+	"node/node.exe",
+	"daemon/cli.mjs",
+	"daemon/package.json",
+	"daemon/native/windows-stop.node",
+	"daemon/node_modules/gentle-pi/package.json",
+	"bin/engram.exe",
+	"bin/pi.exe",
+	"bin/private-storage.exe",
+	"ui/index.html",
+]);
+
+/**
+ * Lays Node's extracted Windows zip (`extracted` holds node.exe, the cmd shims and `node_modules/npm`)
+ * under `node`: `node.exe`, `npm.cmd`, `npx.cmd`, and `lib/node_modules/npm`.
+ * The native Go launcher requires Node at this root. Rewrite npm's shims to use
+ * that Node and the private npm library, never an ambient installation.
+ */
+export function layoutWindowsNode(extracted, node) {
+	mkdirSync(node, { recursive: true });
+	mkdirSync(join(node, "lib", "node_modules"), { recursive: true });
+	copyFileSync(join(extracted, "node.exe"), join(node, "node.exe"));
+	copyFileSync(join(extracted, "LICENSE"), join(node, "LICENSE"));
+	cpSync(join(extracted, "node_modules", "npm"), join(node, "lib", "node_modules", "npm"), {
+		recursive: true,
+	});
+	for (const name of ["npm", "npx"])
+		writeFileSync(join(node, `${name}.cmd`), npmWrapper(`${name}-cli.js`, "win32"));
 }
 
 /** The SHA-256 a `SHASUMS256.txt` / `checksums.txt` listing gives `fileName`; throws when it is absent. */
@@ -144,6 +298,29 @@ export function formatSize(bytes) {
 	return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+/**
+ * A copied Windows source tree has no Git revision; never manufacture one. That label is for a
+ * local copy only: CI stages release candidates, which must name their daemon commit.
+ */
+export function daemonSourceRevision(
+	repo,
+	platform = process.platform,
+	present = existsSync,
+	git = execFileSync,
+	ci = process.env.CI,
+) {
+	if (platform === "win32" && !present(join(repo, ".git"))) {
+		if (ci)
+			throw new Error(
+				`CI must stage from a Git checkout: ${repo} has no .git, so the runtime would have no daemon commit.`,
+			);
+		return "snapshot-unversioned";
+	}
+	const commit = git("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+	const dirty = git("git", ["status", "--porcelain", "--", "packages"], { cwd: repo, encoding: "utf8" });
+	return dirty.trim() ? `${commit}-dirty` : commit;
+}
+
 /** The runtime's `MANIFEST.json` content. */
 export function buildManifest({ target, versions, daemonCommit, sizeBytes, stagedAt }) {
 	for (const key of ["node", "engram", "gentlePi"])
@@ -161,7 +338,9 @@ export function buildManifest({ target, versions, daemonCommit, sizeBytes, stage
 }
 
 /** A `bin/npm` or `bin/npx` that runs the staged Node's own npm, wherever the folder is copied. */
-export function npmWrapper(cli) {
+export function npmWrapper(cli, platform = "unix") {
+	if (platform === "win32")
+		return `@echo off\r\n"%~dp0node.exe" "%~dp0lib\\node_modules\\npm\\bin\\${cli}" %*\r\n`;
 	return `#!/bin/sh
 # Runs the npm bundled with this Node; a script rather than Node's symlink, so copies that follow links work.
 self=$0
@@ -264,6 +443,115 @@ export function dmgFileName(productName, version, arch) {
 	const names = { arm64: "aarch64", x64: "x64" };
 	if (!names[arch]) throw new Error(`No DMG for arch ${arch}.`);
 	return `${productName}_${version}_${names[arch]}.dmg`;
+}
+
+// Windows installer (`package-windows.mjs`).
+
+export const WINDOWS_USAGE = "usage: package-windows [--skip-stage] [--check]";
+
+/** Parses package-windows' command line: two switches, and a bare `--` is ignored. */
+export function parseWindowsArgs(argv) {
+	const options = { skipStage: false, check: false };
+	const switches = { "--skip-stage": "skipStage", "--check": "check" };
+	for (const arg of argv.filter((value) => value !== "--")) {
+		if (!switches[arg]) throw new Error(`Unexpected argument ${arg}.\n${WINDOWS_USAGE}`);
+		options[switches[arg]] = true;
+	}
+	return options;
+}
+
+/**
+ * The configuration `tauri build --config` merges for a self-contained Windows release: the
+ * staged runtime as the app's `runtime` resource — the mapping `tauriReleaseConfig` uses for
+ * macOS, and the one `daemon::runtime_dir` looks for beside the exe. No macOS key: there is no
+ * signing identity on Windows. It carries no `longDescription`: the Windows bundlers do not
+ * emit one (measured on the built bundles — the MSI has no `Comments`/`ARPCOMMENTS` property,
+ * and the NSIS version-info block derives every key from `PRODUCTNAME`), so a description here
+ * would be config with no output.
+ */
+export function windowsReleaseConfig({ runtime }) {
+	if (!runtime) throw new Error("windowsReleaseConfig needs the staged runtime path.");
+	return { bundle: { resources: { [runtime]: "runtime" } } };
+}
+
+/**
+ * The environment `tauri build` runs with for the Windows installers. `CI` keeps the bundler
+ * non-interactive, as in package-mac. `GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED=1` is the marker
+ * build.rs embeds and the release daemon checks: without it an installed copy with a missing
+ * or partial runtime falls back to the build machine's paths instead of refusing to start.
+ * It is set last so an inherited value can never turn the requirement off.
+ */
+export function windowsBuildEnv(env = process.env) {
+	return { ...env, CI: "true", GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED: "1" };
+}
+
+/** The NSIS and MSI names Tauri's bundler gives a product and version. */
+export function windowsInstallerNames(productName, version) {
+	return {
+		nsis: `${productName}_${version}_x64-setup.exe`,
+		msi: `${productName}_${version}_x64_en-US.msi`,
+	};
+}
+
+/**
+ * The 7-Zip executables to try, in order, when `--check` has to extract an NSIS
+ * payload: an explicit `SEVEN_ZIP`, the two conventional install folders, then
+ * whatever PATH resolves. The caller probes each one; this only names them.
+ */
+export function sevenZipCandidates(env = process.env) {
+	const candidates = [];
+	if (env.SEVEN_ZIP) candidates.push(env.SEVEN_ZIP);
+	for (const root of [env.ProgramFiles, env["ProgramFiles(x86)"]])
+		if (root) candidates.push(join(root, "7-Zip", "7z.exe"));
+	return [...candidates, "7z", "7za"];
+}
+
+/**
+ * What an installer payload's extracted `runtime/` tree is missing from, or holds
+ * beyond, the staged runtime. Both arguments are relative paths; Windows compares
+ * them case-insensitively and indifferently to the separator, so a payload that only
+ * differs that way is not a difference.
+ */
+export function payloadDifferences(staged, extracted) {
+	const normalize = (path) => path.replace(/\\/g, "/").toLowerCase();
+	const wanted = new Set(staged.map(normalize));
+	const found = new Set(extracted.map(normalize));
+	return {
+		missing: [...wanted].filter((path) => !found.has(path)).sort(),
+		extra: [...found].filter((path) => !wanted.has(path)).sort(),
+	};
+}
+
+/**
+ * The files whose bytes `--check` compares between the staged runtime and the payload.
+ * Not all of them: the whole tree is 300 MB of mostly Node's own distribution and
+ * dependencies, and these are the ones a dropped or repacked resource would change.
+ */
+export const RUNTIME_HASH_SAMPLE = Object.freeze([
+	"MANIFEST.json",
+	"node/node.exe",
+	"bin/pi.exe",
+	"bin/private-storage.exe",
+	"daemon/native/windows-stop.node",
+	"bin/engram.exe",
+	"daemon/cli.mjs",
+]);
+
+/** The engine's own binary, wherever the build nested it and at whichever version. */
+export function isGentleAiBinary(relative) {
+	return /(^|\/)\.gentle-ai\/v[^/]+\/gentle-ai\.exe$/.test(relative.replace(/\\/g, "/"));
+}
+
+/**
+ * The engine's provenance for `stage-runtime`'s log, from either shape of
+ * `integrity.json`: a Darwin/Linux signed release asset records `asset` and
+ * `assetSha256`, a Windows Go SumDB source build records `method`, `binarySha256`,
+ * `goVersion` and `buildMode` instead (L54).
+ */
+export function gentleAiProvenance(integrity) {
+	if (integrity.asset) return `from ${integrity.asset} (sha256 ${integrity.assetSha256})`;
+	const sha = integrity.binarySha256 ? `${String(integrity.binarySha256).slice(0, 12)}…` : "unknown";
+	return `${integrity.method ?? "unknown method"} (${integrity.goVersion ?? "unknown Go"}, binary sha256 ${sha})`;
 }
 
 /**

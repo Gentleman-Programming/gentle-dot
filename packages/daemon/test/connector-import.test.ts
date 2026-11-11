@@ -5,7 +5,7 @@ import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "n
 import { dirname, join } from "node:path";
 import type { ImportCandidate, ServerPayload } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
-import { scanClientConfigs } from "../src/connector-import.ts";
+import { importLocations, scanClientConfigs } from "../src/connector-import.ts";
 import { ConnectorManager, ConnectorStore } from "../src/connectors.ts";
 import { MemorySecretSource } from "../src/secret-source.ts";
 import { tempDir, waitFor } from "./helpers.ts";
@@ -180,6 +180,74 @@ describe("scanning other apps' MCP configs", () => {
 		]);
 		// Gentle Shell entries keep their server, not the other app's exposure.
 		expect(byName("codegraph")?.server).toEqual({ command: "codegraph", args: ["serve", "--mcp"] });
+	});
+
+	it("finds Claude Desktop and VS Code where Windows keeps them (AppData\\Roaming)", () => {
+		const home = tempDir();
+		write(home, "AppData/Roaming/Claude/claude_desktop_config.json", {
+			mcpServers: { files: { command: "npx", args: ["-y", "files-server"] } },
+		});
+		write(home, "AppData/Roaming/Code/User/mcp.json", {
+			servers: { docs: { type: "http", url: "https://docs.example.com/mcp" } },
+		});
+		const found = scanClientConfigs(home).map((server) => `${server.source}:${server.name}`);
+		expect(found).toEqual(["Claude Desktop:files", "VS Code:docs"]);
+	});
+
+	it("finds Claude Desktop where its Windows (MSIX) package keeps it, and only Claude's package", () => {
+		const home = tempDir();
+		const config = "LocalCache/Roaming/Claude/claude_desktop_config.json";
+		write(home, `AppData/Local/Packages/Claude_pzs8sxrjxfjjc/${config}`, {
+			mcpServers: { files: { command: "npx", args: ["-y", "files-server"] } },
+		});
+		write(home, `AppData/Local/Packages/ClaudeHelper_123/${config}`, {
+			mcpServers: { helper: { command: "helper" } },
+		});
+		write(home, `AppData/Local/Packages/Other_456/${config}`, {
+			mcpServers: { other: { command: "other" } },
+		});
+		write(home, "AppData/Local/Packages/Claude_broken", "not a folder");
+		const found = scanClientConfigs(home).map((server) => `${server.source}:${server.name}`);
+		expect(found).toEqual(["Claude Desktop:files"]);
+	});
+
+	it("reads AppData where Windows says it is, not below the home folder", () => {
+		const home = tempDir();
+		const roaming = tempDir();
+		const local = tempDir();
+		write(home, "AppData/Roaming/Claude/claude_desktop_config.json", {
+			mcpServers: { stale: { command: "old" } },
+		});
+		write(roaming, "Claude/claude_desktop_config.json", { mcpServers: { files: { command: "files" } } });
+		write(roaming, "Code/User/mcp.json", {
+			servers: { docs: { type: "http", url: "https://docs.example.com/mcp" } },
+		});
+		write(local, "Packages/Claude_pzs8sxrjxfjjc/LocalCache/Roaming/Claude/claude_desktop_config.json", {
+			mcpServers: { notes: { command: "notes" } },
+		});
+		const found = scanClientConfigs(home, { appData: roaming, localAppData: local }).map(
+			(server) => `${server.source}:${server.name}`,
+		);
+		expect(found).toEqual(["Claude Desktop:files", "Claude Desktop:notes", "VS Code:docs"]);
+	});
+
+	it("takes AppData from the environment for the user's home, and from a test home otherwise", () => {
+		const roaming = join(tempDir(), "Roaming");
+		const local = join(tempDir(), "Local");
+		const env = { APPDATA: roaming, LOCALAPPDATA: local };
+		const home = tempDir();
+		expect(importLocations(undefined, env, home)).toEqual({ home, appData: roaming, localAppData: local });
+		const fixture = tempDir();
+		expect(importLocations(fixture, env, home)).toEqual({
+			home: fixture,
+			appData: join(fixture, "AppData", "Roaming"),
+			localAppData: join(fixture, "AppData", "Local"),
+		});
+		expect(importLocations(undefined, { APPDATA: "relative", LOCALAPPDATA: "" }, home)).toEqual({
+			home,
+			appData: join(home, "AppData", "Roaming"),
+			localAppData: join(home, "AppData", "Local"),
+		});
 	});
 
 	it("finds nothing in an empty home and skips files it cannot read", () => {

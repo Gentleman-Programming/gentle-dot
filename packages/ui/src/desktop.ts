@@ -25,8 +25,12 @@ export function hidePanel(): void {
 	if (inDesktop()) void invoke("hide_panel");
 }
 
-export function setDotState(state: AgentState): void {
-	if (inDesktop()) void invoke("set_dot_state", { state });
+export function setDotState(state: AgentState, conversationsEnabled?: boolean): void {
+	if (inDesktop())
+		void invoke("set_dot_state", {
+			state,
+			...(conversationsEnabled === undefined ? {} : { conversationsEnabled }),
+		});
 }
 
 /** Opens a web page (sign-in) in the user's browser. Only http and https. */

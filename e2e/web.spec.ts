@@ -303,6 +303,9 @@ test("explains a rejected access key", async ({ page }) => {
 test("asks for the access key when there is none", async ({ page }) => {
 	await page.goto("/");
 	await expect(page.getByRole("status")).toContainText("This page needs your access key");
+	await expect(page.getByRole("status")).toContainText(
+		"on a server, open the link with #token=<your access key>",
+	);
 });
 
 test("keeps the onboarding banner in its own space, above the first message", async ({ page }) => {

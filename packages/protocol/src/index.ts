@@ -150,8 +150,18 @@ export type AuthEvent =
 /** What a connector may do: only read, or also act after the user approves each action. */
 export type ConnectorMode = "read_only" | "read_write";
 
-/** `off`: not added or turned off; `needs_setup`: a value the user types is missing; `error`: the last sign-in failed. */
-export type ConnectorStatus = "off" | "needs_setup" | "needs_signin" | "connected" | "error";
+/**
+ * `off`: not added or turned off; `needs_setup`: a value the user types is missing; `needs_preparation`:
+ * what it runs is not on this computer yet (Discord on Windows), and connecting again prepares it with
+ * the values it already has; `error`: the last sign-in failed.
+ */
+export type ConnectorStatus =
+	| "off"
+	| "needs_setup"
+	| "needs_preparation"
+	| "needs_signin"
+	| "connected"
+	| "error";
 
 /** In-app steps for a connector the user sets up with an app or bot of their own. */
 export interface ConnectorGuide {
@@ -341,6 +351,7 @@ export type ClientMessage =
 	| { type: "steer"; text: string }
 	| { type: "abort" }
 	| { type: "ui_response"; requestId: string; value?: string; confirmed?: boolean; cancelled?: boolean }
+	| { type: "settings_conversations_set"; enabled: boolean }
 	| { type: "new_conversation" }
 	| { type: "list_conversations" }
 	| { type: "open_conversation"; conversationId: string }
@@ -406,6 +417,7 @@ export type ServerPayload =
 			/** On a server without the desktop app (S25.8): connector changes and approvals need this PIN. */
 			pin?: PinStatus;
 	  }
+	| { type: "features"; features: Features }
 	| { type: "pin_status"; pin: PinStatus }
 	| { type: "agent_state"; state: AgentState }
 	| { type: "user_message"; messageId: string; text: string; attachments?: AttachmentInfo[] }
@@ -626,6 +638,10 @@ export function parseClientMessage(raw: string): ClientMessage | undefined {
 		case "get_earlier":
 			return isString(m.before) && m.before.length <= 200
 				? { type: "get_earlier", before: m.before }
+				: undefined;
+		case "settings_conversations_set":
+			return typeof m.enabled === "boolean"
+				? { type: "settings_conversations_set", enabled: m.enabled }
 				: undefined;
 		case "open_conversation":
 			return isString(m.conversationId)

@@ -1,0 +1,143 @@
+# Windows checks for the native Windows port.
+#
+# The desktop shell is mostly written on Linux and macOS, where its `cfg(windows)` code never
+# compiles, so this is where that code meets a real `x86_64-pc-windows-msvc` toolchain.
+name: Windows
+
+on:
+  push:
+    # `ci/**` branches try workflow changes before they reach `main`.
+    branches: [main, 'ci/**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust shell
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The toolchain the Windows port is built and tested with. The repository has no
+      # rust-toolchain.toml, so this pin is the one place that names it; later PRs keep it.
+      - uses: dtolnay/rust-toolchain@1.96.1
+
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      # `tauri.conf.json` points `frontendDist` at the built UI. A debug build does not embed it,
+      # but the folder has to exist, and building the UI here would add the whole pnpm install.
+      - name: UI folder for the build script
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path packages/ui/dist/app | Out-Null
+
+      # sherpa-onnx-sys's build script trusts a restored `sherpa-onnx-prebuilt` tree blindly: a
+      # present `lib` directory short-circuits the download without checking the static libraries
+      # are in it (#92's poisoned-cache class). A partial rust-cache restore then passes
+      # `cargo check` (no linking) and fails `cargo test` with "could not find native static
+      # library sherpa-onnx-c-api". Purge the restored tree so the script downloads it fresh.
+      - name: Purge restored sherpa-onnx prebuilt tree
+        working-directory: apps/desktop/src-tauri
+        shell: pwsh
+        run: Remove-Item -Recurse -Force target/sherpa-onnx-prebuilt -ErrorAction SilentlyContinue
+
+      - name: cargo check
+        working-directory: apps/desktop/src-tauri
+        run: cargo check --locked --all-targets
+
+      # The test binary has ended with STATUS_ACCESS_VIOLATION (0xC0000005) after every test
+      # passed, and nothing explains it yet. Windows Error Reporting writes a full dump of a
+      # crashing process when LocalDumps is configured, so the next occurrence leaves evidence.
+      # The test binary's name carries a hash (`gentle_dot_lib-<hash>.exe`) that no registry key
+      # can wildcard, so this sets the machine-wide default rather than a per-exe key; DumpCount
+      # keeps only the newest few. Settings under HKLM need the runner's administrator token.
+      - name: Collect crash dumps (WER LocalDumps)
+        shell: pwsh
+        run: |
+          $dumps = Join-Path $env:RUNNER_TEMP 'wer-dumps'
+          New-Item -ItemType Directory -Force -Path $dumps | Out-Null
+          $key = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps'
+          New-Item -Path $key -Force | Out-Null
+          New-ItemProperty -Path $key -Name DumpFolder -Value $dumps -PropertyType ExpandString -Force | Out-Null
+          New-ItemProperty -Path $key -Name DumpType -Value 2 -PropertyType DWord -Force | Out-Null
+          New-ItemProperty -Path $key -Name DumpCount -Value 5 -PropertyType DWord -Force | Out-Null
+
+      - name: cargo test
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --locked --lib
+
+      # A dump is only readable next to the binary and symbols that produced it.
+      - name: Upload crash dumps
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-test-crash-dumps
+          path: |
+            ${{ runner.temp }}/wer-dumps
+            apps/desktop/src-tauri/target/debug/deps/gentle_dot_lib-*.exe
+            apps/desktop/src-tauri/target/debug/deps/gentle_dot_lib-*.pdb
+          if-no-files-found: ignore
+          retention-days: 14
+
+  app-channel:
+    name: Native app channel
+    runs-on: windows-latest
+    env:
+      # Match pnpm-workspace.yaml and the macOS job's exact-version exception.
+      PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: '["gentle-pi@4.7.0"]'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      # gentle-pi's Windows postinstall requires local Go 1.25.10 or newer.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: false
+      - run: pnpm install --frozen-lockfile
+
+      # The build takes an explicit cl.exe path and needs the SDK's INCLUDE and LIB.
+      - uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+
+      # Provision inputs here, not in the build script; match the running Node exactly.
+      - name: Build app-channel addon
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = node -p process.version
+          $inputs = Join-Path $env:RUNNER_TEMP 'node-addon-inputs'
+          New-Item -ItemType Directory -Force -Path $inputs | Out-Null
+          $release = "https://nodejs.org/download/release/$version"
+          Invoke-WebRequest "$release/node-$version-headers.tar.gz" -OutFile "$inputs/headers.tar.gz"
+          Invoke-WebRequest "$release/win-x64/node.lib" -OutFile "$inputs/node.lib"
+          # Both downloads must match the release's published SHA-256 sums.
+          $sums = (Invoke-WebRequest "$release/SHASUMS256.txt").Content -split "`n"
+          foreach ($pair in @(@("node-$version-headers.tar.gz", 'headers.tar.gz'), @('win-x64/node.lib', 'node.lib'))) {
+            $line = $sums | Where-Object { $_ -match "^[0-9a-f]{64}\s+$([regex]::Escape($pair[0]))$" }
+            if (-not $line) { throw "No published checksum for $($pair[0])" }
+            $actual = (Get-FileHash -Algorithm SHA256 (Join-Path $inputs $pair[1])).Hash.ToLowerInvariant()
+            if ($actual -ne ($line -split '\s+')[0]) { throw "Checksum mismatch for $($pair[0])" }
+          }
+          tar -xf "$inputs/headers.tar.gz" -C $inputs
+          if ($LASTEXITCODE -ne 0) { throw 'Node header extraction failed' }
+          $compiler = (Get-Command cl.exe).Source
+          pnpm --filter @gentle-dot/daemon run build:windows-stop -- --compiler "$compiler" --headers "$inputs/node-$version/include/node" --node-lib "$inputs/node.lib"
+          if ($LASTEXITCODE -ne 0) { throw 'Native addon build failed' }
+
+      # The daemon test files that run on Windows (the runtime build uses the addon built above).
+      - name: Daemon tests
+        run: pnpm exec vitest run packages/daemon/test/windows-stop.test.ts packages/daemon/test/windows-app-channel.test.ts packages/daemon/test/app-channel-platform.test.ts packages/daemon/test/app-channel.test.ts packages/daemon/test/app-channel-fd.test.ts packages/daemon/test/windows-app-channel-addon.test.ts packages/daemon/test/windows-stop-addon.test.ts packages/daemon/test/process-tree.test.ts packages/daemon/test/supervisor.test.ts packages/daemon/test/runtime.test.ts packages/daemon/test/config.test.ts packages/daemon/test/isolation.test.ts packages/daemon/test/private-memory.test.ts packages/daemon/test/lifecycle.test.ts packages/daemon/test/cli.test.ts packages/daemon/test/runtime-build.test.ts scripts/package/test/lib.test.ts scripts/package/test/package-windows.test.ts
+

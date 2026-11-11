@@ -19,6 +19,7 @@
 		"test:real": "GENTLE_DOT_REAL_AGENT=1 vitest run packages/daemon/test/real-agent.test.ts",
 		"prepare:windows-private-storage": "node scripts/windows/private-storage/prepare.ts",
 		"package:mac": "node scripts/package/package-mac.mjs",
+		"package:windows:payload": "node scripts/package/package-windows.mjs",
 		"package:linux": "node scripts/package/package-linux.mjs",
 		"package:linux:check": "node scripts/package/linux-check.mjs",
 		"package:ci:matrix": "node scripts/package/ci-native.mjs matrix",

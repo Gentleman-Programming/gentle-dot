@@ -9,6 +9,8 @@ export interface DotConfig {
 	port: number;
 	host: string;
 	dataDir: string;
+	/** The memory mode (SW9): the user's global Engram (`shared`) or the assistant's own (`private`). */
+	memory: MemoryMode;
 	/** The engine's own working folder, `<dataDir>/workspace`. */
 	workspace: string;
 	/** The folder the user chose to work in, when it is not the engine's own workspace. */
@@ -24,7 +26,7 @@ export interface DotConfig {
 const DEFAULT_UI_DIR = fileURLToPath(new URL("../../ui/dist/app", import.meta.url));
 
 /** Node's CLI uses JS realpath, which cannot resolve a Windows verbatim entry. */
-function engineEntryPath(path: string): string {
+export function engineEntryPath(path: string): string {
 	if (process.platform !== "win32" || !path.startsWith("\\\\?\\")) return path;
 	try {
 		const ordinary = fileURLToPath(pathToFileURL(path));
@@ -43,6 +45,12 @@ function engineEntryPath(path: string): string {
 }
 
 /**
+ * The memory mode (SW9): `shared` talks to the user's **global** Engram (the default), and
+ * `private` runs a memory of the assistant's own under `<dataDir>/home/.engram` (W25).
+ */
+export type MemoryMode = "shared" | "private";
+
+/**
  * Path of the Gentle Shell launcher bundled with the daemon (the `gentle-pi` dependency),
  * from the runtime's `node_modules` in an installed app.
  */
@@ -59,6 +67,37 @@ export function bundledGentleShell(env: NodeJS.ProcessEnv = process.env): string
 		if (existsSync(bin)) return bin;
 	}
 	throw new Error("The bundled assistant engine is missing. Run `pnpm install`.");
+}
+
+/**
+ * Disable launch-time provisioning only for the installed Windows default engine.
+ * GENTLE_DOT_RUNTIME is supplied by the desktop runtime launcher; matching the
+ * executable and bundled script also leaves programmatic custom agents alone.
+ */
+export function agentSpawnEnv(
+	command: string,
+	args: string[],
+	env: NodeJS.ProcessEnv,
+	platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+	const runtime = runtimeDir(env);
+	if (
+		platform !== "win32" ||
+		!runtime ||
+		command !== process.execPath ||
+		env.GENTLE_DOT_AGENT_BIN ||
+		env.GENTLE_DOT_AGENT_SCRIPT ||
+		env.GENTLE_DOT_AGENT_ARGS ||
+		args[0] !== engineEntryPath(join(runtimeModules(runtime), "gentle-pi", "bin", "gentle-shell.mjs"))
+	)
+		return env;
+	return {
+		...env,
+		// gentle-shell's first-run companion provisioning gate.
+		GENTLE_SHELL_NO_AUTO_SETUP: "1",
+		// Its missing package-local gentle-ai self-heal and installer gate.
+		GENTLE_PI_SKIP_GENTLE_AI_INSTALL: "1",
+	};
 }
 
 /** The web UI: the runtime's `ui/` in an installed app, the UI package's build otherwise. */
@@ -98,9 +137,40 @@ function parseList(value: string | undefined, name: string): string[] {
 }
 
 /**
+ * `config.json`'s `memory`: absent is `shared`, the user's global Engram. Anything else is refused
+ * with a named error and the file is only ever read, so a refused file is left exactly as it was.
+ */
+function parseMemory(value: unknown): MemoryMode {
+	if (value === undefined || value === "shared") return "shared";
+	if (value === "private") return "private";
+	throw new Error(`Invalid memory in config.json: ${String(value)}`);
+}
+
+/**
+ * The file's `memory` with the environment applied: `GENTLE_DOT_ENGRAM` wins over `config.json`,
+ * as `GENTLE_DOT_PORT` does for `port`. It keeps its present meaning — only `private` selects
+ * private mode, so any other value (and an unset variable) is `shared`.
+ */
+function memoryModeOf(env: NodeJS.ProcessEnv, file: Record<string, unknown>): MemoryMode {
+	if (env.GENTLE_DOT_ENGRAM !== undefined) return env.GENTLE_DOT_ENGRAM === "private" ? "private" : "shared";
+	return parseMemory(file.memory);
+}
+
+/**
+ * Reads a data folder's memory mode the way the daemon does: `memory` in its `config.json`, with
+ * `GENTLE_DOT_ENGRAM` as the override. The daemon resolves it itself (W26) so the setting holds on
+ * every launch path with nothing exported by the app.
+ */
+export function memoryMode(env: NodeJS.ProcessEnv, dataDir: string): MemoryMode {
+	return memoryModeOf(env, readFileConfig(dataDir));
+}
+
+/**
  * The agent is the bundled Gentle Shell by default, run with the assistant's own
  * home so nothing is shared with a Gentle Shell the user may have installed.
- * GENTLE_DOT_AGENT_ARGS marks a custom agent script (tests), which gets no home.
+ * GENTLE_DOT_AGENT_SCRIPT selects an existing Gentle Shell script while keeping
+ * that separate home. GENTLE_DOT_AGENT_ARGS takes precedence for custom agent
+ * scripts (tests), which get no home.
  */
 function agentConfig(env: NodeJS.ProcessEnv, dataDir: string) {
 	const custom = parseList(env.GENTLE_DOT_AGENT_ARGS, "GENTLE_DOT_AGENT_ARGS");
@@ -110,6 +180,12 @@ function agentConfig(env: NodeJS.ProcessEnv, dataDir: string) {
 			agentCommand: env.GENTLE_DOT_AGENT_BIN ?? process.execPath,
 			agentArgs: custom,
 			agentHome: undefined,
+		};
+	if (env.GENTLE_DOT_AGENT_SCRIPT)
+		return {
+			agentCommand: env.GENTLE_DOT_AGENT_BIN ?? process.execPath,
+			agentArgs: [env.GENTLE_DOT_AGENT_SCRIPT],
+			agentHome,
 		};
 	if (env.GENTLE_DOT_AGENT_BIN) return { agentCommand: env.GENTLE_DOT_AGENT_BIN, agentArgs: [], agentHome };
 	return { agentCommand: process.execPath, agentArgs: [bundledGentleShell(env)], agentHome };
@@ -131,6 +207,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): DotConfig {
 			: parsePort(file.port ?? 4317, "config.json"),
 		host: env.GENTLE_DOT_HOST ?? "127.0.0.1",
 		dataDir,
+		memory: memoryModeOf(env, file),
 		workspace,
 		preferredFolder: preferredFolder === workspace ? undefined : preferredFolder,
 		uiDir: resolve(env.GENTLE_DOT_UI_DIR ?? uiDirOf(env)),

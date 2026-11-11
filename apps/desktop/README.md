@@ -1,6 +1,6 @@
-# Gentle Dot desktop (macOS and Linux)
+# Gentle Dot desktop (macOS, Windows, and Linux)
 
-The Tauri 2 shell around the Gentle Dot UI: a floating Dot, an expandable panel, a menu bar item, and a global shortcut. The contract between Rust and the UI is §9 of [`docs/design.md`](../../docs/design.md). Linux is covered [below](#linux).
+The Tauri 2 shell around the Gentle Dot UI: a floating Dot, an expandable panel, a menu bar item, and a global shortcut. The contract between Rust and the UI is §9 of [`docs/design.md`](../../docs/design.md). Windows is covered in [`docs/install.md`](../../docs/install.md), and its tester checklist is [`docs/windows-testing.md`](../../docs/windows-testing.md); Linux is covered [below](#linux).
 
 ## Requirements
 

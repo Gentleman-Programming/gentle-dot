@@ -14,7 +14,6 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { McpOAuthState } from "@earendil-works/pi-mcp/oauth";
@@ -29,7 +28,7 @@ import type {
 import { MAX_CONNECTOR_DRAFTS } from "@gentle-dot/protocol";
 import { childGuardFile, childGuardText } from "./child-guard.ts";
 import { resolveRecord, resolveValue, storedSignIn } from "./connector-credentials.ts";
-import { type ScannedServer, scanClientConfigs, valueNotes } from "./connector-import.ts";
+import { importLocations, type ScannedServer, scanClientConfigs, valueNotes } from "./connector-import.ts";
 import {
 	INTEGRITY_KEY_ID,
 	macMatches,
@@ -43,6 +42,7 @@ import { type ConnectorPolicy, draftSecretProblem, POLICY_ENV } from "./extensio
 import { ensurePrivateDir } from "./isolation.ts";
 import type { ProxiedConnector, UpstreamCredentials } from "./mcp-proxy.ts";
 import { PrivateFileProtectionError, readPrivateFileSync, writePrivateFile } from "./private-file.ts";
+import { engineEntryPath } from "./config.ts";
 import { runtimeDir, runtimeModules } from "./runtime.ts";
 import { NO_APP, type SecretSource, SecretsUnavailableError } from "./secret-source.ts";
 
@@ -849,6 +849,11 @@ export class ConnectorStore {
 				this.log("connectors.json was signed before and is missing; starting with no connectors");
 				this.onSetAside(MISSING_NOTICE);
 			}
+			// The empty record is signed in its place: the next start verifies it instead of reporting a
+			// file that never existed (a fresh install) or one already reported.
+			this.edited = true;
+			mkdirSync(this.options.dataDir, { recursive: true, mode: 0o700 });
+			writePrivateFile(this.file, this.recordText());
 			return;
 		}
 		const record = this.loaded.record;
@@ -990,10 +995,10 @@ export class ConnectorStore {
 		const { spec, server } = await this.unlocked(id);
 		const env = this.options.env ?? process.env;
 		if ("command" in server) {
-			const resolved = resolveRecord(server.env, env, spec.name);
+			const resolved = resolveRecord(server.env, env, spec.name, this.options.log);
 			return resolved ? { env: resolved } : {};
 		}
-		const headers = resolveRecord(server.headers, env, spec.name);
+		const headers = resolveRecord(server.headers, env, spec.name, this.options.log);
 		const ownAuthorization = Object.keys(server.headers ?? {}).some(
 			(h) => h.toLowerCase() === "authorization",
 		);
@@ -1002,7 +1007,12 @@ export class ConnectorStore {
 			server.url,
 			{ load: () => this.signInState(id), save: (state) => this.saveSignIn(id, state) },
 			() => {
-				const { clientId, clientSecret, callbackUrl } = oauthSettings(spec.name, server, env);
+				const { clientId, clientSecret, callbackUrl } = oauthSettings(
+					spec.name,
+					server,
+					env,
+					this.options.log,
+				);
 				return {
 					...(clientId ? { clientId } : {}),
 					...(clientSecret ? { clientSecret } : {}),
@@ -1020,7 +1030,7 @@ export class ConnectorStore {
 		const stored = this.signInState(id);
 		return {
 			serverUrl: server.url,
-			settings: oauthSettings(spec.name, server, this.options.env ?? process.env),
+			settings: oauthSettings(spec.name, server, this.options.env ?? process.env, this.options.log),
 			...(stored ? { stored } : {}),
 		};
 	}
@@ -1625,12 +1635,13 @@ function oauthSettings(
 	name: string,
 	server: Extract<ServerTemplate, { url: string }>,
 	env: NodeJS.ProcessEnv,
+	log?: (line: string) => void,
 ): OAuthSettings {
 	const { oauth } = server;
 	return {
 		...(oauth?.clientId ? { clientId: oauth.clientId } : {}),
 		...(oauth?.clientSecret
-			? { clientSecret: resolveValue(oauth.clientSecret, env, `${name} client secret`) }
+			? { clientSecret: resolveValue(oauth.clientSecret, env, `${name} client secret`, log) }
 			: {}),
 		...(oauth?.callbackUrl ? { callbackUrl: oauth.callbackUrl } : {}),
 		...(oauth?.callbackPort !== undefined ? { callbackPort: oauth.callbackPort } : {}),
@@ -1728,7 +1739,7 @@ export function bundledMcpCli(env: NodeJS.ProcessEnv = process.env): McpCli {
 			"bundle",
 			"cli.js",
 		);
-		if (existsSync(cli)) return { command: process.execPath, args: [cli] };
+		if (existsSync(cli)) return { command: process.execPath, args: [engineEntryPath(cli)] };
 		throw new Error(`The bundled assistant engine is missing from ${runtimeModules(runtime)}.`);
 	}
 	const require = createRequire(import.meta.url);
@@ -1801,8 +1812,12 @@ export interface ConnectorOAuthOptions {
 
 export interface ConnectorManagerOptions {
 	store: ConnectorStore;
+	/** Prepares the curated Discord runtime before asking for credentials or enabling it. */
+	prepareConnector?: (id: string, signal: AbortSignal) => Promise<void>;
+	/** Whether that runtime is ready; absent where nothing needs preparing. */
+	connectorPrepared?: (id: string) => boolean;
 	oauth?: ConnectorOAuthOptions;
-	/** The home folder "Import my MCP servers" scans; default the user's. */
+	/** The home folder "Import my MCP servers" scans; default the user's, with AppData where Windows says. */
 	importHome?: string;
 	log?: (line: string) => void;
 }
@@ -1830,6 +1845,11 @@ export class ConnectorManager {
 	/** The window that registered the computer helper; it goes away with that window. */
 	private computerOwner: object | undefined;
 	private setupFlow: Setup | undefined;
+	private preparation:
+		| { owner: object; id: string; connectorId: string; controller: AbortController }
+		| undefined;
+	private preparationDone: Promise<void> = Promise.resolve();
+	private closed = false;
 	private readonly failed = new Set<string>();
 	private readonly waiting = new Map<string, ConnectorDraft>();
 	private scanned = new Map<string, ScannedServer>();
@@ -1913,46 +1933,83 @@ export class ConnectorManager {
 
 	/** Adds or turns on a connector: asks for the values it still needs, then signs in when it has no sign-in yet. */
 	connect(owner: object, id: string, emit: Emit): ConnectorRefusal | undefined {
+		return this.prepareConfiguration(owner, id, emit, (flowId) =>
+			this.connectPrepared(owner, id, emit, flowId),
+		);
+	}
+
+	private connectPrepared(
+		owner: object,
+		id: string,
+		emit: Emit,
+		flowId?: string,
+	): ConnectorRefusal | undefined {
 		const saved = this.options.store.state().connectors[id];
 		const spec = specOf(id, saved);
 		if (!spec) return REFUSALS.unknown;
 		if (this.busy()) return REFUSALS.busy;
 		if (missingValues(spec, saved?.values)) {
 			// Nothing is added until every value is there.
-			this.askValues(owner, id, spec.fields, emit, (values, flowId) =>
-				this.keepValues(
-					id,
-					values,
-					emit,
-					flowId,
-					(current) => ({ ...current, enabled: true }),
-					() => this.afterSetup(owner, id, emit, flowId),
-				),
+			this.askValues(
+				owner,
+				id,
+				spec.fields,
+				emit,
+				(values, flowId) =>
+					this.keepValues(
+						id,
+						values,
+						emit,
+						flowId,
+						(current) => ({ ...current, enabled: true }),
+						() => this.afterSetup(owner, id, emit, flowId),
+					),
+				flowId,
 			);
 			return undefined;
 		}
 		this.save(id, (current) => ({ ...current, enabled: true }));
-		this.afterSetup(owner, id, emit, `connector-${randomUUID()}`);
+		this.afterSetup(owner, id, emit, flowId ?? `connector-${randomUUID()}`);
 		return undefined;
 	}
 
 	/** Asks again for the values the user typed (a new token, another OAuth client). */
 	setup(owner: object, id: string, emit: Emit): ConnectorRefusal | undefined {
 		const saved = this.options.store.state().connectors[id];
+		if (!specOf(id, saved)) return REFUSALS.unknown;
+		if (!saved) return REFUSALS.notAdded;
+		return this.prepareConfiguration(owner, id, emit, (flowId) =>
+			this.setupPrepared(owner, id, emit, flowId),
+		);
+	}
+
+	private setupPrepared(
+		owner: object,
+		id: string,
+		emit: Emit,
+		flowId?: string,
+	): ConnectorRefusal | undefined {
+		const saved = this.options.store.state().connectors[id];
 		const spec = specOf(id, saved);
 		if (!spec) return REFUSALS.unknown;
 		if (!saved) return REFUSALS.notAdded;
 		if (spec.fields.length === 0) return REFUSALS.noSetup;
 		if (this.busy()) return REFUSALS.busy;
-		this.askValues(owner, id, spec.fields, emit, (values, flowId) =>
-			this.keepValues(
-				id,
-				values,
-				emit,
-				flowId,
-				(current) => current,
-				() => this.afterSetup(owner, id, emit, flowId),
-			),
+		this.askValues(
+			owner,
+			id,
+			spec.fields,
+			emit,
+			(values, flowId) =>
+				this.keepValues(
+					id,
+					values,
+					emit,
+					flowId,
+					(current) => current,
+					() => this.afterSetup(owner, id, emit, flowId),
+				),
+			flowId,
 		);
 		return undefined;
 	}
@@ -1970,6 +2027,12 @@ export class ConnectorManager {
 
 	/** Answers the flow `owner` started: a typed value, a pasted address, or a cancellation. */
 	reply(owner: object, flowId: string, answer: { value?: string; cancelled?: boolean }): boolean {
+		const preparation = this.preparation;
+		if (preparation?.id === flowId) {
+			if (preparation.owner !== owner || !answer.cancelled) return false;
+			preparation.controller.abort();
+			return true;
+		}
 		const setup = this.setupFlow;
 		if (setup && setup.id === flowId) {
 			if (setup.owner !== owner) return false;
@@ -1995,17 +2058,27 @@ export class ConnectorManager {
 
 	/** A window that goes away takes its sign-in with it. */
 	cancelOwnedBy(owner: object): void {
+		if (this.preparation?.owner === owner) this.preparation.controller.abort();
 		if (this.setupFlow?.owner === owner) this.cancelSetup(this.setupFlow);
 		if (this.flow?.owner === owner) this.cancel(this.flow);
 	}
 
+	/** Daemon shutdown must await acquisition exit and staging cleanup, not only request abort. */
+	async close(): Promise<void> {
+		this.closed = true;
+		this.cancelAll();
+		await this.preparationDone;
+	}
+
 	cancelAll(): void {
+		this.preparation?.controller.abort();
 		if (this.setupFlow) this.cancelSetup(this.setupFlow);
 		if (this.flow) this.cancel(this.flow);
 	}
 
 	/** Turns a connector off; its sign-in is kept for when it is turned on again. */
 	disconnect(id: string): ConnectorRefusal | undefined {
+		if (this.preparation?.connectorId === id) this.preparation.controller.abort();
 		return this.change(id, (saved) => ({ ...saved, enabled: false }));
 	}
 
@@ -2015,6 +2088,7 @@ export class ConnectorManager {
 
 	/** Forgets the connector and its secrets (its sign-in, tokens, and typed values) in the app's store. */
 	async remove(id: string): Promise<ConnectorRefusal | undefined> {
+		if (this.preparation?.connectorId === id) this.preparation.controller.abort();
 		const saved = this.options.store.state().connectors[id];
 		const spec = specOf(id, saved);
 		if (!spec) return REFUSALS.unknown;
@@ -2096,12 +2170,12 @@ export class ConnectorManager {
 
 	/** Reads the other apps' configurations (only reads them) and lists what it found, without any value. */
 	scan(): ImportCandidate[] {
-		const home = this.options.importHome ?? homedir();
+		const { home, ...folders } = importLocations(this.options.importHome);
 		const groups = new Map<string, { candidate: ImportCandidate; server: ScannedServer }>();
 		const found = new Map<string, ScannedServer>();
 		const computerUrl = this.options.store.computerUrl();
 		const computer = computerUrl === undefined ? undefined : fingerprint({ url: computerUrl });
-		for (const server of scanClientConfigs(home)) {
+		for (const server of scanClientConfigs(home, folders)) {
 			const key = server.server ? fingerprint(server.server) : `${server.source}:${server.name}`;
 			// The helper is built in; a copy of it elsewhere is never offered.
 			if (key === computer) continue;
@@ -2235,13 +2309,79 @@ export class ConnectorManager {
 	): ConnectorInfo["status"] {
 		if (!saved?.enabled) return "off";
 		if (missingValues(spec, saved.values)) return "needs_setup";
+		if (this.needsPreparation(id, saved)) return "needs_preparation";
 		if (this.failed.has(id)) return "error";
 		if (spec.oauth && !this.options.store.isSignedIn(id)) return "needs_signin";
 		return "connected";
 	}
 
+	/** The curated Discord whose runtime is not on this computer yet (only where it is prepared). */
+	private needsPreparation(id: string, saved: SavedConnector | undefined): boolean {
+		const prepared = this.options.connectorPrepared;
+		return prepared !== undefined && id === "discord" && !saved?.custom && !prepared(id);
+	}
+
 	private busy(): boolean {
-		return this.flow !== undefined || this.setupFlow !== undefined;
+		return (
+			this.closed || this.flow !== undefined || this.setupFlow !== undefined || this.preparation !== undefined
+		);
+	}
+
+	private prepareConfiguration(
+		owner: object,
+		id: string,
+		emit: Emit,
+		proceed: (flowId?: string) => ConnectorRefusal | undefined,
+	): ConnectorRefusal | undefined {
+		const saved = this.options.store.state().connectors[id];
+		if (!specOf(id, saved)) return REFUSALS.unknown;
+		if (this.busy()) return REFUSALS.busy;
+		const prepare = this.options.prepareConnector;
+		if (!prepare || id !== "discord" || saved?.custom) return proceed();
+		if (this.options.connectorPrepared?.(id)) return proceed();
+		const pending = {
+			owner,
+			id: `connector-setup-${randomUUID()}`,
+			connectorId: id,
+			controller: new AbortController(),
+		};
+		this.preparation = pending;
+		emit({
+			type: "auth_event",
+			flowId: pending.id,
+			event: { kind: "progress", message: "Preparing Discord…" },
+		});
+		this.preparationDone = (async () => {
+			try {
+				await prepare(id, pending.controller.signal);
+				pending.controller.signal.throwIfAborted();
+				this.preparation = undefined;
+				const refused = proceed(pending.id);
+				if (refused)
+					emit({
+						type: "auth_done",
+						flowId: pending.id,
+						providerId: id,
+						ok: false,
+						message: refused.message,
+					});
+			} catch (error) {
+				if (!pending.controller.signal.aborted)
+					this.log(`could not prepare connector ${id}: ${(error as Error).message}`);
+				emit({
+					type: "auth_done",
+					flowId: pending.id,
+					providerId: id,
+					ok: false,
+					message: pending.controller.signal.aborted
+						? "Preparation cancelled."
+						: "Could not prepare Discord. Try connecting again.",
+				});
+			} finally {
+				if (this.preparation === pending) this.preparation = undefined;
+			}
+		})();
+		return undefined;
 	}
 
 	/** Changes one connector, keeping what is not changed, then has the engine read it again. */
@@ -2297,8 +2437,9 @@ export class ConnectorManager {
 		fields: readonly SetupField[],
 		emit: Emit,
 		finish: (values: Record<string, string>, flowId: string) => void,
+		flowId?: string,
 	): void {
-		const id = `connector-setup-${randomUUID()}`;
+		const id = flowId ?? `connector-setup-${randomUUID()}`;
 		this.setupFlow = {
 			id,
 			connectorId,

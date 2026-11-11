@@ -17,6 +17,7 @@ import { AppChannel } from "./app-channel.ts";
 import { AuthManager, type AuthRuntime, createModelAuthRuntime, resolveAgentHome } from "./auth.ts";
 import { AuthHelper } from "./auth-helper.ts";
 import { type BridgeClient, DotBridge } from "./bridge.ts";
+import { type MemoryMode, memoryMode } from "./config.ts";
 import {
 	APPROVAL_GUARD,
 	ConnectorManager,
@@ -25,6 +26,9 @@ import {
 	policyEnv,
 } from "./connectors.ts";
 import { discoverComputerComponents } from "./computer-components.ts";
+import { claimDaemonDirs, daemonClaimDirs, daemonClaimMessage, releaseDaemonClaims } from "./daemon-claim.ts";
+import { DiscordPackage } from "./discord-package.ts";
+import { discordProxyView } from "./discord-proxy-view.ts";
 import { directAccess, type EngineAccess, engineAccess } from "./engine-access.ts";
 import {
 	type AcquiredComponent,
@@ -47,10 +51,12 @@ import { FileSecretSource, SECRETS_FILE, SECRETS_KEY_VAR } from "./secret-file.t
 import { AppSecretSource } from "./secret-source.ts";
 import { AgentSupervisor } from "./supervisor.ts";
 import { UploadStore } from "./uploads.ts";
+import { UserSettings } from "./user-settings.ts";
 import { VoiceService } from "./voice.ts";
 import { CONNECTOR_HOME, chownHandOver, prepareVpsLayout, type VpsOptions } from "./vps.ts";
 import { PIN_FILE, PinGate } from "./web-pin.ts";
 import { identityArgs } from "./white-label.ts";
+import { isProductionWindowsAppChannel } from "./windows-app-channel.ts";
 
 export interface DaemonOptions {
 	/** Trusted host-acquired local files only; never read from env, engine or app messages.
@@ -101,7 +107,7 @@ export interface DaemonOptions {
 	/** Origins allowed to open the WebSocket, besides the daemon's own and the desktop app's. */
 	allowedOrigins?: string[];
 	backoffMs?: number[];
-	/** Several conversations instead of one continuous chat; default `GENTLE_DOT_CONVERSATIONS=1`. */
+	/** Explicit startup override; otherwise saved preference, then legacy environment fallback. */
 	conversations?: boolean;
 	/** When the chat's session is rotated; default from `GENTLE_DOT_ROTATE_BYTES` and `GENTLE_DOT_ROTATE_COMPACTIONS`. */
 	rotation?: RotationLimits;
@@ -165,14 +171,67 @@ export function startupMessage(url: string, dataDir: string, interactive: boolea
 	return `Gentle Dot is running at ${url.split("#")[0]} (the access key is in ${join(dataDir, "token")})`;
 }
 
+/**
+ * Applies the memory mode (SW9, W26) to the environment the engine starts with. The mode is
+ * written back as `GENTLE_DOT_ENGRAM` — the documented override, and what `isolatedAgentEnv` and
+ * `privateMemory` read — so `config.json`'s `memory` behaves exactly like exporting the variable
+ * does. `shared` leaves the environment as it is: only `private` selects private mode.
+ */
+export function applyMemoryMode(base: NodeJS.ProcessEnv, memory: MemoryMode): NodeJS.ProcessEnv {
+	if (memory !== "private") return base;
+	return { ...base, GENTLE_DOT_ENGRAM: "private" };
+}
+
 export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
+	// A generic Duplex or fd number is not Windows descendant-exclusion admission.
+	// Only actual main-thread/native ownership transfer on the production startup
+	// path admits a requested channel, before privateMemory can spawn PowerShell.
+	if (
+		process.platform === "win32" &&
+		options.appChannel &&
+		!isProductionWindowsAppChannel(options.appChannel)
+	)
+		throw new Error("Windows app channel requires validated production ownership before startup");
 	const log = options.log ?? (() => {});
+	// One daemon per data folder (W24): the port bind only stops a second daemon on the same port, so
+	// the folders the daemon owns are claimed here, before anything is written into them.
+	const claimDirs = daemonClaimDirs(options.dataDir, options.agentHome);
+	// The inherited claim creates its exclusive record before ensureToken runs.
+	// Protect Windows ancestry first, using the feature's native storage boundary,
+	// so neither a raw mode-bit mkdir nor a reparse path can precede admission.
+	if (process.platform === "win32") for (const dir of claimDirs) ensurePrivateDir(dir);
+	const claim = claimDaemonDirs(claimDirs);
+	if (claim.status !== "claimed") throw new Error(daemonClaimMessage(claim));
+	try {
+		return await startClaimedDaemon(options, log, claim.files);
+	} catch (error) {
+		// A daemon that did not start must not leave its claim behind either.
+		releaseDaemonClaims(claim.files);
+		throw error;
+	}
+}
+
+async function startClaimedDaemon(
+	options: DaemonOptions,
+	log: (line: string) => void,
+	claims: string[],
+): Promise<DotDaemon> {
+	const openApp = () =>
+		options.appChannel
+			? new AppChannel(options.appChannel, {
+					log,
+					...(options.approvalWaitMs ? { approvalWaitMs: options.approvalWaitMs } : {}),
+				})
+			: undefined;
+	// Observe Windows transport errors during asynchronous memory bootstrap.
+	// Unix retains its original channel-construction timing below.
+	const earlyWindowsApp = process.platform === "win32" ? openApp() : undefined;
 	const components = options.computerComponents === undefined
 		? discoverComputerComponents(options.dataDir)
 		: options.computerComponents;
 	const preparedComputer = await resolveComputerProviders({ components });
-	// Deliberately not connected to McpProxy or engine config until T3 supplies an authentic
-	// native session gate. Later activation must reuse that proxy's owned stdio lifecycle.
+	// Artifact readiness is not a native session grant. Keep preparation disconnected
+	// from McpProxy and engine configuration until the owned session gate admits it.
 	const computerProviders = Object.freeze({ status: preparedComputer.status, kind: preparedComputer.kind });
 	const token = ensureToken(options.dataDir);
 	const vps = options.vps;
@@ -196,21 +255,22 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	let agentEnv = { ...(options.agentEnv ?? process.env) };
 	// The server's secrets key is the daemon's only, whatever the engine is (S25.8).
 	delete agentEnv[SECRETS_KEY_VAR];
+	// Memory is a setting, not an environment variable (SW9, W26): the mode `config.json` names is
+	// applied to the base environment here, before the private server is looked for and before the
+	// isolation, so the engine, its subagents and the private memory server all see one switch.
+	// `GENTLE_DOT_ENGRAM` stays the documented override — `memoryMode` lets it win over the file, as
+	// `GENTLE_DOT_PORT` does for `port` — and it is what `isolatedAgentEnv` and `privateMemory` read.
+	agentEnv = applyMemoryMode(agentEnv, memoryMode(agentEnv, options.dataDir));
 	const homeArgs: string[] = [];
 	const memory = options.agentHome ? await privateMemory(agentEnv, options.dataDir, log, access) : undefined;
 	if (options.agentHome) {
 		homeArgs.push("--home", options.agentHome);
 		// The engine also writes under the home folder; it gets one of its own.
-		agentEnv = isolatedAgentEnv(agentEnv, options.dataDir, access);
+		agentEnv = isolatedAgentEnv(agentEnv, options.dataDir, access, (line) => log(`[agent] ${line}`));
 		agentEnv.GENTLE_PI_CONFIG_HOME = join(options.dataDir, "gentle-ai");
 	}
 	const agentHome = options.agentHome ?? resolveAgentHome(process.env, options.dataDir);
-	const app = options.appChannel
-		? new AppChannel(options.appChannel, {
-				log,
-				...(options.approvalWaitMs ? { approvalWaitMs: options.approvalWaitMs } : {}),
-			})
-		: undefined;
+	const app = earlyWindowsApp ?? openApp();
 	// The approved connectors are read once, here; the engine cannot change them (docs/design.md).
 	// Their secrets come from the app's secure store over its channel, and only into memory (S25.5).
 	const connectorStore = new ConnectorStore({
@@ -235,8 +295,17 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	});
 	// The engine reaches every connector through the proxy (S25.4); its key changes with every launch.
 	let port = options.port;
+	const discordPackage =
+		process.platform === "win32" && !options.connectorTransport
+			? new DiscordPackage(join(options.dataDir, "connector-packages"))
+			: undefined;
 	const proxy = new McpProxy({
-		connector: (id) => connectorStore.proxyView(id),
+		connector: (id) =>
+			discordPackage
+				? discordProxyView(connectorStore.proxyView(id), connectorStore.state().connectors[id], () =>
+						discordPackage.command(),
+					)
+				: connectorStore.proxyView(id),
 		prepare: (id) => connectorStore.prepare(id),
 		credentials: (id) => connectorStore.credentials(id),
 		// In the desktop app's native dialog, outside the agent's reach (S25.3).
@@ -318,6 +387,12 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	});
 	const connectors = new ConnectorManager({
 		store: connectorStore,
+		...(discordPackage
+			? {
+					prepareConnector: (_id: string, signal: AbortSignal) => discordPackage.prepare(signal),
+					connectorPrepared: () => discordPackage.command() !== undefined,
+				}
+			: {}),
 		...(options.connectorOAuth ? { oauth: options.connectorOAuth } : {}),
 		...((options.importHome ?? process.env.GENTLE_DOT_IMPORT_HOME)
 			? { importHome: options.importHome ?? process.env.GENTLE_DOT_IMPORT_HOME }
@@ -334,6 +409,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		...(vps ? { access } : {}),
 		...(options.uploadLimits ? { limits: options.uploadLimits } : {}),
 	});
+	const userSettings = new UserSettings(options.dataDir);
 	const historyPage = options.historyPage ?? Number(process.env.GENTLE_DOT_HISTORY_PAGE);
 	const bridge = new DotBridge(supervisor, {
 		dataDir: options.dataDir,
@@ -347,7 +423,11 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		...(vps && !app ? { pin: new PinGate({ file: join(options.dataDir, PIN_FILE) }) } : {}),
 		...(options.approvalWaitMs ? { approvalWaitMs: options.approvalWaitMs } : {}),
 		...(vps ? { engineAccess: access } : {}),
-		features: { conversations: options.conversations ?? process.env.GENTLE_DOT_CONVERSATIONS === "1" },
+		features: {
+			conversations:
+				options.conversations ?? userSettings.conversations(process.env.GENTLE_DOT_CONVERSATIONS),
+		},
+		userSettings,
 		rotation: options.rotation ?? rotationLimits(process.env),
 		...(Number.isInteger(historyPage) && historyPage > 0 ? { historyPage } : {}),
 	});
@@ -361,6 +441,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		// Nothing the app asks changes connectors before connectors.json was checked (S25.6).
 		app.handler = async (method, params) => {
 			await integrity;
+			if (!app.connected) throw new Error("The Gentle Dot app closed its channel.");
 			return appRequest(method, params, bridge, connectors, app);
 		};
 		// The computer helper belongs to the app that registered it (S24.7).
@@ -416,21 +497,51 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	const shutdown = async () => {
 		// Not listening any more first, so an app relaunched meanwhile starts a daemon of its own.
 		const serverClosed = new Promise<void>((done) => server.close(() => done()));
-		app?.close();
-		for (const client of wss.clients) client.terminate();
-		wss.close();
-		// Stops waiting approvals and the connectors' servers (stdio ones are processes of the daemon).
-		await proxy.close();
-		await serverClosed;
-		await supervisor.stop();
-		connectorStore.close();
-		authHelper?.close();
-		await memory?.stop();
+		let failed = false;
+		let firstError: unknown;
+		const attempt = async (cleanup: () => unknown) => {
+			try {
+				await cleanup();
+			} catch (error) {
+				if (!failed) {
+					failed = true;
+					firstError = error;
+				}
+			}
+		};
+		// Logical refusal and secret invalidation happen NOW, not after native drain.
+		// Start drain independently so a pending/failed channel cannot skip cleanup.
+		const channelClosed = attempt(() => app?.close());
+		const preparationClosed = attempt(() => connectors.close());
+		await attempt(() => {
+			for (const client of wss.clients) client.terminate();
+			wss.close();
+		});
+		await preparationClosed;
+		await attempt(() => proxy.close());
+		await attempt(() => serverClosed);
+		await attempt(() => supervisor.stop());
+		await attempt(() => connectorStore.close());
+		await attempt(() => authHelper?.close());
+		await attempt(() => memory?.stop());
+		await channelClosed;
+		if (failed) throw firstError;
+		// The folders are free for the next start; a claim left by a kill is taken over by liveness
+		// instead, so this only keeps a clean stop from leaving the file behind.
+		releaseDaemonClaims(claims);
 	};
 	let stopping: Promise<void> | undefined;
 	const close = (): Promise<void> => {
 		if (!stopping) {
-			stopping = shutdown();
+			// Publish before synchronous logical close notifies app.onClose; do not
+			// defer refusal, and do not recursively start another shutdown.
+			let resolveClose!: () => void;
+			let rejectClose!: (error: unknown) => void;
+			stopping = new Promise<void>((resolve, reject) => {
+				resolveClose = resolve;
+				rejectClose = reject;
+			});
+			void shutdown().then(resolveClose, rejectClose);
 			stopping.then(stopped, (error: Error) => {
 				log(`the assistant did not stop cleanly: ${error.message}`);
 				stopped();

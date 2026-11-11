@@ -15,7 +15,8 @@
 import { type StdioOptions, spawnSync } from "node:child_process";
 import { closeSync, fstatSync } from "node:fs";
 import { Socket } from "node:net";
-import { Duplex, Readable, Writable } from "node:stream";
+import type { Duplex } from "node:stream";
+import { isWindowsAppChannel } from "./windows-app-channel.ts";
 
 /** Where the app puts its end of the channel. */
 export const APP_FD = 3;
@@ -25,8 +26,9 @@ export const APPROVAL_WAIT_MS = 130_000;
  * A frame longer than this closes the channel; nothing legitimate comes close. The app has the same
  * rule, and a closed channel stops the daemon (S35.2), so neither side ever sends a longer one: an
  * oversized request fails (an approval is refused) and an oversized answer becomes an error.
+ * Both sides must count the same unit, and bytes is the one the app's end uses.
  */
-const MAX_FRAME = 1024 * 1024;
+export const MAX_FRAME = 1024 * 1024;
 
 /** One argument of the action, in the order shown. */
 export interface PreviewField {
@@ -78,6 +80,7 @@ export class AppChannel implements AppLink {
 	private buffer = "";
 	private nextId = 0;
 	private open = true;
+	private closing?: Promise<void>;
 
 	constructor(stream: Duplex, options: AppChannelOptions = {}) {
 		this.stream = stream;
@@ -136,10 +139,23 @@ export class AppChannel implements AppLink {
 		return Promise.race([answer, aborted]);
 	}
 
-	close(): void {
-		if (!this.open) return;
+	/** Logical refusal/notification precedes transport drain. Memoize before notifying
+	 * listeners: daemon shutdown may reenter close, but must never await itself. */
+	close(): Promise<void> {
+		if (this.closing) return this.closing;
 		this.open = false;
-		this.stream.destroy();
+		this.buffer = "";
+		const stream = this.stream;
+		const windows = isWindowsAppChannel(stream);
+		this.closing = windows
+			? Promise.resolve().then(async () => {
+					const result = await stream.close("drain");
+					if (result.mode !== "drain" || result.drained !== true)
+						throw new Error("Windows app channel was not drained.");
+				})
+			: Promise.resolve();
+		void this.closing.catch(() => {}); // EOF/error initiators have no awaiter
+		if (!windows) this.stream.destroy();
 		for (const [id, waiting] of this.pending) {
 			clearTimeout(waiting.timer);
 			waiting.reject(new Error("The Gentle Dot app closed its channel."));
@@ -147,17 +163,26 @@ export class AppChannel implements AppLink {
 		}
 		for (const listener of [...this.closeListeners]) listener();
 		this.closeListeners.clear();
+		return this.closing;
 	}
 
 	private receive(chunk: string): void {
+		if (!this.open) return;
 		this.buffer += chunk;
 		for (let end = this.buffer.indexOf("\n"); end >= 0; end = this.buffer.indexOf("\n")) {
 			const line = this.buffer.slice(0, end);
 			this.buffer = this.buffer.slice(end + 1);
+			// `MAX_FRAME` is a byte cap and the frame is a string: counting characters would let a frame
+			// of multi-byte characters through, while the app's own end refuses to send one.
+			if (Buffer.byteLength(line, "utf8") > MAX_FRAME) {
+				this.log("the app's channel sent a frame that is too long; closing it");
+				this.close();
+				return;
+			}
 			if (line.trim() !== "") this.onFrame(line);
 			if (!this.open) return;
 		}
-		if (this.buffer.length > MAX_FRAME) {
+		if (Buffer.byteLength(this.buffer, "utf8") > MAX_FRAME) {
 			this.log("the app's channel sent a frame that is too long; closing it");
 			this.close();
 		}
@@ -184,7 +209,10 @@ export class AppChannel implements AppLink {
 		if (frame.kind !== "request" || typeof frame.method !== "string") return;
 		const { id, method } = frame;
 		Promise.resolve()
-			.then(() => this.handler(method, frame.params))
+			.then(() => {
+				if (!this.open) throw new Error("The Gentle Dot app closed its channel.");
+				return this.handler(method, frame.params);
+			})
 			.then(
 				(result) => this.write({ kind: "response", id, result: result ?? {} }),
 				(error: Error) => this.write({ kind: "response", id, error: error.message }),
@@ -220,6 +248,8 @@ export function childInherits(
 	identity: string,
 	stdio: StdioOptions = ["ignore", "pipe", "ignore"],
 ) {
+	// Unix dev:ino equality cannot prove Windows handle exclusion; fail closed without probing.
+	if (process.platform === "win32") return true;
 	const script = `try{const s=require("fs").fstatSync(${fd},{bigint:true});process.stdout.write(s.dev+":"+s.ino)}catch{}`;
 	const probe = spawnSync(process.execPath, ["-e", script], { stdio, encoding: "utf8", timeout: 10_000 });
 	// A probe that could not run proves nothing: treat it as a leak.
@@ -238,22 +268,11 @@ export interface InheritedChannelOptions extends AppChannelOptions {
  * is Node's own IPC channel). When a child would inherit it, it is closed and refused: an agent
  * holding it could act as the app.
  */
-export function inheritedAppSocket(options: InheritedChannelOptions = {}): Duplex | undefined {
-	if (process.platform === "win32" && process.env.GENTLE_DOT_APP_STDIO === "v1") {
-		// Only this app's owned child's anonymous stdin/stdout pipes carry privileged frames.
-		// Remove the selector before spawning children. It contains no credential or address.
-		delete process.env.GENTLE_DOT_APP_STDIO;
-		// Node's isFIFO() is always false on Windows; libuv still reports S_IFIFO
-		// in st_mode for inherited anonymous pipes (not terminals or regular files).
-		const isPipe = (fd: number) => (fstatSync(fd).mode & 0xf000) === 0x1000;
-		if (!isPipe(0) || !isPipe(1)) {
-			throw new Error("The app's private Windows pipes are unavailable.");
-		}
-		return Duplex.fromWeb({
-			readable: Readable.toWeb(process.stdin),
-			writable: Writable.toWeb(process.stdout),
-		});
-	}
+export function inheritedAppSocket(options: InheritedChannelOptions = {}): Socket | undefined {
+	// Windows acquisition belongs exclusively to WindowsAppChannel's native ownership
+	// transfer in the CLI. Neither Unix socket wrapping nor the legacy stdio selector
+	// can establish that admission.
+	if (process.platform === "win32") return undefined;
 	const fd = options.fd ?? APP_FD;
 	if (process.env.NODE_CHANNEL_FD === String(fd)) return undefined;
 	let identity: string;

@@ -238,11 +238,18 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 				conversationId: message.conversationId ?? state.conversationId,
 				model: message.model ?? state.model,
 				features: message.features ?? initialState.features,
+				conversations: message.features?.conversations ? state.conversations : [],
 				voice: message.voice ?? initialState.voice,
 				// The daemon sends the drafts still waiting right after ready.
 				connectors: { ...state.connectors, drafts: [] },
 			};
 		}
+		case "features":
+			return {
+				...state,
+				features: message.features,
+				conversations: message.features.conversations ? state.conversations : [],
+			};
 		case "pin_status":
 			return { ...state, pin: message.pin };
 		case "agent_state":

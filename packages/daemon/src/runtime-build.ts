@@ -3,7 +3,6 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFile
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
 const REPOSITORY = fileURLToPath(new URL("../../../", import.meta.url));
@@ -59,6 +58,55 @@ export function lockedDependencies(
 	return versions;
 }
 
+/**
+ * An engine package's key in the lockfile's `packages:` section: two spaces, an optional quote,
+ * the `@earendil-works/` name, `@`, then the version up to a peer suffix `(`, the quote or the `:`.
+ * For `  '@earendil-works/pi-ai@1.4.0(ws@8.22.0)':` that is `@earendil-works/pi-ai` and `1.4.0`.
+ */
+const ENGINE_PACKAGE_KEY = /^ {2}'?(?<name>@earendil-works\/[^@'/]+)@(?<version>[^(':]+)/;
+
+function enginePackageKey(line: string): { name: string; version: string } | undefined {
+	const { name, version } = ENGINE_PACKAGE_KEY.exec(line)?.groups ?? {};
+	return name && version ? { name, version } : undefined;
+}
+
+/**
+ * The lockfile's versions of the engine's own packages (`@earendil-works/*`) that the runtime
+ * does not list directly. The engine asks for them with `^` ranges, so a fresh `npm install`
+ * would take newer releases that may no longer fit it; the runtime pins them as `overrides`.
+ */
+export function lockedEnginePackages(
+	direct: Record<string, string>,
+	lockfile: string = readFileSync(LOCKFILE, "utf8"),
+): Record<string, string> {
+	const versions: Record<string, string> = {};
+	let inPackages = false;
+	for (const line of lockfile.split("\n")) {
+		if (/^\S/.test(line)) inPackages = line.trim() === "packages:";
+		const entry = inPackages ? enginePackageKey(line) : undefined;
+		if (!entry || entry.name in direct) continue;
+		const { name, version } = entry;
+		if (versions[name] && versions[name] !== version)
+			throw new Error(`The lockfile holds two versions of ${name}.`);
+		versions[name] = version;
+	}
+	return versions;
+}
+
+/** Windows staging is explicit and refuses an absent build; Unix never needs the addon. */
+export function runtimeWindowsStopArtifact(
+	platform: NodeJS.Platform,
+	artifact = join(PACKAGE, "native", "windows-stop.node"),
+	present: (path: string) => boolean = existsSync,
+): string | undefined {
+	if (platform !== "win32") return undefined;
+	if (!present(artifact))
+		throw new Error(
+			"Windows stop addon is missing. Run build:windows-stop with existing Node headers and node.lib first.",
+		);
+	return artifact;
+}
+
 /** A `pi` command that runs the runtime's own Node on the engine, from wherever the runtime folder is. */
 export function piWrapper(engineEntry: string): string {
 	return `#!/bin/sh
@@ -74,6 +122,22 @@ done
 runtime=$(CDPATH= cd -- "$(dirname -- "$self")/.." && pwd -P) || exit 1
 exec "$runtime/node/bin/node" "$runtime/daemon/node_modules/${engineEntry}" "$@"
 `;
+}
+
+/**
+ * Legacy batch-wrapper API retained for inherited callers. The selected Windows producer
+ * emits the native Go `bin/pi.exe` instead; this wrapper is not its staged launcher.
+ * A caller using this helper must supply the inherited `node/bin/node.exe` layout.
+ * Delayed expansion stays off so a `!` in an argument reaches the engine literally.
+ */
+export function piCmdWrapper(engineEntry: string): string {
+	return [
+		"@echo off",
+		"setlocal DisableDelayedExpansion",
+		`"%~dp0..\\node\\bin\\node.exe" "%~dp0..\\daemon\\node_modules\\${engineEntry.replaceAll("/", "\\")}" %*`,
+		"exit /b %errorlevel%",
+		"",
+	].join("\r\n");
 }
 
 /** The engine's `pi` entry inside `node_modules`, from its package's `bin` (its exports hide `package.json`). */
@@ -94,9 +158,15 @@ function engineEntry(): string {
  * Builds the daemon part of the installed runtime into `outDir`: `daemon/cli.mjs`
  * (the daemon and the protocol bundled; the engine and `ws` external), the files it
  * finds next to itself, a `package.json` for a flat install of the external
- * dependencies, and platform-native executables. Nothing is installed.
+ * dependencies, and platform-native executables. Windows retains the Go launcher and
+ * private-storage helper and also carries the native fd3/stop addon. Nothing is installed.
  */
-export async function buildRuntime(outDir: string): Promise<void> {
+export async function buildRuntime(
+	outDir: string,
+	platform: NodeJS.Platform = process.platform,
+): Promise<void> {
+	const nativeArtifact = runtimeWindowsStopArtifact(platform);
+	const { build } = await import("esbuild");
 	const daemon = join(outDir, "daemon");
 	mkdirSync(join(daemon, "extensions"), { recursive: true });
 	mkdirSync(join(outDir, "bin"), { recursive: true });
@@ -118,13 +188,16 @@ export async function buildRuntime(outDir: string): Promise<void> {
 	for (const name of ["approval-guard.ts", "screenshot-context.ts"]) {
 		copyFileSync(join(PACKAGE, "src", "extensions", name), join(daemon, "extensions", name));
 	}
-	// The SDK imports the 1.0.x declarations API; its transitive range alone can
-	// select an incompatible release. Match the direct locked pin (npm EOVERRIDE).
-	const overrides = { "@earendil-works/pi-codemode": dependencies["@earendil-works/pi-codemode"] };
-	const manifest = { name: "gentle-dot-runtime", private: true, type: "module", dependencies, overrides };
+	if (nativeArtifact) {
+		mkdirSync(join(daemon, "native"), { recursive: true });
+		copyFileSync(nativeArtifact, join(daemon, "native", "windows-stop.node"));
+	}
+	// Preserve exact SDK sibling compatibility across the inherited engine upgrade.
+	const manifest = { name: "gentle-dot-runtime", private: true, type: "module", dependencies,
+		overrides: lockedEnginePackages(dependencies) };
 	writeFileSync(join(daemon, "package.json"), `${JSON.stringify(manifest, null, "\t")}\n`);
 	const entry = engineEntry();
-	if (process.platform === "win32") {
+	if (platform === "win32") {
 		const packagePath = "@earendil-works/pi-coding-agent/";
 		const relativeEntry = entry.startsWith(packagePath) ? entry.slice(packagePath.length) : "";
 		if (!/^[a-zA-Z0-9_./-]+$/.test(relativeEntry) || relativeEntry.includes("..")) {

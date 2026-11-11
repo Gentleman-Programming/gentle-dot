@@ -19,6 +19,9 @@ import { ensurePrivateDir } from "../src/isolation.ts";
 import { writePrivateFile } from "../src/private-file.ts";
 import { tempDir } from "./helpers.ts";
 import { inspectWindowsAcl } from "./windows-acl-oracle.ts";
+import { canCreateFileSymlinks } from "./support/fixture-capabilities.ts";
+import { hasServerMode } from "./support/platform-absence.ts";
+import { expectPrivateFilePermissions } from "./private-file-permissions.ts";
 
 // Bracket semantics use an explicit POSIX identity fixture, not a fabricated Windows root.
 const own = { uid: process.getuid?.() ?? 1001, gid: process.getgid?.() ?? 1001 };
@@ -33,7 +36,10 @@ afterEach(() => {
 });
 const SRC = fileURLToPath(new URL("../src/", import.meta.url));
 
-describe("engine access", () => {
+describe.skipIf(
+	// Server mode takes the engine's user with setuid, which Windows does not have (S25.8).
+	!hasServerMode("engine access"),
+)("engine access", () => {
 	it("runs a synchronous call and says it is inside while it runs", () => {
 		const access = engineAccess(own);
 		expect(insideEngineAccess()).toBe(false);
@@ -71,7 +77,20 @@ describe("engine access", () => {
 });
 
 describe("the daemon's own files", () => {
-	it("are written whole, private, and replace a link at their place without following it", () => {
+	it("are written whole and private, and replace a file at their place", () => {
+		const dir = tempDir();
+		writeFileSync(join(dir, "state.json"), "old\n");
+		writePrivateFile(join(dir, "state.json"), "new\n");
+		expect(lstatSync(join(dir, "state.json")).isFile()).toBe(true);
+		expect(readFileSync(join(dir, "state.json"), "utf8")).toBe("new\n");
+		expectPrivateFilePermissions(join(dir, "state.json"));
+		expect(readdirSync(dir)).toEqual(["state.json"]);
+	});
+
+	// Only the link needs the skip: a file symlink wants a privilege a plain Windows install lacks.
+	it.skipIf(
+		!canCreateFileSymlinks("engine-access: the daemon's state file, replaced where a symlink held it"),
+	)("replace a link at their place without following it", () => {
 		const dir = tempDir();
 		if (process.platform === "win32") ensurePrivateDir(dir);
 		const target = join(dir, "target");
@@ -96,15 +115,21 @@ describe("the daemon's own files", () => {
 			expect(acl.rules).toHaveLength(2);
 			expect(acl.rules.every((rule) => rule.type === "Allow" && !rule.inherited)).toBe(true);
 		} else expect(statSync(file).mode & 0o777).toBe(0o600);
+
 		expect(readdirSync(dir).sort()).toEqual(["state.json", "target"]);
 	});
 
-	it("are never written inside an engine-access call, and nothing is left behind", () => {
-		const dir = tempDir();
-		expect(() => engineAccess(own)(() => writePrivateFile(join(dir, "token"), "x"))).toThrow(/engine's user/);
-		expect(existsSync(join(dir, "token"))).toBe(false);
-		expect(readdirSync(dir)).toEqual([]);
-	});
+	it.skipIf(!hasServerMode("the daemon's own files: a call writes no daemon file"))(
+		"are never written inside an engine-access call, and nothing is left behind",
+		() => {
+			const dir = tempDir();
+			expect(() => engineAccess(own)(() => writePrivateFile(join(dir, "token"), "x"))).toThrow(
+				/engine's user/,
+			);
+			expect(existsSync(join(dir, "token"))).toBe(false);
+			expect(readdirSync(dir)).toEqual([]);
+		},
+	);
 });
 
 describe("no file work on libuv's thread pool (S25.8, B1)", () => {

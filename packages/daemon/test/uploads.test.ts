@@ -74,7 +74,12 @@ function store(limits = { fileBytes: 100, messageBytes: 150, files: 3 }) {
 const listUploads = (workspace: string) => {
 	const root = join(workspace, "uploads");
 	if (!existsSync(root)) return [];
-	return readdirSync(root, { recursive: true }).map(String).sort();
+	// The store reports its keys with forward slashes (`uploads/<id>/<name>`, see `uploads.ts`),
+	// so this helper normalises what the filesystem hands back instead of leaking the host's
+	// separator into an expectation about the store's key format.
+	return readdirSync(root, { recursive: true })
+		.map((entry) => String(entry).replaceAll("\\", "/"))
+		.sort();
 };
 
 describe("upload store", () => {

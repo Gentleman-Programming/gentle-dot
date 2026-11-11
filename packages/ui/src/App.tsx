@@ -139,8 +139,9 @@ function Assistant({ surface }: { surface: Surface }) {
 	}, []);
 
 	useEffect(() => {
-		if (surface === "dot") setDotState(state.agentState);
-	}, [surface, state.agentState]);
+		if (surface === "dot")
+			setDotState(state.agentState, state.connection === "open" && state.features.conversations);
+	}, [surface, state.agentState, state.connection, state.features.conversations]);
 
 	useEffect(() => {
 		if (surface !== "panel") return;
@@ -194,7 +195,7 @@ function Assistant({ surface }: { surface: Surface }) {
 			<div className="chat chat-web">
 				<div className="status" role="status">
 					{unreachable ??
-						"This page needs your access key. Open it from the Gentle Dot menu (Open in browser)."}
+						"This page needs your access key. On your computer, open it from the Gentle Dot menu (Open in browser); on a server, open the link with #token=<your access key>."}
 				</div>
 			</div>
 		);

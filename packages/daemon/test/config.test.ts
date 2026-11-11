@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, toNamespacedPath } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { bundledGentleShell, loadConfig } from "../src/config.ts";
+import { agentSpawnEnv, bundledGentleShell, loadConfig } from "../src/config.ts";
 import { runtimeDir } from "../src/runtime.ts";
 import { tempDir } from "./helpers.ts";
 
@@ -52,6 +52,7 @@ describe("bundled engine entry representation", () => {
 		expect(config.agentArgs).toHaveLength(1);
 		expect(realpathSync.native(config.agentArgs[0]!)).toBe(realpathSync.native(entry));
 		expect(bundledGentleShell(env)).toBe(config.agentArgs[0]);
+		expect(agentSpawnEnv(config.agentCommand, config.agentArgs, env).GENTLE_SHELL_NO_AUTO_SETUP).toBe("1");
 		expect(runtimeDir(env)).toBe(env.GENTLE_DOT_RUNTIME);
 		expect(env).toEqual(before);
 		// Include native failure streams in the RED receipt, not just an exit-code mismatch.
@@ -103,6 +104,67 @@ describe("bundled engine entry representation", () => {
 	});
 });
 
+describe("packaged agent spawn environment", () => {
+	const runtime = join(process.cwd(), "packaged-runtime");
+	const script = join(runtime, "daemon", "node_modules", "gentle-pi", "bin", "gentle-shell.mjs");
+	const env = {
+		GENTLE_DOT_RUNTIME: runtime,
+		GENTLE_SHELL_NO_AUTO_SETUP: "0",
+		GENTLE_PI_SKIP_GENTLE_AI_INSTALL: "0",
+	};
+
+	it("disables both automatic setup gates for the Windows bundled default without mutating its input", () => {
+		expect(agentSpawnEnv(process.execPath, [script, "--home", "/agent"], env, "win32")).toEqual({
+			...env,
+			GENTLE_SHELL_NO_AUTO_SETUP: "1",
+			GENTLE_PI_SKIP_GENTLE_AI_INSTALL: "1",
+		});
+		expect(env.GENTLE_SHELL_NO_AUTO_SETUP).toBe("0");
+		expect(env.GENTLE_PI_SKIP_GENTLE_AI_INSTALL).toBe("0");
+	});
+
+	it("matches the repository-local launcher's early-return gates, not just its notices", () => {
+		// Read source only: never import or execute the launcher or installer.
+		const launcherPath = bundledGentleShell({});
+		const launcher = readFileSync(launcherPath, "utf8");
+		expect(launcher).toContain('const AUTO_SETUP_OPT_OUT_ENV = "GENTLE_SHELL_NO_AUTO_SETUP";');
+		expect(launcher).toMatch(
+			/async function maybeAutoProvisionHome\([^\n]+\) \{\s*if \(process\.env\[AUTO_SETUP_OPT_OUT_ENV\] === "1"\) return undefined;/,
+		);
+		expect(launcher).toContain('const SKIP_GENTLE_AI_INSTALL_ENV = "GENTLE_PI_SKIP_GENTLE_AI_INSTALL";');
+		expect(launcher).toMatch(
+			/function ensurePackageLocalGentleAi\([^\n]+\) \{\s*if \(existsSync\(binaryPath\)\) return \{ ok: true \};\s*if \(process\.env\[SKIP_GENTLE_AI_INSTALL_ENV\] === "1"\) \{\s*return \{/,
+		);
+		const installer = readFileSync(
+			join(launcherPath, "..", "..", "scripts", "install-gentle-ai.mjs"),
+			"utf8",
+		);
+		expect(installer).toMatch(/if \(process\.env\.GENTLE_PI_SKIP_GENTLE_AI_INSTALL === "1"\) \{/);
+	});
+
+	it.each(["linux", "darwin"] as const)(
+		"preserves prior %s bundled startup and operator gate values",
+		(platform) => {
+			expect(agentSpawnEnv(process.execPath, [script], env, platform)).toEqual(env);
+		},
+	);
+
+	it("preserves Windows source and explicit launch choices", () => {
+		const cases = [
+			{ command: process.execPath, args: [script], env: { ...env, GENTLE_DOT_RUNTIME: "" } },
+			{ command: "custom-node", args: [script], env },
+			{ command: process.execPath, args: ["external-shell.mjs"], env },
+			...[
+				{ GENTLE_DOT_AGENT_SCRIPT: script },
+				{ GENTLE_DOT_AGENT_BIN: process.execPath },
+				{ GENTLE_DOT_AGENT_ARGS: "[]" },
+			].map((override) => ({ command: process.execPath, args: [script], env: { ...env, ...override } })),
+		];
+		for (const choice of cases)
+			expect(agentSpawnEnv(choice.command, choice.args, choice.env, "win32")).toEqual(choice.env);
+	});
+});
+
 describe("loadConfig", () => {
 	it("uses local-only defaults and the bundled Gentle Shell with the assistant's own home", () => {
 		const dataDir = tempDir();
@@ -118,8 +180,8 @@ describe("loadConfig", () => {
 		});
 		expect(config.preferredFolder).toBeUndefined();
 		expect(config.agentArgs).toHaveLength(1);
-		expect(config.agentArgs[0]?.endsWith(join("node_modules", "gentle-pi", "bin", "gentle-shell.mjs"))).toBe(
-			true,
+		expect(config.agentArgs[0]?.replaceAll("\\", "/")).toMatch(
+			/node_modules\/gentle-pi\/bin\/gentle-shell\.mjs$/,
 		);
 		expect(existsSync(config.agentArgs[0] ?? "")).toBe(true);
 	});
@@ -131,9 +193,29 @@ describe("loadConfig", () => {
 			agentArgs: [],
 			agentHome: join(dataDir, "agent"),
 		});
-		const customHome = join(dataDir, "custom-agent-home");
-		expect(loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_AGENT_HOME: customHome }).agentHome).toBe(
-			customHome,
+		const explicitHome = join(dataDir, "h");
+		expect(loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_AGENT_HOME: explicitHome }).agentHome).toBe(
+			explicitHome,
+		);
+	});
+
+	it("runs an explicit Gentle Shell script with Node and keeps its separate home", () => {
+		const dataDir = tempDir();
+		const script = String.raw`C:\Users\test user\.pnpm\gentle-shell.mjs`;
+		const env = { GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_AGENT_SCRIPT: script };
+		expect(loadConfig(env)).toMatchObject({
+			agentCommand: process.execPath,
+			agentArgs: [script],
+			agentHome: join(dataDir, "agent"),
+			workspace: join(dataDir, "workspace"),
+		});
+		const home = join(dataDir, "separate-home");
+		expect(
+			loadConfig({ ...env, GENTLE_DOT_AGENT_BIN: "custom-node", GENTLE_DOT_AGENT_HOME: home }),
+		).toMatchObject({ agentCommand: "custom-node", agentArgs: [script], agentHome: home });
+		// Empty selection preserves the existing bundled default.
+		expect(loadConfig({ ...env, GENTLE_DOT_AGENT_SCRIPT: "" })).toEqual(
+			loadConfig({ GENTLE_DOT_DATA_DIR: dataDir }),
 		);
 	});
 
@@ -143,6 +225,7 @@ describe("loadConfig", () => {
 			GENTLE_DOT_DATA_DIR: dataDir,
 			GENTLE_DOT_AGENT_BIN: "node",
 			GENTLE_DOT_AGENT_ARGS: '["fake.ts"]',
+			GENTLE_DOT_AGENT_SCRIPT: "ignored-gentle-shell.mjs",
 		});
 		expect(config).toMatchObject({ agentCommand: "node", agentArgs: ["fake.ts"] });
 		expect(config.agentHome).toBeUndefined();
@@ -170,6 +253,32 @@ describe("loadConfig", () => {
 			GENTLE_DOT_WORKSPACE: join(dataDir, "workspace"),
 		});
 		expect(same.preferredFolder).toBeUndefined();
+	});
+
+	it("reads the memory mode, absent meaning the user's shared Engram", () => {
+		const dataDir = tempDir();
+		expect(loadConfig({ GENTLE_DOT_DATA_DIR: dataDir }).memory).toBe("shared");
+		writeFileSync(join(dataDir, "config.json"), JSON.stringify({ memory: "private" }));
+		expect(loadConfig({ GENTLE_DOT_DATA_DIR: dataDir }).memory).toBe("private");
+	});
+
+	it("lets GENTLE_DOT_ENGRAM win over the file, as GENTLE_DOT_PORT does for port", () => {
+		const dataDir = tempDir();
+		writeFileSync(join(dataDir, "config.json"), JSON.stringify({ memory: "shared" }));
+		expect(loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_ENGRAM: "private" }).memory).toBe("private");
+		writeFileSync(join(dataDir, "config.json"), JSON.stringify({ memory: "private" }));
+		expect(loadConfig({ GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_ENGRAM: "shared" }).memory).toBe("shared");
+	});
+
+	it("refuses an unknown memory value and leaves the file alone", () => {
+		const dataDir = tempDir();
+		const file = join(dataDir, "config.json");
+		const written = JSON.stringify({ memory: "secret", port: 5000 });
+		writeFileSync(file, written);
+		expect(() => loadConfig({ GENTLE_DOT_DATA_DIR: dataDir })).toThrow(
+			"Invalid memory in config.json: secret",
+		);
+		expect(readFileSync(file, "utf8")).toBe(written);
 	});
 
 	it("rejects an invalid port and a malformed argument list", () => {

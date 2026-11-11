@@ -1,6 +1,8 @@
 # Installing Gentle Dot
 
-Gentle Dot ships as a self-contained app: it carries its own Node runtime, the assistant engine, and a fallback Engram. Nothing else needs to be installed first.
+Gentle Dot's distribution recipes carry a private Node runtime, assistant engine, and fallback Engram.
+
+**Integration candidate:** native builds, installer payloads, and side-by-side acceptance have not been verified for this merged revision. Historical Windows measurements below are inherited branch evidence, not current acceptance. Do not replace an existing installation on that basis.
 
 ## macOS
 
@@ -80,6 +82,53 @@ To keep permissions across updates, sign every release with the same identity. `
 
 The command stages the runtime (`build/runtime/darwin-arm64`), signs the runtime's binaries, builds the release app, and writes the DMG to `apps/desktop/src-tauri/target/release/bundle/dmg/`. `--skip-stage` reuses a runtime staged earlier; `--check-dmg <dmg>` checks an existing DMG without building.
 
+## Windows
+
+Requirements: Windows 10 or 11, 64-bit (x64). Computer control screenshots require Windows 10 version 2004 (build 19041) or newer: excluding Gentle Dot's windows from captures requires `WDA_EXCLUDEFROMCAPTURE`.
+
+### Install
+
+1. Run `Gentle Dot_<version>_x64-setup.exe`.
+2. The installer is not signed yet, so Windows SmartScreen may say **Windows protected your PC**. Click **More info**, then **Run anyway**. Only do this for an installer you built yourself or got from someone you trust.
+3. Follow the installer. It installs for your user only, in `%LOCALAPPDATA%\Gentle Dot` (an update keeps the folder of the earlier install), with no administrator prompt. Where WebView2 is missing, it first runs Microsoft's WebView2 installer, which needs the internet. WebView2 ships with Windows 11 and most Windows 10 installs.
+
+If Gentle Dot is running, the installer says **Gentle Dot is running! Click OK to kill it**. **OK** closes it at once, without the usual orderly quit, so quit it from the tray first.
+
+### First open
+
+Open **Gentle Dot** from the Start menu only after the selected build has been qualified. Packaged Windows startup disables automatic engine provisioning and refuses missing runtime components. Voice/computer-control source is inherited, but this candidate has no native microphone, provider, or application proof.
+
+### Where data lives
+
+| What | Where |
+|---|---|
+| The app and its bundled runtime | the install folder, with the runtime in `runtime\` |
+| Settings, conversations, logs (`daemon.log`), the engine's own files | `%USERPROFILE%\.gentle-dot\` |
+| Connector secrets | Windows Credential Manager, `dev.gentleman.gentle-dot.connectors/<id>` |
+| The window's own data (WebView2) | `%LOCALAPPDATA%\dev.gentleman.gentle-dot\` and `%APPDATA%\dev.gentleman.gentle-dot\` |
+| Memory (Engram, project `gentle-dot`) | `%USERPROFILE%\.engram\`, shared with any other Engram user on this PC |
+| Launch at login (when turned on) | a `Gentle Dot` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` |
+
+The app's install folder never changes after install; everything it writes goes to the folders above.
+
+Windows keeps native `%USERPROFILE%` precedence so importing the upstream `HOME` fallback cannot silently move the feature installation's data. The desktop also accepts `HOMEDRIVE` + `HOMEPATH`, then `HOME` when native sources are absent. An explicit `GENTLE_DOT_DATA_DIR` remains the way to select another data folder.
+
+### A connector secret that cannot be read
+
+The selected backend remains Windows Credential Manager. Check the named store error and the intended Windows logon; do not delete a DPAPI directory as a repair. Existing Credential Manager entries stay in their original namespace. The inherited DPAPI implementation is retained but is not selected and no automatic migration, fallback, or recovery is performed.
+
+Generic credentials have a 2560-byte blob limit. An oversized UTF-8 secret is refused without replacing the stored value; connectors needing larger serialized sign-ins remain a documented limitation.
+
+### Uninstall
+
+1. Quit Gentle Dot from its tray icon (**Quit**), so the assistant and its processes stop in order.
+2. Open **Settings → Apps → Installed apps**, find **Gentle Dot**, and choose **Uninstall**, or run `uninstall.exe` in the install folder. It removes the app, its Start menu and desktop shortcuts, its launch at login, and its registry entries. Like the installer, it asks to close Gentle Dot if it is still running.
+3. Optional: tick **Delete the application data** in the uninstaller to remove the window's data (`%APPDATA%\dev.gentleman.gentle-dot\` and `%LOCALAPPDATA%\dev.gentleman.gentle-dot\`).
+4. Optional: remove `%USERPROFILE%\.gentle-dot\` to delete settings and conversations. Credential Manager entries are separate; do not remove unrelated credentials or treat a DPAPI directory as this backend's data.
+
+`%USERPROFILE%\.gentle-dot\daemon.owner` stays behind after a normal quit. It records the last launch without any authority over it. Stale records are not replaced today ([#216](https://github.com/Gentleman-Programming/gentle-dot/issues/216)), so if Gentle Dot refuses to start after a crash or a forced stop, quit it, then rename `daemon.owner`, `daemon.pid` and `.gentle-dot-daemon.lock` in `%USERPROFILE%\.gentle-dot\` aside and start it again.
+
+
 ## Linux
 
 Gentle Dot ships as a self-contained package: it carries its own Node.js, assistant engine, and Engram, so nothing else needs to be installed first. Pick the file for your system (`dpkg --print-architecture` or `uname -m` tells which):
@@ -103,3 +152,110 @@ Keep the `./` with `apt`. The package manager adds WebKitGTK and tray support. T
 - Remove: `sudo apt remove gentle-dot` or `sudo pacman -R gentle-dot` (your data in `~/.gentle-dot` stays).
 - Build the packages (needs Docker): `pnpm package:linux --arch <arm64|amd64>` (amd64 also builds the Arch package); check them in clean containers with `pnpm package:linux:check --arch <arm64|amd64>`. `node scripts/package/linux-cargo-check.mjs --arch <arm64|amd64>` runs the desktop crate's tests and clippy on Linux, the keyring store against a real GNOME Keyring on a private session bus, and the app channel checks.
 - Developers can still build from source with `scripts/linux/setup-debian.sh` or `scripts/linux/setup-arch.sh` (app at `~/.local/bin/gentle-dot`).
+
+## Windows developer recipes
+
+Two producers are retained under distinct commands. `pnpm package:windows` remains the feature's PowerShell NSIS producer, with target-aware staging and installer path guards. `pnpm package:windows:payload` names the inherited NSIS/MSI recipe and extraction checker. Neither command was executed to validate this integration; neither grants replacement-install permission.
+
+Measured on Windows 11 x86_64: the app provisions `%USERPROFILE%\.gentle-dot`, starts its own daemon over the private named-pipe channel, and `GET http://127.0.0.1:4317/` answers HTTP 200; quitting exits with code 0 and takes its daemon with it. `cargo test --lib` reports 399 passed / 0 failed / 4 ignored. Everything else below is the intended behaviour a tester checks, or is marked "not yet".
+
+### Requirements
+
+- Windows 10 or Windows 11, x86_64. aarch64 is not supported yet.
+- **Node.js 24** and **pnpm 11.5.0** (the version `package.json` pins; `corepack enable` picks it up).
+- **Rust stable with the MSVC toolchain**, plus the **Visual Studio Build Tools with the "Desktop development with C++" workload** (the linker and C compiler).
+- **WebView2**: Windows 11 ships it; Windows 10 gets the Evergreen Runtime if it is missing.
+- **Go 1.25.10 or newer.** `pnpm install` also needs Go on Windows, because gentle-pi's postinstall builds its package-local Gentle AI binary from source there. On macOS and Linux the same postinstall downloads a pinned release archive, so this requirement is Windows-only.
+
+### Build from source
+
+Building the Windows installers needs Node.js 24, pnpm, Rust with the MSVC toolchain, the Visual Studio Build Tools with the "Desktop development with C++" workload, and Go 1.25.10 or newer — `pnpm install` builds gentle-pi's Gentle AI binary from source on Windows, and so does the staging step.
+
+From the repository root:
+
+```powershell
+pnpm install
+$env:GENTLE_DOT_BUILD_GO = "C:\Program Files\Go\bin\go.exe"
+pnpm package:windows           # native PowerShell recipe
+pnpm package:windows:payload --check  # inherited NSIS/MSI recipe; needs 7-Zip
+```
+
+`GENTLE_DOT_BUILD_GO` must be the full path of the real `go.exe` in `GOROOT\bin`, not a Scoop or Chocolatey shim; staging refuses anything else before it downloads or writes anything. gentle-pi's postinstall builds the Gentle AI engine from source with it. Staging runs `npm install` with a fixed environment instead of yours: a scratch home, the staged Node, the Windows system folders, and the folder of that `go.exe`. Your other variables, tokens such as `GITHUB_TOKEN` included, never reach the install scripts.
+
+`pnpm package:windows:payload` stages the app's runtime (`build/runtime/win-x64`: Node, the assistant engine, a fallback Engram, the daemon, and the web UI), then runs the release build and writes two **self-contained** installers under `apps/desktop/src-tauri/target/release/bundle/`:
+
+| Installer | File | Installs to | Needs |
+|---|---|---|---|
+| NSIS, per user | `nsis/Gentle Dot_<version>_x64-setup.exe` | `%LOCALAPPDATA%\Gentle Dot` | nothing |
+| MSI, per machine | `msi/Gentle Dot_<version>_x64_en-US.msi` | `Program Files\Gentle Dot` | an administrator |
+
+At version 0.1.0 they measure 79,267,489 bytes (75.6 MB) and 125,985,987 bytes (120.1 MB), because each carries the 317.9 MB runtime compressed. `--skip-stage` reuses a runtime staged earlier. `--check` verifies an installer before you trust it, and **installs nothing**: it extracts each payload, compares every one of the ~28,000 files against the staged runtime, checks the SHA-256 sample (the manifest, `node\node.exe`, `bin\pi.exe`, `bin\private-storage.exe`, the native stop addon, Engram, the daemon bundle, and engine binaries), and deletes the extractions.
+
+The app finds its runtime in `runtime\` beside `Gentle Dot.exe` (override with `GENTLE_DOT_RUNTIME_DIR`). Measured on Windows 11 x86_64 with the NSIS installer: `"Gentle Dot_0.1.0_x64-setup.exe" /S /D=<folder>` exits 0 and leaves `Gentle Dot.exe`, `runtime\` and `uninstall.exe` in that folder, with an Add/Remove Programs entry under `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Gentle Dot`; the installed `runtime\` holds all 28,273 staged files byte for byte, and running its `bin\pi.cmd`, `bin\engram.exe` and engine binary with no Go on `PATH` reports `1.0.4`, `engram 3.4.0` and `gentle-ai 4.0.0`. **The MSI was measured too**, on the same machine: it installs per machine into `Program Files\Gentle Dot` and registers `MsiExec.exe /X{AD01D81E-8C39-4D16-87A4-04BF1E8BB1A3}` under `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall`. It uninstalls from **Settings → Apps** (`MsiExec /X`) — the install before the current one was removed that way and the new one installed over it, leaving exactly one `Program Files\Gentle Dot` and one Add/Remove Programs entry — and the uninstall keeps the per-user data, so the app came back with its connectors and sign-ins: `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\` and `%USERPROFILE%\.gentle-dot` are not the installer's to delete. It also writes `HKCU\Software\Gentleman Programming\Gentle Dot` (`InstallDir` and the three shortcut flags).
+
+The selected Windows runtime keeps `node\node.exe`, the native Go `bin\pi.exe`, `bin\private-storage.exe`, and `daemon\native\windows-stop.node`. The app's PATH puts runtime folders first, system folders next, then only the first absolute ambient directory containing `git.exe`. It does not import the whole user PATH or launch a shell for discovery. Native fd3 ownership remains mandatory before daemon descendants start.
+
+**The installers are not signed** — there is no code-signing identity in this project yet — so Windows shows its "unrecognized app" warning.
+
+`pnpm --filter @gentle-dot/desktop build` still works and is a plain release build: it writes the same two installers, but **they do not carry the runtime**, which is what [docs/windows-testing.md](windows-testing.md) uses.
+
+You can also run the built app directly: `apps/desktop/src-tauri/target/release/gentle-dot.exe`.
+
+### Where data lives
+
+| What | Where |
+|---|---|
+| Settings, conversations, logs (`daemon.log`), the access key (`token`), the engine's own home and workspace | `%USERPROFILE%\.gentle-dot` |
+| Connector secrets, unchanged backend | Windows Credential Manager, `dev.gentleman.gentle-dot.connectors/<id>` |
+| The installed app and its runtime (only if you used an installer) | `%LOCALAPPDATA%\Gentle Dot` (NSIS, per user) or `Program Files\Gentle Dot` (MSI, per machine) |
+| Installer output (build only) | `apps/desktop/src-tauri/target/release/bundle/` |
+
+The app itself never changes after it is built; everything it writes goes to the folders above.
+
+### Panel shortcut and launch at login
+
+The panel opens with the global shortcut **`Ctrl+Alt+Space`**. macOS and Linux keep `Alt+Space`, which is Windows' window-menu key and a poor default for a global hotkey (it would take that menu away from every app). Change it in the panel's Settings or as `shortcut` in `config.json`; **Launch at login** in the tray menu registers the app as **`Gentle Dot`** under the Windows `Run` key — normally `HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run`, or `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run` when the app runs with administrator rights, which starts it for every user.
+
+### Memory
+
+The assistant remembers things in your own Engram. Turn on **Private memory** in the panel's Settings to give it a memory of its own instead: it keeps its memories under `%USERPROFILE%\.gentle-dot\home\.engram`, starts empty, and never reads or writes your own Engram. The choice is saved as `"memory": "shared"` or `"memory": "private"` in `config.json`, and changing it in Settings restarts the assistant so the engine starts in the new mode.
+
+**When the assistant may not touch memory, it says so instead of failing.** The memory providers reach a store only by running the program `ENGRAM_BIN` names, so a program that refuses — print a notice, exit `78`, touch nothing — is what stops them before any store is opened, created or migrated. The runtime carries that program as a real executable, `bin\engram-guard.exe` (the POSIX one ships as a `#!/bin/sh` script, which Windows has no interpreter for: the notice then said the binary "could not be found" for a file that was right there). If `ENGRAM_BIN` points at something this platform cannot start, the app gives the engine its own guard instead and writes one line in `daemon.log` saying so; an invalid explicit Windows `ENGRAM_BIN` is refused with the strict absolute-readable-`.exe` error rather than silently selecting another memory binary.
+
+### Connector secrets and the Windows limit
+
+Connector secrets remain generic credentials in the current Windows logon's Credential Manager, under `dev.gentleman.gentle-dot.connectors/<id>`. The app serves them over its owned private channel. The 2560-byte blob limit remains: larger serialized sign-ins are refused, not silently moved to a different backend. Inherited DPAPI code is retained for source compatibility but is not selected.
+
+**Limit on Windows:** same-user programs, including the agent's shell, remain trusted. Credential Manager is not an executable-bound isolation boundary. No credential migration or personal-store access was exercised during integration.
+
+### What does not work yet on Windows
+
+The port is incomplete on purpose. Each item names the unit that carries it.
+
+- **Connectors that need a secret or an approval work over the private channel** (W7). The app hands the daemon its end of the private channel as fd 3 through a native handle-inheritance launch (stop record and owner record written before the child executes), so a daemon the app did not start is refused rather than answered. A connector that needs a secret asks for it in the app and the value reaches the daemon over that channel; a connector whose secret is missing fails closed rather than falling back to a file.
+- **Voice** (W12) and **computer control** (W13, macOS-only today) are not available.
+- **The panel's blur is gated and unverified** (W8d): the app asks for `Mica` only on Windows 11 (build ≥ 22000) with transparency effects on, a local session, and DWM composition on; otherwise the panel is opaque. Tauri gives no readback, so the blur can still silently fail even when those facts hold — the gate is the mitigation, and confirming it is the tester's visual check in [docs/windows-testing.md](windows-testing.md).
+
+The recipe and inherited measurements are not current installer qualification. This integration still needs independent verification, native builds, complete payload checks, and isolated side-by-side acceptance. Preserve the existing installation until those gates pass.
+
+For a step-by-step tester checklist, see [docs/windows-testing.md](windows-testing.md).
+
+### Uninstall
+
+1. Quit Gentle Dot from the tray.
+2. If you built from source, delete the folder you built or the built app; if you installed one of the installers, remove **Gentle Dot** from **Settings → Apps → Installed apps** (the NSIS installer writes its own `uninstall.exe` next to the app as well).
+3. Optional: delete `%USERPROFILE%\.gentle-dot` to remove settings and conversations.
+4. Connector credentials are separate Credential Manager items. Uninstalling the app does not migrate them; any manual removal must target only this app's service namespace after explicit approval.
+
+The NSIS uninstaller removes the app folder and its Add/Remove Programs entry, but leaves an empty `HKCU\Software\Gentleman Programming\Gentle Dot` key behind — that is Tauri's installer template, not this app. Deleting it is optional.
+
+### For developers
+
+**Line endings after switching branches.** `.gitattributes` (`* text=auto eol=lf`) heals a fresh clone, but an existing Windows checkout that switches branches keeps CRLF on files that are identical between the branches, and `biome check` then reports around 178 errors that are only line endings. The fix is to renormalize the tracked files:
+
+```sh
+git add --renormalize .
+git diff --stat   # must stay empty
+```
+
+**A cold build that fails inside a dependency.** A cold build can fail inside a dependency's build script with a silent `cl.exe` exit code 2 and empty stderr. That is a missing Windows SDK include path (`stddef.h`), not a defect in this repository. The workaround that worked is a `.bat` that sets `INCLUDE` and `LIB` explicitly before the build; a Developer Command Prompt through `vcvars64.bat` does not run well from git-bash.

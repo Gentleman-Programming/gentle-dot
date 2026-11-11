@@ -1,33 +1,19 @@
 import type { ClientMessage } from "@gentle-dot/protocol";
-import { type DragEvent, useState } from "react";
+import { type DragEvent, useEffect, useState } from "react";
 import { openUrl as openExternal } from "../desktop.ts";
 import { activeTitle, type DotAction, type DotState, isBusy, needsAccount } from "../store.ts";
 import type { Uploader } from "../uploads.ts";
 import { useAttachments } from "../useAttachments.ts";
 import type { PanelWindowControls } from "../usePanelWindow.ts";
-import { useVoice, type VoiceControls } from "../useVoice.ts";
+import { useVoice } from "../useVoice.ts";
 import { AccountsPanel } from "./AccountsPanel.tsx";
 import { AskCard } from "./AskCard.tsx";
 import { Composer } from "./Composer.tsx";
 import { ComputerBanner, type ComputerControls } from "./Computer.tsx";
 import { ConnectorDraftCard } from "./ConnectorDraftCard.tsx";
 import { ConnectorsPanel } from "./ConnectorsPanel.tsx";
-import {
-	AccountsIcon,
-	CollapseIcon,
-	ConnectorsIcon,
-	ConversationsIcon,
-	ExpandIcon,
-	EyeIcon,
-	EyeOffIcon,
-	MinusIcon,
-	PlusIcon,
-	ProfilesIcon,
-	RoseGlyph,
-	SettingsIcon,
-	SpeakerIcon,
-	SpeakerOffIcon,
-} from "./icons.tsx";
+import { MenuToggle, PanelMenuDrawer } from "./HeaderMenu.tsx";
+import { RoseGlyph } from "./icons.tsx";
 import { MessageList } from "./MessageList.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
 import { describePinCommand, PinForm } from "./PinForm.tsx";
@@ -99,22 +85,26 @@ export function ChatSurface({
 	const pin = state.pin;
 	const changeSend: Send | undefined = appSend ?? (pin ? setPinPending : undefined);
 	const openAccounts = () => {
+		setShowConversations(false);
 		setShowSettings(false);
 		send({ type: "auth_list" });
 		dispatch({ type: "accounts", open: true });
 	};
 	const openProfiles = () => {
+		setShowConversations(false);
 		setShowSettings(false);
 		send({ type: "profiles_list" });
 		dispatch({ type: "profiles", open: true });
 	};
 	const openConnectors = () => {
+		setShowConversations(false);
 		setShowSettings(false);
 		send({ type: "connectors_list" });
 		dispatch({ type: "connectors", open: true });
 	};
 	/** Settings is a screen like the others: opening it closes them, except a sign-in waiting for an answer. */
 	const openSettings = () => {
+		setShowConversations(false);
 		if (state.auth.open && !state.auth.flow?.prompt) dispatch({ type: "accounts", open: false });
 		if (state.profiles.open) dispatch({ type: "profiles", open: false });
 		if (state.connectors.open && !state.connectors.flow?.prompt)
@@ -147,7 +137,14 @@ export function ChatSurface({
 		: {};
 	/** A switch that waits for the user to confirm stopping the running answer. */
 	const [pendingSwitch, setPendingSwitch] = useState<SwitchMessage | undefined>(undefined);
+	useEffect(() => {
+		if (!state.features.conversations) {
+			setShowConversations(false);
+			setPendingSwitch(undefined);
+		}
+	}, [state.features.conversations]);
 	const switchTo = (message: SwitchMessage) => {
+		if (!state.features.conversations) return;
 		setShowConversations(false);
 		if (isBusy(state.agentState)) setPendingSwitch(message);
 		else send(message);
@@ -168,6 +165,7 @@ export function ChatSurface({
 	const status = statusText(state);
 	const ready =
 		state.connection === "open" && state.agentState !== "restarting" && state.agentState !== "starting";
+	const [menuOpen, setMenuOpen] = useState(false);
 
 	return (
 		<div
@@ -178,106 +176,80 @@ export function ChatSurface({
 			<header className="chat-header" data-tauri-drag-region={variant === "panel" ? "" : undefined}>
 				<span className={`state-dot state-${state.agentState}`} aria-hidden="true" />
 				{conversations ? (
-					<>
-						<h1 className="gradient-text">{activeTitle(state)}</h1>
-						<button
-							type="button"
-							className="icon"
-							aria-label="Conversations"
-							title="Conversations"
-							aria-expanded={showConversations}
-							onClick={() => {
-								if (!showConversations) send({ type: "list_conversations" });
-								setShowConversations(!showConversations);
-							}}
-						>
-							<ConversationsIcon />
-						</button>
-					</>
+					<h1 className="gradient-text">{activeTitle(state)}</h1>
 				) : (
 					<h1 className="assistant-name">
 						<RoseGlyph />
 						<span className="gradient-text">Gentle Dot</span>
 					</h1>
 				)}
-				<button type="button" className="icon" aria-label="Accounts" title="Accounts" onClick={openAccounts}>
-					<AccountsIcon />
-				</button>
-				<button type="button" className="icon" aria-label="Profiles" title="Profiles" onClick={openProfiles}>
-					<ProfilesIcon />
-				</button>
-				<button
-					type="button"
-					className="icon"
-					aria-label="Connectors"
-					title="Connectors"
-					onClick={openConnectors}
-				>
-					<ConnectorsIcon />
-				</button>
-				{voice.mic ? <MuteButton voice={voice} /> : null}
-				{conversations ? (
-					<button
-						type="button"
-						className="icon"
-						aria-label="New conversation"
-						title="New conversation"
-						disabled={!ready}
-						onClick={() => switchTo({ type: "new_conversation" })}
-					>
-						<PlusIcon />
-					</button>
-				) : null}
-				{settings ? (
-					<button
-						type="button"
-						className="icon"
-						aria-label="Settings"
-						title="Settings"
-						aria-expanded={settingsShown}
-						onClick={() => (settingsShown ? setShowSettings(false) : openSettings())}
-					>
-						<SettingsIcon />
-					</button>
-				) : null}
-				{panelWindow ? (
-					<>
-						<RoseButton controls={panelWindow} />
-						<FullscreenButton controls={panelWindow} />
-					</>
-				) : null}
-				{onHide ? (
-					<button type="button" className="icon" aria-label="Hide" title="Hide" onClick={onHide}>
-						<MinusIcon />
-					</button>
-				) : null}
+				<MenuToggle open={menuOpen} onToggle={() => setMenuOpen(!menuOpen)} />
 			</header>
+
+			{menuOpen ? (
+				<PanelMenuDrawer
+					onClose={() => setMenuOpen(false)}
+					conversations={conversations}
+					ready={ready}
+					showConversations={showConversations}
+					onNewConversation={() => {
+						setShowConversations(false);
+						switchTo({ type: "new_conversation" });
+					}}
+					onToggleConversations={() => {
+						if (!showConversations) send({ type: "list_conversations" });
+						setShowConversations(!showConversations);
+					}}
+					openAccounts={openAccounts}
+					openProfiles={openProfiles}
+					openConnectors={openConnectors}
+					settings={settings}
+					settingsShown={settingsShown}
+					openSettings={openSettings}
+					voice={voice}
+					panelWindow={panelWindow}
+					onHide={onHide}
+					accountsOpen={state.auth.open}
+					profilesOpen={state.profiles.open}
+					connectorsOpen={state.connectors.open}
+				/>
+			) : null}
 
 			{computer?.session ? (
 				<ComputerBanner session={computer.session} yolo={computer.yolo !== undefined} stop={computer.stop} />
 			) : null}
 
 			{conversations && showConversations ? (
-				<nav className="conversations" aria-label="Earlier conversations">
-					<p className="eyebrow">Conversations</p>
-					{state.conversations.length === 0 ? <p className="muted">No conversations yet.</p> : null}
-					{state.conversations.map((conversation) => (
-						<button
-							key={conversation.id}
-							type="button"
-							className={conversation.id === state.conversationId ? "active" : ""}
-							onClick={() => {
-								if (conversation.id === state.conversationId) setShowConversations(false);
-								else switchTo({ type: "open_conversation", conversationId: conversation.id });
-							}}
-						>
-							<span>{conversation.title}</span>
-							<time dateTime={conversation.updatedAt}>
-								{new Date(conversation.updatedAt).toLocaleString()}
-							</time>
-						</button>
-					))}
-				</nav>
+				<>
+					{/* Clicking anywhere outside the list closes it: the toggle lives in the drawer now, */}
+					{/* so the list must not trap the user. */}
+					<div
+						className="conversations-scrim"
+						role="presentation"
+						aria-hidden="true"
+						onClick={() => setShowConversations(false)}
+					/>
+					<nav className="conversations" aria-label="Earlier conversations">
+						<p className="eyebrow">Conversations</p>
+						{state.conversations.length === 0 ? <p className="muted">No conversations yet.</p> : null}
+						{state.conversations.map((conversation) => (
+							<button
+								key={conversation.id}
+								type="button"
+								className={conversation.id === state.conversationId ? "active" : ""}
+								onClick={() => {
+									if (conversation.id === state.conversationId) setShowConversations(false);
+									else switchTo({ type: "open_conversation", conversationId: conversation.id });
+								}}
+							>
+								<span>{conversation.title}</span>
+								<time dateTime={conversation.updatedAt}>
+									{new Date(conversation.updatedAt).toLocaleString()}
+								</time>
+							</button>
+						))}
+					</nav>
+				</>
 			) : null}
 
 			{status ? (
@@ -319,7 +291,7 @@ export function ChatSurface({
 
 			{settingsShown ? (
 				<main className="chat-body">
-					<SettingsPanel close={() => setShowSettings(false)} />
+					<SettingsPanel close={() => setShowSettings(false)} state={state} send={send} />
 				</main>
 			) : null}
 
@@ -341,6 +313,7 @@ export function ChatSurface({
 						const first = state.messages[0];
 						if (first) send({ type: "get_earlier", before: first.id });
 					}}
+					openUrl={openUrl}
 				/>
 				{state.interrupted ? (
 					<div className="interrupted">
@@ -403,7 +376,7 @@ export function ChatSurface({
 				</div>
 			) : null}
 
-			{pendingSwitch ? (
+			{conversations && pendingSwitch ? (
 				<div className="switch-confirm" role="alertdialog" aria-label="Stop and switch?">
 					<p>The assistant is still answering. Stop it and open the other conversation?</p>
 					<div className="switch-actions">
@@ -454,53 +427,5 @@ export function ChatSurface({
 				{...(attachments ? { attachments } : {})}
 			/>
 		</div>
-	);
-}
-
-/** Spoken replies on or off (S30.3); the choice is remembered. */
-function MuteButton({ voice }: { voice: VoiceControls }) {
-	const label = voice.muted ? "Unmute spoken replies" : "Mute spoken replies";
-	return (
-		<button
-			type="button"
-			className="icon"
-			aria-label={label}
-			title={label}
-			aria-pressed={voice.muted}
-			onClick={() => voice.setMuted(!voice.muted)}
-		>
-			{voice.muted ? <SpeakerOffIcon /> : <SpeakerIcon />}
-		</button>
-	);
-}
-
-function RoseButton({ controls }: { controls: PanelWindowControls }) {
-	const label = controls.roseHidden ? "Show the rose" : "Hide the rose";
-	return (
-		<button
-			type="button"
-			className="icon"
-			aria-label={label}
-			title={label}
-			onClick={() => controls.setRoseHidden(!controls.roseHidden)}
-		>
-			{controls.roseHidden ? <EyeIcon /> : <EyeOffIcon />}
-		</button>
-	);
-}
-
-function FullscreenButton({ controls }: { controls: PanelWindowControls }) {
-	const label = controls.fullscreen ? "Exit full screen" : "Full screen";
-	return (
-		<button
-			type="button"
-			className="icon"
-			aria-label={label}
-			title={`${label} (⌘⇧F)`}
-			aria-pressed={controls.fullscreen}
-			onClick={() => controls.setFullscreen(!controls.fullscreen)}
-		>
-			{controls.fullscreen ? <CollapseIcon /> : <ExpandIcon />}
-		</button>
 	);
 }

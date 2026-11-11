@@ -75,6 +75,25 @@ describe("protocol", () => {
 	});
 });
 
+describe("conversation settings messages", () => {
+	it("accepts only booleans without changing sibling parsing or connector guards", () => {
+		for (const enabled of [false, true]) {
+			const message = { type: "settings_conversations_set", enabled };
+			expect(parseClientMessage(JSON.stringify(message))).toEqual(message);
+			expect(isAppCommand(message as Parameters<typeof isAppCommand>[0])).toBe(false);
+		}
+		for (const enabled of [undefined, null, 0, 1, "true", "false", [], {}])
+			expect(
+				parseClientMessage(JSON.stringify({ type: "settings_conversations_set", enabled })),
+			).toBeUndefined();
+		expect(parseClientMessage('{"type":"abort","enabled":false}')).toEqual({ type: "abort" });
+		expect(parseClientMessage('{"type":"open_conversation","conversationId":"a","enabled":false}')).toEqual({
+			type: "open_conversation",
+			conversationId: "a",
+		});
+	});
+});
+
 describe("queue", () => {
 	it("reads both complete queues from the engine's queue_update", () => {
 		expect(

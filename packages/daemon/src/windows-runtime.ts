@@ -40,7 +40,7 @@ function readableFile(path: string): boolean {
 export function resolveWindowsEngram(
 	env: Environment,
 	runtime: string,
-	options: { home?: string; isFile?: (path: string) => boolean } = {},
+	options: { home?: string; knownDirs?: string[]; isFile?: (path: string) => boolean } = {},
 ): string {
 	const isFile = options.isFile ?? readableFile;
 	const explicit = windowsVariable(env, "ENGRAM_BIN");
@@ -56,8 +56,10 @@ export function resolveWindowsEngram(
 		const value = entry.trim();
 		return value.startsWith('"') && value.endsWith('"') ? value.slice(1, -1) : value;
 	});
-	if (home && absolute(home))
-		directories.push(win32.join(home, "go", "bin"), win32.join(home, ".local", "bin"));
+	if (options.knownDirs) directories.push(...options.knownDirs);
+	else if (home && absolute(home))
+		directories.push(win32.join(home, "go", "bin"),
+			win32.join(home, "AppData", "Local", "engram", "bin"), win32.join(home, ".local", "bin"));
 	directories.push(win32.join(runtime, "bin"));
 	const seen = new Set<string>();
 	for (const directory of directories) {

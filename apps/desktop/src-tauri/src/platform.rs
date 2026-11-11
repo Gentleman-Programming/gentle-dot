@@ -1,12 +1,39 @@
 //! Platform decisions for the desktop shell (design §9), kept pure so they are tested on
-//! every OS: the GDK backend on Linux, who places the windows, the panel URL, and what a
-//! second launch (`gentle-dot --toggle`) asks the running app to do.
+//! every OS: the GDK backend on Linux, who places the windows, the panel URL, the home folder,
+//! and what a second launch (`gentle-dot --toggle`) asks the running app to do.
+//!
+//! The OS-agnostic decisions live here; translating one into a Tauri type is the caller's job
+//! (`shell.rs` maps [`WindowEffect`] onto `tauri::window::Effect`). The decisions stay pure over
+//! injected values so they are tested on every OS; the one exception is [`WindowsBackdrop::current`],
+//! which reads the Windows facts at runtime behind `cfg(target_os = "windows")` and fails closed.
+
+use std::ffi::OsString;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Os {
     MacOs,
     Linux,
     Windows,
+}
+
+/// The backdrop the panel asks the window system for. macOS blurs with the `HudWindow` material.
+/// Linux gets nothing, because neither X11 nor Wayland can be relied on to composite a
+/// translucent panel. Windows asks for `Mica` only when every fact that makes it real holds —
+/// Windows 11 (build ≥ 22000), transparency effects on, a local session, and DWM composition on —
+/// and otherwise asks for nothing (see [`windows_panel_effect`] and [`WindowsBackdrop`]).
+///
+/// The gate is the mitigation, not a proof. Tauri applies at most one Windows material and throws
+/// the result away (`tauri/src/vibrancy/windows.rs` scans the effect list with `find` and drops the
+/// `window_vibrancy` result), so there is no `Acrylic` fallback and no way to read back whether
+/// `Mica` landed. On a machine where the facts hold but the material is still silently dropped, the
+/// panel keeps `effects=none` and paints its own background, so it stays readable; whether the blur
+/// actually appears is only confirmable by eye.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowEffect {
+    HudWindow,
+    Mica,
+    None,
 }
 
 impl Os {
@@ -18,9 +45,201 @@ impl Os {
         Os::Linux
     };
 
-    /// Only macOS blurs the desktop behind the panel (`HudWindow`); Linux has no window effects.
-    pub fn has_vibrancy(self) -> bool {
-        self == Os::MacOs
+    /// The panel's backdrop on this OS, from the Windows facts read once at launch. `None` means
+    /// the panel must paint an opaque background. macOS and Linux ignore `facts`.
+    pub fn panel_effect(self, facts: WindowsBackdrop) -> WindowEffect {
+        match self {
+            Os::MacOs => WindowEffect::HudWindow,
+            Os::Linux => WindowEffect::None,
+            Os::Windows => windows_panel_effect(facts),
+        }
+    }
+
+    /// Whether the window system blurs the desktop behind the panel.
+    pub fn has_panel_effect(self, facts: WindowsBackdrop) -> bool {
+        self.panel_effect(facts) != WindowEffect::None
+    }
+
+    /// Windows uses app-managed placement. Preserve the existing environment-based
+    /// placement decision on the original platforms.
+    pub fn compositor_places_windows(self, env: impl Fn(&str) -> Option<String>) -> bool {
+        self != Os::Windows && compositor_places_windows(env)
+    }
+
+    /// The panel shortcut a fresh install binds. macOS and Linux keep `Alt+Space`; Windows uses
+    /// `Ctrl+Alt+Space`, because `Alt+Space` opens the window menu in every app and a global
+    /// hotkey on it would take that menu away. The OS does not refuse it — measured on Windows 11,
+    /// `RegisterHotKey` accepts `Alt+Space`; the conflict is what makes it a poor default.
+    pub fn default_shortcut(self) -> &'static str {
+        match self {
+            Os::MacOs | Os::Linux => "Alt+Space",
+            Os::Windows => "Ctrl+Alt+Space",
+        }
+    }
+}
+
+/// The user's home folder, from the variables this OS actually sets.
+///
+/// Windows keeps the feature's native `USERPROFILE` precedence, so importing the
+/// upstream home fallback cannot silently move an existing installation's data to
+/// a Git Bash/MSYS `HOME`. `HOMEDRIVE` + `HOMEPATH` is the older native pair;
+/// `HOME` is used only when neither native source exists. macOS and Linux use `HOME`.
+/// A GUI launch with none of these fails instead of resolving `.gentle-dot`
+/// against its working directory (W22).
+///
+/// The values are `OsString`, so a non-UTF-8 `HOME` on POSIX still resolves.
+///
+/// `None` is the honest answer when nothing names a home, and the caller must fail rather than
+/// invent a relative path.
+pub fn home_dir(os: Os, env: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    // A blank value is not a folder: `USERPROFILE=   ` must not become a home called `   `. A value
+    // that is not UTF-8 cannot be blank text, so it is kept.
+    let value = |key: &str| env(key).filter(|value| value.to_str().map_or(true, |text| !text.trim().is_empty()));
+    let home = value("HOME").map(PathBuf::from);
+    match os {
+        Os::Windows => value("USERPROFILE").map(PathBuf::from)
+            .or_else(|| {
+                let mut path = value("HOMEDRIVE")?;
+                path.push(value("HOMEPATH")?);
+                Some(PathBuf::from(path))
+            })
+            .or(home),
+        Os::MacOs | Os::Linux => home,
+    }
+}
+
+/// The Windows facts that decide whether `Mica` is real, injected so the decision is pure and
+/// tested on every OS. All four must hold: the material needs Windows 11 (build ≥ 22000), the
+/// user's transparency setting, a local session (not Remote Desktop), and DWM composition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowsBackdrop {
+    /// The OS build number, e.g. 26100 for Windows 11 24H2.
+    pub build: u32,
+    /// `EnableTransparency` under the user's Personalize key.
+    pub transparency: bool,
+    /// Whether this is a Remote Desktop session.
+    pub remote_session: bool,
+    /// Whether DWM composition is enabled.
+    pub composition: bool,
+}
+
+/// The first Windows build that has `Mica` at all (Windows 11).
+pub const MICA_MIN_BUILD: u32 = 22000;
+
+impl WindowsBackdrop {
+    /// The fail-closed default: no facts means no `Mica`, so the panel is opaque and readable. A
+    /// caller that cannot read the facts uses this rather than guessing.
+    pub const fn unknown() -> Self {
+        Self { build: 0, transparency: false, remote_session: false, composition: false }
+    }
+
+    /// Reads the facts from this Windows host, or [`unknown`](Self::unknown) if any read fails.
+    pub fn current() -> Self {
+        #[cfg(target_os = "windows")]
+        {
+            windows_facts::read().unwrap_or_else(Self::unknown)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Self::unknown()
+        }
+    }
+}
+
+/// `Mica` only when every fact holds; anything else is [`WindowEffect::None`]. This is the whole
+/// decision (L36): asking is not proof, because Tauri gives no readback, so the gate uses the facts
+/// that make the material real and otherwise keeps the panel opaque.
+pub fn windows_panel_effect(facts: WindowsBackdrop) -> WindowEffect {
+    let mica =
+        facts.build >= MICA_MIN_BUILD && facts.transparency && !facts.remote_session && facts.composition;
+    if mica {
+        WindowEffect::Mica
+    } else {
+        WindowEffect::None
+    }
+}
+
+/// The Windows fact reader: the one place in this module that names a platform crate. Every call
+/// fails closed — an unreadable fact is [`WindowsBackdrop::unknown`], never a panic.
+#[cfg(target_os = "windows")]
+mod windows_facts {
+    use super::WindowsBackdrop;
+    use std::ptr;
+    use windows_sys::Win32::Foundation::{ERROR_SUCCESS, STATUS_SUCCESS};
+    use windows_sys::Win32::Graphics::Dwm::DwmIsCompositionEnabled;
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY_CURRENT_USER, KEY_READ, REG_DWORD,
+    };
+    use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_REMOTESESSION};
+    use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
+
+    const PERSONALIZE: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize";
+    const ENABLE_TRANSPARENCY: &str = "EnableTransparency";
+
+    /// Reads all four facts, or `None` if any of them cannot be read.
+    pub fn read() -> Option<WindowsBackdrop> {
+        Some(WindowsBackdrop {
+            build: os_build()?,
+            transparency: transparency()?,
+            remote_session: remote_session(),
+            composition: composition()?,
+        })
+    }
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// The honest build number: `RtlGetVersion`, not `GetVersionExW`, which lies under a manifest.
+    fn os_build() -> Option<u32> {
+        let mut info = OSVERSIONINFOW::default();
+        info.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOW>() as u32;
+        // SAFETY: `info` is an initialized, correctly sized OSVERSIONINFOW that outlives the call.
+        let status = unsafe { RtlGetVersion(&mut info) };
+        (status == STATUS_SUCCESS).then_some(info.dwBuildNumber)
+    }
+
+    fn transparency() -> Option<bool> {
+        let subkey = wide(PERSONALIZE);
+        let value = wide(ENABLE_TRANSPARENCY);
+        let mut key = ptr::null_mut();
+        // SAFETY: `subkey` is a NUL-terminated wide string, and `key` receives the opened handle.
+        let opened = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut key) };
+        if opened != ERROR_SUCCESS {
+            return None;
+        }
+        let mut kind = 0u32;
+        let mut data = 0u32;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        // SAFETY: `key` is open, `value` is NUL-terminated, and `data`/`size` describe the u32 buffer.
+        let read = unsafe {
+            RegQueryValueExW(
+                key,
+                value.as_ptr(),
+                ptr::null(),
+                &mut kind,
+                &mut data as *mut u32 as *mut u8,
+                &mut size,
+            )
+        };
+        // SAFETY: `key` came from a successful RegOpenKeyExW.
+        unsafe { RegCloseKey(key) };
+        (read == ERROR_SUCCESS && kind == REG_DWORD && size == 4).then_some(data != 0)
+    }
+
+    fn remote_session() -> bool {
+        // `GetSystemMetrics` has no failure channel for this index; a non-zero answer means Remote
+        // Desktop.
+        // SAFETY: the call takes an index and returns an integer; no pointers are involved.
+        unsafe { GetSystemMetrics(SM_REMOTESESSION) != 0 }
+    }
+
+    fn composition() -> Option<bool> {
+        let mut enabled = 0;
+        // SAFETY: `enabled` receives the composition flag.
+        let hr = unsafe { DwmIsCompositionEnabled(&mut enabled) };
+        (hr >= 0).then_some(enabled != 0)
     }
 }
 
@@ -28,9 +247,11 @@ impl Os {
 pub const DOT_TITLE: &str = "Gentle Dot";
 pub const PANEL_TITLE: &str = "Gentle Dot Panel";
 
-/// The panel page. Without vibrancy, `effects=none` makes the UI paint an opaque background.
-pub fn panel_url(os: Os) -> &'static str {
-    if os.has_vibrancy() {
+/// The panel page for a resolved [`WindowEffect`]. Without a backdrop effect, `effects=none` makes
+/// the UI paint an opaque background. Taking the effect rather than the OS is what keeps the URL
+/// and the material the window asks for from disagreeing: both come from one resolution.
+pub fn panel_url(effect: WindowEffect) -> &'static str {
+    if effect != WindowEffect::None {
         "index.html?surface=panel"
     } else {
         "index.html?surface=panel&effects=none"
@@ -96,6 +317,10 @@ mod tests {
 
     fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
         move |key| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string())
+    }
+
+    fn os_env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
+        move |key| env_of(pairs)(key).map(Into::into)
     }
 
     const GNOME_WAYLAND: &[(&str, &str)] = &[
@@ -169,6 +394,16 @@ mod tests {
     }
 
     #[test]
+    fn windows_placement_does_not_change_original_platform_decisions() {
+        assert!(!Os::Windows.compositor_places_windows(env_of(GNOME_WAYLAND)));
+        assert_eq!(
+            Os::MacOs.compositor_places_windows(env_of(GNOME_WAYLAND)),
+            compositor_places_windows(env_of(GNOME_WAYLAND)),
+        );
+        assert!(Os::Linux.compositor_places_windows(env_of(GNOME_WAYLAND)));
+    }
+
+    #[test]
     fn toggle_argument_toggles_the_panel() {
         let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(launch_request(&args(&["gentle-dot", "--toggle"])), LaunchRequest::Toggle);
@@ -180,20 +415,187 @@ mod tests {
         assert_eq!(launch_request(&[]), LaunchRequest::Show);
     }
 
+    /// Windows 11 with every fact that makes `Mica` real: build 26100, transparency on, a local
+    /// session, composition on.
+    const WINDOWS_11: WindowsBackdrop =
+        WindowsBackdrop { build: 26100, transparency: true, remote_session: false, composition: true };
+
     #[test]
-    fn the_panel_uses_vibrancy_only_on_macos() {
-        assert!(Os::MacOs.has_vibrancy());
-        assert!(!Os::Linux.has_vibrancy());
-        assert!(!Os::Windows.has_vibrancy());
-        assert_eq!(panel_url(Os::MacOs), "index.html?surface=panel");
-        assert_eq!(panel_url(Os::Linux), "index.html?surface=panel&effects=none");
-        assert_eq!(panel_url(Os::Windows), "index.html?surface=panel&effects=none");
+    fn every_os_picks_its_own_panel_backdrop() {
+        // macOS always blurs; Linux never gets an effect; Windows asks only when its facts allow it.
+        assert_eq!(Os::MacOs.panel_effect(WindowsBackdrop::unknown()), WindowEffect::HudWindow);
+        assert_eq!(Os::Windows.panel_effect(WindowsBackdrop::unknown()), WindowEffect::None);
+        assert_eq!(Os::Windows.panel_effect(WINDOWS_11), WindowEffect::Mica);
+        assert_eq!(Os::Linux.panel_effect(WINDOWS_11), WindowEffect::None);
+        // The URL follows the resolved effect, not the OS.
+        assert_eq!(panel_url(WindowEffect::HudWindow), "index.html?surface=panel");
+        assert_eq!(panel_url(WindowEffect::Mica), "index.html?surface=panel");
+        assert_eq!(panel_url(WindowEffect::None), "index.html?surface=panel&effects=none");
+    }
+
+    #[test]
+    fn mica_is_asked_for_only_when_every_window_fact_holds() {
+        assert_eq!(windows_panel_effect(WINDOWS_11), WindowEffect::Mica);
+        // At the Windows 11 threshold the material exists; one build below it does not.
+        assert_eq!(
+            windows_panel_effect(WindowsBackdrop { build: MICA_MIN_BUILD, ..WINDOWS_11 }),
+            WindowEffect::Mica
+        );
+        assert_eq!(
+            windows_panel_effect(WindowsBackdrop { build: MICA_MIN_BUILD - 1, ..WINDOWS_11 }),
+            WindowEffect::None
+        );
+        // Each fact on its own turns the request off.
+        assert_eq!(
+            windows_panel_effect(WindowsBackdrop { transparency: false, ..WINDOWS_11 }),
+            WindowEffect::None
+        );
+        assert_eq!(
+            windows_panel_effect(WindowsBackdrop { remote_session: true, ..WINDOWS_11 }),
+            WindowEffect::None
+        );
+        assert_eq!(
+            windows_panel_effect(WindowsBackdrop { composition: false, ..WINDOWS_11 }),
+            WindowEffect::None
+        );
+        // The fail-closed default: no facts read means no material.
+        assert_eq!(windows_panel_effect(WindowsBackdrop::unknown()), WindowEffect::None);
+    }
+
+    #[test]
+    fn a_windows_backdrop_that_is_not_mica_leaves_the_panel_opaque() {
+        // The defect this guards (L8): a translucent panel whose requested material was ignored is
+        // unreadable, and Tauri cannot report whether the effect applied. The material and the URL
+        // come from one resolved value, so they cannot disagree.
+        let cases = [
+            WindowsBackdrop { build: 21999, ..WINDOWS_11 },
+            WindowsBackdrop { build: 0, transparency: false, remote_session: false, composition: false },
+            WindowsBackdrop { transparency: false, ..WINDOWS_11 },
+            WindowsBackdrop { remote_session: true, ..WINDOWS_11 },
+            WindowsBackdrop { composition: false, ..WINDOWS_11 },
+        ];
+        for facts in cases {
+            let effect = Os::Windows.panel_effect(facts);
+            assert_eq!(effect, WindowEffect::None, "{facts:?}");
+            assert!(!Os::Windows.has_panel_effect(facts), "{facts:?}");
+            assert!(panel_url(effect).ends_with("effects=none"), "{facts:?}");
+        }
+        // With every fact holding it asks for `Mica`, and the URL leaves the background to the UI.
+        let effect = Os::Windows.panel_effect(WINDOWS_11);
+        assert_eq!(effect, WindowEffect::Mica);
+        assert!(Os::Windows.has_panel_effect(WINDOWS_11));
+        assert!(!panel_url(effect).ends_with("effects=none"));
+    }
+
+    /// `has_panel_effect` *is* `panel_effect(..) != None`, so asserting that pair only restates
+    /// the definition. The two functions that can actually disagree are `panel_effect`, which
+    /// picks the material, and `panel_url`, which decides whether the UI paints its own
+    /// background; that is what this test cross-checks for every OS and fact combination.
+    #[test]
+    fn the_url_agrees_with_the_effect_the_os_chose() {
+        for os in [Os::MacOs, Os::Windows, Os::Linux] {
+            for facts in [WindowsBackdrop::unknown(), WINDOWS_11] {
+                let effect = os.panel_effect(facts);
+                assert_eq!(
+                    !panel_url(effect).ends_with("effects=none"),
+                    effect != WindowEffect::None,
+                    "{os:?} {facts:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn windows_frontend_dist_is_a_directory_not_a_cannot_be_base_url() {
+        use tauri::utils::config::FrontendDist;
+
+        // Reproduce the production config ambiguity without opening a webview.
+        let absolute: FrontendDist =
+            serde_json::from_value(serde_json::json!(r"C:\staged runtime\ui")).unwrap();
+        let FrontendDist::Url(url) = absolute else {
+            panic!("expected the absolute drive path to reproduce URL classification");
+        };
+        assert_eq!(url.scheme(), "c");
+        assert!(url.cannot_be_a_base());
+        assert!(url.join(panel_url(Os::Windows.panel_effect(WindowsBackdrop::unknown()))).is_err());
+
+        // Packaging emits forward slashes and a ./ prefix, including when the
+        // first component could otherwise look like a URL scheme.
+        for relative in ["./../../../staged runtime/ui", "./ui", "./c:assets/ui"] {
+            let dist: FrontendDist = serde_json::from_value(serde_json::json!(relative)).unwrap();
+            let FrontendDist::Directory(directory) = dist else {
+                panic!("relative frontend must embed a directory: {relative}");
+            };
+            assert_eq!(directory, std::path::PathBuf::from(relative));
+        }
+    }
+
+    #[test]
+    fn every_os_picks_its_own_default_shortcut() {
+        // Alt+Space opens the window menu on Windows, so the default must not name it there.
+        assert_eq!(Os::Windows.default_shortcut(), "Ctrl+Alt+Space");
+        assert_eq!(Os::MacOs.default_shortcut(), "Alt+Space");
+        assert_eq!(Os::Linux.default_shortcut(), "Alt+Space");
+    }
+
+    #[test]
+    fn the_home_comes_from_the_variables_this_os_sets() {
+        let profile = || os_env_of(&[("USERPROFILE", r"C:\Users\me")]);
+        assert_eq!(home_dir(Os::Windows, profile()), Some(PathBuf::from(r"C:\Users\me")));
+        // The older pair, joined the way Windows renders it.
+        assert_eq!(
+            home_dir(Os::Windows, os_env_of(&[("HOMEDRIVE", "C:"), ("HOMEPATH", r"\Users\me")])),
+            Some(PathBuf::from(r"C:\Users\me"))
+        );
+        // A blank value is not a folder, so the next variable is tried and then `None`.
+        assert_eq!(home_dir(Os::Windows, os_env_of(&[("USERPROFILE", "   ")])), None);
+        assert_eq!(
+            home_dir(Os::Windows, os_env_of(&[("HOME", ""), ("USERPROFILE", r"C:\Users\me")])),
+            Some(PathBuf::from(r"C:\Users\me"))
+        );
+        // The W22 bug: a Windows GUI launch has no HOME or USERPROFILE. That is `None`, never a
+        // relative path.
+        assert_eq!(home_dir(Os::Windows, os_env_of(&[])), None);
+        assert_eq!(home_dir(Os::Windows, os_env_of(&[("HOMEDRIVE", "C:")])), None);
+        assert_eq!(home_dir(Os::Linux, os_env_of(&[("HOME", "/home/me")])), Some(PathBuf::from("/home/me")));
+        assert_eq!(home_dir(Os::MacOs, os_env_of(&[("HOME", "/Users/me")])), Some(PathBuf::from("/Users/me")));
+        // The other direction too: Unix does not read USERPROFILE.
+        assert_eq!(home_dir(Os::Linux, profile()), None);
+        assert_eq!(home_dir(Os::MacOs, os_env_of(&[])), None);
+    }
+
+    #[test]
+    fn home_keeps_native_windows_precedence_and_posix_home() {
+        // Importing the upstream fallback must not move the feature's Windows data.
+        let both = || os_env_of(&[("HOME", "/home/me"), ("USERPROFILE", r"C:\Users\me")]);
+        assert_eq!(home_dir(Os::Windows, both()), Some(PathBuf::from(r"C:\Users\me")));
+        assert_eq!(home_dir(Os::Linux, both()), Some(PathBuf::from("/home/me")));
+        assert_eq!(home_dir(Os::MacOs, both()), Some(PathBuf::from("/home/me")));
+        // `HOME` alone is a home on Windows too.
+        assert_eq!(home_dir(Os::Windows, os_env_of(&[("HOME", "/home/me")])), Some(PathBuf::from("/home/me")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_home_that_is_not_utf8_still_resolves_on_posix() {
+        use std::os::unix::ffi::OsStringExt;
+        let raw = OsString::from_vec(b"/home/caf\xe9".to_vec());
+        let home = raw.clone();
+        let env = move |key: &str| (key == "HOME").then(|| home.clone());
+        assert_eq!(home_dir(Os::Linux, &env), Some(PathBuf::from(raw.clone())));
+        assert_eq!(home_dir(Os::MacOs, &env), Some(PathBuf::from(raw)));
     }
 
     #[test]
     fn current_os_matches_the_build_target() {
-        assert_eq!(Os::CURRENT == Os::MacOs, cfg!(target_os = "macos"));
-        assert_eq!(Os::CURRENT == Os::Windows, cfg!(target_os = "windows"));
+        let expected = if cfg!(target_os = "macos") {
+            Os::MacOs
+        } else if cfg!(target_os = "windows") {
+            Os::Windows
+        } else {
+            Os::Linux
+        };
+        assert_eq!(Os::CURRENT, expected);
     }
 
     #[test]

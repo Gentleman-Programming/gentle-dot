@@ -14,6 +14,17 @@ import { basename, dirname, join } from "node:path";
 import { insideEngineAccess } from "./engine-access.ts";
 import { windowsPrivateStorage } from "./windows-private-storage.ts";
 
+/**
+ * The ownership rule `writePrivateFile` applies to its temporary file, kept pure so the branch is
+ * asserted on every host: a uid to compare against, or none. `self` is `undefined` where the
+ * platform does not report the writing user's uid. Windows writes take the separate native
+ * DACL-verifying path before this POSIX-only ownership assertion is reached.
+ */
+export function assertCreatedBySelf(temp: string, owner: number, self: number | undefined): void {
+	if (self !== undefined && owner !== self)
+		throw new Error(`${temp} was created as uid ${owner}, not the daemon's ${self}.`);
+}
+
 export function writePrivateFile(path: string, text: string, mode = 0o600): void {
 	if (insideEngineAccess())
 		throw new Error(`${path} is the daemon's and is not written as the engine's user.`);
@@ -25,9 +36,7 @@ export function writePrivateFile(path: string, text: string, mode = 0o600): void
 	const fd = openSync(temp, "wx", mode);
 	try {
 		const owner = fstatSync(fd).uid;
-		const self = process.getuid?.();
-		if (self !== undefined && owner !== self)
-			throw new Error(`${temp} was created as uid ${owner}, not the daemon's ${self}.`);
+		assertCreatedBySelf(temp, owner, process.getuid?.());
 		writeFileSync(fd, text);
 	} catch (error) {
 		closeSync(fd);

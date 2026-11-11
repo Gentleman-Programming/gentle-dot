@@ -70,8 +70,17 @@ pub fn to_restore(hidden: Visibility, now: Visibility, rose_hidden: bool) -> Vis
 pub trait Windows: Send + Sync {
     fn is_visible(&self, part: Part) -> bool;
     fn hide(&self, part: Part) -> Result<(), String>;
+    fn hide_for_operation(&self, part: Part, _operation: u64) -> Result<(), String> {
+        self.hide(part)
+    }
     /// Orders the window in without focusing it or activating the app.
     fn show(&self, part: Part);
+    /// Release call-owned state after all eligible windows have been shown, including state
+    /// for windows the user chose to keep hidden. Main thread only.
+    fn finish_restore(&self, _operation: u64) {}
+    /// Dispatch failed: restore this call's capture affinities without showing its windows.
+    /// May run off the main thread; failed native restores retain ownerless recovery values.
+    fn abandon_restore(&self, _operation: u64) {}
     /// The user's "Hide the rose" choice, as it is now.
     fn rose_hidden(&self) -> bool;
 }
@@ -116,8 +125,8 @@ impl Preparation for NoPreparation {
 struct State {
     last: u64,
     current: Option<Op>,
-    /// What operations hid that has not been shown again yet.
-    hidden: Visibility,
+    /// Each part belongs to its latest successful hide, never to a delayed older restore.
+    hidden: Vec<(Part, u64)>,
 }
 
 struct Op {
@@ -227,14 +236,17 @@ impl Inner {
         }
         let mut outcome = Ok(());
         for part in PARTS {
-            if !self.windows.is_visible(part) {
+            // A previous restore may still be queued. Inherit its hidden windows too,
+            // so it cannot show them during this call even without a user reopen.
+            if !self.windows.is_visible(part) && !state.hidden.iter().any(|&(saved, _)| saved == part) {
                 continue;
             }
-            if let Err(error) = self.windows.hide(part) {
+            if let Err(error) = self.windows.hide_for_operation(part, operation) {
                 outcome = Err(error);
                 break;
             }
-            state.hidden.set(part, true);
+            state.hidden.retain(|(saved, _)| *saved != part);
+            state.hidden.push((part, operation));
         }
         if let Some(op) = state.current.as_mut() {
             op.hid = Some(outcome);
@@ -243,13 +255,22 @@ impl Inner {
     }
 
     /// On the main thread: shows again what operations hid, as the user left things meanwhile.
-    fn restore(&self) {
-        let hidden = std::mem::take(&mut self.lock().hidden);
+    /// The state lock stays held while showing; that is safe only because nothing `Windows`
+    /// does here re-enters `Working` or waits for another thread that takes this lock.
+    fn restore(&self, operation: u64) {
+        let mut state = self.lock();
+        let mut hidden = Visibility::default();
+        state.hidden.retain(|&(part, owner)| {
+            if owner != operation { return true; }
+            hidden.set(part, true);
+            false
+        });
         let now = Visibility { dot: self.windows.is_visible(Part::Dot), panel: self.windows.is_visible(Part::Panel) };
         let show = to_restore(hidden, now, self.windows.rose_hidden());
         for part in PARTS.into_iter().filter(|part| show.get(*part)) {
             self.windows.show(part);
         }
+        self.windows.finish_restore(operation);
     }
 }
 
@@ -305,14 +326,34 @@ impl Preparation for Working {
         self.0.changed.notify_all();
         self.0.rings.end(operation);
         let inner = self.0.clone();
-        if let Err(error) = self.0.main.run(Box::new(move || inner.restore())) {
+        if let Err(error) = self.0.main.run(Box::new(move || inner.restore(operation))) {
+            // Showing must stay on the main thread, but affinity restoration need not.
+            // End only this call's ownership; preserve recovery values on native failure.
+            let mut state = self.0.lock();
+            state.hidden.retain(|&(_, owner)| owner != operation);
+            self.0.windows.abandon_restore(operation);
             eprintln!("gentle-dot: cannot show the Dot and the panel again: {error}");
         }
     }
 }
 
+/// End the current drawing only when the session ends.
+pub fn session_clears(drawing: &mut Option<u64>, active: bool) -> Option<u64> {
+    if active { None } else { drawing.take() }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_the_end_of_the_session_clears_the_rings_being_drawn() {
+        let mut drawing = Some(7);
+        assert_eq!(super::session_clears(&mut drawing, true), None);
+        assert_eq!(drawing, Some(7));
+        assert_eq!(super::session_clears(&mut drawing, false), Some(7));
+        assert_eq!(drawing, None);
+        assert_eq!(super::session_clears(&mut drawing, false), None);
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Weak;
@@ -328,12 +369,43 @@ mod tests {
         visible: Mutex<Visibility>,
         rose_hidden: AtomicBool,
         fails: Mutex<Option<Part>>,
+        call_affinities: Mutex<Vec<(Option<u64>, (Part, u32))>>,
+        affinities: Mutex<[u32; 2]>,
+        handles: Mutex<[Option<usize>; 2]>,
+        unrelated_affinity: Mutex<u32>,
+        restore_fails: AtomicBool,
+        restored: Mutex<Vec<(Part, u32, bool)>>,
     }
 
     fn name(part: Part) -> &'static str {
         match part {
             Part::Dot => "dot",
             Part::Panel => "panel",
+        }
+    }
+
+    impl FakeWindows {
+        fn restore_affinity(&self, part: Part, previous: u32) -> bool {
+            if self.restore_fails.load(Ordering::SeqCst) { return false; }
+            self.affinities.lock().unwrap()[part as usize] = previous;
+            self.restored.lock().unwrap().push((part, previous, self.is_visible(part)));
+            true
+        }
+    }
+
+    impl FakeWindows {
+        fn handles(&self) -> super::super::capture_order::CallHandles {
+            let [dot, panel] = *self.handles.lock().unwrap();
+            super::super::capture_order::CallHandles { dot, panel }
+        }
+
+        fn restore_unrelated_capture(&self, hwnd: usize, previous: u32) {
+            let mut saved = self.call_affinities.lock().unwrap();
+            if let Some(index) = super::super::capture_order::current_window(&saved, hwnd, self.handles()) {
+                saved[index].1.1 = previous;
+                return;
+            }
+            *self.unrelated_affinity.lock().unwrap() = previous;
         }
     }
 
@@ -351,9 +423,34 @@ mod tests {
             Ok(())
         }
 
+        fn hide_for_operation(&self, part: Part, operation: u64) -> Result<(), String> {
+            self.hide(part)?;
+            let mut saved = self.call_affinities.lock().unwrap();
+            let previous = saved.iter().find(|(_, (window, _))| *window == part)
+                .map(|(_, (_, previous))| *previous)
+                .unwrap_or(self.affinities.lock().unwrap()[part as usize]);
+            self.affinities.lock().unwrap()[part as usize] = 0x11;
+            saved.retain(|&(_, (window, _))| window != part);
+            saved.push((Some(operation), (part, previous)));
+            Ok(())
+        }
+
         fn show(&self, part: Part) {
             self.visible.lock().unwrap().set(part, true);
             self.log.lock().unwrap().push(format!("show {}", name(part)));
+            self.call_affinities.lock().unwrap().retain(|&(_, (window, previous))| {
+                window != part || !self.restore_affinity(window, previous)
+            });
+        }
+
+        fn finish_restore(&self, operation: u64) {
+            let mut saved = self.call_affinities.lock().unwrap();
+            super::super::capture_order::release(&mut saved, operation,
+                |(part, previous)| self.restore_affinity(part, previous));
+        }
+
+        fn abandon_restore(&self, operation: u64) {
+            self.finish_restore(operation);
         }
 
         fn rose_hidden(&self) -> bool {
@@ -389,12 +486,16 @@ mod tests {
     /// once, after the first task is queued).
     struct FakeMain {
         deferred: AtomicBool,
+        fails: AtomicBool,
         queue: Mutex<Vec<Task>>,
         after_queue: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     }
 
     impl MainThread for FakeMain {
         fn run(&self, task: Task) -> Result<(), String> {
+            if self.fails.load(Ordering::SeqCst) {
+                return Err("dispatch failed".into());
+            }
             if !self.deferred.load(Ordering::SeqCst) {
                 task();
                 return Ok(());
@@ -432,10 +533,16 @@ mod tests {
             visible: Mutex::new(visible),
             rose_hidden: AtomicBool::new(!visible.dot),
             fails: Mutex::new(None),
+            call_affinities: Mutex::new(Vec::new()),
+            affinities: Mutex::new([1, 0]),
+            handles: Mutex::new([Some(101), Some(102)]),
+            unrelated_affinity: Mutex::new(0x11),
+            restore_fails: AtomicBool::new(false),
+            restored: Mutex::new(Vec::new()),
         });
         let rings = Arc::new(FakeRings { log: log.clone(), fails: AtomicBool::new(false), on_show: Mutex::new(None) });
         let main =
-            Arc::new(FakeMain { deferred: AtomicBool::new(false), queue: Mutex::new(Vec::new()), after_queue: Mutex::new(None) });
+            Arc::new(FakeMain { deferred: AtomicBool::new(false), fails: AtomicBool::new(false), queue: Mutex::new(Vec::new()), after_queue: Mutex::new(None) });
         let working = Arc::new(Working::new(windows.clone(), rings.clone(), main.clone(), timeout));
         let rig = Rig { working, windows, rings, main, log };
         rig.on_show(|working, operation| {
@@ -496,6 +603,99 @@ mod tests {
     }
 
     #[test]
+    fn delayed_restore_cannot_touch_a_later_calls_windows_or_affinities() {
+        for reopen in [false, true] {
+            let rig = rig();
+            let a = rig.working.begin().unwrap();
+            rig.main.deferred.store(true, Ordering::SeqCst);
+            rig.working.finish(a);
+            rig.main.deferred.store(false, Ordering::SeqCst);
+            // B owns either inherited hides or windows the user reopened meanwhile.
+            if reopen { *rig.windows.visible.lock().unwrap() = BOTH; }
+            let b = rig.working.begin().unwrap();
+            rig.main.drain();
+            assert_eq!(rig.visible(), Visibility::default(), "A must not show B's windows");
+            assert_eq!(*rig.windows.call_affinities.lock().unwrap(), [(Some(b), (Part::Dot, 1)), (Some(b), (Part::Panel, 0))],
+                "A must not release B's affinities");
+            rig.working.finish(b);
+            assert_eq!(rig.visible(), BOTH);
+            assert!(rig.windows.call_affinities.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn unrecorded_handle_does_not_intercept_an_unrelated_windows_capture_restore() {
+        let rig = rig();
+        let operation = rig.working.begin().unwrap();
+        rig.main.fails.store(true, Ordering::SeqCst);
+        rig.windows.restore_fails.store(true, Ordering::SeqCst);
+        rig.working.finish(operation);
+        // Dot/panel handles live for the process. An unrelated (possibly recycled) handle
+        // outside that recorded pair must be restored natively, not handed to their records.
+        rig.windows.restore_unrelated_capture(201, 7);
+        assert_eq!(*rig.windows.unrelated_affinity.lock().unwrap(), 7);
+    }
+
+    #[test]
+    fn failed_dispatch_restores_native_affinity_values_while_hidden() {
+        let rig = rig();
+        let operation = rig.working.begin().unwrap();
+        assert_eq!(*rig.windows.affinities.lock().unwrap(), [0x11, 0x11]);
+        rig.main.fails.store(true, Ordering::SeqCst);
+        rig.working.finish(operation);
+        assert_eq!(*rig.windows.affinities.lock().unwrap(), [1, 0]);
+        assert_eq!(*rig.windows.restored.lock().unwrap(), [(Part::Dot, 1, false), (Part::Panel, 0, false)]);
+    }
+
+    #[test]
+    fn failed_native_restore_keeps_the_original_for_next_show_or_hide() {
+        for show_first in [true, false] {
+            let rig = rig();
+            let operation = rig.working.begin().unwrap();
+            rig.main.fails.store(true, Ordering::SeqCst);
+            rig.windows.restore_fails.store(true, Ordering::SeqCst);
+            rig.working.finish(operation);
+            assert_eq!(*rig.windows.affinities.lock().unwrap(), [0x11, 0x11]);
+            assert_eq!(*rig.windows.call_affinities.lock().unwrap(), [(None, (Part::Dot, 1)), (None, (Part::Panel, 0))]);
+            rig.windows.restore_fails.store(false, Ordering::SeqCst);
+            if show_first {
+                rig.windows.show(Part::Dot);
+                rig.windows.show(Part::Panel);
+                assert_eq!(*rig.windows.affinities.lock().unwrap(), [1, 0]);
+                assert_eq!(*rig.windows.restored.lock().unwrap(), [(Part::Dot, 1, true), (Part::Panel, 0, true)]);
+            }
+            // Also exercise a new hide before any successful show: adopt the saved original.
+            rig.windows.hide_for_operation(Part::Dot, operation + 1).unwrap();
+            rig.windows.hide_for_operation(Part::Panel, operation + 1).unwrap();
+            rig.windows.finish_restore(operation + 1);
+            assert_eq!(*rig.windows.affinities.lock().unwrap(), [1, 0]);
+            assert!(rig.windows.call_affinities.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn failed_restore_dispatch_releases_call_affinities_without_showing() {
+        let rig = rig();
+        let operation = rig.working.begin().unwrap();
+        rig.main.fails.store(true, Ordering::SeqCst);
+        rig.working.finish(operation);
+        assert_eq!(rig.visible(), Visibility::default());
+        assert!(rig.windows.call_affinities.lock().unwrap().is_empty(), "failed dispatch must release ownership");
+    }
+
+    #[test]
+    fn restore_releases_call_affinities_even_when_the_user_hid_the_rose() {
+        let rig = rig();
+        let operation = rig.working.begin().unwrap();
+        assert_eq!(*rig.windows.call_affinities.lock().unwrap(), [(Some(operation), (Part::Dot, 1)), (Some(operation), (Part::Panel, 0))]);
+        rig.windows.rose_hidden.store(true, Ordering::SeqCst);
+        rig.working.finish(operation);
+        assert_eq!(rig.visible(), Visibility { dot: false, panel: true });
+        assert!(rig.windows.call_affinities.lock().unwrap().is_empty(),
+            "the hidden Dot's affinity must be restored and released when its call ends");
+    }
+
+    #[test]
     fn restoring_keeps_what_the_user_changed_meanwhile() {
         let hidden = BOTH;
         // "Hide the rose" during the call keeps the Dot hidden; a reopened panel is left alone.
@@ -512,6 +712,7 @@ mod tests {
         rig.working.finish(operation);
         assert_eq!(rig.log(), ["rings on 1", "hide dot", "hide panel", "rings off 1"]);
         assert_eq!(rig.visible(), Visibility { dot: false, panel: true });
+        assert!(rig.windows.call_affinities.lock().unwrap().is_empty());
     }
 
     #[test]

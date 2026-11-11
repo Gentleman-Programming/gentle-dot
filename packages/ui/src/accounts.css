@@ -121,7 +121,8 @@ button.back {
 	color: var(--green);
 }
 
-.chip.connector-needs_setup {
+.chip.connector-needs_setup,
+.chip.connector-needs_preparation {
 	color: var(--yellow);
 	border-color: rgba(224, 194, 122, 0.45);
 }

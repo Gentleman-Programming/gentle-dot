@@ -1,13 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { loadMemory, type MemoryMode, saveMemory } from "../memory.ts";
 import {
 	formatShortcut,
 	isMac,
+	isWindows,
 	loadShortcut,
 	recordKey,
 	type ShortcutInfo,
 	saveShortcut,
 } from "../shortcut.ts";
+import type { DotState } from "../store.ts";
 import { setVoiceLanguage, VOICE_LANGUAGES, voiceLanguage } from "../voice-language.ts";
+import { SelectMenu } from "./SelectMenu.tsx";
+import type { Send } from "./types.ts";
 import "../settings.css";
 
 type Status =
@@ -17,20 +22,25 @@ type Status =
 	| { kind: "applied" }
 	| { kind: "failed"; reason: string };
 
-function reasonOf(error: unknown): string {
+function reasonOf(error: unknown, fallback = "Gentle Dot could not change the shortcut."): string {
 	if (typeof error === "string" && error) return error;
 	if (error instanceof Error && error.message) return error.message;
-	return "Gentle Dot could not change the shortcut.";
+	return fallback;
 }
 
-/** The desktop panel's settings (S33.1); for now, the shortcut that opens the panel. */
-export function SettingsPanel({ close }: { close: () => void }) {
+/** The desktop panel's settings (S33.1): the panel shortcut, the memory mode, and the voice language. */
+export function SettingsPanel({ close, state, send }: { close: () => void; state: DotState; send: Send }) {
 	const [language, setLanguage] = useState(() => voiceLanguage() ?? "");
 	const mac = isMac();
 	const show = (accelerator: string) => formatShortcut(accelerator, mac);
 	const [info, setInfo] = useState<ShortcutInfo | undefined>(undefined);
 	const [loadFailed, setLoadFailed] = useState(false);
 	const [status, setStatus] = useState<Status>({ kind: "idle" });
+	const [memory, setMemory] = useState<MemoryMode | undefined>(undefined);
+	const [memoryInvalid, setMemoryInvalid] = useState<string | undefined>(undefined);
+	const [memoryFailed, setMemoryFailed] = useState(false);
+	const [memoryApplying, setMemoryApplying] = useState(false);
+	const [memoryReason, setMemoryReason] = useState<string | undefined>(undefined);
 	const live = useRef(true);
 	const prompt = useRef<HTMLSpanElement>(null);
 
@@ -42,6 +52,16 @@ export function SettingsPanel({ close }: { close: () => void }) {
 			},
 			() => {
 				if (live.current) setLoadFailed(true);
+			},
+		);
+		loadMemory().then(
+			(found) => {
+				if (!live.current) return;
+				setMemory(found.memory ?? undefined);
+				setMemoryInvalid(found.error);
+			},
+			() => {
+				if (live.current) setMemoryFailed(true);
 			},
 		);
 		return () => {
@@ -59,6 +79,24 @@ export function SettingsPanel({ close }: { close: () => void }) {
 			},
 			(error: unknown) => {
 				if (live.current) setStatus({ kind: "failed", reason: reasonOf(error) });
+			},
+		);
+	}, []);
+
+	const applyMemory = useCallback((next: MemoryMode) => {
+		setMemoryApplying(true);
+		setMemoryReason(undefined);
+		saveMemory(next).then(
+			(saved) => {
+				if (!live.current) return;
+				setMemory(saved);
+				setMemoryInvalid(undefined);
+				setMemoryApplying(false);
+			},
+			(error: unknown) => {
+				if (!live.current) return;
+				setMemoryReason(reasonOf(error, "Gentle Dot could not change the memory setting."));
+				setMemoryApplying(false);
 			},
 		);
 	}, []);
@@ -149,25 +187,101 @@ export function SettingsPanel({ close }: { close: () => void }) {
 				</button>
 			</section>
 
-			<section className="provider-section" aria-labelledby="settings-voice-language">
+			<section className="provider-section" aria-labelledby="settings-conversations">
+				<h3 id="settings-conversations">Conversations</h3>
+				<p className="muted">
+					Choose separate conversations or one continuous chat. Changes apply right away without interrupting
+					the assistant. Your current chat and saved conversations are kept.
+				</p>
+				<div className="shortcut-row">
+					<button
+						id="settings-separate-conversations"
+						type="button"
+						role="switch"
+						className="switch"
+						aria-checked={state.features.conversations}
+						aria-labelledby="settings-separate-conversations-label"
+						disabled={state.connection !== "open"}
+						onClick={() => {
+							if (state.connection === "open")
+								send({ type: "settings_conversations_set", enabled: !state.features.conversations });
+						}}
+					>
+						<span className="switch-knob" aria-hidden="true" />
+					</button>
+					<label id="settings-separate-conversations-label" htmlFor="settings-separate-conversations">
+						Separate conversations
+					</label>
+				</div>
+				<p className="muted">Saved for this assistant until you change it again.</p>
+			</section>
+
+			<section className="provider-section" aria-labelledby="settings-memory">
+				<h3 id="settings-memory">Memory</h3>
+				<p className="muted">
+					Turn this on to give the assistant a memory of its own instead of yours: it starts empty and never
+					reads or writes your Engram.
+				</p>
+				{memoryFailed ? (
+					<p className="settings-error" role="alert">
+						Gentle Dot could not read the memory setting.
+					</p>
+				) : null}
+				{memoryInvalid ? (
+					<>
+						<p className="settings-error" role="alert">
+							{memoryInvalid}. The assistant is not running until this is fixed: set memory to "shared" or
+							"private" in config.json, or choose one here.
+						</p>
+						<div className="shortcut-row">
+							<button type="button" disabled={memoryApplying} onClick={() => applyMemory("shared")}>
+								Use shared memory
+							</button>
+							<button type="button" disabled={memoryApplying} onClick={() => applyMemory("private")}>
+								Use private memory
+							</button>
+						</div>
+					</>
+				) : (
+					<div className="shortcut-row">
+						<button
+							id="settings-private-memory"
+							type="button"
+							role="switch"
+							className="switch"
+							aria-checked={memory === "private"}
+							aria-labelledby="settings-private-memory-label"
+							disabled={memory === undefined || memoryApplying}
+							onClick={() => applyMemory(memory === "private" ? "shared" : "private")}
+						>
+							<span className="switch-knob" aria-hidden="true" />
+						</button>
+						<label id="settings-private-memory-label" htmlFor="settings-private-memory">
+							Private memory
+						</label>
+					</div>
+				)}
+				{memoryReason ? (
+					<p className="settings-error" role="alert">
+						{memoryReason}
+					</p>
+				) : null}
+			</section>
+
+			<section className="provider-section" aria-labelledby="settings-voice-language" hidden={isWindows()}>
 				<h3 id="settings-voice-language">Voice language</h3>
 				<p className="muted">
 					The language macOS speech listens in. The local voice model detects it by itself.
 				</p>
-				<select
-					aria-label="Voice language"
+				<SelectMenu
+					label="Voice language"
 					value={language}
-					onChange={(event) => {
-						setLanguage(event.target.value);
-						setVoiceLanguage(event.target.value);
+					onChange={(value) => {
+						setLanguage(value);
+						setVoiceLanguage(value);
 					}}
-				>
-					{VOICE_LANGUAGES.map(([locale, label]) => (
-						<option key={locale || "auto"} value={locale}>
-							{label}
-						</option>
-					))}
-				</select>
+					options={VOICE_LANGUAGES.map(([locale, label]) => ({ value: locale, label }))}
+				/>
 			</section>
 		</section>
 	);

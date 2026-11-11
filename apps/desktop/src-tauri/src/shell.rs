@@ -2,22 +2,23 @@
 //! hiding the rose, the full-screen panel, voice input, the shortcut chosen in Settings,
 //! the daemon lifecycle (design §9), and the app's private channel to the daemon (S25.1–S25.3).
 
-use crate::app_channel::{self, AppChannel, NO_CHANNEL, REGISTER_TIMEOUT};
+use crate::app_channel;
+use crate::app_channel::{AppChannel, NO_CHANNEL, REGISTER_TIMEOUT};
 use crate::approvals::{native::NativePrompt, ApprovalRequest, Approvals, Decision, APPROVAL_TIMEOUT};
 use crate::computer::app as computer;
 use crate::computer::server::Endpoint;
 use crate::computer::session::Reason;
 use crate::computer::working::{self, Part};
-use crate::config::{self, ConnectionInfo, DesktopConfig, DEFAULT_SHORTCUT};
+use crate::config::{self, ConnectionInfo, DesktopConfig};
 use crate::daemon::{self, Daemon, RestartOutcome};
 use crate::geometry::{self, Rect};
-use crate::platform::{self, LaunchRequest, Os, DOT_TITLE, PANEL_TITLE};
+use crate::platform::{self, LaunchRequest, Os, WindowEffect, DOT_TITLE, PANEL_TITLE};
 use crate::position::{self, DotPosition};
 use crate::secure_store::{self, SecretStore};
 use crate::shortcut;
 use crate::status::{is_template, tray_status, TrayGlyph};
 use crate::voice::app as voice;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -25,18 +26,19 @@ use std::time::Duration;
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder};
-#[cfg(target_os = "macos")]
 use tauri::window::{Effect, EffectState, EffectsBuilder};
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, RunEvent, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+#[cfg(not(windows))]
+use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::MessageDialogKind;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutEvent, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
 
-const DOT: &str = "dot";
+pub(crate) const DOT: &str = "dot";
 pub(crate) const PANEL: &str = "panel";
 const TRAY: &str = "main";
 /// The Dot window, in points: a 66 pt black disc with the rose, plus a 3 pt
@@ -67,6 +69,9 @@ struct Shell {
     full_screen: Mutex<Option<Rect>>,
     /// The shortcut that toggles the panel now; `None` while none is bound (native Wayland).
     shortcut: Mutex<Option<String>>,
+    /// The assistant's memory mode now (SW9), or the error for an invalid `memory` in `config.json`
+    /// until `memory_set` replaces it with a valid one; read by `memory_get`.
+    memory: Mutex<Result<config::MemoryMode, String>>,
 }
 
 /// The Dot and the panel as computer control hides them during a call (S1, S5): never through
@@ -89,18 +94,35 @@ impl working::Windows for ShellWindows {
     }
 
     fn hide(&self, part: Part) -> Result<(), String> {
-        self.get(part).ok_or_else(|| format!("window {part:?} is missing"))?.hide().map_err(err)
+        let window = self.get(part).ok_or_else(|| format!("window {part:?} is missing"))?;
+        window.hide().map_err(err)
+    }
+
+    #[cfg(windows)]
+    fn hide_for_operation(&self, part: Part, operation: u64) -> Result<(), String> {
+        // Bypass tao so its visibility flag continues to represent the user's choice.
+        crate::computer::win::hide_for_call(part, operation)
     }
 
     fn show(&self, part: Part) {
         let Some(window) = self.get(part) else { return };
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", windows))]
         let shown = computer::show_without_focus(&window);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         let shown = window.show().map_err(err);
         if let Err(error) = shown {
             eprintln!("gentle-dot: cannot show the {part:?} again: {error}");
         }
+    }
+
+    #[cfg(windows)]
+    fn finish_restore(&self, operation: u64) {
+        crate::computer::win::finish_call_affinities(operation);
+    }
+
+    #[cfg(windows)]
+    fn abandon_restore(&self, operation: u64) {
+        crate::computer::win::abandon_call_affinities(operation);
     }
 
     fn rose_hidden(&self) -> bool {
@@ -113,6 +135,9 @@ struct RoseMenuItem(MenuItem<tauri::Wry>);
 
 /// The tray's "Open" item, whose accelerator label follows the shortcut (S33.3).
 struct OpenMenuItem(MenuItem<tauri::Wry>);
+
+/// Always present, disabled until the Dot reports connected daemon features.
+struct NewConversationMenuItem(MenuItem<tauri::Wry>);
 
 /// On native Wayland the desktop binds `gentle-dot --toggle` itself.
 const DESKTOP_OWNS_SHORTCUTS: &str =
@@ -171,6 +196,9 @@ fn read_connection_info(config: &DesktopConfig) -> CommandResult<ConnectionInfo>
 /// spawned (S24.7, L61).
 struct ChannelService {
     approvals: Approvals,
+    /// The computer endpoint to register with the assistant once the channel opens. It is read
+    /// only on that path, which Windows does not have yet (L30), so it is dead there by design.
+    #[cfg_attr(not(unix), allow(dead_code))]
     computer: Option<Endpoint>,
     secrets: Box<dyn SecretStore>,
 }
@@ -230,7 +258,12 @@ async fn connection_info(app: AppHandle) -> CommandResult<ConnectionInfo> {
 
 #[tauri::command]
 fn toggle_panel(app: AppHandle) -> CommandResult {
-    if window(&app, PANEL)?.is_visible().map_err(err)? {
+    let panel = window(&app, PANEL)?;
+    #[cfg(windows)]
+    let shown = panel.is_visible().map_err(err)? && !panel.is_minimized().map_err(err)?;
+    #[cfg(not(windows))]
+    let shown = panel.is_visible().map_err(err)?;
+    if shown {
         hide_panel(app)
     } else {
         show_panel(&app)
@@ -246,7 +279,12 @@ fn hide_panel(app: AppHandle) -> CommandResult {
             *shell.panel_spot.lock().unwrap() = Some((rect.x, rect.y));
         }
     }
-    panel.hide().map_err(err)
+    #[cfg(windows)]
+    let _change = computer::window_change();
+    panel.hide().map_err(err)?;
+    #[cfg(windows)]
+    computer::set_shown(&panel, false)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -261,11 +299,15 @@ fn set_rose_hidden(app: AppHandle, hidden: bool) -> CommandResult<bool> {
     position::save_rose_hidden(&desktop_file(&shell.config), hidden).map_err(err)?;
     shell.rose_hidden.store(hidden, Ordering::SeqCst);
     let dot = window(&app, DOT)?;
+    #[cfg(windows)]
+    let _change = computer::window_change();
     if hidden {
         dot.hide().map_err(err)?;
     } else {
         dot.show().map_err(err)?;
     }
+    #[cfg(windows)]
+    computer::set_shown(&dot, !hidden)?;
     if let Some(item) = app.try_state::<RoseMenuItem>() {
         item.0.set_text(rose_menu_label(hidden)).map_err(err)?;
     }
@@ -320,8 +362,8 @@ fn shortcut_get(app: AppHandle) -> ShortcutInfo {
     let shell = app.state::<Shell>();
     let current = shell.shortcut.lock().unwrap().clone().unwrap_or_else(|| shell.config.shortcut.clone());
     ShortcutInfo {
-        shortcut: shortcut::normalize(&current).unwrap_or(current),
-        default: DEFAULT_SHORTCUT.to_string(),
+        shortcut: shortcut::normalize(&current, Os::CURRENT).unwrap_or(current),
+        default: config::default_shortcut().to_string(),
     }
 }
 
@@ -335,12 +377,89 @@ async fn shortcut_set(app: AppHandle, shortcut: String) -> CommandResult<Shortcu
         }
         let mut current = shell.shortcut.lock().unwrap();
         let host = ShortcutHost { app: &app, config_file: shell.config.data_dir.join("config.json") };
-        let saved = shortcut::apply(&host, current.as_deref(), &shortcut)?;
+        let saved = shortcut::apply(&host, current.as_deref(), &shortcut, Os::CURRENT)?;
         *current = Some(saved.clone());
         Ok(ShortcutChoice { shortcut: saved })
     })
     .await
     .map_err(err)?
+}
+
+/// Result of `memory_get`/`memory_set` (SW9): the assistant's memory mode as the panel reads it.
+#[derive(serde::Serialize)]
+struct MemoryInfo {
+    /// `null` while `config.json` holds a value the daemon refuses; `error` then says which.
+    memory: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl MemoryInfo {
+    fn of(state: &Result<config::MemoryMode, String>) -> MemoryInfo {
+        match state {
+            Ok(mode) => MemoryInfo { memory: Some(mode.as_str()), error: None },
+            Err(error) => MemoryInfo { memory: None, error: Some(error.clone()) },
+        }
+    }
+}
+
+#[tauri::command]
+fn memory_get(app: AppHandle) -> MemoryInfo {
+    MemoryInfo::of(&app.state::<Shell>().memory.lock().unwrap())
+}
+
+/// Saves the memory mode and restarts the assistant so the engine picks it up (SW9). An unchanged
+/// value is a no-op: nothing is written and the assistant is left running. A failed restart is an
+/// error the panel shows; the mode stays saved, so the next start of the assistant uses it.
+#[tauri::command]
+async fn memory_set(app: AppHandle, memory: String) -> CommandResult<MemoryInfo> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mode = config::MemoryMode::parse(&memory)?;
+        let shell = app.state::<Shell>();
+        let config_file = shell.config.data_dir.join("config.json");
+        let (daemon, port) = (shell.daemon.clone(), shell.config.port);
+        apply_memory(&shell.memory, &config_file, mode, || {
+            memory_restart_result(daemon.restart(DAEMON_START_TIMEOUT), port)
+        })?;
+        Ok(MemoryInfo { memory: Some(mode.as_str()), error: None })
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Records `mode` as the memory mode (SW9): the lock is held across reading the current mode,
+/// writing `config.json` and updating it, so two calls cannot interleave their read and write.
+/// `restart` runs after the lock is released (a restart takes seconds and `memory_get` reads the
+/// same lock) and only when the mode changed; its error is the caller's. An invalid value is never
+/// equal to a mode, so choosing one repairs the file.
+fn apply_memory(
+    state: &Mutex<Result<config::MemoryMode, String>>,
+    config_file: &Path,
+    mode: config::MemoryMode,
+    restart: impl FnOnce() -> CommandResult,
+) -> CommandResult {
+    {
+        let mut current = state.lock().unwrap();
+        if *current == Ok(mode) {
+            return Ok(());
+        }
+        config::save_memory(config_file, mode)?;
+        *current = Ok(mode);
+    }
+    restart()
+}
+
+/// What `memory_set` tells the panel about a restart: the new mode is already saved either way.
+fn memory_restart_result(outcome: RestartOutcome, port: u16) -> CommandResult {
+    match outcome {
+        RestartOutcome::Restarted => Ok(()),
+        RestartOutcome::External => {
+            Err(format!("The memory mode was saved, but the assistant was not restarted. {}", daemon::foreign_daemon_message(port)))
+        }
+        RestartOutcome::Failed(error) => {
+            Err(format!("The memory mode was saved, but the assistant could not restart: {error}"))
+        }
+    }
 }
 
 struct ShortcutHost<'a> {
@@ -369,6 +488,12 @@ impl shortcut::Host for ShortcutHost<'_> {
 }
 
 /// The accelerator is only a label; one the menu cannot show is left off.
+fn unlabel_tray_open(app: &AppHandle) {
+    if let Some(item) = app.try_state::<OpenMenuItem>() {
+        let _ = item.0.set_accelerator(None::<&str>);
+    }
+}
+
 fn label_tray_open(app: &AppHandle, shortcut: &str) {
     if let Some(item) = app.try_state::<OpenMenuItem>() {
         if item.0.set_accelerator(Some(shortcut)).is_err() {
@@ -378,12 +503,22 @@ fn label_tray_open(app: &AppHandle, shortcut: &str) {
 }
 
 #[tauri::command]
-fn set_dot_state(app: AppHandle, state: String) -> CommandResult {
+fn set_dot_state(
+    app: AppHandle,
+    state: String,
+    conversations_enabled: Option<bool>,
+) -> CommandResult {
     let status = tray_status(&state).ok_or_else(|| format!("unknown state `{state}`"))?;
     let tray = app.tray_by_id(TRAY).ok_or("tray icon is missing")?;
     tray.set_tooltip(Some(&status.tooltip)).map_err(err)?;
     tray.set_icon(Some(Image::from_bytes(status.glyph.image(Os::CURRENT)).map_err(err)?)).map_err(err)?;
-    tray.set_icon_as_template(is_template(Os::CURRENT)).map_err(err)
+    tray.set_icon_as_template(is_template(Os::CURRENT)).map_err(err)?;
+    if let Some(enabled) = conversations_enabled {
+        if let Some(item) = app.try_state::<NewConversationMenuItem>() {
+            item.0.set_enabled(enabled).map_err(err)?;
+        }
+    }
+    Ok(())
 }
 
 /// The window frame in points. Tao reports it in pixels of the window's current scale factor.
@@ -469,11 +604,29 @@ fn place_panel_next_to_dot(app: &AppHandle) -> CommandResult {
 }
 
 fn show_panel(app: &AppHandle) -> CommandResult {
+    // Restoring a minimized panel shows it too.
+    #[cfg(windows)]
+    let _change = computer::window_change();
+    #[cfg(windows)]
+    restore_panel(&window(app, PANEL)?)?;
     place_panel(app)?;
     let panel = window(app, PANEL)?;
     panel.show().map_err(err)?;
+    #[cfg(windows)]
+    computer::set_shown(&panel, true)?;
     panel.set_focus().map_err(err)?;
     app.emit("dot://panel-shown", ()).map_err(err)
+}
+
+/// A minimized panel must be restored before it is moved or shown.
+#[cfg(windows)]
+fn restore_panel(panel: &WebviewWindow) -> CommandResult {
+    if panel.is_minimized().map_err(err)? { panel.unminimize().map_err(err)?; }
+    let current = rect_of(panel)?;
+    if (current.width, current.height) != (PANEL_SIZE.0 as i32, PANEL_SIZE.1 as i32) {
+        panel.set_size(LogicalSize::new(PANEL_SIZE.0, PANEL_SIZE.1)).map_err(err)?;
+    }
+    Ok(())
 }
 
 /// Snaps the Dot to the nearest edge and persists the position.
@@ -514,6 +667,38 @@ fn spawn_snapper(app: AppHandle) -> mpsc::Sender<()> {
     tx
 }
 
+/// The material the panel asks the window system for, as a pure decision so every OS can test it
+/// without opening a window: the effect the panel resolved, mapped to the tauri material and the
+/// corner radius it goes with (`HudWindow` takes 20.0; `Mica` uses the builder's default).
+/// `None` means the OS gets no material, which is Linux and Windows whenever the backdrop facts
+/// do not hold.
+///
+/// Which effect each platform gets, and why the Windows request is gated rather than proven, is
+/// [`WindowEffect`]'s to say: this function only translates the answer, never decides it. Taking
+/// the effect rather than the OS is what keeps the window and the page from disagreeing — both
+/// consume the one resolution in `build_windows`.
+fn panel_material(effect: WindowEffect) -> Option<(Effect, Option<f64>)> {
+    match effect {
+        WindowEffect::HudWindow => Some((Effect::HudWindow, Some(20.0))),
+        WindowEffect::Mica => Some((Effect::Mica, None)),
+        WindowEffect::None => None,
+    }
+}
+
+fn with_panel_effects<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
+    panel: WebviewWindowBuilder<'a, R, M>,
+    effect: WindowEffect,
+) -> WebviewWindowBuilder<'a, R, M> {
+    let Some((material, radius)) = panel_material(effect) else {
+        return panel;
+    };
+    let mut effects = EffectsBuilder::new().effect(material).state(EffectState::Active);
+    if let Some(radius) = radius {
+        effects = effects.radius(radius);
+    }
+    panel.effects(effects.build())
+}
+
 fn build_windows(
     app: &AppHandle,
     config: &DesktopConfig,
@@ -537,9 +722,15 @@ fn build_windows(
     // the Dot stays resizable and equal minimum and maximum sizes pin it at DOT_SIZE.
     #[cfg(target_os = "linux")]
     let dot = dot.resizable(true).min_inner_size(DOT_SIZE.0, DOT_SIZE.1).max_inner_size(DOT_SIZE.0, DOT_SIZE.1);
+    #[cfg(windows)]
+    let dot = dot.minimizable(false);
     let dot = dot.build()?;
-    // Linux has no window effects; the panel URL tells the UI to paint an opaque background.
-    let panel = WebviewWindowBuilder::new(app, PANEL, WebviewUrl::App(platform::panel_url(Os::CURRENT).into()))
+    #[cfg(windows)]
+    crate::computer::win::record_call_window(Part::Dot, dot.hwnd()?.0);
+    // The backdrop is resolved once here and threaded into both the panel URL and the window
+    // material, so the UI's own background and the system backdrop can never disagree.
+    let effect = Os::CURRENT.panel_effect(platform::WindowsBackdrop::current());
+    let panel = WebviewWindowBuilder::new(app, PANEL, WebviewUrl::App(platform::panel_url(effect).into()))
         .title(PANEL_TITLE)
         .inner_size(PANEL_SIZE.0, PANEL_SIZE.1)
         .transparent(true)
@@ -550,9 +741,15 @@ fn build_windows(
         // Lets the chat receive HTML5 drops of attachments (S31); Tauri's own handler would take them.
         .disable_drag_drop_handler()
         .visible(false);
-    #[cfg(target_os = "macos")]
-    let panel = panel
-        .effects(EffectsBuilder::new().effect(Effect::HudWindow).state(EffectState::Active).radius(20.0).build());
+    #[cfg(windows)]
+    let panel = panel.minimizable(false);
+    let panel = with_panel_effects(panel, effect);
+    #[cfg(windows)]
+    {
+        let panel = panel.build()?;
+        crate::computer::win::record_call_window(Part::Panel, panel.hwnd()?.0);
+    }
+    #[cfg(not(windows))]
     panel.build()?;
 
     if !places_windows {
@@ -583,21 +780,12 @@ fn build_windows(
     Ok(())
 }
 
-/// Whether the conversations list is on, read like the daemon reads it (`GENTLE_DOT_CONVERSATIONS=1`).
-fn conversations_on(value: Option<&str>) -> bool {
-    value == Some("1")
-}
-
-/// The tray menu, top to bottom (`-` is a separator). "New conversation" only exists with the
-/// conversations list on; in the single continuous chat there is nothing new to start.
+/// The tray menu, top to bottom (`-` is a separator). "New conversation" always exists,
+/// initially disabled; only the Dot's live daemon features enable it.
 /// "Stop computer control" and "Yolo mode" exist where computer control does (macOS, S24.3, S24.9).
 /// "rose" hides or shows the floating Dot (S26.1).
-fn tray_menu_ids(conversations: bool, computer_control: bool) -> Vec<&'static str> {
-    let mut ids = vec!["open"];
-    if conversations {
-        ids.push("new");
-    }
-    ids.extend(["browser", "rose"]);
+fn tray_menu_ids(computer_control: bool) -> Vec<&'static str> {
+    let mut ids = vec!["open", "new", "browser", "rose"];
     if computer_control {
         ids.extend(["computer-stop", "computer-yolo"]);
     }
@@ -612,11 +800,14 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tau
         .or_else(|_| MenuItem::with_id(app, "open", "Open", true, None::<&str>))?;
     app.manage(OpenMenuItem(open.clone()));
     let menu = Menu::new(app)?;
-    let conversations = conversations_on(std::env::var("GENTLE_DOT_CONVERSATIONS").ok().as_deref());
-    for id in tray_menu_ids(conversations, cfg!(target_os = "macos")) {
+    for id in tray_menu_ids(cfg!(any(target_os = "macos", windows))) {
         match id {
             "open" => menu.append(&open)?,
-            "new" => menu.append(&MenuItem::with_id(app, "new", "New conversation", true, None::<&str>)?)?,
+            "new" => {
+                let item = MenuItem::with_id(app, "new", "New conversation", false, None::<&str>)?;
+                menu.append(&item)?;
+                app.manage(NewConversationMenuItem(item));
+            }
             "browser" => menu.append(&MenuItem::with_id(app, "browser", "Open in browser", true, None::<&str>)?)?,
             "rose" => {
                 let item = MenuItem::with_id(app, "rose", rose_menu_label(rose_hidden), true, None::<&str>)?;
@@ -694,6 +885,15 @@ fn rose_hidden_state(app: &AppHandle) -> bool {
 }
 
 fn show_message(app: &AppHandle, kind: MessageDialogKind, text: &str) {
+    // Gentle Dot's own task dialog on Windows: its life is known exactly, so computer-control
+    // captures are held off while it shows (the plugin's box closes on another thread, and its
+    // close can be reported late or not at all).
+    #[cfg(windows)]
+    {
+        let _ = app;
+        crate::alert::tell("Gentle Dot", text, matches!(kind, MessageDialogKind::Error));
+    }
+    #[cfg(not(windows))]
     app.dialog().message(text).title("Gentle Dot").kind(kind).show(|_| {});
 }
 
@@ -728,16 +928,21 @@ fn restart_daemon(app: AppHandle) {
     });
 }
 
-/// ⌥⇧Esc ends computer control from anywhere, even while another app is in front.
-#[cfg(target_os = "macos")]
+/// The panic shortcut (⌥⇧Esc on macOS, Alt+Shift+Esc on Windows) ends computer control from
+/// anywhere, even while another app is in front. When another app or the system already holds it,
+/// the user is told once and the yolo dialog stops promising it; Stop keeps working.
+#[cfg(any(target_os = "macos", windows))]
 fn register_panic_shortcut(app: &AppHandle) {
     let handler = |app: &AppHandle, _: &_, event: tauri_plugin_global_shortcut::ShortcutEvent| {
         if event.state() == ShortcutState::Pressed {
             computer::stop(app, Reason::Panic);
         }
     };
-    if let Err(error) = app.global_shortcut().on_shortcut(computer::PANIC_SHORTCUT, handler) {
+    let registered = app.global_shortcut().on_shortcut(computer::PANIC_SHORTCUT, handler);
+    computer::set_panic_shortcut_registered(registered.is_ok());
+    if let Err(error) = registered {
         eprintln!("gentle-dot: the computer-control panic shortcut is unavailable: {error}");
+        show_message(app, MessageDialogKind::Warning, computer::PANIC_UNAVAILABLE_TEXT);
     }
 }
 
@@ -752,12 +957,13 @@ fn toggle_on_press(app: &AppHandle, _: &Shortcut, event: ShortcutEvent) {
 
 /// Binds the configured shortcut, or the default one when it is unavailable. Returns the bound one.
 fn register_shortcut(app: &AppHandle, shortcut: &str) -> Option<String> {
+    let default = config::default_shortcut();
     match app.global_shortcut().on_shortcut(shortcut, toggle_on_press) {
         Ok(()) => return Some(shortcut.to_string()),
-        Err(error) => eprintln!("gentle-dot: shortcut `{shortcut}` is unavailable ({error}); using {DEFAULT_SHORTCUT}"),
+        Err(error) => eprintln!("gentle-dot: shortcut `{shortcut}` is unavailable ({error}); using {default}"),
     }
-    if shortcut != DEFAULT_SHORTCUT && app.global_shortcut().on_shortcut(DEFAULT_SHORTCUT, toggle_on_press).is_ok() {
-        return Some(DEFAULT_SHORTCUT.to_string());
+    if shortcut != default && app.global_shortcut().on_shortcut(default, toggle_on_press).is_ok() {
+        return Some(default.to_string());
     }
     None
 }
@@ -781,7 +987,15 @@ pub fn run() {
         std::env::set_var("GDK_BACKEND", backend);
     }
     let places_windows = !platform::compositor_places_windows(|key| std::env::var(key).ok());
-    let config = config::load_config();
+    // No home folder and no `GENTLE_DOT_DATA_DIR`: there is nowhere to keep anything, and
+    // guessing a relative folder is the W22 bug. Fail before a window exists rather than after.
+    let config = match config::load_config() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("gentle-dot: {error}");
+            std::process::exit(1);
+        }
+    };
     tauri::Builder::default()
         // First, so a second launch forwards its arguments and exits before anything else starts.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| handle_launch(app, &args)))
@@ -799,6 +1013,8 @@ pub fn run() {
             set_panel_fullscreen,
             shortcut_get,
             shortcut_set,
+            memory_get,
+            memory_set,
             connector_command,
             computer::computer_endpoint,
             computer::computer_permissions,
@@ -860,19 +1076,25 @@ pub fn run() {
                 panel_spot: Mutex::new(None),
                 full_screen: Mutex::new(None),
                 shortcut: Mutex::new(None),
+                memory: Mutex::new(config.memory.clone()),
             });
             let (voice_input, voice_model) = voice::start(&handle);
             app.manage(voice_input);
             app.manage(voice_model);
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             register_panic_shortcut(&handle);
 
-            build_windows(&handle, &config, places_windows, rose_hidden)?;
+            // The tray goes up before the windows: a webview starts loading the UI as soon as it is
+            // built, and the UI calls `set_dot_state` as soon as it runs, which needs `tray_by_id`
+            // to find one. Building the tray second lost that race and the UI reported
+            // "tray icon is missing" while the tray appeared a moment later anyway.
             build_tray(&handle, &config, rose_hidden)?;
+            build_windows(&handle, &config, places_windows, rose_hidden)?;
             if places_windows {
                 let bound = register_shortcut(&handle, &config.shortcut);
-                if let Some(bound) = &bound {
-                    label_tray_open(&handle, bound);
+                match &bound {
+                    Some(bound) => label_tray_open(&handle, bound),
+                    None => unlabel_tray_open(&handle),
                 }
                 *app.state::<Shell>().shortcut.lock().unwrap() = bound;
                 let snap = app.state::<Shell>().snap.clone();
@@ -898,7 +1120,12 @@ pub fn run() {
         .expect("failed to build Gentle Dot")
         .run(|app, event| {
             if let RunEvent::Exit = event {
+                #[cfg(unix)]
                 app.state::<Shell>().daemon.stop();
+                #[cfg(windows)]
+                if let Err(reason) = app.state::<Shell>().daemon.stop() {
+                    eprintln!("gentle-dot: Windows shutdown was not confirmed: {reason}");
+                }
             }
         });
 }
@@ -908,17 +1135,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tray_hides_new_conversation_in_the_single_chat() {
+    fn tray_keeps_new_conversation_present_before_features_arrive() {
         assert_eq!(
-            tray_menu_ids(false, false),
-            vec!["open", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
+            tray_menu_ids(false),
+            vec!["open", "new", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
         );
     }
 
     #[test]
     fn tray_shows_new_conversation_with_the_conversations_list() {
         assert_eq!(
-            tray_menu_ids(true, false),
+            tray_menu_ids(false),
             vec!["open", "new", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
         );
     }
@@ -926,8 +1153,8 @@ mod tests {
     #[test]
     fn tray_offers_stop_computer_control_where_it_exists() {
         assert_eq!(
-            tray_menu_ids(false, true),
-            vec!["open", "browser", "rose", "computer-stop", "computer-yolo", "-", "restart", "autostart", "-", "quit"]
+            tray_menu_ids(true),
+            vec!["open", "new", "browser", "rose", "computer-stop", "computer-yolo", "-", "restart", "autostart", "-", "quit"]
         );
     }
 
@@ -968,6 +1195,14 @@ mod tests {
     }
 
     #[test]
+    fn the_memory_commands_are_registered_in_build_rs() {
+        let build = include_str!("../build.rs");
+        for command in ["memory_get", "memory_set"] {
+            assert!(build.contains(&format!("\"{command}\",")), "{command} is missing from build.rs");
+        }
+    }
+
+    #[test]
     fn only_the_glow_overlay_may_acknowledge_the_working_rings() {
         let build = include_str!("../build.rs");
         assert!(build.contains("\"computer_working_ready\","), "computer_working_ready is missing from build.rs");
@@ -993,10 +1228,132 @@ mod tests {
     }
 
     #[test]
-    fn conversations_flag_reads_like_the_daemon() {
-        assert!(conversations_on(Some("1")));
-        assert!(!conversations_on(None));
-        assert!(!conversations_on(Some("0")));
-        assert!(!conversations_on(Some("true")));
+    fn tray_new_is_initially_disabled_and_updates_from_optional_live_features() {
+        // Structural contract: no display server or user desktop is opened by this test.
+        let source = include_str!("shell.rs");
+        let build = source
+            .split("fn build_tray(")
+            .nth(1)
+            .unwrap()
+            .split("fn rose_hidden_state")
+            .next()
+            .unwrap();
+        assert!(build.contains("\"New conversation\", false"));
+        assert!(build.contains("app.manage(NewConversationMenuItem(item))"));
+        assert!(!build.contains("GENTLE_DOT_CONVERSATIONS"));
+        let command = source
+            .split("fn set_dot_state(")
+            .nth(1)
+            .unwrap()
+            .split("fn rect_of")
+            .next()
+            .unwrap();
+        assert!(command.contains("conversations_enabled: Option<bool>"));
+        assert!(command.contains("if let Some(enabled) = conversations_enabled"));
+        assert!(command.contains("item.0.set_enabled(enabled)"));
+    }
+
+    #[test]
+    fn the_panel_material_follows_the_effect_the_os_chose() {
+        assert!(matches!(
+            panel_material(WindowEffect::HudWindow),
+            Some((Effect::HudWindow, Some(radius))) if radius == 20.0
+        ));
+        assert!(matches!(panel_material(WindowEffect::Mica), Some((Effect::Mica, None))));
+        assert!(panel_material(WindowEffect::None).is_none());
+    }
+
+    #[test]
+    fn the_page_and_the_material_agree_on_every_effect() {
+        // The doc on `panel_material` promises that the material and the URL "cannot disagree", and
+        // each side is asserted alone — the mapping here, the URL in `platform` — so the pair is
+        // what this checks: a window asking for a backdrop exactly when the page does not paint its
+        // own background.
+        for effect in [WindowEffect::HudWindow, WindowEffect::Mica, WindowEffect::None] {
+            let url = platform::panel_url(effect);
+            let page_paints_its_own = url.ends_with("effects=none");
+            assert_eq!(panel_material(effect).is_none(), page_paints_its_own, "{effect:?} gives {url}");
+        }
+    }
+
+    fn memory_scratch(name: &str) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-scratch/shell-memory").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn memory_set_saves_the_mode_then_restarts_once() {
+        let file = memory_scratch("changed").join("config.json");
+        std::fs::write(&file, r#"{ "memory": "shared" }"#).unwrap();
+        let state = Mutex::new(Ok(config::MemoryMode::Shared));
+        let mut restarts = 0;
+        let result = apply_memory(&state, &file, config::MemoryMode::Private, || {
+            restarts += 1;
+            Ok(())
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(restarts, 1);
+        assert_eq!(*state.lock().unwrap(), Ok(config::MemoryMode::Private));
+        assert_eq!(std::fs::read_to_string(&file).unwrap().replace(char::is_whitespace, ""), r#"{"memory":"private"}"#);
+    }
+
+    #[test]
+    fn memory_set_to_the_current_mode_writes_and_restarts_nothing() {
+        let file = memory_scratch("same").join("config.json");
+        let state = Mutex::new(Ok(config::MemoryMode::Shared));
+        let result = apply_memory(&state, &file, config::MemoryMode::Shared, || panic!("must not restart"));
+        assert_eq!(result, Ok(()));
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn memory_set_repairs_an_invalid_value_and_restarts() {
+        let file = memory_scratch("repair").join("config.json");
+        std::fs::write(&file, r#"{ "memory": "Private" }"#).unwrap();
+        let state = Mutex::new(Err(config::invalid_memory("Private")));
+        let mut restarts = 0;
+        let result = apply_memory(&state, &file, config::MemoryMode::Shared, || {
+            restarts += 1;
+            Ok(())
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(restarts, 1);
+        assert_eq!(*state.lock().unwrap(), Ok(config::MemoryMode::Shared));
+    }
+
+    #[test]
+    fn memory_set_returns_the_restart_failure_and_keeps_the_saved_mode() {
+        let file = memory_scratch("restart-fails").join("config.json");
+        std::fs::write(&file, r#"{ "memory": "shared" }"#).unwrap();
+        let state = Mutex::new(Ok(config::MemoryMode::Shared));
+        let result = apply_memory(&state, &file, config::MemoryMode::Private, || {
+            memory_restart_result(RestartOutcome::Failed("no port".to_string()), 4317)
+        });
+        assert_eq!(result, Err("The memory mode was saved, but the assistant could not restart: no port".to_string()));
+        assert_eq!(*state.lock().unwrap(), Ok(config::MemoryMode::Private));
+        assert!(std::fs::read_to_string(&file).unwrap().contains("private"));
+    }
+
+    #[test]
+    fn memory_set_does_not_restart_when_saving_fails() {
+        // The folder does not exist as a directory: its parent is a file.
+        let dir = memory_scratch("save-fails");
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, "").unwrap();
+        let state = Mutex::new(Ok(config::MemoryMode::Shared));
+        let result = apply_memory(&state, &blocker.join("config.json"), config::MemoryMode::Private, || {
+            panic!("must not restart")
+        });
+        assert!(result.is_err());
+        assert_eq!(*state.lock().unwrap(), Ok(config::MemoryMode::Shared));
+    }
+
+    #[test]
+    fn a_foreign_assistant_after_a_memory_restart_is_an_error_naming_the_port() {
+        let result = memory_restart_result(RestartOutcome::External, 4317);
+        assert!(result.unwrap_err().contains("port 4317"));
+        assert_eq!(memory_restart_result(RestartOutcome::Restarted, 4317), Ok(()));
     }
 }
