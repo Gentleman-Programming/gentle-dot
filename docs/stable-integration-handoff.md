@@ -6,8 +6,14 @@ ARM64 and macOS are later milestones. Every technical task here is **planned**, 
 
 ## Quick path: one agreed baseline
 
-1. Read your card and the [ODD task record](../odd/tasks/stable-integration.md). Each ID has an explicit person in both places; the parent owns tracker transitions.
-2. Use consolidated product checkpoint `375b3f5fb9196f904b2915f2e3b5d4c0a500497a` on `docs/stable-integration-team` (preview slice `80baa1d54376c7d77b9fac675b99af44eab46a0c`); the original PR merge baseline was `0b2f98fca6f48e751c9daf29fca8909b1840b2da`. Read the latest handoff/evidence before choosing an implementation SHA.
+1. Read current instructions without changing a dirty implementation branch:
+   ```sh
+   git fetch origin docs/stable-integration-team
+   git show origin/docs/stable-integration-team:docs/stable-integration-handoff.md
+   git show origin/docs/stable-integration-team:odd/tasks/stable-integration.md
+   ```
+   These are contributor instructions, not commands executed by this handoff. Do not `git pull`, reset or rebase current dirty branches just to read docs. Each ID has an explicit owner; the parent owns tracker transitions.
+2. Use consolidated product checkpoint `375b3f5fb9196f904b2915f2e3b5d4c0a500497a` on `docs/stable-integration-team` (preview slice `80baa1d54376c7d77b9fac675b99af44eab46a0c`); the original PR merge baseline was `0b2f98fca6f48e751c9daf29fca8909b1840b2da`. UI1 keeps this agreed code base; later public docs-only updates do not require Mars to rebase code. Read the latest handoff/evidence before choosing any other implementation SHA.
 3. For implementation, agree the exact base SHA and file list with Maicol; use `feat/stable-<ID>-<slug>` for the first contributor branch and identify dependent PRs.
 4. Reproduce one bounded behavior, deliver code + tests + relevant docs together, then hand off the evidence template below. Creating this plan grants no execution consent.
 5. Maicol integrates approved slices and names a new public candidate SHA. Contributors align with that candidate, not a blind rebase onto trunk.
@@ -15,7 +21,7 @@ ARM64 and macOS are later milestones. Every technical task here is **planned**, 
 This branch now consolidates the full PR232/PR233 history, the ten selected preview/test source files from the original integration worktree, and the seven selected primary CI/helper/test/doc files. Source manifests record byte-identical transfers; the source worktrees remain untouched. Generated binaries, caches, unrelated WIP and private data are not committed.
 Fresh upstream `main` at `f97d56d884b1d3c178f415b95d486464e7b220bf` was already included (zero main-only commits), so no merge from main was needed.
 This is a common **testing checkpoint**, not preview-ready or stable acceptance. I1 memory-startup isolation and the historical T6 native-containment proof remain open.
-The authoritative scope and owner association are [S1–S7](../odd/tasks/stable-integration.md#specs). A dedicated exact-branch Windows x64/Linux x64 workflow runs tests/builds and disposable installation checks only, never deployment or release.
+The authoritative scope and owner association are [S1–S9](../odd/tasks/stable-integration.md#specs). A dedicated exact-branch Windows x64/Linux x64 workflow runs tests/builds and disposable installation checks only, never deployment or release.
 
 ## Deliverables and confirmed issue mapping
 
@@ -25,15 +31,31 @@ Publication completes the coordination handoff, not the technical work: every ca
 | ID | Named owner | Deliverable | Dependencies | GitHub issue |
 | --- | --- | --- | --- | --- |
 | I1 | Maicol | Preview isolation and launcher identity | None | [#237](https://github.com/Gentleman-Programming/gentle-dot/issues/237) |
-| W1 | PabloGNU | Windows native runtime and owned shutdown | I1 | [#238](https://github.com/Gentleman-Programming/gentle-dot/issues/238) |
-| W2 | PabloGNU | Windows native voice acceptance | W1 | [#239](https://github.com/Gentleman-Programming/gentle-dot/issues/239) |
+| W1 | PabloGNU | Checkpoint startup/runtime/owned-shutdown gaps; reuse Mars's Windows work | I1; compare #215/22b/23 deltas | [#238](https://github.com/Gentleman-Programming/gentle-dot/issues/238) |
+| W2 | PabloGNU | PR232-integrated voice; consented real devices; UI2 handoff | W1; qualify older evidence | [#239](https://github.com/Gentleman-Programming/gentle-dot/issues/239) |
 | W3 | PabloGNU | Disposable Windows installation lifecycle | W1 | [#240](https://github.com/Gentleman-Programming/gentle-dot/issues/240) |
 | L1 | Cinlo | Linux x64 desktop/daemon/native acceptance | I1 for shared isolation | [#241](https://github.com/Gentleman-Programming/gentle-dot/issues/241) |
 | L2 | Cinlo | Linux x64 producer and installation lifecycle | L1 | [#242](https://github.com/Gentleman-Programming/gentle-dot/issues/242) |
-| UI1 | Mars | Existing UI flow regressions | None; parallel with I1 | [#243](https://github.com/Gentleman-Programming/gentle-dot/issues/243) |
+| UI1 | Mars | [PR247](https://github.com/Gentleman-Programming/gentle-dot/pull/247) Escape-menu / [PR248](https://github.com/Gentleman-Programming/gentle-dot/pull/248) select-groups submitted; review/integration pending | Base 375b3f5; parallel with I1 | [#243](https://github.com/Gentleman-Programming/gentle-dot/issues/243) |
 | UI2 | Mars | Voice-control interaction acceptance | UI1, W2, L1 acceptance | [#244](https://github.com/Gentleman-Programming/gentle-dot/issues/244) |
-| I2 | Maicol | Shared integration and reviewable slices | Approved contributor slices as available | [#245](https://github.com/Gentleman-Programming/gentle-dot/issues/245) |
+| I2 | Maicol | Delta reconciliation, shared integration and reviewable slices | Approved slices; C5 remains paused | [#245](https://github.com/Gentleman-Programming/gentle-dot/issues/245) |
 | I3 | Maicol | One stable candidate qualification dossier | I1, W1–W3, L1–L2, UI1–UI2, I2 | [#246](https://github.com/Gentleman-Programming/gentle-dot/issues/246) |
+
+## Existing contributions, dependencies and evidence
+
+Reuse before rewriting; these remain **Mars's deliveries**, not new PabloGNU implementation assignments.
+
+| Delivery / evidence | Current boundary | Reuse / next owner action |
+| --- | --- | --- |
+| [PR215](https://github.com/Gentleman-Programming/gentle-dot/pull/215) | Parent-checked: OPEN, non-draft, base `main`, head `a583a68a205900f7a9eb2a130caa413a13439ab3`; eight aggregate PR checks SUCCESS | Mars retains ownership; user reports waiting for Quique. Maicol compares actual delta before reuse: some content may have arrived through other branches; do not claim inclusion in 375b3f5. |
+| [Run 42699458220](https://github.com/Gentleman-Programming/gentle-dot/actions/runs/42699458220) | Parent-checked SUCCESS at the same head; four Windows jobs: Typecheck/lint, Native addon, Rust shell, Native app channel | Green checks are not review approval, integrated-candidate acceptance or merge permission. |
+| 22b: [`test/windows-failure-paths`](https://github.com/MarsSall/gentle-dot/tree/test/windows-failure-paths), `2b65fc2be509ef6b7160fed0e079ab3627eda7f2` | Parent-confirmed PUBLIC branch, no PR; depends on PR215 as reported; error-write/unreadable-sign-in tests, three mutants reported caught | Mars retains authorship; PabloGNU reuses rather than recreates error paths/suite. |
+| 23: [`docs/windows-port-docs`](https://github.com/MarsSall/gentle-dot/tree/docs/windows-port-docs), `906a63fd5c4a3bc2bbcf7b611a0bc7efd450637c` | Parent-confirmed PUBLIC branch, no PR; six documentation files; needs author rebase as reported | Mars owns any rebase after coordination; PabloGNU reuses docs, not rewrites the port guide. |
+| Windows PC / WASAPI real mic | AUTHOR-REPORTED, TEST SHA NOT SUPPLIED: 96/96, related #199; installed app indicators working, typing uncorrupted during app stalls, typing stops when foreground changes | Obtain base SHA, host/tool versions and exact commands before reuse. Not independently observed, not PR232 or new-candidate acceptance. |
+
+22b/23 are delivery labels, not issues; public branches do not mean reviewed, merged or automatically transferred work. No blind cherry-pick, rebase, migration, GitHub assignee changes, PR approval or merge is authorized here.
+
+**Owner starts:** Mars supplies existing evidence and supports review of submitted UI1 PR247/248, then UI2. PabloGNU first compares reusable Windows work with Maicol, scopes only W1 gaps, then W2 voice evidence for Mars and W3 fresh disposable lifecycle. Cinlo follows L1/L2 and hands native results to UI2. Maicol reconciles deltas/dependencies and exact shared file lists before integration; no extra features or PRs are requested.
 
 ## Working practices and boundaries
 
@@ -112,8 +134,8 @@ Remaining native or installed checks must report their own candidate SHA and out
 | Later tests/UI build | NOT RUN | Earlier typecheck failure stopped those steps |
 | Native build/installed acceptance | SKIPPED | Functional prerequisites failed; no native/installed acceptance inferred |
 
-The failing public test already had this content at the original PR integration and pre-consolidation baseline; consolidation did not edit it. The error is a test-source compile failure, not an observed production runtime failure.
-Minimal next scope: Maicol/I2 coordinates a test-only import correction, scoped typecheck/test proof and a new test CI run after explicit bounded authorization. Do not relax typecheck, hide the failure, rerun old failed CI blindly or claim a stable version. The observer's initial network failure was recovered by watching the same run, not by launching a second run.
+Parent Git-diff confirmation attributes the removed import to **our merge `c8e11d7`**, not Mars. It was already missing at the original integration/pre-consolidation baseline; consolidation did not edit it. This is a test-source compile failure, not an observed production runtime failure, and PR215 does not establish a fix for it.
+**C5 remains paused:** Maicol's import-only local correction is uncommitted, unpublished and unverified; typecheck, focused tests and new CI must not resume through this docs update. Both preparation failures and consumed budgets remain in the ODD history. Do not relax gates or rerun CI blindly. The observer's initial network failure was recovered by watching the same run, not by launching a second run.
 
 ## Task cards
 
@@ -134,9 +156,9 @@ All cards require the common PR template, applicable R coordination, and parent 
 
 ### W1 — Windows native runtime and owned shutdown
 
-**Owner: PabloGNU. Dependencies: I1.**
-- Goal: qualify the integrated Windows x64 app, daemon and runtime on native Windows, not only source/fake transports.
-- Detail: verify Node selection, restricted PATH boundaries, engine readiness, private stdio/fd3 admission, Job ownership and shutdown of owned descendants.
+**Owner: PabloGNU. Dependencies: I1; compare Mars's #215/22b/23 deltas before reuse.**
+- Goal: verify compatibility and close checkpoint-specific Windows x64 startup/runtime/owned-shutdown gaps, not implement the port or recreate Mars's suite, error paths or docs.
+- Detail: reuse existing deliveries; identify remaining Node selection, restricted PATH, engine readiness, private stdio/fd3 admission, Job ownership and owned-descendant shutdown gaps, including R3-001.
 - Proposed edit areas: Windows adapters in `apps/desktop/src-tauri/src/daemon/`, `apps/desktop/src-tauri/src/app_channel/windows.rs`, `packages/daemon/src/windows-*.ts`, `scripts/windows/test/`, and relevant Windows docs.
 - Shared/reserved: R applies to common Rust channel/daemon/shell/config and helper contracts; Maicol must accept any shared transfer first.
 - Parent handoff: native host/tool versions, I1 base SHA, exact scoped tests, Node/executable identity, PATH observations, ownership and quit/relaunch evidence.
@@ -148,7 +170,7 @@ All cards require the common PR template, applicable R coordination, and parent 
 ### W2 — Windows native voice
 
 **Owner: PabloGNU. Dependencies: W1.**
-- Goal: qualify real supported capture, device selection, transcription and spoken output, coordinating UI boundaries with Mars.
+- Goal: qualify PR232-integrated capture, device selection, transcription and spoken output with appropriately consented real-device checks; hand evidence to Mars/UI2. Mars's separate Windows report has no supplied test SHA; it is a reuse lead, not acceptance.
 - Detail: follow existing WASAPI Capture/Devices, SAPI-to-WAV and Parakeet paths only where actually supported; model presence is not device readiness.
 - Proposed edit areas: Windows adapters in `apps/desktop/src-tauri/src/voice/`, corresponding native fixtures, focused `packages/ui/test/voice*` in coordination with Mars, and `docs/windows-voice-output.md`.
 - Shared/reserved: R and common voice engine/IPC modules require Maicol; Mars owns UI-control changes. Agree file ownership before any shared test edit.
@@ -161,7 +183,7 @@ All cards require the common PR template, applicable R coordination, and parent 
 ### W3 — Disposable Windows installation lifecycle
 
 **Owner: PabloGNU. Dependencies: W1.**
-- Goal: qualify Windows x64 installer lifecycle on a disposable authorized machine/profile using the existing producer and guards.
+- Goal: qualify fresh disposable Windows x64 install, update/reinstall and uninstall on an authorized machine/profile, reusing the existing producer, docs and guards.
 - Detail: distinguish source startup from installed startup; identify installer, runtime manifest and candidate SHA at every stage.
 - Proposed edit areas: `scripts/windows/package.ps1`, `scripts/windows/stage.ps1`, `scripts/windows/smoke-install.ps1`, related Windows tests and packaging docs, subject to exact-file approval.
 - Shared/reserved: R covers runtime identity/security/config/lockfiles; producer changes touching common packaging helpers go to Maicol.
@@ -200,15 +222,17 @@ All cards require the common PR template, applicable R coordination, and parent 
 ### UI1 — Existing application-flow regressions
 
 **Owner: Mars. Dependencies: none; may run in parallel with I1.**
-- Goal: reproduce and fix integration regressions in existing navigation, chat, settings and application-owned error flows, without redesign.
-- Detail: verify open/hide/navigation, streamed chat, settings persistence and visible recovery/error states using existing behavior as the reference.
-- Proposed edit areas: `packages/ui/src/` presentation/components and focused `packages/ui/test/` regressions, plus relevant UI behavior docs; exact files agreed first.
+- Submitted, not accepted: two independent OPEN PRs by `MarsSall`, targeting `docs/stable-integration-team`, with agreed code baseline `375b3f5fb9196f904b2915f2e3b5d4c0a500497a`; bodies use **Refs #243**, not Closes. Review/integration remain planned until both are accepted.
+- [PR247](https://github.com/Gentleman-Programming/gentle-dot/pull/247): `feat/stable-UI1-escape-menu`, head `cbe22797d34291f17829b0eb347aef2fd6177419` — ONLY `packages/ui/src/components/HeaderMenu.tsx` and `packages/ui/test/window.test.tsx`.
+- [PR248](https://github.com/Gentleman-Programming/gentle-dot/pull/248): `feat/stable-UI1-select-groups`, head `56fa0f264b1c327c7756798453bed5343756c154` — ONLY `packages/ui/src/components/SelectMenu.tsx` and `packages/ui/test/select-menu.test.tsx`.
+- Read-only supplied patches show capture-phase Escape handling with `preventDefault` and group offsets into flat indices, consistent with the reported scope; this is not technical approval or functional reproduction. Optional `header.test`, `profiles.test`, `settings.test` remain outside the edit scope; no `App.tsx` without new coordination.
 - Shared/reserved: R applies; native shell/config, protocol, daemon and shared state contracts require Maicol rather than unilateral UI changes.
 - Parent handoff: reproduction, before/after screenshots or bounded observations without personal content, focused regression results and required platform follow-ups.
-- Acceptance: existing flows remain usable and errors remain visible/actionable on the integration; settings retain prior semantics and rejected actions leave owned state unchanged.
-- Verification: observe RED/GREEN for reproduced deterministic bugs and one preservation test per touched existing behavior; native/window claims require native observations.
+- Acceptance: reproduced Escape-menu and grouped-selection regressions pass their scoped tests while prior behavior is preserved; both PRs require acceptance before #243 can close.
+- AUTHOR-REPORTED local evidence, latest Linux Node 24.14.1/pnpm 11.5: base 375b3f5 370/370; PR247 371/371 (one added RED→GREEN); PR248 372/372 (one RED→GREEN plus one preservation). Prior 373 was a combined review worktree with three added cases, not parametrization. Mars reports local UI tsc/Biome clean; no whole-repository suite or native execution. These supersede the earlier Node 26 report, not independent reproduction.
+- Hosted snapshot from parent-supplied metadata, not live/final CI: PR247 `typescript`, `rust`, `Native app channel` FAILED; PR248 `typescript`, `rust` FAILED; other checks QUEUED and `installer` SKIPPED on both. Causes are undiagnosed; do not attribute all failures to statSync. Neither PR is CI-green or native acceptance.
 - Dependencies delivered: supply UI1 results and stable control-state expectations to UI2 and Maicol, not an assertion that platform runtime is qualified.
-- Non-goals: redesign, new features, native IPC changes, provider-account access or approving Windows/Linux acceptance on their owners' behalf.
+- Non-goals: settings navigation, mailto/http/https allowlist fixes, redesign, new features, native IPC changes, provider access or platform acceptance. Existing Windows PRs remain Mars's deliveries.
 
 ### UI2 — Voice-control interaction
 
@@ -226,13 +250,13 @@ All cards require the common PR template, applicable R coordination, and parent 
 ### I2 — Shared integration and reviewable slices
 
 **Owner: Maicol. Dependencies: approved contributor slices as they become available.**
-- Goal: steward the main integration branch and shared contracts, integrating reviewable dependent PRs at explicit baselines.
+- Goal: compare actual Mars delivery deltas before integrating approved slices at explicit baselines; do not assume PR215 is included in 375b3f5. Steward shared contracts and the integration branch.
 - Detail: preserve full intent/history while splitting oversized changes; the existing full PR233 candidate stopped at `lens_context_budget_exceeded` and remains unapproved.
 - Proposed edit areas: approved shared integration surfaces in R, schema/protocol, Rust shell/config/security, lockfiles and common CI, with exact per-slice authorization.
 - Shared/reserved: Maicol is custodian, not a bypass; name affected platform/UI reviewers and transfer any common-file ownership explicitly.
 - Parent handoff: dependency order, base/head SHAs, full-history/intent references, exact scoped diff/checks and the public next integration baseline.
 - Acceptance: approved slices compose without unrequested shared-contract changes; Windows contracts remain preserved and evidence maps to the actual integrated tree.
-- Verification: scoped checks, preservation/differential evidence where shared contracts are affected, then authorized native/CI checks; coordinate the existing test-only Windows Cargo WIP transfer.
+- Verification: future scoped checks, preservation/differential evidence and separately authorized native/CI checks; C5 code/typecheck/tests/CI remain paused. Maicol owns our merge c8e11d7 statSync regression, not Mars; no root verification is authorized by this handoff.
 - Review limit: no force bypass, receipt reset or reuse of consumed review authority; splitting is not permission to omit intent or evade review limits.
 - Non-goals: blind trunk rebases, unapproved correction-budget renewal, merging main or release publication authority.
 
@@ -273,4 +297,4 @@ Start with the [README](../README.md), [installation guide](install.md), [deskto
 [Windows testing](windows-testing.md), [runtime discovery](windows-runtime-discovery.md), [Windows voice](windows-voice-output.md),
 [Linux testing](linux-testing.md), [platform packaging](platform-packaging.md) and [distribution boundaries](distribution.md).
 Historical status sections in platform docs are not current acceptance; use the explicit candidate SHA and this handoff's privacy/consent boundaries.
-Next: Maicol scopes I1 and Mars scopes UI1 against the agreed baseline, then the platform owners follow the dependency table. Use the confirmed issue for each delivery. Implementation, native acceptance and release remain future work; this documentation publication grants no extra execution or release authority.
+Next: Mars supports review of submitted UI1 PR247/248 and supplies existing Windows evidence; PabloGNU compares reusable work before scoping W1 gaps, then follows W2/W3 dependencies. Cinlo follows L1/L2; Maicol coordinates review, shared deltas and the remaining I1 scope. Use the confirmed issue for each delivery. C5 code/checks/new CI stay paused; this documentation publication grants no extra execution or release authority.
