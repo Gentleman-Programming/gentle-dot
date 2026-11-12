@@ -238,4 +238,49 @@ describe("SelectMenu", () => {
 		await userEvent.tab();
 		expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
 	});
+
+	it("Enter picks the option the pointer highlighted in a later group, not one in an earlier group", async () => {
+		const onChange = vi.fn();
+		render(
+			<Harness
+				onChange={onChange}
+				groups={[
+					{
+						label: "OpenAI",
+						options: [
+							{ value: "gpt-a", label: "GPT A" },
+							{ value: "gpt-b", label: "GPT B" },
+						],
+					},
+					{
+						label: "Anthropic",
+						options: [
+							{ value: "claude-a", label: "Claude A" },
+							{ value: "claude-b", label: "Claude B" },
+						],
+					},
+				]}
+			/>,
+		);
+		await open();
+		const option = within(listbox()).getByRole("option", { name: "Claude A" });
+		fireEvent.mouseMove(option);
+		expect(option).toHaveClass("active");
+		await userEvent.keyboard("{Enter}");
+		expect(onChange).toHaveBeenLastCalledWith("claude-a");
+		expect(screen.getByRole("button", { name: "Voice language" })).toHaveTextContent("Claude A");
+	});
+
+	it("reopened after a click, Enter keeps the chosen value instead of an older highlight", async () => {
+		const onChange = vi.fn();
+		render(<Harness onChange={onChange} />);
+		await open();
+		await userEvent.click(within(listbox()).getByRole("option", { name: "English" }));
+		expect(onChange).toHaveBeenLastCalledWith("en");
+		await open();
+		expect(within(listbox()).getByRole("option", { name: "English" })).toHaveClass("active");
+		await userEvent.keyboard("{Enter}");
+		expect(onChange).toHaveBeenLastCalledWith("en");
+		expect(screen.getByRole("button", { name: "Voice language" })).toHaveTextContent("English");
+	});
 });
