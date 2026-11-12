@@ -161,6 +161,23 @@ Two producers are retained under distinct commands. `pnpm package:windows` remai
 
 Measured on Windows 11 x86_64: the app provisions `%USERPROFILE%\.gentle-dot`, starts its own daemon over the private named-pipe channel, and `GET http://127.0.0.1:4317/` answers HTTP 200; quitting exits with code 0 and takes its daemon with it. `cargo test --lib` reports 399 passed / 0 failed / 4 ignored. Everything else below is the intended behaviour a tester checks, or is marked "not yet".
 
+### Isolated local preview (not an installer)
+
+The Windows-only Rust feature `local-preview` is **off by default**. It must be paired with `apps/desktop/src-tauri/tauri.preview.conf.json`, which selects **Gentle Dot Preview**, identifier `dev.gentleman.gentle-dot.preview`, and disables bundling. Applying the overlay without the feature, or building the feature with the normal identity, fails before startup. Do not use either normal Windows installer for a side-by-side preview.
+
+After separate build authorization and prerequisite qualification, the Tauri build inputs are `--features local-preview --config tauri.preview.conf.json --no-bundle` from the desktop crate context. This source change does not run that build or qualify the resulting application.
+
+Preview startup requires both:
+
+- `GENTLE_DOT_DATA_DIR`: a **nonexistent absolute local-drive directory** whose final name begins `gentle-dot-preview-`, with an existing parent. Relative paths, production data/install components, aliases, reparse parents and existing roots are refused. Do not pre-create the root; each launch needs a fresh one. Failed owned roots are retained, not reused or deleted automatically.
+- `GENTLE_DOT_PORT`: an explicit integer in `1..65535`, other than the normal port `4317`. The normal ownership/channel guard still refuses a foreign daemon.
+
+Before plugins or windows, the preview exclusively creates its root and reuses the native private-directory ACL guard. It redirects HOME/profile/AppData/temp/XDG locations below that root and gives **both** windows the same explicit `<root>/webview` directory. The title bars and tray identify the preview. Connector secrets use a fresh **MemoryStore** only: no Credential Manager, DPAPI or migration. Memory stays private; selecting shared memory is refused.
+
+There is no single-instance forwarding, autostart plugin/query/menu mutation, or global shortcut registration/change/unregistration. The IPC gate also refuses those integrations. Native computer/voice helpers are not started, so no third helper WebView uses a default profile; their activation IPC is refused with `Unavailable in isolated local preview.` Normal UI and Stop paths remain available. This mode does not validate real microphone, audio or provider behavior.
+
+Launch preparation must still supply a cleared, credential-free environment, synthetic runtime/agent inputs and authorized scratch paths. This is not a sandbox against same-user processes or arbitrary custom agents. **Independent guard verification and full native qualification are required before the parent launches anything.** See [preview checks](windows-testing.md#isolated-preview-checks) for the evidence boundaries. Ordinary builds retain their product identity, configuration/home resolution, secret backend and integrations.
+
 ### Requirements
 
 - Windows 10 or Windows 11, x86_64. aarch64 is not supported yet.

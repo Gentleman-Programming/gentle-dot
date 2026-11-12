@@ -8,6 +8,25 @@ This checklist is **source-only**: it runs the app you just built, not an instal
 
 The tracked product icon `apps/desktop/src-tauri/icons/icon.ico` retains the feature-base bytes from `7c6adaff70ca0f29b28192ababcd75959f42153b`: Git blob `aa73428e1919e06cec752390617c1cfa74e2c791`. No icon generation was run. This byte identity is source provenance, not installer or visual acceptance.
 
+## Isolated preview checks
+
+The `local-preview` feature and `tauri.preview.conf.json` overlay are a non-installer, Windows-only path; see [preview requirements](install.md#isolated-local-preview-not-an-installer). They do not authorize app execution, providers, microphone access, replacement installation or access to personal profiles.
+
+Two focused checks have deliberately different boundaries:
+
+- `node --test scripts/windows/test/preview-isolation.test.mjs` is inert source inspection. It never compiles Rust, executes fixtures or accesses a store.
+- Explicitly compiling **only** `src/preview.rs` with `rustc --test` exercises the std-only admission/command policy against fresh synthetic fixtures. It does not compile Tauri, run the production ACL implementation, initialize WebView2, or execute an OS secret-store test. Use an explicitly isolated MSVC/SDK environment and retained scratch; never run broad crate discovery as a substitute.
+
+Before any separately authorized preview launch, the independent verifier must confirm:
+
+1. Feature/overlay identity pairing rejects mismatches before plugins, config reads or daemon startup. Missing, relative, existing or shared roots fail without changing existing sentinel data or calling the privacy callback.
+2. Only a fresh `gentle-dot-preview-*` root is admitted; privacy failure stops startup and retains owned evidence. Both title-bar-visible windows receive the same fresh `<root>/webview` profile.
+3. Preview serves secrets from MemoryStore without constructing the OS backend. Production defaults remain unchanged when the feature is absent.
+4. Single-instance forwarding, autostart queries/mutations/IPC and all global-shortcut paths are disabled. Native provider and microphone/synthesis commands are denied before dispatch; Stop and normal UI commands remain usable.
+5. Native private-files, ACL, branded channel admission, checked shutdown, packaged runtime and restricted PATH guards remain intact. Actual ACL/WebView behavior, full app compilation and shutdown need later native proof.
+
+The parent controls the cleared launch environment, synthetic daemon/runtime inputs, native qualification and eventual execution. Do not apply the normal checklist's sign-in, microphone, autostart or global shortcut steps to this preview. Retain failed evidence; use a new data root instead of retrying against an existing one.
+
 ## Before you start
 
 1. Check your Windows version. In PowerShell, run:

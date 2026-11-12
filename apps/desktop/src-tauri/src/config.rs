@@ -142,12 +142,24 @@ pub fn resolve_data_dir(os: crate::platform::Os, env: impl Fn(&str) -> Option<Os
 }
 
 /// Reads the real environment and `<data dir>/config.json`.
+#[cfg(not(feature = "local-preview"))]
 pub fn load_config() -> Result<DesktopConfig, String> {
     let env = |key: &str| std::env::var(key).ok();
     // OS strings preserve non-UTF-8 Unix HOME paths too.
     let dir = resolve_data_dir(crate::platform::Os::CURRENT, |key| std::env::var_os(key))?;
     let file = std::fs::read_to_string(dir.join("config.json")).ok();
     Ok(parse_config(dir, file.as_deref(), &env))
+}
+
+/// Only an admitted fresh root can reach preview configuration. No home fallback or old file read.
+#[cfg(feature = "local-preview")]
+pub fn load_preview_config(root: &crate::preview::OwnedRoot) -> Result<DesktopConfig, String> {
+    let port = crate::preview::port(std::env::var("GENTLE_DOT_PORT").ok().as_deref())?;
+    let mut config = parse_config(root.data_dir().to_path_buf(), None, |_| None);
+    config.port = port;
+    config.memory = Ok(MemoryMode::Private);
+    save_memory(&root.data_dir().join("config.json"), MemoryMode::Private)?;
+    Ok(config)
 }
 
 pub const INVALID_CONFIG: &str =

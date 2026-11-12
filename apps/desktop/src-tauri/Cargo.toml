@@ -5,6 +5,11 @@ description = "Gentle Dot desktop shell"
 edition = "2021"
 publish = false
 
+# Local-only, non-installer preview. Never selected by ordinary builds.
+[features]
+default = []
+local-preview = []
+
 [lib]
 name = "gentle_dot_lib"
 crate-type = ["rlib"]

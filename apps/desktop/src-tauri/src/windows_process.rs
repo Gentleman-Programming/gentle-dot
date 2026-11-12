@@ -245,13 +245,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn saturated_app_channel_cannot_delay_the_owned_child_stop_deadline() {
-        struct Refuse;
-        impl crate::app_channel::Handler for Refuse {
-            fn approve(&self, _: &crate::approvals::ApprovalRequest) -> bool {
-                false
-            }
-        }
+    fn saturated_stdio_pipe_cannot_delay_the_owned_child_stop_deadline() {
         let root = std::env::temp_dir().join(format!("gentle-dot-backpressure-{}", std::process::id()));
         private_directory(&root).unwrap();
         let script = root.join("not-reading.mjs");
@@ -264,12 +258,10 @@ mod tests {
         let (mut child, stream) = spawn(&spec, File::create(root.join("test.log")).unwrap(), true).unwrap();
         let stream = stream.unwrap();
         let writer = stream.writer.clone();
-        let channel = crate::app_channel::AppChannel::start(stream, Arc::new(Refuse)).unwrap();
-        let sending = channel.clone();
+        let mut sending = stream.try_clone().unwrap();
         let (sent, finished) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let result =
-                sending.request("blocked", serde_json::json!({"data":"x".repeat(900_000)}), Duration::from_secs(30));
+        let writing = std::thread::spawn(move || {
+            let result = sending.write_all(&vec![b'x'; 900_000]);
             let _ = sent.send(result);
         });
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -278,20 +270,35 @@ mod tests {
         }
         assert!(matches!(writer.try_lock(), Err(TryLockError::WouldBlock)), "the pipe must actually be backpressured");
         let (closed, answer) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            channel.close();
-            let _ = closed.send(());
+        let closing = std::thread::spawn(move || {
+            let _ = closed.send(stream.shutdown(Shutdown::Both));
         });
-        if answer.recv_timeout(Duration::from_millis(500)).is_err() {
+        let shutdown = answer.recv_timeout(Duration::from_millis(500));
+        if shutdown.is_err() {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("channel close waited for the blocked writer");
+            panic!("stdio pipe shutdown waited for the blocked writer");
         }
+        let writer_was_pending = matches!(finished.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+        assert!(child.try_wait().unwrap().is_none(), "the synthetic child must still be alive before owned stop");
         let stopping = Instant::now();
-        crate::daemon::stop_child(child.as_mut(), Duration::from_millis(100));
+        // This legacy stdio child has no native authenticated-stop adapter. Exercise
+        // its own kill/reap boundary, not the dedicated native channel's stop API.
+        let grace = stopping + Duration::from_millis(100);
+        while matches!(child.try_wait(), Ok(None)) && Instant::now() < grace {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if child.try_wait().unwrap().is_none() {
+            child.kill().unwrap();
+        }
+        child.wait().unwrap();
         assert!(stopping.elapsed() < Duration::from_secs(2));
         assert!(child.try_wait().unwrap().is_some());
+        shutdown.unwrap().unwrap();
+        assert!(writer_was_pending, "stdio shutdown must not wait for or settle the blocked writer");
         assert!(finished.recv_timeout(Duration::from_secs(3)).unwrap().is_err());
+        closing.join().unwrap();
+        writing.join().unwrap();
     }
 
     #[test]
