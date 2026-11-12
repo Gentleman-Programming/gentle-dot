@@ -7,14 +7,15 @@ ARM64 and macOS are later milestones. Every technical task here is **planned**, 
 ## Quick path: one agreed baseline
 
 1. Read your card and the [ODD task record](../odd/tasks/stable-integration.md). Each ID has an explicit person in both places; the parent owns tracker transitions.
-2. Begin from integration baseline `0b2f98fca6f48e751c9daf29fca8909b1840b2da`, on `docs/stable-integration-team` for this documentation handoff.
+2. Use consolidated product checkpoint `375b3f5fb9196f904b2915f2e3b5d4c0a500497a` on `docs/stable-integration-team` (preview slice `80baa1d54376c7d77b9fac675b99af44eab46a0c`); the original PR merge baseline was `0b2f98fca6f48e751c9daf29fca8909b1840b2da`. Read the latest handoff/evidence before choosing an implementation SHA.
 3. For implementation, agree the exact base SHA and file list with Maicol; use `feat/stable-<ID>-<slug>` for the first contributor branch and identify dependent PRs.
 4. Reproduce one bounded behavior, deliver code + tests + relevant docs together, then hand off the evidence template below. Creating this plan grants no execution consent.
 5. Maicol integrates approved slices and names a new public candidate SHA. Contributors align with that candidate, not a blind rebase onto trunk.
 
-This branch contains the committed full PR232/PR233 integration history, **not** the original worktree's uncommitted preview/test changes.
-It must not be described as preview-ready. The original worktree remains separate; no blind copying of its WIP is authorized.
-The authoritative scope and named-owner association are [S1–S6](../odd/tasks/stable-integration.md#specs); this document implements the D1 handoff only.
+This branch now consolidates the full PR232/PR233 history, the ten selected preview/test source files from the original integration worktree, and the seven selected primary CI/helper/test/doc files. Source manifests record byte-identical transfers; the source worktrees remain untouched. Generated binaries, caches, unrelated WIP and private data are not committed.
+Fresh upstream `main` at `f97d56d884b1d3c178f415b95d486464e7b220bf` was already included (zero main-only commits), so no merge from main was needed.
+This is a common **testing checkpoint**, not preview-ready or stable acceptance. I1 memory-startup isolation and the historical T6 native-containment proof remain open.
+The authoritative scope and owner association are [S1–S7](../odd/tasks/stable-integration.md#specs). A dedicated exact-branch Windows x64/Linux x64 workflow runs tests/builds and disposable installation checks only, never deployment or release.
 
 ## Deliverables and confirmed issue mapping
 
@@ -84,8 +85,19 @@ Node must satisfy the root `package.json` (`>=24`); pnpm is pinned to `11.5.0`. 
 | `pnpm package:linux:check --arch amd64` | Existing disposable distro-container package checks, not a real desktop/device session |
 
 Do not disable global setup or gates to make `pnpm test` appear dependency-free. Select focused checks with the parent before broad suites.
-The committed-baseline Windows Cargo run has a legacy test-only `E0308` blocker: I2 must coordinate transfer/review of the existing test-only WIP, not blindly copy it or restart an exhausted allowance.
-No Cargo pass is asserted here. An environment fix or test transfer needs separate bounded scope and observed proof.
+The original committed baseline had a legacy test-only `E0308` blocker. Its existing test-only repair is now transferred byte-for-byte with provenance, not newly corrected. Prior named Rust results remain prior evidence; no fresh full Cargo pass is asserted here.
+Remaining native or installed checks must report their own candidate SHA and outcomes. Consolidation does not renew any exhausted correction allowance.
+
+## Consolidated testing checkpoint
+
+- Upstream main checked: `f97d56d884b1d3c178f415b95d486464e7b220bf`, already included; zero main-only commits. No merge/rebase from main was needed.
+- Preview slice: `80baa1d54376c7d77b9fac675b99af44eab46a0c`, ten owned source/test/doc files, 545 authored lines. Native review approved and acknowledged for this slice only.
+- CI slice: `375b3f5fb9196f904b2915f2e3b5d4c0a500497a`, nine workflow/helper/test/doc files, 873 authored lines. Native review approved and acknowledged for this slice only.
+- Local evidence: 33 independent source/inert contracts passed; the subsequent addon-prerequisite delta received independent static/identity review plus a parent-host 4/4 test run. These are not full runtime, device or installed acceptance.
+- Original worktrees and their selected bytes/modes/index/HEAD/status were preserved. Generated executables, private state, caches and unrelated WIP remain excluded; build them from this checkpoint.
+- `integration-tests.yml` runs only for this branch's relevant-input pushes, or explicit manual dispatch: Windows x64/Linux x64 functional tests, native build and disposable installation checks. Read-only permissions; QA artifacts, no deploy/release/main writes. Hosted results are pending until the exact run is observed.
+- Native review warning `R3-001` is informational: fast connection refusal may exhaust twelve startup probes in about three seconds although the deadline is thirty. It remains follow-up work for W1, not an applied correction, and does not reopen the approved review.
+- I1 memory-startup isolation, T6 native containment and real voice/device/desktop qualification remain open. An approved source review and passing inert tests do not close them.
 
 ## Task cards
 
@@ -95,8 +107,8 @@ All cards require the common PR template, applicable R coordination, and parent 
 
 **Owner: Maicol. Dependencies: none.**
 - Goal: prevent preview startup from using an unowned or ambiguous private-memory listener; reconcile the launcher executable pin without altering production defaults.
-- Detail: the occupied/ambiguous startup path is a confirmed **source gap, not a proven privacy breach**. This branch does not contain the original preview fixes.
-- Proposed edit areas: `packages/daemon/src/isolation.ts`, its tests under `packages/daemon/test/`, the existing launcher preparation in the original integration worktree (`build/pr-preview-open/`, not tracked in this docs branch), and the specific preview launch boundary identified during approved scoping.
+- Detail: the occupied/ambiguous startup path is a confirmed **source gap, not a proven privacy breach**. The original preview/test source is now consolidated here, but this startup gap is not corrected by copying it.
+- Proposed edit areas: `packages/daemon/src/isolation.ts`, its tests under `packages/daemon/test/`, the consolidated preview boundary and the existing launcher preparation in the original integration worktree (`build/pr-preview-open/`, excluded build evidence). Agree a tracked launcher surface before transferring that ignored helper; no generated binary/cache copy.
 - Shared/reserved: R applies, especially isolation/config and launcher identity policy; no incidental production/shared contract changes.
 - Parent handoff: a separately bounded correction proposal, exact files/checks and canonical ownership proof. Old S7/S8 correction limits remain exhausted; no reusable old receipt or authority.
 - Acceptance: approved preview-owned listener starts successfully; occupied unowned and ambiguous listeners are refused before preview use, without mutation/termination of unrelated state; production defaults retain prior behavior.
