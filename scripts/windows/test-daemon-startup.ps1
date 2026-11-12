@@ -208,6 +208,11 @@ function Receive-DaemonStartupHealth([int]$Port) {
 }
 function Wait-DaemonStartupPoll { Start-Sleep -Milliseconds 250 }
 
+function New-DaemonStartupClock {
+    # A fresh monotonic clock for each launch; wall-clock adjustments cannot end polling early.
+    return [Diagnostics.Stopwatch]::StartNew()
+}
+
 function Invoke-DaemonStartupContract {
     param([string]$Runtime)
     $ErrorActionPreference = 'Stop'
@@ -229,9 +234,9 @@ function Invoke-DaemonStartupContract {
             [void][IO.Directory]::CreateDirectory($environment[$key])
         }
         $owner = Start-DaemonStartupProcess -Runtime $Runtime -Environment $environment
-        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        $clock = New-DaemonStartupClock
         $outcome = 'daemon-startup-timeout'
-        for ($poll = 0; $poll -lt 12 -and [DateTime]::UtcNow -lt $deadline; $poll++) {
+        while ($clock.ElapsedMilliseconds -lt 30000) {
             if (Test-DaemonStartupExited $owner) { $outcome = 'daemon-startup-earlyexit'; break }
             if (Receive-DaemonStartupHealth -Port $port) { $outcome = 'daemon-startup-passed'; break }
             Wait-DaemonStartupPoll

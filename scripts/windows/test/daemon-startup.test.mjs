@@ -33,7 +33,15 @@ test('launch settings use only packaged Node/CLI and a fresh allowlisted environ
  for (const key of ['HOME','USERPROFILE','APPDATA','LOCALAPPDATA','TEMP','TMP','TMPDIR','XDG_CACHE_HOME','GENTLE_DOT_DATA_DIR']) assert.ok(result.env[key].startsWith(scratch));
  assert.equal(result.env.GENTLE_DOT_RUNTIME,runtime); assert.equal(result.env.GENTLE_DOT_PORT,'12345');
 });
+const virtualClock = `
+ function New-DaemonStartupClock {
+   $script:clock=[pscustomobject]@{ElapsedMilliseconds=0}
+   return $script:clock
+ }
+ function Wait-DaemonStartupPoll { $script:clock.ElapsedMilliseconds+=250 }
+`;
 const mocks = `
+ ${virtualClock}
  $script:starts=0; $script:stops=0; $script:polls=0
  function New-DaemonStartupScratch { ${quote(scratch)} }
  function Get-DaemonStartupPort { 12345 }
@@ -41,10 +49,9 @@ const mocks = `
  function Test-DaemonStartupExited { return ($mode -eq 'earlyexit') }
  function Stop-DaemonStartupProcess { $script:stops++; return ($mode -ne 'cleanupfailure') }
  function Receive-DaemonStartupHealth { $script:polls++; if ($mode -eq 'probeerror') { throw 'SECRET' }; return ($mode -in @('success','cleanupfailure')) }
- function Wait-DaemonStartupPoll {}
 `;
 for (const [mode, outcome, polls, stops] of [
- ['success','daemon-startup-passed',1,1], ['timeout','daemon-startup-timeout',12,1],
+ ['success','daemon-startup-passed',1,1], ['timeout','daemon-startup-timeout',120,1],
  ['earlyexit','daemon-startup-earlyexit',0,1], ['probeerror','daemon-startup-failed',1,1],
  ['startfailure','daemon-startup-failed',0,0], ['cleanupfailure','daemon-startup-cleanup-failed',1,1],
 ]) test(`public launch contract ${mode} is sanitized and stops only its owned process`, () => {
@@ -75,6 +82,76 @@ const containedModel = `
  $script:owner | Add-Member ScriptMethod Stop { $this.Stops++; $this.Process.ChildAlive=$false; return $true }
  $script:owner | Add-Member ScriptMethod Dispose {}
 `;
+test("R3-001 readiness on poll 13 before the 30-second deadline succeeds and cleans up its owner exactly once", () => {
+	const output = ps(`${containedModel}; ${virtualClock}; $env:CI='true';
+ $script:starts=0; $script:polls=0; $script:waits=0
+ $script:root.HasExited=$false; $script:owner.HasExited=$false
+ $script:owner | Add-Member NoteProperty Disposed $false
+ $script:owner | Add-Member ScriptMethod Dispose { $this.Disposed=$true } -Force
+ function New-DaemonStartupScratch { ${quote(scratch)} }
+ function Get-DaemonStartupPort { 12345 }
+ function Start-DaemonStartupProcess { $script:starts++; return $script:owner }
+ function Receive-DaemonStartupHealth {
+   $script:polls++
+   return ($script:polls -eq 13)
+ }
+ # Advance the injected per-call clock at the normal cadence, without real sleeps.
+ function Wait-DaemonStartupPoll { $script:waits++; $script:clock.ElapsedMilliseconds+=250 }
+ $r=Invoke-DaemonStartupContract -Runtime ${quote(runtime)}
+ [ordered]@{outcome=$r;starts=$script:starts;polls=$script:polls;waits=$script:waits;elapsedMs=$script:clock.ElapsedMilliseconds;childAlive=$script:root.ChildAlive;stops=$script:owner.Stops;disposed=$script:owner.Disposed} | ConvertTo-Json -Compress`);
+	assert.equal(
+		output,
+		JSON.stringify({
+			outcome: "daemon-startup-passed",
+			starts: 1,
+			polls: 13,
+			waits: 12,
+			elapsedMs: 3000,
+			childAlive: false,
+			stops: 1,
+			disposed: true,
+		}),
+	);
+});
+for (const [readyPoll, outcome, elapsedMs] of [
+	[120, "daemon-startup-passed", 29750],
+	[121, "daemon-startup-timeout", 30000],
+])
+	test(`R3-001 readiness at poll ${readyPoll} respects the exact virtual 30-second boundary`, () => {
+		const output = ps(`$env:CI='true'; $mode='timeout'; ${mocks};
+ function Receive-DaemonStartupHealth { $script:polls++; return ($script:polls -eq ${readyPoll}) }
+ $r=Invoke-DaemonStartupContract -Runtime ${quote(runtime)}
+ [ordered]@{outcome=$r;starts=$script:starts;polls=$script:polls;elapsedMs=$script:clock.ElapsedMilliseconds;stops=$script:stops} | ConvertTo-Json -Compress`);
+		assert.deepEqual(JSON.parse(output), { outcome, starts: 1, polls: 120, elapsedMs, stops: 1 });
+	});
+test("R3-001 each invocation starts a fresh elapsed-time budget after a prior timeout", () => {
+	const output = ps(`$env:CI='true'; $mode='timeout'; ${mocks};
+ $a=Invoke-DaemonStartupContract -Runtime ${quote(runtime)}; $firstClock=$script:clock
+ $mode='success'; $b=Invoke-DaemonStartupContract -Runtime ${quote(runtime)}
+ [ordered]@{a=$a;b=$b;firstMs=$firstClock.ElapsedMilliseconds;secondMs=$script:clock.ElapsedMilliseconds;distinct=(-not [object]::ReferenceEquals($firstClock,$script:clock));starts=$script:starts;stops=$script:stops} | ConvertTo-Json -Compress`);
+	assert.deepEqual(JSON.parse(output), {
+		a: "daemon-startup-timeout",
+		b: "daemon-startup-passed",
+		firstMs: 30000,
+		secondMs: 0,
+		distinct: true,
+		starts: 2,
+		stops: 2,
+	});
+});
+test("R3-001 default timing uses fresh running monotonic clocks and a 250-ms wait", () => {
+	const output = ps(`$a=New-DaemonStartupClock; $b=New-DaemonStartupClock
+ function Start-Sleep { param([int]$Milliseconds) $script:delay=$Milliseconds }
+ Wait-DaemonStartupPoll
+ [ordered]@{type=$a.GetType().FullName;running=($a.IsRunning -and $b.IsRunning);distinct=(-not [object]::ReferenceEquals($a,$b));delay=$script:delay} | ConvertTo-Json -Compress
+ $a.Stop(); $b.Stop()`);
+	assert.deepEqual(JSON.parse(output), {
+		type: "System.Diagnostics.Stopwatch",
+		running: true,
+		distinct: true,
+		delay: 250,
+	});
+});
 test('exited root still requires contained descendant termination, not root-only WaitForExit', () => {
  const output = ps(`${containedModel}; $ok=Stop-DaemonStartupProcess $script:owner; [ordered]@{ok=$ok;childAlive=$script:root.ChildAlive;stops=$script:owner.Stops} | ConvertTo-Json -Compress`);
  assert.deepEqual(JSON.parse(output),{ok:true,childAlive:false,stops:1});
