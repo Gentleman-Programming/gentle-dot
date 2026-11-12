@@ -16,23 +16,23 @@ This branch contains the committed full PR232/PR233 integration history, **not**
 It must not be described as preview-ready. The original worktree remains separate; no blind copying of its WIP is authorized.
 The authoritative scope and named-owner association are [S1–S6](../odd/tasks/stable-integration.md#specs); this document implements the D1 handoff only.
 
-## Deliverables and planned issue mapping
+## Deliverables and confirmed issue mapping
 
-Named owners are people, not inferred GitHub handles or assignees. The parent will publish to `Gentleman-Programming/gentle-dot` and reconcile confirmed issue URLs later.
-“Pending parent publication” is a placeholder, not an issue number, assignment or completion claim.
+Named owners are people, not inferred GitHub handles or assignees. All ten issues were created and read back in `Gentleman-Programming/gentle-dot` with these owners in their titles/bodies, and no GitHub account assignees or labels.
+Publication completes the coordination handoff, not the technical work: every card remains planned.
 
 | ID | Named owner | Deliverable | Dependencies | GitHub issue |
 | --- | --- | --- | --- | --- |
-| I1 | Maicol | Preview isolation and launcher identity | None | Pending parent publication |
-| W1 | PabloGNU | Windows native runtime and owned shutdown | I1 | Pending parent publication |
-| W2 | PabloGNU | Windows native voice acceptance | W1 | Pending parent publication |
-| W3 | PabloGNU | Disposable Windows installation lifecycle | W1 | Pending parent publication |
-| L1 | Cinlo | Linux x64 desktop/daemon/native acceptance | I1 for shared isolation | Pending parent publication |
-| L2 | Cinlo | Linux x64 producer and installation lifecycle | L1 | Pending parent publication |
-| UI1 | Mars | Existing UI flow regressions | None; parallel with I1 | Pending parent publication |
-| UI2 | Mars | Voice-control interaction acceptance | UI1, W2, L1 acceptance | Pending parent publication |
-| I2 | Maicol | Shared integration and reviewable slices | Approved contributor slices as available | Pending parent publication |
-| I3 | Maicol | One stable candidate qualification dossier | I1, W1–W3, L1–L2, UI1–UI2, I2 | Pending parent publication |
+| I1 | Maicol | Preview isolation and launcher identity | None | [#237](https://github.com/Gentleman-Programming/gentle-dot/issues/237) |
+| W1 | PabloGNU | Windows native runtime and owned shutdown | I1 | [#238](https://github.com/Gentleman-Programming/gentle-dot/issues/238) |
+| W2 | PabloGNU | Windows native voice acceptance | W1 | [#239](https://github.com/Gentleman-Programming/gentle-dot/issues/239) |
+| W3 | PabloGNU | Disposable Windows installation lifecycle | W1 | [#240](https://github.com/Gentleman-Programming/gentle-dot/issues/240) |
+| L1 | Cinlo | Linux x64 desktop/daemon/native acceptance | I1 for shared isolation | [#241](https://github.com/Gentleman-Programming/gentle-dot/issues/241) |
+| L2 | Cinlo | Linux x64 producer and installation lifecycle | L1 | [#242](https://github.com/Gentleman-Programming/gentle-dot/issues/242) |
+| UI1 | Mars | Existing UI flow regressions | None; parallel with I1 | [#243](https://github.com/Gentleman-Programming/gentle-dot/issues/243) |
+| UI2 | Mars | Voice-control interaction acceptance | UI1, W2, L1 acceptance | [#244](https://github.com/Gentleman-Programming/gentle-dot/issues/244) |
+| I2 | Maicol | Shared integration and reviewable slices | Approved contributor slices as available | [#245](https://github.com/Gentleman-Programming/gentle-dot/issues/245) |
+| I3 | Maicol | One stable candidate qualification dossier | I1, W1–W3, L1–L2, UI1–UI2, I2 | [#246](https://github.com/Gentleman-Programming/gentle-dot/issues/246) |
 
 ## Working practices and boundaries
 
@@ -245,4 +245,4 @@ Start with the [README](../README.md), [installation guide](install.md), [deskto
 [Windows testing](windows-testing.md), [runtime discovery](windows-runtime-discovery.md), [Windows voice](windows-voice-output.md),
 [Linux testing](linux-testing.md), [platform packaging](platform-packaging.md) and [distribution boundaries](distribution.md).
 Historical status sections in platform docs are not current acceptance; use the explicit candidate SHA and this handoff's privacy/consent boundaries.
-Next: the parent checks this docs-only handoff, commits/publishes it and the person-associated tracker, then fills confirmed issue URLs. Implementation and release remain future, separately authorized work.
+Next: Maicol scopes I1 and Mars scopes UI1 against the agreed baseline, then the platform owners follow the dependency table. Use the confirmed issue for each delivery. Implementation, native acceptance and release remain future work; this documentation publication grants no extra execution or release authority.
