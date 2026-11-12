@@ -1,0 +1,172 @@
+// PARENT HOST ONLY: one first launch; --check is deliberately not a supported mode.
+// Worker validation uses node --check (no imports or behavioral bodies executed).
+import fs from 'node:fs';
+import path from 'node:path';
+import net from 'node:net';
+import http from 'node:http';
+import {spawn, spawnSync} from 'node:child_process';
+import {createHash, randomBytes} from 'node:crypto';
+import {fileURLToPath, pathToFileURL} from 'node:url';
+const here=path.dirname(fileURLToPath(import.meta.url));
+const read=p=>JSON.parse(fs.readFileSync(p,'utf8'));
+const sha=p=>createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+const m=read(path.join(here,'manifest.json'));
+const rootPath=p=>path.join(m.cwd,p);
+const ensure=(v,category)=>{if(!v){const e=new Error();e.category=category;throw e;}};
+const delay=ms=>new Promise(r=>setTimeout(r,ms));
+let c,run,child,exited=false,spawnError=false,appPid=null,phase='preflight',ports=[];
+const save=(name,data)=>c.save(path.join(run,name+'.json'),data);
+function noLinks(p){
+  for(let q=path.resolve(p);;q=path.dirname(q)){
+    const s=fs.lstatSync(q); ensure(s.isDirectory()&&!s.isSymbolicLink(),'nonregular_parent');
+    ensure(fs.realpathSync.native(q).replace(/^\\\\\?\\/,'').toLowerCase()===q.toLowerCase(),'aliased_parent');
+    if(path.dirname(q)===q)break;
+  }
+}
+function envFor(base){
+  // No process.env, PATH inheritance, npmrc, .env, profile or credential discovery.
+  return {SystemRoot:'C:/Windows',WINDIR:'C:/Windows',COMSPEC:'C:/Windows/System32/cmd.exe',
+    ProgramFiles:'C:/Program Files','ProgramFiles(x86)':'C:/Program Files (x86)',ProgramW6432:'C:/Program Files',
+    OS:'Windows_NT',PATHEXT:'.COM;.EXE;.BAT;.CMD',PROCESSOR_ARCHITECTURE:'AMD64',
+    PATH:'C:/Program Files/nodejs;C:/Windows/System32;C:/Windows',
+    PSModulePath:'C:/Windows/System32/WindowsPowerShell/v1.0/Modules',
+    HOME:base+'/home',USERPROFILE:base+'/home',APPDATA:base+'/roaming',LOCALAPPDATA:base+'/local',
+    TEMP:base+'/tmp',TMP:base+'/tmp',TMPDIR:base+'/tmp',XDG_CONFIG_HOME:base+'/config',
+    XDG_DATA_HOME:base+'/data',XDG_CACHE_HOME:base+'/cache',XDG_STATE_HOME:base+'/state',
+    GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:run+'/empty.gitconfig',GIT_CONFIG_SYSTEM:run+'/empty.gitconfig',
+    GIT_OPTIONAL_LOCKS:'0',GIT_TERMINAL_PROMPT:'0',NPM_CONFIG_USERCONFIG:run+'/empty.npmrc',
+    NPM_CONFIG_GLOBALCONFIG:run+'/empty.npmrc',NPM_CONFIG_CACHE:base+'/cache',
+    COREPACK_ENABLE_NETWORK:'0',NO_UPDATE_NOTIFIER:'1',
+    GENTLE_SHELL_NO_AUTO_SETUP:'1',GENTLE_PI_SKIP_GENTLE_AI_INSTALL:'1',GENTLE_PI_AGENTS:'0'};
+}
+function observe(env,root){
+  const result=spawnSync(m.powershell,['-NoLogo','-NoProfile','-NonInteractive','-File',path.join(here,'observe.ps1'),
+    '-AppPid',String(appPid),'-AppExe',rootPath(m.app),'-Root',root,'-NodeExe',m.node,
+    '-EngramExe',rootPath(m.engram),'-DaemonPort',String(ports[0].port),'-MemoryPort',String(ports[1].port)],
+    {cwd:run,env,encoding:'utf8',timeout:12000,maxBuffer:32768,windowsHide:true});
+  ensure(result.status===0&&!result.error,'owned_metadata_unavailable');
+  let value;try{value=JSON.parse(result.stdout);}catch{ensure(false,'owned_metadata_invalid');}
+  ensure(value.ok===true&&value.appPid===appPid,'owned_metadata_invalid');return value;
+}
+async function reserve(){
+  const server=net.createServer(); await new Promise((resolve,reject)=>{
+    server.once('error',reject);server.listen({host:'127.0.0.1',port:0,exclusive:true},resolve);
+  });
+  const port=server.address().port;
+  if([4317,5173,7437,7438].includes(port)||ports.some(p=>p.port===port)){
+    await new Promise(r=>server.close(r));ensure(false,'port_selection_refused');
+  }
+  return {server,port};
+}
+function health(port){
+  // No redirects; no headers, tokens, raw response bodies or arbitrary fields retained.
+  return new Promise(resolve=>{
+    let done=false,timer;const finish=value=>{if(!done){done=true;clearTimeout(timer);resolve(value);}};
+    const request=http.get({host:'127.0.0.1',port,path:'/health',agent:false,timeout:1500},response=>{
+      let count=0;const parts=[];
+      response.on('data',part=>{count+=part.length;if(count>4096){response.destroy();finish(null);}else parts.push(part);});
+      response.on('error',()=>finish(null));
+      response.on('end',()=>{
+        try{const body=JSON.parse(Buffer.concat(parts).toString('utf8'));
+          const allowed=['starting','restarting','error','needs_you','idle','working','thinking'];
+          finish(response.statusCode===200&&body.ok===true&&allowed.includes(body.agentState)
+            ?{ok:true,agentState:body.agentState}:null);
+        }catch{finish(null);}
+      });
+    });
+    timer=setTimeout(()=>{request.destroy();finish(null);},1500);
+    request.once('timeout',()=>{request.destroy();finish(null);});request.once('error',()=>finish(null));
+  });
+}
+try {
+  ensure(process.platform==='win32'&&process.arch==='x64'&&process.argv.length===2,'host_invocation');
+  ensure(path.resolve(here).toLowerCase()===rootPath('build/pr-preview-open').toLowerCase(),'wrong_worktree');
+  noLinks(here);
+  for(const [p,h]of Object.entries(m.seals))ensure(sha(rootPath(p))===h,'sealed_input_changed');
+  ensure(sha(m.node)===m.nodeSha256&&sha(process.execPath)===m.nodeSha256,'node_identity');
+  // Fail closed: the supplied 3065... pin belongs to the ZIP, not the executable.
+  // Parent must reconcile this explicit prerequisite in the manifest, never bypass this check.
+  ensure(m.suppliedEngramBinarySha256===m.qualifiedEngramBinarySha256,'engram_pin_is_archive_not_exe');
+  ensure(sha(rootPath(m.engram))===m.suppliedEngramBinarySha256,'engram_identity');
+  ensure(sha(rootPath(m.app))===m.appSha256,'preview_identity');
+  c=await import(pathToFileURL(rootPath(m.common)).href);
+  c.sealedSource();c.freezeArtifacts();
+  const capacity=fs.statfsSync(here);ensure(capacity.bavail*capacity.bsize>=m.minimumFreeBytes,'capacity');
+  // Exclusive single-use latch: retained even after failure, no retry/second launch.
+  fs.writeFileSync(path.join(here,'first-launch.claim.json'),JSON.stringify({at:new Date().toISOString(),owner:'parent-host',maximumAppLaunches:1})+'\n',{flag:'wx'});
+  run=fs.mkdtempSync(path.join(here,'parent-'));noLinks(run);
+  const root=path.join(run,'gentle-dot-preview-'+randomBytes(6).toString('hex'));
+  const bootstrap=run+'/bootstrap';fs.mkdirSync(bootstrap);
+  for(const dir of ['home','roaming','local','tmp','config','data','cache','state'])fs.mkdirSync(bootstrap+'/'+dir);
+  for(const name of ['empty.gitconfig','empty.npmrc'])fs.writeFileSync(run+'/'+name,'',{flag:'wx'});
+  const probeEnv=envFor(bootstrap),env=envFor(root);
+  const prior=c.read(rootPath(m.sourceSnapshot));
+  const before=c.snapshot(probeEnv,Object.keys(prior.receipts));
+  for(const key of ['files','head','index','rawIndex','status'])
+    ensure(JSON.stringify(before[key])===JSON.stringify(prior[key]),'qualified_source_snapshot_changed');
+  save('before',before);
+  const sdk=read(rootPath(m.sdkOwnership));
+  ensure(sha(sdk.integrity.path)===sdk.integrity.sha256,'sdk_integrity_changed');
+  for(const [relative,h]of Object.entries(sdk.sourceHashes))ensure(sha(sdk.sdkRoot+'/'+relative)===h,'sdk_producer_changed');
+  const artifacts=c.freezeArtifacts();
+  const frontend=read(rootPath('build/pr-preview-native/run-xd4AdL/frontend-files.json'));
+  for(const [p,h]of Object.entries(frontend))ensure(sha(path.join(rootPath(m.embeddedUi),p))===h,'qualified_ui_changed');
+  for(const [p,h]of Object.entries(prior.files))ensure(sha(rootPath(p))===h,'qualified_source_changed');
+  ports.push(await reserve());ports.push(await reserve());
+  Object.assign(env,{GENTLE_DOT_DATA_DIR:root,GENTLE_DOT_NODE:m.node,GENTLE_DOT_DAEMON_SCRIPT:rootPath('packages/daemon/src/cli.ts'),
+    GENTLE_DOT_PORT:String(ports[0].port),GENTLE_DOT_HOST:'127.0.0.1',GENTLE_DOT_ENGRAM:'private',
+    GENTLE_DOT_ENGRAM_PORT:String(ports[1].port),ENGRAM_BIN:rootPath(m.engram),
+    ENGRAM_DATA_DIR:root+'/home/.engram',GENTLE_DOT_UI_DIR:rootPath(m.embeddedUi)});
+  // RUNTIME_DIR and GENTLE_DOT_RUNTIME intentionally absent. Source daemon receives the
+  // binary's compile-captured qualified PATH, not this launcher's PATH or packaged whitelist.
+  ensure(!fs.existsSync(root)&&!('GENTLE_DOT_RUNTIME_DIR'in env)&&!('GENTLE_DOT_RUNTIME'in env),'fresh_root_required');
+  save('launch',{owner:'parent-host',root,app:rootPath(m.app),args:['--toggle'],env,
+    ports:ports.map(p=>p.port),capacityFreeBytes:capacity.bavail*capacity.bsize,artifacts,
+    oneLaunch:true,stdout:'ignored',stderr:'ignored',selectionRace:'unavoidable after socket close; never accept a foreign daemon',
+    failurePolicy:'retain receipts and owned app for parent-only tray Quit; never force kill or relaunch'});
+  // Snapshot and hashing completed before releasing both reservations immediately before spawn.
+  await Promise.all(ports.map(p=>new Promise(r=>p.server.close(r))));
+  phase='spawn';
+  child=spawn(rootPath(m.app),['--toggle'],{cwd:run,env,stdio:'ignore',detached:true,windowsHide:false});
+  child.once('exit',()=>{exited=true;});child.once('error',()=>{spawnError=true;});
+  await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',()=>reject(Object.assign(new Error(),{category:'app_spawn_failed'})));});
+  appPid=child.pid;save('app-pid',{pid:appPid,recordedAt:new Date().toISOString(),detached:true,exitedObserved:false});
+  child.unref();phase='readiness';
+  let firstCreation,ready=null,last=null,healthProjection=null;
+  const deadline=Date.now()+m.deadlineMs;
+  for(let attempt=0;attempt<m.maxObservations&&Date.now()<deadline;attempt++){
+    ensure(!exited&&!spawnError,'app_exited_before_readiness');
+    last=observe(probeEnv,root);
+    if(firstCreation===undefined)firstCreation=last.appCreated;
+    ensure(last.appCreated===firstCreation,'app_pid_identity_changed');
+    ensure(last.memoryListenerCount===0||last.memoryOwned,'foreign_private_memory_listener');
+    // Never make an HTTP request until listener PID is an exact-Node descendant of this app.
+    if(last.daemonOwned){
+      healthProjection=await health(ports[0].port);
+      const again=observe(probeEnv,root);
+      ensure(again.appCreated===firstCreation&&again.daemonOwned&&again.daemonPid===last.daemonPid,'daemon_ownership_changed');
+      last=again;
+      ensure(last.memoryListenerCount===0||last.memoryOwned,'foreign_private_memory_listener');
+      const w=last.webviews;
+      if(healthProjection?.agentState==='idle'&&last.visible&&last.previewTitle&&w.length>0&&
+        w.some(v=>v.userDataArgument&&v.exactWebviewRoot)&&w.every(v=>v.publicRuntime&&(!v.userDataArgument||v.underRoot))){
+        ready={metadata:last,health:healthProjection};break;
+      }
+    }
+    await delay(2000);
+  }
+  ensure(ready,'readiness_deadline_or_profile_unproven');
+  c.preservation(run,probeEnv);
+  save('readiness',{ready:true,appPid,root,...ready,leftVisible:true,exitedObserved:exited,
+    screenshotVerified:false,voiceVerified:false,providerVerified:false,packagedPathVerified:false});
+  ensure(!exited,'app_exited_after_readiness');
+  console.log(JSON.stringify({ready:true,appPid,run,receipt:run+'/readiness.json',leftVisible:true}));
+} catch(error) {
+  for(const p of ports)if(p.server.listening)await new Promise(r=>p.server.close(r));
+  const result={ready:false,category:error?.category??'preparation_or_owned_observation_failed',phase,
+    appPid,exitedObserved:exited,appMayRemainVisible:!!appPid&&!exited,
+    action:appPid&&!exited?'Parent must use this preview tray Quit; no automatic kill/retry.':'No app launch confirmed.',
+    retryAuthorized:false};
+  if(run&&c){try{save('failure',result);}catch{}try{c.preservation(run,envFor(run+'/bootstrap'));save('preservation',{unchanged:true});}catch{try{save('preservation',{unchanged:false});}catch{}}}
+  console.error(JSON.stringify(result));process.exitCode=1;
+}

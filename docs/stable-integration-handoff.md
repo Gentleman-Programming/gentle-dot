@@ -20,7 +20,7 @@ Recipients first accept; ownership transfer is not delivery or execution consent
 This branch now consolidates the full PR232/PR233 history, the ten selected preview/test source files from the original integration worktree, and the seven selected primary CI/helper/test/doc files. Source manifests record byte-identical transfers; the source worktrees remain untouched. Generated binaries, caches, unrelated WIP and private data are not committed.
 Fresh upstream `main` at `f97d56d884b1d3c178f415b95d486464e7b220bf` was already included (zero main-only commits), so no merge from main was needed.
 This is a common **testing checkpoint**, not preview-ready or stable acceptance. I1 memory-startup isolation and the historical T6 native-containment proof remain open.
-The authoritative scope and owner association are [S1–S10](../odd/tasks/stable-integration.md#specs). A dedicated exact-branch Windows x64/Linux x64 workflow runs tests/builds and disposable installation checks only, never deployment or release.
+The authoritative scope and owner association are [S1–S11](../odd/tasks/stable-integration.md#specs). A dedicated exact-branch Windows x64/Linux x64 workflow runs tests/builds and disposable installation checks only, never deployment or release.
 
 ## Deliverables and confirmed issue mapping
 
@@ -153,6 +153,8 @@ Parent Git-diff confirmation attributes the removed import to **our merge `c8e11
 All cards require the common PR template, applicable R coordination, and parent acceptance of their exact scope before work. Acceptance below is a future observable target.
 
 ### I1 — Preview isolation and launcher identity
+
+**Missing evidence attached (S11):** [original inert launcher/observer, recorded identity digests and post-S7/S8 stop record](evidence/i1-handoff/README.md). These are original sources, not an I1 fix or runnable bundle. The packet distinguishes original integration S7/S8 from stable S8/C5; no ownership reconfirmation, implementation, checks or CI is requested. Existing limits require bounded human disposition or stop, not an automatic new attempt.
 
 **Proposed owner: PabloGNU (PENDING ACCEPTANCE). Dependencies: none; old exhausted limits require bounded human disposition.**
 - Goal: prevent preview startup from using an unowned or ambiguous private-memory listener; reconcile the launcher executable pin without altering production defaults.

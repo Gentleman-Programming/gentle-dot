@@ -1,0 +1,56 @@
+# Parent-host only. Never enumerate all processes or expose command lines.
+param([int]$AppPid,[string]$AppExe,[string]$Root,[string]$NodeExe,[string]$EngramExe,[int]$DaemonPort,[int]$MemoryPort)
+$ErrorActionPreference='Stop'
+$ProgressPreference='SilentlyContinue'
+try {
+  Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class PreviewWindow { [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h); }' -ErrorAction Stop
+  $app=Get-CimInstance Win32_Process -Filter "ProcessId=$AppPid" -Property ProcessId,ParentProcessId,CreationDate,ExecutablePath
+  if (!$app -or $app.ExecutablePath -ine $AppExe) { throw 'identity' }
+  $owned=@($app); $queue=[System.Collections.Generic.Queue[object]]::new(); $queue.Enqueue($app)
+  while ($queue.Count -gt 0) {
+    $parent=$queue.Dequeue()
+    $children=@(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($parent.ProcessId)" -Property ProcessId,ParentProcessId,CreationDate,ExecutablePath)
+    foreach ($child in $children) {
+      if ($child.CreationDate -lt $parent.CreationDate) { throw 'lineage' }
+      if ($owned.Count -ge 48 -or $owned.ProcessId -contains $child.ProcessId) { throw 'bound' }
+      $owned+= $child; $queue.Enqueue($child)
+    }
+  }
+  $webviews=@(); $nodes=@(); $memory=@()
+  foreach ($p in $owned) {
+    if ($p.ExecutablePath -ieq $NodeExe) { $nodes+= [int]$p.ProcessId }
+    if ($p.ExecutablePath -ieq $EngramExe) { $memory+= [int]$p.ProcessId }
+    if ([IO.Path]::GetFileName($p.ExecutablePath) -ieq 'msedgewebview2.exe') {
+      # Read only an owned WebView's command line; immediately reduce user-data-dir to booleans.
+      $cmd=(Get-CimInstance Win32_Process -Filter "ProcessId=$($p.ProcessId)" -Property CommandLine).CommandLine
+      $match=[regex]::Match($cmd,'(?i)(?:^|\s)--user-data-dir=(?:"([^"]+)"|([^\s"]+))')
+      $contained=$false; $exact=$false
+      if ($match.Success) {
+        $v=$match.Groups[1].Value; if (!$v) { $v=$match.Groups[2].Value }
+        $full=[IO.Path]::GetFullPath($v).TrimEnd('\','/')
+        $wanted=[IO.Path]::GetFullPath((Join-Path $Root 'webview')).TrimEnd('\','/')
+        $exact=$full -ieq $wanted
+        $contained=$full.StartsWith(([IO.Path]::GetFullPath($Root).TrimEnd('\','/')+'\'),[StringComparison]::OrdinalIgnoreCase)
+      }
+      $cmd=$null; $v=$null; $full=$null
+      $machinePath=$p.ExecutablePath.StartsWith('C:\Program Files (x86)\Microsoft\EdgeWebView\Application\',[StringComparison]::OrdinalIgnoreCase)
+      $webviews+= @{pid=[int]$p.ProcessId; userDataArgument=$match.Success; underRoot=$contained; exactWebviewRoot=$exact; publicRuntime=$machinePath}
+    }
+  }
+  $daemon=@(Get-NetTCPConnection -LocalPort $DaemonPort -State Listen -ErrorAction SilentlyContinue)
+  $engram=@(Get-NetTCPConnection -LocalPort $MemoryPort -State Listen -ErrorAction SilentlyContinue)
+  $daemonOwned=($daemon.Count -eq 1 -and $daemon[0].LocalAddress -eq '127.0.0.1' -and $nodes -contains [int]$daemon[0].OwningProcess)
+  $memoryOwned=($engram.Count -eq 1 -and $memory -contains [int]$engram[0].OwningProcess)
+  $wp=Get-Process -Id $AppPid -ErrorAction Stop
+  $visible=($wp.MainWindowHandle -ne [IntPtr]::Zero -and [PreviewWindow]::IsWindowVisible($wp.MainWindowHandle))
+  $title=($wp.MainWindowTitle -ceq 'Gentle Dot Preview')
+  # Creation scalar anchors repeated observations against PID reuse, not a command-line dump.
+  @{ok=$true; appPid=$AppPid; appCreated=$app.CreationDate.ToUniversalTime().Ticks.ToString(); ownedCount=$owned.Count;
+    visible=$visible; previewTitle=$title; daemonOwned=$daemonOwned;
+    daemonPid=$(if($daemonOwned){[int]$daemon[0].OwningProcess}else{0});
+    memoryListenerCount=$engram.Count; memoryOwned=$memoryOwned; webviews=@($webviews)} | ConvertTo-Json -Depth 4 -Compress
+} catch {
+  # Do not emit exception text, WMI data, paths, headers or credentials.
+  '{"ok":false,"category":"owned_metadata_unavailable"}'
+  exit 1
+}
