@@ -18,11 +18,14 @@ const targets = [
  ['linux-x64', 'ubuntu-24.04', 'linux', 'x64', 'x86_64-unknown-linux-gnu'],
  ['linux-arm64', 'ubuntu-24.04-arm', 'linux', 'arm64', 'aarch64-unknown-linux-gnu'],
  ['darwin-x64', 'macos-15-intel', 'darwin', 'x64', 'x86_64-apple-darwin'],
- ['darwin-arm64', 'macos-15', 'darwin', 'arm64', 'aarch64-apple-darwin'],
+ ['darwin-arm64', 'macos-26', 'darwin', 'arm64', 'aarch64-apple-darwin'],
 ];
 function call(args, cwd) {
  return spawnSync(process.execPath, [cli, ...args], { cwd, encoding: 'utf8', env: {
-  PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR, OS: process.env.OS,
+  SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR, OS: process.env.OS,
+  HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE,
+  APPDATA: process.env.APPDATA, LOCALAPPDATA: process.env.LOCALAPPDATA,
+  TEMP: process.env.TEMP, TMP: process.env.TMP, TMPDIR: process.env.TMPDIR, XDG_CACHE_HOME: process.env.XDG_CACHE_HOME,
  } });
 }
 function snapshot(dir) {

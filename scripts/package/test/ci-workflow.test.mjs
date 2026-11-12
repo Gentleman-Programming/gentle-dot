@@ -76,6 +76,15 @@ test('installer checks consume the matching metadata and state unsupported ARM64
   } else if (item.arch === 'x64') {
    const smoke = steps.find(s => s.run?.includes('./scripts/windows/smoke-install.ps1'));
    assert.equal(smoke.if, "matrix.target == 'windows-x64'");
+   const launch = steps.find(s => s.name === 'Windows x64 packaged Node and daemon launch contract');
+   assert.deepEqual(launch, {
+    name: 'Windows x64 packaged Node and daemon launch contract',
+    if: "matrix.target == 'windows-x64'",
+    shell: 'pwsh',
+    run: './scripts/windows/test-daemon-startup.ps1 -Runtime "./build/windows/runtime"',
+   });
+   assert.ok(steps.indexOf(launch) > steps.findIndex(s => s.run === '${{ matrix.build }}'));
+   assert.ok(steps.indexOf(launch) < steps.indexOf(smoke));
    assert.match(smoke.run, /plan.installers\[0\].directory/);
    assert.match(smoke.run, /Count -ne 1/);
    assert.match(smoke.run, /-DiagnosticsPath "\$env:RUNNER_TEMP\/windows-smoke-diagnostics.json"/);

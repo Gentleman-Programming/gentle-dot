@@ -1,0 +1,218 @@
+name: Stable integration tests (not a release)
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - docs/stable-integration-team
+    paths:
+      - .github/workflows/integration-tests.yml
+      - .github/workflows/native-distributions.yml
+      - .github/workflows/windows.yml
+      - apps/**
+      - packages/**
+      - scripts/**
+      - docker/**
+      - packaging/**
+      - patches/**
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - .npmrc
+      - .nvmrc
+      - tsconfig*.json
+      - vitest.config.ts
+permissions:
+  contents: read
+jobs:
+  functional:
+    name: Static, TypeScript and UI tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.5.0'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.1'
+          architecture: x64
+      - uses: actions/setup-go@v5
+        if: runner.os == 'Windows'
+        with:
+          go-version: '1.25.10'
+          architecture: x64
+          cache: false
+      - run: pnpm install --frozen-lockfile
+      # Canonical windows.yml app-channel prerequisite; compile only on the native CI runner.
+      - uses: ilammy/msvc-dev-cmd@v1.13.0
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
+      - name: Build app-channel addon
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = node -p process.version
+          $inputs = Join-Path $env:RUNNER_TEMP 'node-addon-inputs'
+          New-Item -ItemType Directory -Force -Path $inputs | Out-Null
+          $release = "https://nodejs.org/download/release/$version"
+          Invoke-WebRequest "$release/node-$version-headers.tar.gz" -OutFile "$inputs/headers.tar.gz"
+          Invoke-WebRequest "$release/win-x64/node.lib" -OutFile "$inputs/node.lib"
+          # Both downloads must match the release's published SHA-256 sums.
+          $sums = (Invoke-WebRequest "$release/SHASUMS256.txt").Content -split "`n"
+          foreach ($pair in @(@("node-$version-headers.tar.gz", 'headers.tar.gz'), @('win-x64/node.lib', 'node.lib'))) {
+            $line = $sums | Where-Object { $_ -match "^[0-9a-f]{64}\s+$([regex]::Escape($pair[0]))$" }
+            if (-not $line) { throw "No published checksum for $($pair[0])" }
+            $actual = (Get-FileHash -Algorithm SHA256 (Join-Path $inputs $pair[1])).Hash.ToLowerInvariant()
+            if ($actual -ne ($line -split '\s+')[0]) { throw "Checksum mismatch for $($pair[0])" }
+          }
+          tar -xf "$inputs/headers.tar.gz" -C $inputs
+          if ($LASTEXITCODE -ne 0) { throw 'Node header extraction failed' }
+          $compiler = (Get-Command cl.exe).Source
+          if (-not [IO.Path]::IsPathFullyQualified($compiler)) { throw 'Expected absolute cl.exe path' }
+          pnpm --filter @gentle-dot/daemon run build:windows-stop -- --compiler "$compiler" --headers "$inputs/node-$version/include/node" --node-lib "$inputs/node.lib"
+          if ($LASTEXITCODE -ne 0) { throw 'Native addon build failed' }
+      # Windows Vitest globalSetup prepares its Go private-storage helper on this fresh runner.
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm --filter @gentle-dot/ui build
+      - name: Retained inert fixture root
+        run: |
+          mkdir -p "$RUNNER_TEMP/integration-inert"
+          echo "GENTLE_DOT_CI_TEST_ROOT=$RUNNER_TEMP/integration-inert" >> "$GITHUB_ENV"
+      - run: node --test scripts/package/test/ci-native.test.mjs scripts/package/test/ci-workflow.test.mjs scripts/package/test/integration-workflow.test.mjs
+      - name: Windows inert startup contracts (not Win32 proof)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:GENTLE_DOT_TEST_PWSH = (Get-Process -Id $PID).Path
+          node --test scripts/windows/test/daemon-startup.test.mjs
+  targets:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.1'
+      - id: targets
+        shell: bash
+        run: |
+          node --input-type=module -e 'import {matrix} from "./scripts/package/ci-native.mjs"; import {appendFileSync} from "node:fs"; const include=matrix.include.filter(item => ["windows-x64","linux-x64"].includes(item.target)); if(include.length !== 2) throw Error("Expected two native x64 targets"); appendFileSync(process.env.GITHUB_OUTPUT,"matrix="+JSON.stringify({include})+"\n");'
+  native:
+    name: Native build and installed evidence (${{ matrix.target }})
+    needs: [functional, targets]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.1'
+          architecture: ${{ matrix.arch }}
+      - name: Refuse mismatched native host before build output
+        id: plan
+        run: |
+          node scripts/package/ci-native.mjs plan --target '${{ matrix.target }}' --source '${{ github.sha }}' > "$RUNNER_TEMP/native-plan.json"
+          node -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP+"/native-plan.json"));fs.appendFileSync(process.env.GITHUB_OUTPUT,"artifact="+p.artifactName+"\n")'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '11.5.0'
+      - uses: actions/setup-go@v5
+        if: runner.os == 'Windows'
+        with:
+          go-version: '1.25.10'
+          architecture: ${{ matrix.arch }}
+          cache: false
+      - name: Matching native Rust toolchain (not cross compilation)
+        run: |
+          rustup set default-host '${{ matrix.rust }}'
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc -vV | grep -Fx 'host: ${{ matrix.rust }}'
+      - name: Docker native architecture prerequisite
+        if: runner.os == 'Linux'
+        run: |
+          docker info
+          test "$(docker info --format '{{.Architecture}}')" = '${{ matrix.arch == 'x64' && 'x86_64' || 'aarch64' }}'
+      - name: Frozen workspace dependencies (runtime lock gap remains)
+        run: pnpm install --frozen-lockfile
+      # The Windows runtime producer requires the same fresh-checkout addon as tests.
+      - uses: ilammy/msvc-dev-cmd@v1.13.0
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
+      - name: Build app-channel addon
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = node -p process.version
+          $inputs = Join-Path $env:RUNNER_TEMP 'node-addon-inputs'
+          New-Item -ItemType Directory -Force -Path $inputs | Out-Null
+          $release = "https://nodejs.org/download/release/$version"
+          Invoke-WebRequest "$release/node-$version-headers.tar.gz" -OutFile "$inputs/headers.tar.gz"
+          Invoke-WebRequest "$release/win-x64/node.lib" -OutFile "$inputs/node.lib"
+          # Both downloads must match the release's published SHA-256 sums.
+          $sums = (Invoke-WebRequest "$release/SHASUMS256.txt").Content -split "`n"
+          foreach ($pair in @(@("node-$version-headers.tar.gz", 'headers.tar.gz'), @('win-x64/node.lib', 'node.lib'))) {
+            $line = $sums | Where-Object { $_ -match "^[0-9a-f]{64}\s+$([regex]::Escape($pair[0]))$" }
+            if (-not $line) { throw "No published checksum for $($pair[0])" }
+            $actual = (Get-FileHash -Algorithm SHA256 (Join-Path $inputs $pair[1])).Hash.ToLowerInvariant()
+            if ($actual -ne ($line -split '\s+')[0]) { throw "Checksum mismatch for $($pair[0])" }
+          }
+          tar -xf "$inputs/headers.tar.gz" -C $inputs
+          if ($LASTEXITCODE -ne 0) { throw 'Node header extraction failed' }
+          $compiler = (Get-Command cl.exe).Source
+          if (-not [IO.Path]::IsPathFullyQualified($compiler)) { throw 'Expected absolute cl.exe path' }
+          pnpm --filter @gentle-dot/daemon run build:windows-stop -- --compiler "$compiler" --headers "$inputs/node-$version/include/node" --node-lib "$inputs/node.lib"
+          if ($LASTEXITCODE -ne 0) { throw 'Native addon build failed' }
+      - name: Build with existing Dot producer and integrity guards
+        run: ${{ matrix.build }}
+      - name: Linux installation and runtime checks in clean containers
+        if: runner.os == 'Linux'
+        run: ${{ matrix.check }}
+      - name: Windows x64 packaged Node and daemon launch contract
+        if: matrix.target == 'windows-x64'
+        shell: pwsh
+        run: ./scripts/windows/test-daemon-startup.ps1 -Runtime "./build/windows/runtime"
+      - name: Windows x64 isolated install, hash, readiness, reinstall and uninstall
+        if: matrix.target == 'windows-x64'
+        shell: pwsh
+        run: |
+          $plan = Get-Content "$env:RUNNER_TEMP/native-plan.json" -Raw | ConvertFrom-Json
+          $installers = @(Get-ChildItem -LiteralPath $plan.installers[0].directory -Filter '*-setup.exe' -File)
+          if ($installers.Count -ne 1) { throw 'Expected exactly one NSIS installer' }
+          ./scripts/windows/smoke-install.ps1 -Installer $installers[0].FullName -DiagnosticsPath "$env:RUNNER_TEMP/windows-smoke-diagnostics.json"
+      - name: Sanitized Windows startup diagnostics
+        if: failure() && matrix.target == 'windows-x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-startup-diagnostics
+          path: ${{ runner.temp }}/windows-smoke-diagnostics.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Require installers and collect byte identities (QA only)
+        run: node scripts/package/ci-native.mjs collect --target '${{ matrix.target }}' --source '${{ github.sha }}' --out build/native-qa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.plan.outputs.artifact }}
+          path: build/native-qa/
+          if-no-files-found: error
+          retention-days: 14

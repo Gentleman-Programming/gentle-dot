@@ -65,6 +65,10 @@ jobs:
       - name: Linux installation and runtime checks in clean containers
         if: runner.os == 'Linux'
         run: ${{ matrix.check }}
+      - name: Windows x64 packaged Node and daemon launch contract
+        if: matrix.target == 'windows-x64'
+        shell: pwsh
+        run: ./scripts/windows/test-daemon-startup.ps1 -Runtime "./build/windows/runtime"
       - name: Windows x64 isolated install, hash, readiness, reinstall and uninstall
         if: matrix.target == 'windows-x64'
         shell: pwsh

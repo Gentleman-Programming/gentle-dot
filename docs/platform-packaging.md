@@ -75,7 +75,7 @@ Rust must report the selected native host. Windows Go architecture is explicit.
 
 | Platform | QA check written into CI | Missing proof |
 | --- | --- | --- |
-| Windows x64 | Existing isolated NSIS lifecycle smoke; explicit target-specific installer path, existing x64 runtime identity | Not run by this unit; physical Stop/provider acceptance separate |
+| Windows x64 | CI-only packaged Node+daemon launch contract, then existing isolated NSIS lifecycle smoke; matching installer path and x64 runtime identity | Native execution not run locally by this unit; physical Stop/provider acceptance separate |
 | Windows ARM64 | Producer's staging checks and target identity; installer required | Installed smoke explicitly unsupported; x64/default smoke is never used |
 | Linux x64/ARM64 | Native Docker server required; existing Debian/Ubuntu checks, plus Arch on x64 | Native Docker daemon/build prerequisites and container runtime checks not executed here |
 | macOS x64/ARM64 | Existing producer `--sign - --check`: nested signatures, DMG mount/copy and daemon smoke | Ad hoc only, not notarized; GUI/installed acceptance separate |
@@ -88,6 +88,57 @@ runtime npm ranges/latest Engram selection and postinstall inputs remain gaps.
 Missing upstream checksums, installers or producer runtime manifests fail the job;
 there is no `continue-on-error` fallback. ARM64 runner/tool availability is still a
 native CI prerequisite, not proven by the structural tests.
+
+### Packaged daemon launch contract (Windows x64 CI only)
+
+After build and before installer smoke, CI invokes:
+
+```powershell
+./scripts/windows/test-daemon-startup.ps1 -Runtime "./build/windows/runtime"
+```
+
+It directly launches that staged `node/node.exe` with `daemon/cli.mjs`, not the GUI
+or an ambient Node. The child environment is cleared and rebuilt from OS roots,
+packaged Node/System32 PATH and fresh data/home/appdata/temp/cache directories under
+`build/arise-ci-t6/daemon-<unique-id>`. No ambient profile, token, provider setting,
+Node option or credential is forwarded. State is retained, not uploaded or cleaned.
+
+An ephemeral loopback port uses the same reservation/release pattern as installer
+smoke (a port-reuse race remains possible). At most 12 sanitized health probes run
+within a 30-second deadline; an in-flight probe can add up to 3 seconds. Existing
+TCP/HTTP/JSON/body limits are reused. Passing requires listener connection, HTTP 200
+and a valid health shape, **not agent idle or installed readiness**. The existing
+240-second installer smoke and all integrity checks still run unchanged afterward.
+
+The CI OS adapter creates a private unnamed Windows Job Object with kill-on-close
+and no breakaway permission. It creates Node **suspended**, assigns it to the job,
+and only then resumes its primary thread. Assignment failure terminates the still
+suspended root; no uncontained daemon execution is allowed. The Unicode environment
+is explicitly constructed, and the inherited-handle list contains only an OS `NUL`
+handle for stdin/stdout/stderr: no runner stdio, job handle, raw pipes or log files.
+
+Only a fixed `daemon-startup-*` outcome is printed: passed, timeout, earlyexit,
+invalid-runtime, not-ci, failed or cleanup-failed. Exit is 0 only for passed; every
+other outcome exits 1. Cleanup unconditionally terminates the owned job, even when
+the root exited, and waits at most five seconds for **zero active job processes**.
+Root-only exit cannot certify descendant cleanup. Closing the last job handle is
+the kill-on-close backstop; cleanup errors/timeouts still fail the contract.
+There is no PID scanning or unrelated-process termination. This forced CI teardown
+is not graceful-shutdown or physical Stop proof.
+
+The embedded Win32 adapter is compiled only on actual CI launch. Local checks use
+inert doubles and inspect creation/assignment/resume ordering and job accounting;
+they do **not** compile or execute that adapter. Native compilation, nested-runner
+job compatibility, descendant teardown and handle inheritance still need separately
+authorized OS proof before native containment can be claimed.
+
+Only the `darwin-arm64` runner row changes from `macos-15` to `macos-26`, the
+[documented standard native ARM64 public runner](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+The other five rows and Node/Rust host guards stay unchanged: no emulation, paid
+runner or capacity guarantee is introduced. Intel's signed-byte compatibility
+blocker remains unresolved. Local tests use inert sources and fake process/health
+contracts; actual packaged execution and hosted macOS ARM64 acquisition still need
+CI evidence. This instrumentation does not establish a Windows startup fix.
 
 ### Sanitized Windows startup diagnostics
 
@@ -191,3 +242,91 @@ parser (no dependency installation). No full Vitest/native fixture suite is used
 **Next gate (Risk item 5):** independent CI/manifest verification and separate
 platform-native build/runtime/installed acceptance. This unit does not grant remote
 workflow dispatch, release, provider activation or application-install permission.
+
+## Stable integration branch tests (S7)
+
+**Implemented, not remotely executed:**
+[the dedicated integration workflow](../.github/workflows/integration-tests.yml)
+accepts pushes only on `docs/stable-integration-team` plus manual
+`workflow_dispatch`. Push does not require registration on the default branch;
+manual dispatch availability is not assumed before GitHub exposes the workflow.
+Its positive paths filter covers app/package/script/container/packaging inputs,
+lock/toolchain configuration, the two relevant QA workflows and the canonical
+Windows workflow used by the structural prerequisite contract. Documentation or
+ODD-evidence-only commits do not automatically repeat expensive native jobs.
+No PR, main push, deployment, release, environment or secret access is introduced.
+
+The `functional` jobs run on native Windows x64 (`windows-2022`) and Linux x64
+(`ubuntu-24.04`): frozen pnpm install, TypeScript checking, full workspace Vitest
+(including UI), UI build, and explicit deterministic CI contracts. Windows Vitest
+globalSetup may build its private-storage Go helper on the disposable runner;
+this is a prerequisite, not a skipped gate. Windows inert startup tests use the
+runner's PowerShell 7 executable, not the System32 PowerShell 5 runtime.
+
+Both Windows job paths now prepare `native/windows-stop.node` before workspace
+tests or the runtime producer, respectively. They reuse the existing
+`windows.yml` app-channel recipe: `ilammy/msvc-dev-cmd@v1.13.0` with x64 SDK
+environment, Node headers and `win-x64/node.lib` for the running pinned Node
+`24.14.1`, both verified against that official release's `SHASUMS256.txt` before
+extraction/build, then `build:windows-stop` with an absolute `cl.exe` path and
+explicit headers/library. Missing checksums, mismatches, extraction or build errors
+fail the gate. This addresses a fresh-checkout prerequisite, not a new addon or
+producer implementation; Linux execution and existing Go globalSetup are unchanged.
+
+After functional gates, `native` jobs build and collect installed evidence for
+only `windows-x64` and `linux-x64`, selecting unchanged shared metadata. Every
+selected existing native QA step is retained: OS/Node/Rust host guards, Linux
+native Docker architecture and clean-container installation/runtime checks;
+Windows staged daemon launch followed by isolated NSIS install/hash/readiness,
+reinstall/uninstall smoke, sanitized failure diagnostics, and installer/runtime
+manifest collection. The Windows producer's fd3/nativeShutdown and integrity
+requirements are not replaced by inert helper tests. Names distinguish static/UI
+results from native-build/installed evidence; individual native steps distinguish
+packaged launch from installed readiness. A failed prerequisite or check fails CI,
+not an accepted skip. Artifacts remain QA-only, with unchanged 7/14-day retention.
+
+Node `24.14.1`, pnpm `11.5.0`, Windows Go `1.25.10`, stable native Rust and the
+existing Linux Docker recipe are reused. Existing six-target QA triggers and
+`windows-native.yml` PR behavior are unchanged. There is no emulation, paid runner,
+signature bypass, provider/microphone exercise or publication step.
+
+**Local verification boundary:** parsed-YAML integration tests observed RED before
+workflow creation (3 missing-file failures), then GREEN (3 passed). Imported
+`ci-native`/`ci-workflow` deterministic contracts passed 6/6 using a physically
+copied, lock-matching YAML `2.9.0` closure and retained inert fixtures. System32
+PowerShell 5 inert startup contracts returned 4 passed/12 failed: its .NET lacks
+`ProcessStartInfo.ArgumentList`, and first-use progress produced CLIXML on stderr.
+No imported contract was weakened or corrected. A subsequent local prerequisite
+correction selected the existing PowerShell 7.6.9 executable: the same 16 inert
+contracts passed with empty stderr. The original PowerShell 5 failure remains
+retained; neither result establishes Win32/native containment. No native app,
+installer or provider ran on this host.
+
+The bounded fresh-checkout prerequisite correction adds one parsed-YAML rule:
+both Windows paths must initialize MSVC and prepare the checksum-verified,
+Node-matching addon before their consumers. Its RED run kept the original three
+contracts passing and failed only the missing-prerequisite rule. The focused GREEN
+run passed all four contracts. The rule compares parsed steps and exact canonical
+commands/guards plus ordering; it does not download headers/libraries or compile an
+addon locally. Earlier RED3/GREEN3, CI6, PS5 failure, PS7 16/16 and the parent's
+independent 33/33 evidence are retained, not replayed or replaced.
+
+**Still incomplete:** historical T6 native proof failed unexpectedly after root
+exit; its prior source-correction allowance is exhausted and is not reset here.
+Neither this workflow nor its deterministic tests qualify Win32 descendant
+containment, installed readiness, effective physical Stop or platform perfection.
+The parent must independently verify the candidate, publish the exact branch,
+observe its first current-candidate CI run and retain actual failures. Any further
+native T6 correction/probe needs its own explicit authority; this workflow is not
+permission to replay that exhausted probe. Runtime-lock/provenance gaps above
+remain. I1's private-memory listener ownership/launcher qualification and cold-host
+CI outcomes are still separate missing proof; this prerequisite correction does not
+resolve them. Main was inspected as already included; no main port is part of this unit.
+
+Source-transfer receipts live in the retained, excluded
+`build/stable-consolidation-ci/` evidence directory. Seven CI/helper/test/docs
+paths were imported byte-for-byte from primary HEAD `7c6adaf`; only this appended
+section differs from the imported packaging document. Before/after receipts record
+primary HEAD, status, logical/raw index and all seven SHA-256 identities. Mirror,
+synthetic home/temp/cache and fixtures are retained for parent-controlled cleanup,
+not intended as source delivery or uploaded diagnostic content.

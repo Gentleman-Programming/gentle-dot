@@ -32,7 +32,7 @@ export const matrix = { include: [
  target('linux-x64', 'ubuntu-24.04', 'linux', 'x64', 'x86_64-unknown-linux-gnu'),
  target('linux-arm64', 'ubuntu-24.04-arm', 'linux', 'arm64', 'aarch64-unknown-linux-gnu'),
  target('darwin-x64', 'macos-15-intel', 'darwin', 'x64', 'x86_64-apple-darwin'),
- target('darwin-arm64', 'macos-15', 'darwin', 'arm64', 'aarch64-apple-darwin'),
+ target('darwin-arm64', 'macos-26', 'darwin', 'arm64', 'aarch64-apple-darwin'),
 ] };
 
 export function plan(target, source, root = process.cwd(), host = process) {
