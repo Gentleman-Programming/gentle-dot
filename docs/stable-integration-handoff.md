@@ -95,9 +95,25 @@ Remaining native or installed checks must report their own candidate SHA and out
 - CI slice: `375b3f5fb9196f904b2915f2e3b5d4c0a500497a`, nine workflow/helper/test/doc files, 873 authored lines. Native review approved and acknowledged for this slice only.
 - Local evidence: 33 independent source/inert contracts passed; the subsequent addon-prerequisite delta received independent static/identity review plus a parent-host 4/4 test run. These are not full runtime, device or installed acceptance.
 - Original worktrees and their selected bytes/modes/index/HEAD/status were preserved. Generated executables, private state, caches and unrelated WIP remain excluded; build them from this checkpoint.
-- `integration-tests.yml` runs only for this branch's relevant-input pushes, or explicit manual dispatch: Windows x64/Linux x64 functional tests, native build and disposable installation checks. Read-only permissions; QA artifacts, no deploy/release/main writes. Hosted results are pending until the exact run is observed.
+- `integration-tests.yml` runs only for this branch's relevant-input pushes, or explicit manual dispatch: Windows x64/Linux x64 functional tests, native build and disposable installation checks. Read-only permissions; QA artifacts, no deploy/release/main writes. The first exact-head hosted result is recorded below; it is not green.
 - Native review warning `R3-001` is informational: fast connection refusal may exhaust twelve startup probes in about three seconds although the deadline is thirty. It remains follow-up work for W1, not an applied correction, and does not reopen the approved review.
 - I1 memory-startup isolation, T6 native containment and real voice/device/desktop qualification remain open. An approved source review and passing inert tests do not close them.
+
+### First hosted test result
+
+[Run 43237299238](https://github.com/Gentleman-Programming/gentle-dot/actions/runs/43237299238), source checkpoint `6f5199580b418e365a4f22133346a1b990943682`: **completed, failure**.
+
+| Gate | Result | Evidence boundary |
+| --- | --- | --- |
+| Target selection | PASS | Windows x64/Linux x64 subset selected |
+| Windows setup | PASS | Frozen install, MSVC setup and addon compilation passed |
+| Windows functional | FAIL | `pnpm typecheck`, TS2304 at `packages/daemon/test/secret-file.test.ts:41`: missing `statSync` import |
+| Linux functional | FAIL | Same typecheck error |
+| Later tests/UI build | NOT RUN | Earlier typecheck failure stopped those steps |
+| Native build/installed acceptance | SKIPPED | Functional prerequisites failed; no native/installed acceptance inferred |
+
+The failing public test already had this content at the original PR integration and pre-consolidation baseline; consolidation did not edit it. The error is a test-source compile failure, not an observed production runtime failure.
+Minimal next scope: Maicol/I2 coordinates a test-only import correction, scoped typecheck/test proof and a new test CI run after explicit bounded authorization. Do not relax typecheck, hide the failure, rerun old failed CI blindly or claim a stable version. The observer's initial network failure was recovered by watching the same run, not by launching a second run.
 
 ## Task cards
 
