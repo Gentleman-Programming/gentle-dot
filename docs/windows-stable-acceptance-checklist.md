@@ -4,9 +4,9 @@
 
 ## Current gate and quick path
 
-I1 remains Maicol's undelivered dependency; W1 is blocked on its accepted handoff. R3-001 is **CLOSED**: no more tests are requested, and PabloGNU must not take over I1. Maicol's reported `375b3f5` code checkpoint and `e7ff3b7` documentation checkpoint do not establish I1 readiness or a current acceptance candidate.
+Following the [ownership handoff at `51cf3e5`](https://github.com/Gentleman-Programming/gentle-dot/blob/51cf3e57c2c4bd3ed0a028522afd00683bbf8238/docs/stable-integration-handoff.md), **PabloGNU owns I1 as well as W1–W3**. W1 remains blocked until I1 is separately authorized, delivered and accepted. The transfer does not resume paused code, tests or CI, renew exhausted S7/S8 limits, or bypass retained worker prohibitions. R3-001 is **CLOSED**: no more tests are requested. The `375b3f5` source checkpoint and later documentation handoffs do not establish I1 readiness or a current acceptance candidate.
 
-1. Maicol supplies the I1 PR, exact integrated candidate SHA, approved test scope, executable identity/ownership and listener-boundary evidence with review disposition.
+1. PabloGNU delivers the separately authorized I1 unit with its PR, exact integrated candidate SHA, approved test scope, canonical executable identity/ownership and listener-boundary evidence with independent security review disposition. Agree the base, exact files, inherited-limit disposition and named shared-file handoff before editing.
 2. PabloGNU completes the separately scoped W1 native runtime, ownership, graceful Quit and relaunch acceptance against that candidate.
 3. Only after accepted I1 and W1, agree separate W2 hardware/model/provider scope and W3 disposable lifecycle scope. Fill the pending evidence fields before execution.
 4. Run only the approved cases, retain all outcomes, and return evidence to the named owners. Missing consent or dependencies means **BLOCKED**, not a pass or an invitation to broaden scope.
@@ -20,7 +20,7 @@ I1 remains Maicol's undelivered dependency; W1 is blocked on its accepted handof
 - [ ] Explicitly approve installation, versioned update, same-installer reinstall and uninstall separately, including disposable destination/profile, prior-installation conflicts, registration/shortcut effects and owned cleanup disposition.
 - [ ] Keep current personal installations and profiles out of scope. Use only authorized synthetic app-data and unrelated-profile canaries; establish ownership and baseline bytes before lifecycle actions.
 - [ ] Agree bounded, redacted evidence collection: no credentials, tokens, personal logs, private absolute paths or ignored build receipts in public reports. Retain failures without automatic cleanup or retries.
-- [ ] Coordinate shared contracts with Maicol and voice/UI boundaries with Mars. Platform ownership is not folder exclusivity; findings needing changes return for exact-file approval.
+- [ ] Coordinate shared contracts through Cinlo/R after his proposed transfer is accepted, and voice/UI boundaries with Mars. Named shared-file handoffs and separate human authorization remain required; platform ownership is not folder exclusivity and changing executor bypasses no retained limit.
 
 ## W2 — native voice cases
 
@@ -138,7 +138,9 @@ Use the [common consent/evidence rules](stable-integration-handoff.md#consent-an
 
 The W2 rows map the native voice card plus the existing review/pause contract; the W3 rows map the installed lifecycle card. Source links and named tests are a navigation map only: **none was executed for this documentation unit**. Disabled preview helpers, mocked UI/IPC, memory WAVs and source-only startup cannot qualify native voice or installed behavior.
 
-**Next external owner: Maicol**, to deliver accepted I1 with PR, exact candidate SHA and test scope. Then **PabloGNU** owns W1 acceptance and separately authorized W2/W3 execution, coordinating voice/UI evidence with **Mars** and shared contracts with Maicol. Hand W2 observations to Mars for UI2 and the candidate-bound dossier to Maicol for I3; documentation completion alone accepts neither card.
+**PabloGNU owns I1 and W1–W3.** Deliver accepted I1 with PR, exact candidate SHA and test scope before W1 acceptance and separately authorized W2/W3 execution. Ownership does not start paused work or supply missing launcher source, provenance or governing records.
+
+**Cinlo is the proposed shared R/I2/I3/C5/C4 coordinator**, subject to his recipient acceptance and the existing pauses/limits. Coordinate named shared-file handoffs through that role, voice/UI evidence with **Mars**, W2 observations for UI2 with Mars, and the candidate-bound I3 dossier with Cinlo once accepted and authorized. Documentation completion alone accepts none of these cards.
 
 [wasapi]: ../apps/desktop/src-tauri/src/voice/wasapi.rs
 [device]: ../apps/desktop/src-tauri/src/voice/wasapi/device.rs
