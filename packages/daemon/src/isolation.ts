@@ -380,7 +380,9 @@ function runListenerCommand(
 			[...args],
 			{
 				encoding: "utf8",
-				timeout: listenerLookupTimeoutMs(command === "powershell.exe" ? "win32" : process.platform),
+				timeout: listenerLookupTimeoutMs(
+					win32.basename(command).toLowerCase() === "powershell.exe" ? "win32" : process.platform,
+				),
 				windowsHide: true,
 			},
 			(error, stdout, stderr) => {
@@ -397,7 +399,16 @@ function runListenerCommand(
 /** Enumerate Windows listeners before filtering, so an unused port is not a query error. */
 async function listeningPid(port: string, options: PrivateMemoryOptions): Promise<Listener> {
 	const windows = (options.platform ?? process.platform) === "win32";
-	const command = windows ? "powershell.exe" : "lsof";
+	// Source builds can capture a PATH without WindowsPowerShell; use the existing OS image.
+	const command = windows
+		? win32.join(
+				process.env.SystemRoot || "C:\\Windows",
+				"System32",
+				"WindowsPowerShell",
+				"v1.0",
+				"powershell.exe",
+			)
+		: "lsof";
 	const args = windows
 		? [
 				"-NoLogo",

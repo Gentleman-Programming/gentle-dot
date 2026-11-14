@@ -265,6 +265,44 @@ describe("preview memory startup admission", () => {
 		expect(f.health).not.toHaveBeenCalled();
 	});
 
+	it("finds the Windows listener observer when the daemon PATH omits PowerShell", async () => {
+		const f = fixture([empty]);
+		Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+		vi.stubEnv("SystemRoot", "D:\\Windows");
+		const powershell = "D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+		f.lookup.mockImplementation((...args: unknown[]) => {
+			const callback = args.at(-1) as (error: Error | null, stdout: string, stderr: string) => void;
+			callback(
+				args[0] === powershell
+					? null
+					: Object.assign(new Error("spawn powershell.exe ENOENT"), { code: "ENOENT" }),
+				"",
+				"",
+			);
+			return {} as ChildProcess;
+		});
+
+		const result = await startDaemon(f.options).catch((error: unknown) => error);
+		expect.soft(result).toBe(downstream);
+		expect.soft(f.lookup).toHaveBeenCalledOnce();
+		expect.soft(f.lookup.mock.calls[0]?.[0]).toBe(powershell);
+		expect(f.lookup.mock.calls[0]?.[1]).toEqual([
+			"-NoLogo",
+			"-NoProfile",
+			"-NonInteractive",
+			"-Command",
+			"$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; try { Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { $_.LocalPort -eq 17438 } | Select-Object -ExpandProperty OwningProcess } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }",
+		]);
+		expect(f.lookup.mock.calls[0]?.[2]).toEqual({ encoding: "utf8", timeout: 15_000, windowsHide: true });
+		expect.soft(f.effects.privateDir).toHaveBeenCalledOnce();
+		for (const [name, effect] of Object.entries(f.effects))
+			if (effect !== f.effects.privateDir) expect.soft(effect, name).not.toHaveBeenCalled();
+		expect(f.health).not.toHaveBeenCalled();
+		expect(f.kill).not.toHaveBeenCalled();
+		expect(f.spawn).not.toHaveBeenCalled();
+		expect(snapshot(f.dataDir)).toEqual(f.before);
+	});
+
 	it.each(["empty", "owned", "saved private mode"])("admits %s only as far as the safe startup barrier", async (kind) => {
 		const f = fixture(kind === "empty" ? [empty] : [one, one]);
 		if (kind === "saved private mode") delete f.options.agentEnv!.GENTLE_DOT_ENGRAM;
