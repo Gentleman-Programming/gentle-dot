@@ -20,7 +20,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { bundledGentleShell } from "../src/config.ts";
 import { bundledMcpCli } from "../src/connectors.ts";
-import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { type DotDaemon, createDaemon as startDaemon } from "../src/daemon.ts";
 import { PROPOSE_TOOL } from "../src/extensions/approval-guard.ts";
 import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";

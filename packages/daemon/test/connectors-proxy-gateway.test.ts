@@ -10,7 +10,7 @@ import { McpClient, type McpError, StreamableHttpTransport, type Tool } from "@e
 import type { ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
-import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { type DotDaemon, createDaemon as startDaemon } from "../src/daemon.ts";
 import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { oauthOptions } from "./fake-oauth.ts";
@@ -79,14 +79,14 @@ async function setup() {
 	const notion = await fakeNotion();
 	const fake = fakeAuthRuntime();
 	const app = fakeApp([], "allow");
+	process.env["BRIDGE_AUTH_TOKEN"] = "test-bridge-token-12345";
 	const d = await startDaemon({
 		port: 0,
 		host: "127.0.0.1",
 		dataDir,
 		workspace: join(dataDir, "workspace"),
 		uiDir: dataDir,
-		agentCommand: process.execPath,
-		agentArgs: [FAKE_AGENT],
+		engineCommand: [process.execPath, FAKE_AGENT],
 		agentHome,
 		backoffMs: [50],
 		authRuntime: async () => fake.runtime,

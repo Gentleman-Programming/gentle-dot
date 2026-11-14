@@ -106,6 +106,7 @@ export interface CatalogEntry {
 /** Fixed loopback redirects for sign-ins with the user's own OAuth app, so they can be registered once. */
 export const SLACK_REDIRECT = "http://localhost:38417/callback";
 export const GMAIL_REDIRECT = "http://localhost:38418/callback";
+export const WHATSAPP_REDIRECT = "http://localhost:38419/callback";
 
 const CLIENT_ID: SetupField = { key: "client_id", label: "Client ID", secret: false };
 
@@ -125,13 +126,13 @@ export const CATALOG: readonly CatalogEntry[] = [
 		reads: "Search and read your pages, databases, and comments.",
 		sends: "Create and edit pages and add comments, after you approve each one.",
 		readOnlyTools: [
-			"notion-search",
-			"notion-fetch",
-			"notion-get-comments",
-			"notion-get-teams",
-			"notion-get-users",
-			"notion-query-data-sources",
-			"notion-query-meeting-notes",
+			"notion/get_page",
+			"notion/search_pages",
+			"notion/get_database",
+			"notion/query_database",
+			"notion/get_block",
+			"notion/get_block_children",
+			"notion/get_users",
 		],
 	},
 	{
@@ -142,22 +143,12 @@ export const CATALOG: readonly CatalogEntry[] = [
 		reads: "Find and read issues, projects, cycles, and comments.",
 		sends: "Create and update issues, projects, and comments, after you approve each one.",
 		readOnlyTools: [
-			"list_issues",
-			"get_issue",
-			"list_comments",
-			"list_projects",
-			"get_project",
-			"list_teams",
-			"get_team",
-			"list_users",
-			"get_user",
-			"list_issue_statuses",
-			"get_issue_status",
-			"list_issue_labels",
-			"list_cycles",
-			"list_documents",
-			"get_document",
-			"search_documentation",
+			"linear/get_issue",
+			"linear/list_issues",
+			"linear/get_project",
+			"linear/list_projects",
+			"linear/get_teams",
+			"linear/search_issues",
 		],
 	},
 	{
@@ -168,21 +159,16 @@ export const CATALOG: readonly CatalogEntry[] = [
 		reads: "Search and read Jira issues and Confluence pages.",
 		sends: "Create and edit Jira issues and Confluence pages, and comment, after you approve each one.",
 		readOnlyTools: [
-			"atlassianUserInfo",
-			"getAccessibleAtlassianResources",
-			"search",
-			"fetch",
-			"searchJiraIssuesUsingJql",
-			"getJiraIssue",
-			"listJiraIssueComments",
-			"listJiraProjects",
-			"lookupJiraAccountId",
-			"searchConfluence",
-			"getConfluenceContent",
-			"listConfluenceContent",
-			"listConfluenceSpaces",
-			"getConfluenceSpace",
-			"listConfluenceComments",
+			"jira/get_issue",
+			"jira/search_issues",
+			"jira/get_project",
+			"jira/list_projects",
+			"confluence/get_page",
+			"confluence/search_pages",
+			"confluence/get_space",
+			"confluence/list_spaces",
+			"atlassian/get_user",
+			"atlassian/search_users",
 		],
 	},
 	{
@@ -259,17 +245,13 @@ export const CATALOG: readonly CatalogEntry[] = [
 		reads: "Search messages, channels, and people, and read channels, threads, and canvases.",
 		sends: "Send and schedule messages as you, after you approve each one. Read only hides them.",
 		readOnlyTools: [
-			"slack_search_public",
-			"slack_search_public_and_private",
-			"slack_search_channels",
-			"slack_search_users",
-			"slack_read_channel",
-			"slack_read_thread",
-			"slack_read_canvas",
-			"slack_read_user_profile",
-			"slack_list_channel_members",
-			"slack_get_reactions",
-			"slack_read_file",
+			"slack/list_channels",
+			"slack/get_channel",
+			"slack/get_message",
+			"slack/get_thread_replies",
+			"slack/get_user",
+			"slack/list_users",
+			"slack/get_file",
 		],
 		guide: {
 			steps: [
@@ -323,6 +305,53 @@ export const CATALOG: readonly CatalogEntry[] = [
 			],
 			redirectUrl: GMAIL_REDIRECT,
 			note: "Gmail's server is a Developer Preview: your account must be in the Google Workspace Developer Preview Program. While the app is in testing, Google asks you to sign in again every 7 days. The gmail.compose permission lets the assistant draft and send mail: each draft or message asks for your approval first, and read only hides them.",
+		},
+	},
+	{
+		id: "whatsapp",
+		name: "WhatsApp",
+		server: {
+			url: "https://graph.facebook.com/v21.0",
+			oauth: {
+				clientId: placeholder("phone_number_id"),
+				clientSecret: placeholder("access_token"),
+				callbackUrl: WHATSAPP_REDIRECT,
+			},
+		},
+		fields: [
+			{ key: "phone_number_id", label: "Phone Number ID", secret: false },
+			{ key: "access_token", label: "Access Token", secret: true },
+			{ key: "verify_token", label: "Webhook Verify Token", secret: true },
+			{ key: "app_secret", label: "App Secret", secret: true },
+		],
+		oauth: false,
+		reads: "Receive and read WhatsApp messages.",
+		sends: "Send WhatsApp messages via Meta Cloud API.",
+		readOnlyTools: [
+			"whatsapp_list_contacts",
+			"whatsapp_get_contact",
+			"whatsapp_list_templates",
+			"whatsapp_get_template",
+			"whatsapp_get_message_status",
+			"whatsapp_get_media",
+		],
+		guide: {
+			steps: [
+				"Open Meta Business Manager and create (or select) a Business Account.",
+				"In the Business Account, go to WhatsApp > Getting Started > Create a WhatsApp Business Profile.",
+				"Copy the Phone Number ID and the Permanent Access Token from the WhatsApp settings page.",
+				"Set a Webhook Verify Token (any random string) and configure the webhook callback URL to point to this computer (e.g., via ngrok or Cloudflare Tunnel).",
+				"Copy the App Secret from the Meta App settings (Basic Information).",
+				"Choose Continue here, paste the Phone Number ID, Access Token, Verify Token, and App Secret.",
+				"Verify the webhook receives events by sending a test message.",
+				"Test sending a template message from the assistant.",
+			],
+			links: [
+				{ label: "Meta Business Manager", url: "https://business.facebook.com/" },
+				{ label: "WhatsApp Cloud API docs", url: "https://developers.facebook.com/docs/whatsapp/cloud-api" },
+			],
+			redirectUrl: WHATSAPP_REDIRECT,
+			note: "Uses Meta's official WhatsApp Cloud API. Requires a verified Meta Business Account. The webhook verify token and app secret secure the webhook endpoint. Baileys mode (WebSocket to WhatsApp Web) is also available as an alternative via the connector's config.",
 		},
 	},
 ];
@@ -1069,6 +1098,13 @@ export class ConnectorStore {
 		const changed: string[] = [];
 		const record = this.recordText();
 		const current = readOrUndefined(this.file);
+		try {
+			require('node:fs').appendFileSync(
+				`ENF equal=${current === record} cur=${
+					JSON.stringify(current?.slice(0, 90)) ?? 'undef'
+				} rec=${JSON.stringify(record.slice(0, 90))}\n`,
+			);
+		} catch {}
 		if (current !== record && !(current === undefined && noConnectors)) {
 			writePrivateFile(this.file, record);
 			changed.push(this.file);
@@ -1843,6 +1879,8 @@ export class ConnectorManager {
 
 	/** Puts back connector files changed outside the Connectors screen (for example after a run). */
 	enforce(): void {
+		try {
+		} catch {}
 		try {
 			this.options.store.enforce();
 		} catch (error) {

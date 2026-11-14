@@ -1,0 +1,203 @@
+# ============================================
+# CONFIGURACIÓN DAEMON PRINCIPAL
+# ============================================
+daemon:
+  port: 4317
+  host: "127.0.0.1"
+  data_dir: "~/.gentle-dot"
+  workspace: "~/.gentle-dot/workspace"
+  log_level: "info"
+  token_env: "DAEMON_TOKEN"
+  
+  health_check_interval: 30
+  health_check_timeout: 5
+  
+  heartbeat_interval: 30
+  heartbeat_timeout: 90
+  
+  max_message_size: 1048576
+  max_concurrent_connections: 100
+  rate_limit_messages_per_sec: 30
+  
+  config_watch: true
+  config_watch_debounce: 1000
+
+# ============================================
+# CONECTORES
+# ============================================
+connectors:
+  # ------------------------------------------
+  # TELEGRAM (BaseBridge v2 - gramY)
+  # ------------------------------------------
+  telegram:
+    enabled: true
+    mode: "read_write"
+    long_polling: true
+    webhook_url: ""
+    allowed_users_env: "DOT_TELEGRAM_ALLOWED_USERS"
+    bot_token_env: "TELEGRAM_BOT_TOKEN_ROSITA"
+    daemon_url_env: "GENTLE_DOT_URL"
+    token_file_env: "GENTLE_DOT_TOKEN_FILE"
+    max_concurrent_chats: 1000
+    draft_refresh_ms: 20000
+
+  # ------------------------------------------
+  # GMAIL (MCP Oficial)
+  # ------------------------------------------
+  gmail:
+    enabled: true
+    mode: "read_write"
+    daemon_url_env: "GENTLE_DOT_URL"
+    token_file_env: "GENTLE_DOT_TOKEN_FILE"
+    oauth:
+      client_id_env: "GMAIL_CLIENT_ID"
+      client_secret_env: "GMAIL_CLIENT_SECRET"
+      redirect_uri: "http://localhost:4317/oauth2callback"
+      scopes:
+        - "https://www.googleapis.com/auth/gmail.readonly"
+        - "https://www.googleapis.com/auth/gmail.send"
+        - "https://www.googleapis.com/auth/gmail.modify"
+    token_path_env: "GMAIL_TOKEN_PATH"
+    poll_interval_ms: 5000
+    watch_labels:
+      - "INBOX"
+
+  # ------------------------------------------
+  # DISCORD (discord.js)
+  # ------------------------------------------
+  discord:
+    enabled: true
+    mode: "read_write"
+    bot_token_env: "DISCORD_BOT_TOKEN"
+    daemon_url_env: "GENTLE_DOT_URL"
+    token_file_env: "GENTLE_DOT_TOKEN_FILE"
+    allowed_channel_ids_env: "DISCORD_ALLOWED_CHANNEL_IDS"
+    allowed_guild_ids_env: "DISCORD_ALLOWED_GUILD_IDS"
+    admin_port_env: "DOT_DISCORD_ADMIN_PORT"
+    admin_token_file_env: "DOT_DISCORD_ADMIN_TOKEN_FILE"
+    allowlist_file_env: "DOT_DISCORD_ALLOWLIST_FILE"
+
+  # ------------------------------------------
+  # WHATSAPP (Meta Cloud MCP)
+  # ------------------------------------------
+  whatsapp:
+    enabled: true
+    mode: "read_write"
+    daemon_url_env: "GENTLE_DOT_URL"
+    token_file_env: "GENTLE_DOT_TOKEN_FILE"
+    mcp_command_env: "WHATSAPP_MCP_COMMAND"
+    mcp_args_env: "WHATSAPP_MCP_ARGS"
+    meta:
+      phone_number_id_env: "WHATSAPP_META_PHONE_NUMBER_ID"
+      token_env: "WHATSAPP_META_TOKEN"
+      verify_token_env: "WHATSAPP_META_VERIFY_TOKEN"
+      app_secret_env: "WHATSAPP_META_APP_SECRET"
+      webhook_port_env: "WHATSAPP_META_WEBHOOK_PORT"
+      webhook_host_env: "WHATSAPP_META_WEBHOOK_HOST"
+      graph_url_env: "WHATSAPP_META_GRAPH_URL"
+      graph_version_env: "WHATSAPP_META_GRAPH_VERSION"
+    allowed_numbers_env: "WHATSAPP_ALLOWED_NUMBERS"
+    allowed_team_ids_env: "WHATSAPP_ALLOWED_TEAM_IDS"
+
+  # ------------------------------------------
+  # LINEAR (MCP Oficial)
+  # ------------------------------------------
+  linear:
+    enabled: true
+    mode: "read_write"
+    api_key_env: "LINEAR_API_KEY"
+    daemon_url_env: "GENTLE_DOT_URL"
+    token_file_env: "GENTLE_DOT_TOKEN_FILE"
+    mcp_command_env: "LINEAR_MCP_COMMAND"
+    mcp_args_env: "LINEAR_MCP_ARGS"
+    allowed_team_ids_env: "LINEAR_ALLOWED_TEAM_IDS"
+
+  # ------------------------------------------
+  # NOTION (MCP Oficial)
+  # ------------------------------------------
+  notion:
+    enabled: true
+    mode: "read_write"
+    api_key_env: "NOTION_API_KEY"
+    daemon_url_env: "GENTLE_DOT_URL"
+    token_file_env: "GENTLE_DOT_TOKEN_FILE"
+    mcp_command_env: "NOTION_MCP_COMMAND"
+    mcp_args_env: "NOTION_MCP_ARGS"
+    allowed_workspace_ids_env: "NOTION_ALLOWED_WORKSPACE_IDS"
+
+  # ------------------------------------------
+  # ATLASSIAN (MCP Oficial - Jira/Confluence)
+  # ------------------------------------------
+  atlassian:
+    enabled: true
+    mode: "read_write"
+    site_url_env: "ATLASSIAN_SITE_URL"
+    api_token_env: "ATLASSIAN_API_TOKEN"
+    email_env: "ATLASSIAN_EMAIL"
+    daemon_url_env: "GENTLE_DOT_URL"
+    token_file_env: "GENTLE_DOT_TOKEN_FILE"
+    mcp_command_env: "ATLASSIAN_MCP_COMMAND"
+    mcp_args_env: "ATLASSIAN_MCP_ARGS"
+    allowed_cloud_ids_env: "ATLASSIAN_ALLOWED_CLOUD_IDS"
+
+  # ------------------------------------------
+  # SLACK (MCP Oficial - Socket Mode)
+  # ------------------------------------------
+  slack:
+    enabled: true
+    mode: "read_write"
+    bot_token_env: "SLACK_BOT_TOKEN"
+    app_token_env: "SLACK_APP_TOKEN"
+    signing_secret_env: "SLACK_SIGNING_SECRET"
+    daemon_url_env: "GENTLE_DOT_URL"
+    token_file_env: "GENTLE_DOT_TOKEN_FILE"
+    mcp_command_env: "SLACK_MCP_COMMAND"
+    mcp_args_env: "SLACK_MCP_ARGS"
+    allowed_channel_ids_env: "SLACK_ALLOWED_CHANNEL_IDS"
+    allowed_team_ids_env: "SLACK_ALLOWED_TEAM_IDS"
+
+  # ------------------------------------------
+  # VOICE (Parakeet TDT Local)
+  # ------------------------------------------
+  voice:
+    enabled: true
+    mode: "read_write"
+    transcriber_script_env: "GENTLE_DOT_VOICE_TRANSCRIBER_SCRIPT"
+    model_dir_env: "GENTLE_DOT_VOICE_MODEL"
+    daemon_url_env: "GENTLE_DOT_URL"
+    token_file_env: "GENTLE_DOT_TOKEN_FILE"
+    max_duration_sec_env: "GENTLE_DOT_VOICE_MAX_DURATION_SEC"
+    supported_formats_env: "GENTLE_DOT_VOICE_SUPPORTED_FORMATS"
+
+# ============================================
+# LOGGING
+# ============================================
+logging:
+  level: "info"
+  format: "json"
+  output: "stdout"
+  file_path: "~/.gentle-dot/logs/daemon.log"
+  max_files: 10
+  max_size_mb: 100
+  redact_fields:
+    - "token"
+    - "password"
+    - "secret"
+    - "access_token"
+    - "refresh_token"
+    - "webhook_secret"
+
+# ============================================
+# STORAGE
+# ============================================
+storage:
+  daemon_db: "~/.gentle-dot/daemon.db"
+
+# ============================================
+# METRICS (Opcional)
+# ============================================
+metrics:
+  enabled: false
+  port: 9090
+  path: "/metrics"
+  interval_seconds: 60

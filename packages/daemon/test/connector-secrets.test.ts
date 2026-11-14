@@ -22,7 +22,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { AppChannel } from "../src/app-channel.ts";
 import { ConnectorManager, ConnectorStore, type CustomConnector } from "../src/connectors.ts";
-import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { type DotDaemon, createDaemon as startDaemon } from "../src/daemon.ts";
 import {
 	AppSecretSource,
 	MemorySecretSource,
@@ -678,14 +678,14 @@ async function daemonWith(options: { dataDir: string; app?: ReturnType<typeof fa
 	const { dataDir, app } = options;
 	const notion = await fakeNotion();
 	const oauth = fakeOAuth();
+	process.env["BRIDGE_AUTH_TOKEN"] = "test-bridge-token-12345";
 	const d = await startDaemon({
 		port: 0,
 		host: "127.0.0.1",
 		dataDir,
 		workspace: join(dataDir, "workspace"),
 		uiDir: dataDir,
-		agentCommand: process.execPath,
-		agentArgs: [FAKE_AGENT],
+		engineCommand: [process.execPath, FAKE_AGENT],
 		agentHome: join(dataDir, "agent"),
 		backoffMs: [50],
 		authRuntime: async () => fakeAuthRuntime().runtime,
@@ -798,14 +798,14 @@ describe("connector secrets end to end", () => {
 
 /** A daemon without the app that runs stdio servers itself (the default transport). */
 async function daemonWithStdio(dataDir: string) {
+	process.env["BRIDGE_AUTH_TOKEN"] = "test-bridge-token-12345";
 	const d = await startDaemon({
 		port: 0,
 		host: "127.0.0.1",
 		dataDir,
 		workspace: join(dataDir, "workspace"),
 		uiDir: dataDir,
-		agentCommand: process.execPath,
-		agentArgs: [FAKE_AGENT],
+		engineCommand: [process.execPath, FAKE_AGENT],
 		agentHome: join(dataDir, "agent"),
 		backoffMs: [50],
 		authRuntime: async () => fakeAuthRuntime().runtime,
