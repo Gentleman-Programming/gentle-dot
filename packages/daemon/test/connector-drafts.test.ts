@@ -6,7 +6,7 @@ import type { ServerMessage, ServerPayload } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { ConnectorManager, ConnectorStore } from "../src/connectors.ts";
-import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { type DotDaemon, createDaemon as startDaemon } from "../src/daemon.ts";
 import approvalGuard, {
 	DRAFT_STATUS_KEY,
 	decide,

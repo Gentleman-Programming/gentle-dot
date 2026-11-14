@@ -5,5 +5,12 @@
 	"type": "module",
 	"exports": {
 		".": "./src/index.ts"
+	},
+	"scripts": {
+		"build": "tsc",
+		"typecheck": "tsc --noEmit"
+	},
+	"devDependencies": {
+		"typescript": "^5.5.0"
 	}
 }

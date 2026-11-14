@@ -11,7 +11,7 @@ import { McpClient, type McpError, StreamableHttpTransport, type Tool } from "@e
 import { APP_REQUIRED, type ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
-import { type DaemonOptions, type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { type DaemonOptions, type DotDaemon, createDaemon as startDaemon } from "../src/daemon.ts";
 import { FileSecretSource } from "../src/secret-file.ts";
 import { PIN_ATTEMPTS } from "../src/web-pin.ts";
 import { fakeApp } from "./fake-app.ts";
