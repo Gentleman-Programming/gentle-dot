@@ -45,6 +45,7 @@ import { FileSecretSource, SECRETS_FILE, SECRETS_KEY_VAR } from "./secret-file.t
 import { AppSecretSource } from "./secret-source.ts";
 import { AgentSupervisor } from "./supervisor.ts";
 import { UploadStore } from "./uploads.ts";
+import { UserSettings } from "./user-settings.ts";
 import { VoiceService } from "./voice.ts";
 import { CONNECTOR_HOME, chownHandOver, prepareVpsLayout, type VpsOptions } from "./vps.ts";
 import { PIN_FILE, PinGate } from "./web-pin.ts";
@@ -95,7 +96,7 @@ export interface DaemonOptions {
 	/** Origins allowed to open the WebSocket, besides the daemon's own and the desktop app's. */
 	allowedOrigins?: string[];
 	backoffMs?: number[];
-	/** Several conversations instead of one continuous chat; default `GENTLE_DOT_CONVERSATIONS=1`. */
+	/** Explicit startup override; otherwise saved preference, then legacy environment fallback. */
 	conversations?: boolean;
 	/** When the chat's session is rotated; default from `GENTLE_DOT_ROTATE_BYTES` and `GENTLE_DOT_ROTATE_COMPACTIONS`. */
 	rotation?: RotationLimits;
@@ -381,6 +382,7 @@ async function startClaimedDaemon(
 		...(vps ? { access } : {}),
 		...(options.uploadLimits ? { limits: options.uploadLimits } : {}),
 	});
+	const userSettings = new UserSettings(options.dataDir);
 	const historyPage = options.historyPage ?? Number(process.env.GENTLE_DOT_HISTORY_PAGE);
 	const bridge = new DotBridge(supervisor, {
 		dataDir: options.dataDir,
@@ -394,7 +396,11 @@ async function startClaimedDaemon(
 		...(vps && !app ? { pin: new PinGate({ file: join(options.dataDir, PIN_FILE) }) } : {}),
 		...(options.approvalWaitMs ? { approvalWaitMs: options.approvalWaitMs } : {}),
 		...(vps ? { engineAccess: access } : {}),
-		features: { conversations: options.conversations ?? process.env.GENTLE_DOT_CONVERSATIONS === "1" },
+		features: {
+			conversations:
+				options.conversations ?? userSettings.conversations(process.env.GENTLE_DOT_CONVERSATIONS),
+		},
+		userSettings,
 		rotation: options.rotation ?? rotationLimits(process.env),
 		...(Number.isInteger(historyPage) && historyPage > 0 ? { historyPage } : {}),
 	});

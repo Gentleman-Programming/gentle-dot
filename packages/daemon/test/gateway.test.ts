@@ -82,6 +82,169 @@ function find<T extends ServerMessage["type"]>(
 	);
 }
 
+describe("live conversation preference", () => {
+	it("reloads saved false ahead of the environment and retains session history across daemon starts", async () => {
+		const dataDir = tempDir();
+		vi.stubEnv("GENTLE_DOT_CONVERSATIONS", "1");
+		try {
+			const first = await daemon(process.env, { dataDir });
+			const a = await authed(first);
+			const original = (await find(a, "ready")).conversationId;
+			send(a, { type: "send", text: "survives restart" });
+			await find(a, "message_done");
+			send(a, { type: "settings_conversations_set", enabled: false });
+			await find(a, "features");
+			await first.close();
+			const next = await daemon(process.env, { dataDir });
+			const b = await authed(next);
+			expect(await find(b, "ready")).toMatchObject({
+				conversationId: original,
+				features: { conversations: false },
+			});
+			send(b, { type: "get_history" });
+			expect((await find(b, "history")).messages.map((m) => m.text)).toEqual([
+				"survives restart",
+				"Echo: survives restart",
+			]);
+		} finally {
+			vi.unstubAllEnvs();
+		}
+	});
+
+	it.each(["new_conversation", "open_conversation"] as const)(
+		"rejects queued %s after disable before any session change",
+		async (type) => {
+			const d = await daemon();
+			const a = await authed(d);
+			const ready = await find(a, "ready");
+			const session = d.supervisor.sessionFile;
+			send(a, { type: "settings_conversations_set", enabled: false });
+			send(a, { type, conversationId: ready.conversationId });
+			const disabled = await find(a, "features");
+			const error = await find(a, "error");
+			expect(error).toMatchObject({
+				code: "conversations_off",
+				message: "This assistant keeps one continuous chat.",
+			});
+			expect(a.messages.indexOf(disabled)).toBeLessThan(a.messages.indexOf(error));
+			expect(a.messages.filter((m) => m.type === "history")).toEqual([]);
+			expect(d.supervisor.sessionFile).toBe(session);
+		},
+	);
+
+	it("recovers the operation tail when a failed save already has a switch queued behind it", async () => {
+		const dataDir = tempDir();
+		const d = await daemon(process.env, { dataDir, conversations: true });
+		const a = await authed(d);
+		const original = (await find(a, "ready")).conversationId;
+		const file = join(dataDir, "user-settings.json");
+		writeFileSync(file, "{broken");
+		send(a, { type: "settings_conversations_set", enabled: false });
+		send(a, { type: "new_conversation" });
+		expect(await find(a, "error")).toMatchObject({ code: "command_failed" });
+		expect((await find(a, "history")).conversationId).not.toBe(original);
+		expect(readFileSync(file, "utf8")).toBe("{broken");
+		expect(a.messages.filter((m) => m.type === "features")).toEqual([]);
+	});
+
+	it("persists before broadcasting to two clients and reconnects without changing the active chat", async () => {
+		const dataDir = tempDir();
+		const d = await daemon(process.env, { dataDir, conversations: false });
+		const a = await authed(d);
+		const b = await authed(d);
+		const original = (await find(a, "ready")).conversationId;
+		send(a, { type: "send", text: "keep this" });
+		await find(a, "message_done");
+		send(a, { type: "settings_conversations_set", enabled: true });
+		for (const client of [a, b])
+			expect(await find(client, "features")).toMatchObject({ features: { conversations: true } });
+		expect(JSON.parse(readFileSync(join(dataDir, "user-settings.json"), "utf8"))).toEqual({
+			conversations: true,
+		});
+		const late = await authed(d);
+		expect(await find(late, "ready")).toMatchObject({
+			conversationId: original,
+			features: { conversations: true },
+		});
+		send(a, { type: "settings_conversations_set", enabled: false });
+		await find(b, "features", (m) => !m.features.conversations);
+		send(b, { type: "get_history" });
+		expect(await find(b, "history")).toMatchObject({
+			conversationId: original,
+			messages: [
+				expect.objectContaining({ text: "keep this" }),
+				expect.objectContaining({ text: "Echo: keep this" }),
+			],
+		});
+		send(b, { type: "list_conversations" });
+		expect((await find(b, "conversations")).conversations.map((c) => c.id)).toContain(original);
+	});
+
+	it("does not abort or restart a streaming answer when disabling", async () => {
+		const d = await daemon();
+		const a = await authed(d);
+		const pid = d.supervisor.pid;
+		const session = d.supervisor.sessionFile;
+		send(a, { type: "send", text: "slow" });
+		await find(a, "agent_state", (m) => m.state === "thinking");
+		send(a, { type: "settings_conversations_set", enabled: false });
+		await find(a, "features");
+		expect(d.supervisor.busy).toBe(true);
+		expect(await find(a, "message_done")).toMatchObject({ text: "Echo: slow" });
+		expect(d.supervisor.pid).toBe(pid);
+		expect(d.supervisor.sessionFile).toBe(session);
+		expect(a.messages.filter((m) => m.type === "message_done" && (m.stopped || m.error))).toEqual([]);
+	});
+
+	it("rejects malformed values and failed persistence only to the requester, then recovers", async () => {
+		const dataDir = tempDir();
+		const d = await daemon(process.env, { dataDir, conversations: true });
+		const a = await authed(d);
+		const b = await authed(d);
+		const file = join(dataDir, "user-settings.json");
+		writeFileSync(file, "{broken");
+		send(a, { type: "settings_conversations_set", enabled: "false" });
+		expect(await find(a, "error")).toMatchObject({ code: "bad_message" });
+		send(a, { type: "settings_conversations_set", enabled: false });
+		await find(a, "error", (m) => m.code === "command_failed");
+		expect(readFileSync(file, "utf8")).toBe("{broken");
+		expect(b.messages.filter((m) => m.type === "features" || m.type === "error")).toEqual([]);
+		expect(await find(await authed(d), "ready")).toMatchObject({ features: { conversations: true } });
+		writeFileSync(file, "{}");
+		send(a, { type: "settings_conversations_set", enabled: false });
+		await find(b, "features", (m) => !m.features.conversations);
+	});
+
+	it.each(["new_conversation", "open_conversation"] as const)(
+		"orders %s then disable, and refuses it after disable",
+		async (type) => {
+			const d = await daemon();
+			const a = await authed(d);
+			const original = (await find(a, "ready")).conversationId;
+			send(a, { type: "send", text: "saved" });
+			await find(a, "message_done");
+			send(a, { type: "new_conversation" });
+			await find(a, "history", (m) => m.conversationId !== original);
+			const mark = a.messages.length;
+			const command = type === "open_conversation" ? { type, conversationId: original } : { type };
+			send(a, command);
+			send(a, { type: "settings_conversations_set", enabled: false });
+			const disabled = await find(a, "features", (m) => !m.features.conversations);
+			const history = a.messages.slice(mark).find((m) => m.type === "history");
+			expect(history).toBeDefined();
+			if (!history) throw new Error("The accepted switch did not publish history.");
+			expect(a.messages.indexOf(history)).toBeLessThan(a.messages.indexOf(disabled));
+			const session = d.supervisor.sessionFile;
+			send(a, command);
+			expect(await find(a, "error")).toMatchObject({
+				code: "conversations_off",
+				message: "This assistant keeps one continuous chat.",
+			});
+			expect(d.supervisor.sessionFile).toBe(session);
+		},
+	);
+});
+
 describe("gateway", () => {
 	it("closes with 4401 when the token is wrong", async () => {
 		const d = await daemon();

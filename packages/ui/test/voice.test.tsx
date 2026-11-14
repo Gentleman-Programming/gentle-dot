@@ -5,6 +5,7 @@ import { useReducer } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatSurface } from "../src/components/ChatSurface.tsx";
 import { type DotState, initialState, reduce } from "../src/store.ts";
+import { openPanelMenu } from "./panel-menu.ts";
 
 /** Talking to the assistant (S30.2–S30.4) through the chat, with the desktop and browser mocked. */
 const h = vi.hoisted(() => ({
@@ -109,7 +110,7 @@ function Harness({ initial }: { initial: DotState }) {
 }
 
 const ready: DotState = { ...initialState, connection: "open", agentState: "idle" };
-const withVoice = (transcribe: boolean, speak = transcribe): DotState => ({
+export const withVoice = (transcribe: boolean, speak = transcribe): DotState => ({
 	...ready,
 	voice: { transcribe, speak },
 });
@@ -421,6 +422,7 @@ describe("spoken replies", () => {
 
 	it("stays silent while muted, and remembers the choice", async () => {
 		const { unmount } = render(<Harness initial={withVoice(true, false)} />);
+		await openPanelMenu();
 		await userEvent.click(screen.getByRole("button", { name: "Mute spoken replies" }));
 		expect(screen.getByRole("button", { name: "Unmute spoken replies" })).toHaveAttribute(
 			"aria-pressed",
@@ -432,6 +434,7 @@ describe("spoken replies", () => {
 		expect(synth.speak).not.toHaveBeenCalled();
 		unmount();
 		render(<Harness initial={withVoice(true, false)} />);
+		await openPanelMenu();
 		expect(screen.getByRole("button", { name: "Unmute spoken replies" })).toBeInTheDocument();
 	});
 

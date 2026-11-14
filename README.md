@@ -56,7 +56,7 @@ A glowing rose sits on your desktop. Click it, press your shortcut (**`⌥ Space
 
 ### One conversation, with memory
 
-There is one continuous chat, not a list of threads to manage. When it grows too large, Gentle Dot quietly carries on in a fresh session seeded with a summary, so it stays fast and affordable. It remembers through your global **Engram™** memory: it saves to its own project, `gentle-dot`, and recalls from everything you keep there.
+By default there is one continuous chat, not a list of threads to manage. Prefer separate threads? Open **Menu → Settings → Separate conversations** in the desktop panel. Your choice stays saved until you change it again, applies immediately in every connected window and the native tray, and never interrupts the assistant or removes your current or saved conversations. When a chat grows too large, Gentle Dot quietly carries on in a fresh session seeded with a summary, so it stays fast and affordable. It remembers through your global **Engram™** memory: it saves to its own project, `gentle-dot`, and recalls from everything you keep there.
 
 ---
 
@@ -143,6 +143,7 @@ On a terminal, the daemon prints a URL that already carries its access key. Linu
 A small Node daemon starts the agent engine (Gentle Shell, `gentle-shell --mode rpc`) as a child process, gives it the Gentle Dot identity, restarts it if it crashes, and translates its events into a WebSocket protocol for the desktop app and the browser. The desktop app is Tauri 2: it draws the rose and the panel, owns the global shortcuts, and hosts a native helper for computer control and speech, so the session grant, the panic stop, the blocklist, and the risky-action dialogs live outside the agent.
 
 - **Your data:** `~/.gentle-dot` (mode 0700): sessions, settings, the access key (`token`), and the engine's own home and workspace. Point the assistant at a folder of yours with `GENTLE_DOT_WORKSPACE` or `"workspace"` in `~/.gentle-dot/config.json`.
+- **Conversations:** the daemon saves your choice in `<dataDir>/user-settings.json` (0600 on Unix), separately from desktop `config.json`. A saved `true` or `false` wins over the legacy `GENTLE_DOT_CONVERSATIONS=1` fallback; without either, chat is continuous. No environment variable is needed to use the switch. Unreadable or invalid settings are reported, never silently replaced.
 - **Memory:** your global Engram (`~/.engram`, port 7437), project `gentle-dot`; `GENTLE_DOT_ENGRAM=private` gives the assistant a memory of its own.
 - **Connectors:** the daemon alone writes `~/.gentle-dot/connectors.json` and the engine's `mcp.json`, and puts them back if anything else changes them. `connectors.json` is signed with a key kept in the Keychain; if it was changed while Gentle Dot was closed, it is set aside and you are told.
 - **Screenshots:** each model call carries only the latest one; earlier ones become one-line log entries, which keeps long control sessions fast. On Windows, computer control needs Windows 10 version 2004 (build 19041) or newer to exclude Gentle Dot's windows from screenshots.

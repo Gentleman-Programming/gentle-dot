@@ -11,6 +11,18 @@ function apply(state: DotState, ...payloads: ServerPayload[]): DotState {
 }
 
 describe("reduce", () => {
+	it("applies live features without disturbing chat state and clears stale lists", () => {
+		const before = apply(
+			initialState,
+			{ type: "message_delta", messageId: "m", delta: "live" },
+			{ type: "conversations", conversations: [{ id: "a", title: "A", updatedAt: "now" }], activeId: "a" },
+		);
+		const on = apply(before, { type: "features", features: { conversations: true } });
+		expect(on).toEqual({ ...before, features: { conversations: true } });
+		const off = apply(on, { type: "features", features: { conversations: false } });
+		expect(off).toEqual({ ...before, features: { conversations: false }, conversations: [] });
+		expect(off.messages).toBe(before.messages);
+	});
 	it("records ready, connection, and agent state", () => {
 		let s = reduce(initialState, { type: "connection", status: "open" });
 		s = apply(s, { type: "ready", agentState: "idle", conversationId: "a.jsonl", model: "Fake" });

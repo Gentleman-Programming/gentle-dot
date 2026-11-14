@@ -76,6 +76,30 @@ afterEach(() => {
 	window.history.replaceState(null, "", "/");
 });
 
+describe("native conversation availability", () => {
+	it("only the Dot reports connected feature transitions through the real invoke payload", async () => {
+		h.connection = async () => INFO;
+		const view = await renderApp("?surface=dot");
+		const calls = () =>
+			h.invoke.mock.calls.filter(([command]) => command === "set_dot_state").map(([, args]) => args);
+		expect(calls().at(-1)).toEqual({ state: "idle", conversationsEnabled: false });
+		const { App } = await import("../src/App.tsx");
+		h.state = { ...h.state, connection: "open", features: { conversations: true } };
+		view.rerender(<App />);
+		expect(calls().at(-1)).toEqual({ state: "idle", conversationsEnabled: true });
+		h.state = { ...h.state, connection: "closed" };
+		view.rerender(<App />);
+		expect(calls().at(-1)).toEqual({ state: "idle", conversationsEnabled: false });
+		h.state = { ...h.state, connection: "open", features: { conversations: false } };
+		view.rerender(<App />);
+		expect(calls().at(-1)).toEqual({ state: "idle", conversationsEnabled: false });
+		const count = calls().length;
+		view.unmount();
+		await renderApp("?surface=panel");
+		expect(calls()).toHaveLength(count);
+	});
+});
+
 describe("after the app refused its assistant (S35.2)", () => {
 	it("the panel connects once the app reports the assistant ready", async () => {
 		await renderApp("?surface=panel");
