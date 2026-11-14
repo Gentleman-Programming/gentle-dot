@@ -1785,11 +1785,17 @@ export class Daemon {
    * Stops the daemon. Idempotent: closing twice, or closing while the app quits, stops it once
    * and every caller waits for the same promise.
    */
-  async stop(): Promise<void> {
-    this.stopping ??= this.doStop().finally(() => {
-      this.stopped = true;
-      this.resolveClosed();
-    });
+  stop(): Promise<void> {
+    return this.stopImpl();
+  }
+
+  private stopImpl(): Promise<void> {
+    if (!this.stopping) {
+      this.stopping = this.doStop().finally(() => {
+        this.stopped = true;
+        this.resolveClosed();
+      });
+    }
     return this.stopping;
   }
 
@@ -1815,7 +1821,10 @@ export class Daemon {
     this.stopChildGuardWatch = null;
     this.connectorStore?.close();
 
-    await this.appChannel.stop();
+    const appChannelClose = this.appChannel.close();
+    if (appChannelClose && typeof appChannelClose.then === 'function') {
+      await appChannelClose;
+    }
     console.log('[Daemon] App Channel stopped');
 
     await this.wsServer.stop();
