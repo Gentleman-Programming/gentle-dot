@@ -210,7 +210,7 @@ Branch: `feat/gentle-dot` · Delivery strategy: `reviewable-slices` (decisión 2
 | T23g | S25.7 | delegated writer (Rust Linux + containers), parallel with T23f | done (verified, B1/B2 fixed and rechecked) | `837a42d`, `920455b` | Linux: Secret Service store and documented limit |
 | T23h | S25.8 | delegated writer (context backstop), after T23f | done (verified; B1 fixed; full re-verification no blockers) | `35b942b`, `162473c`, `4d1035e` | VPS: engine as another OS user, encrypted secrets, PIN approvals |
 | T35 | S35.1 | inline | in progress | — | No jiti cache inside the bundle |
-| T36 | S35.2, S35.3 | delegated writer (daemon + Rust daemon spawn), parallel with T37/T38 | in progress | — | Daemon lifetime and engine home ownership |
+| T36 | S35.2, S35.3 | delegated writer (daemon + Rust daemon spawn), parallel with T37/T38 | in progress | `f8f4339` lifecycle tests PASS | Daemon lifetime and engine home ownership |
 | T37 | S35.4, S35.5 (#25) | inline | done | `ffbca1d` PASS; composer keeps unsent message (#21), voice re-check on model change (#25) | Composer send result; voice re-check |
 | T38 | S35.5 (#10) | inline | done | `049adf2` PASS; macOS AVAudioEngine config change no longer interrupts recording | Configuration change is not an interruption |
 | T22 | S18 (hardening, L47 B1/B2) | delegated writer | done (accepted with documented gaps, L52) | `8651bba`; parent re-ran 328 tests + typecheck | Option A: authoritative in-memory connector state with revert, credential reads blocked, path-independent bash checks, full approval preview, redirect manual, private Engram stop, onboarding overlap fix |
