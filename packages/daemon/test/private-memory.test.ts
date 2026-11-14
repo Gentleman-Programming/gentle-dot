@@ -7,7 +7,7 @@ import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { type AddressInfo, createServer } from "node:net";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as computerComponents from "../src/computer-components.ts";
@@ -560,7 +560,15 @@ describe("private memory ownership safeguards", () => {
 		await owned?.stop();
 		expect(f.kill).toHaveBeenCalledExactlyOnceWith(12345, "SIGTERM");
 		expect(f.runListenerCommand).toHaveBeenCalledTimes(3);
-		expect(f.runListenerCommand.mock.calls[0]?.[0]).toBe("powershell.exe");
+		expect(f.runListenerCommand.mock.calls[0]?.[0]).toBe(
+			win32.join(
+				process.env.SystemRoot || "C:\\Windows",
+				"System32",
+				"WindowsPowerShell",
+				"v1.0",
+				"powershell.exe",
+			),
+		);
 	});
 
 	it.each([
