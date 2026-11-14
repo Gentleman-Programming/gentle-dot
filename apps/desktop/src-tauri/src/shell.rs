@@ -1057,6 +1057,7 @@ pub fn run() {
         }
         for (key, path) in environment { std::env::set_var(key, path); }
         std::env::set_var("GENTLE_DOT_ENGRAM", "private");
+        std::env::set_var("GENTLE_DOT_PREVIEW_MEMORY_ADMISSION", "1");
     }
     // GNOME on Wayland: run under XWayland so the Dot can place itself, stay on top, and snap.
     // This must happen before GTK starts.

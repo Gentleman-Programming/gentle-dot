@@ -14,6 +14,23 @@ test('preview is compile-time opt-in and normal product identity remains unchang
  const preview=JSON.parse(read('apps/desktop/src-tauri/tauri.preview.conf.json'));
  assert.equal(preview.identifier,'dev.gentleman.gentle-dot.preview');assert.equal(preview.productName,'Gentle Dot Preview');assert.equal(preview.bundle.active,false);assert.deepEqual(preview.app.windows,[]);
 });
+test("preview memory admission marker is emitted only inside the compile-time preview environment block", () => {
+	const source = shell();
+	const block = section(
+		source,
+		'    #[cfg(feature = "local-preview")]\n    {\n        // Before Tauri/plugins/threads.',
+		"    // GNOME on Wayland",
+	);
+	assert.ok(block.startsWith('    #[cfg(feature = "local-preview")]'));
+	const emission = /^\s*std::env::set_var\(\s*"GENTLE_DOT_PREVIEW_MEMORY_ADMISSION"\s*,\s*"1"\s*\);/gm;
+	assert.equal(
+		[...block.matchAll(emission)].length,
+		1,
+		"preview must actually emit the internal admission marker",
+	);
+	const setters = /^\s*std::env::set_var\(\s*"GENTLE_DOT_PREVIEW_MEMORY_ADMISSION"\s*,/gm;
+	assert.equal([...source.matchAll(setters)].length, 1, "no production or duplicate marker setter");
+});
 test('identity and fresh-root admission precede configuration, plugins, stores and startup',()=>{
  const run=shell().slice(shell().indexOf('pub fn run()'));
  assert.ok(run.indexOf('crate::preview::prepare(')>=0);
