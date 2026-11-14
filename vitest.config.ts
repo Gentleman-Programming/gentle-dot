@@ -16,6 +16,26 @@ export default defineConfig({
 					testTimeout: 20_000,
 				},
 			},
+			{
+				test: {
+					name: "connectors-gmail",
+					include: [
+						"packages/connectors/gmail/test/**/*.test.ts",
+					],
+					environment: "node",
+					testTimeout: 30_000,
+				},
+			},
+			{
+				test: {
+					name: "connectors-telegram",
+					include: [
+						"packages/connectors/telegram/src/**/*.test.ts",
+					],
+					environment: "node",
+					testTimeout: 30_000,
+				},
+			},
 			"packages/ui",
 		],
 	},

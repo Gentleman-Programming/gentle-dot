@@ -7,8 +7,11 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { createServer, IncomingMessage, Server as HttpServer } from 'http';
 import { URL } from 'url';
 import { EventEmitter } from 'events';
-import { ConnectorRegistry, ConnectorInfo, ConnectorType } from './connector-registry.js';
-import { AppConfig } from './config-loader.js';
+import { createHmac, timingSafeEqual } from 'node:crypto';
+import { CloseCode } from '@gentle-dot/protocol';
+import { CONNECTOR_TYPES, ConnectorRegistry, type ConnectorInfo, type ConnectorType } from './connector-registry.ts';
+import type { UploadStore } from './uploads.ts';
+import type { AppConfig } from './config-loader.ts';
 
 export type BridgeMessageType =
   | 'hello'
@@ -20,7 +23,14 @@ export type BridgeMessageType =
   | 'command'
   | 'command_result'
   | 'error'
-  | 'disconnect';
+  | 'disconnect'
+  | 'agent_state'
+  | 'message_delta'
+  | 'message_done'
+  | 'activity'
+  | 'send'
+  | 'abort'
+  | 'ui_response';
 
 export interface BridgeMessage {
   type: BridgeMessageType;
@@ -107,7 +117,25 @@ interface ConnectionState {
   authenticated: boolean;
 }
 
+/**
+ * The one shared key this server authenticates windows and bridges with. The daemon
+ * generates it at startup and persists it in `<dataDir>/token` (cli.ts); a built-in
+ * default would be a secret published in the source that any local process could use,
+ * so a missing key is an error rather than a fallback (S25.8).
+ */
+export function requireAuthToken(env: NodeJS.ProcessEnv = process.env): string {
+  const token = env['BRIDGE_AUTH_TOKEN'];
+  if (!token) {
+    throw new Error(
+      'BRIDGE_AUTH_TOKEN is not set: the daemon must generate its access key before the WebSocket server starts.',
+    );
+  }
+  return token;
+}
+
 export class WsServer extends EventEmitter {
+  /** Captured once at start, so a later env change cannot move the key mid-life. */
+  private authToken: string | undefined;
   private wss: WebSocketServer | null = null;
   private httpServer: HttpServer | null = null;
   private registry: ConnectorRegistry;
@@ -126,12 +154,41 @@ export class WsServer extends EventEmitter {
    * Start the WebSocket server
    */
   async start(): Promise<void> {
+    // Fail closed before listening: without a key, no client can authenticate.
+    this.authToken = requireAuthToken();
+    // Origins the operator named on top of the desktop app's defaults.
+    const configured = (this.config.daemon as { allowedOrigins?: string[] }).allowedOrigins;
+    for (const origin of configured ?? []) this.allowedOrigins.add(origin);
     return new Promise((resolve, reject) => {
       this.httpServer = createServer((req, res) => {
         this.handleHttpRequest(req, res);
       });
 
-      this.wss = new WebSocketServer({ server: this.httpServer, path: '/ws' });
+      this.wss = new WebSocketServer({ noServer: true, path: '/ws' });
+      const wss = this.wss;
+
+      // WebSocket upgrades are routed here instead of through the HTTP handler, so the origin
+      // veto runs before the handshake: a page the user happens to open must not drive their
+      // assistant. Same-origin windows (the served web UI, a proxied VPS domain) and the
+      // allowlisted desktop origins pass; anything else is refused before upgrading.
+      this.httpServer.on('upgrade', (req, socket, head) => {
+        const url = new URL(req.url ?? '/', 'http://localhost');
+        if (url.pathname !== '/ws') {
+          socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        const origin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
+        const host = typeof req.headers.host === 'string' ? req.headers.host : undefined;
+        const sameOrigin =
+          origin !== undefined && host !== undefined && (origin === `http://${host}` || origin === `https://${host}`);
+        if (origin !== undefined && !sameOrigin && !this.allowedOrigins.has(origin)) {
+          socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\nThat origin is not allowed.');
+          socket.destroy();
+          return;
+        }
+        wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+      });
 
       this.wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
         this.handleConnection(ws, req);
@@ -194,6 +251,16 @@ export class WsServer extends EventEmitter {
   private handleHttpRequest(req: IncomingMessage, res: import('http').ServerResponse): void {
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
 
+    if (url.pathname === '/upload') {
+      this.handleUpload(req, res);
+      return;
+    }
+
+    if (url.pathname === '/mcp') {
+      this.handleMcp(req, res);
+      return;
+    }
+
     if (url.pathname === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, timestamp: Date.now() }));
@@ -219,8 +286,180 @@ export class WsServer extends EventEmitter {
       return;
     }
 
+    if (url.pathname === '/webhook/gmail') {
+      this.handleGmailWebhook(req, res);
+      return;
+    }
+
+    if (url.pathname === '/oauth2callback') {
+      this.handleOAuthCallback(req, res);
+      return;
+    }
+
+    // The daemon no longer ships a window (the desktop app does), but the root answers so a
+    // browser or a health check that lands here sees something alive instead of a 404.
+    if (url.pathname === '/' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<!doctype html><title>Gentle Dot</title><p>Gentle Dot is running.</p>');
+      return;
+    }
+
+    // A path the daemon does not serve: wrong method for a known place is a 405, anything else 404.
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405, { Allow: 'GET, HEAD' });
+      res.end();
+      return;
+    }
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not found' }));
+  }
+
+  /**
+   * Handle Gmail push notification webhook
+   * Gmail sends Pub/Sub push notifications to this endpoint when watched labels change.
+   */
+  private async handleGmailWebhook(req: IncomingMessage, res: import('http').ServerResponse): Promise<void> {
+    if (req.method !== 'POST') {
+      res.writeHead(405, { Allow: 'POST' });
+      res.end();
+      return;
+    }
+
+    // Read the raw body for signature verification
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+      chunks.push(chunk as Buffer);
+    }
+    const body = Buffer.concat(chunks).toString('utf8');
+
+    // Verify the HMAC signature
+    const signatureHeader = req.headers['x-goog-signature'] as string | undefined;
+    const webhookSecret = process.env.GMAIL_WEBHOOK_SECRET;
+    
+    if (!webhookSecret) {
+      console.error('[Gmail Webhook] GMAIL_WEBHOOK_SECRET not configured');
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Webhook secret not configured' }));
+      return;
+    }
+
+    if (!signatureHeader) {
+      console.error('[Gmail Webhook] Missing x-goog-signature header');
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing signature' }));
+      return;
+    }
+
+    const separator = signatureHeader.indexOf('=');
+    if (separator === -1) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid signature format' }));
+      return;
+    }
+    const algorithm = signatureHeader.slice(0, separator);
+    const signature = signatureHeader.slice(separator + 1);
+    if (algorithm !== 'sha256' || !signature) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid signature algorithm' }));
+      return;
+    }
+
+    const expectedSignature = createHmac('sha256', webhookSecret).update(body).digest('base64');
+    const signatureBuffer = Buffer.from(signature, 'base64');
+    const expectedBuffer = Buffer.from(expectedSignature, 'base64');
+
+    if (signatureBuffer.length !== expectedBuffer.length || !timingSafeEqual(signatureBuffer, expectedBuffer)) {
+      console.error('[Gmail Webhook] Invalid signature');
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid signature' }));
+      return;
+    }
+
+    // Parse the Pub/Sub envelope
+    let notification: { emailAddress: string; historyId: string } | null = null;
+    try {
+      const envelope = JSON.parse(body) as { message?: { data?: string } };
+      if (typeof envelope.message?.data === 'string') {
+        const decoded = Buffer.from(envelope.message.data, 'base64').toString('utf-8');
+        const parsed = JSON.parse(decoded) as { emailAddress?: string; historyId?: string };
+        if (typeof parsed.emailAddress === 'string' && typeof parsed.historyId === 'string') {
+          notification = { emailAddress: parsed.emailAddress, historyId: parsed.historyId };
+        }
+      }
+    } catch {
+      // Ignore parse errors
+    }
+
+    if (!notification) {
+      console.error('[Gmail Webhook] Failed to parse notification');
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid notification format' }));
+      return;
+    }
+
+    console.log(`[Gmail Webhook] Received notification for ${notification.emailAddress}, historyId: ${notification.historyId}`);
+
+    // Find the Gmail connector and trigger a history poll
+    const gmailConnector = this.registry.getByType('gmail')[0];
+    if (gmailConnector) {
+      // Send a command to the bridge to poll for new messages
+      const success = this.sendToConnector(gmailConnector.connectorId, 'command', {
+        commandId: `webhook-${Date.now()}`, 
+        action: 'webhook_notification',
+        params: notification,
+      });
+      if (!success) {
+        console.warn('[Gmail Webhook] Gmail connector not connected or failed to send command');
+      }
+    } else {
+      console.warn('[Gmail Webhook] No Gmail connector registered');
+    }
+
+    // Always respond 204 to acknowledge receipt (Gmail will retry on non-2xx)
+    res.writeHead(204);
+    res.end();
+  }
+
+  /**
+   * Handle OAuth2 callback from Google
+   * Exchanges authorization code for tokens and forwards to Gmail connector
+   */
+  private async handleOAuthCallback(req: IncomingMessage, res: import('http').ServerResponse): Promise<void> {
+    const url = new URL(req.url || '/', `http://${req.headers.host}`);
+    const code = url.searchParams.get('code');
+    const error = url.searchParams.get('error');
+
+    if (error) {
+      console.error('[OAuth Callback] OAuth error:', error);
+      res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<html><body><h1>OAuth Error</h1><p>${error}</p></body></html>`);
+      return;
+    }
+
+    if (!code) {
+      res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<html><body><h1>OAuth Error</h1><p>No authorization code received</p></body></html>');
+      return;
+    }
+
+    // Find the Gmail connector and forward the code
+    const gmailConnector = this.registry.getByType('gmail')[0];
+    if (gmailConnector) {
+      const success = this.sendToConnector(gmailConnector.connectorId, 'command', {
+        commandId: `oauth-${Date.now()}`,
+        action: 'handle_oauth_callback',
+        params: { code },
+      });
+      if (success) {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end('<html><body><h1>Success</h1><p>Authorization complete. You can close this window.</p></body></html>');
+        return;
+      }
+    }
+
+    console.error('[OAuth Callback] No Gmail connector registered');
+    res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end('<html><body><h1>Error</h1><p>No Gmail connector available</p></body></html>');
   }
 
   /**
@@ -234,9 +473,41 @@ export class WsServer extends EventEmitter {
 
     console.log('[WsServer] New connection from', req.socket.remoteAddress);
 
+    /** Set once the socket identifies itself as a window rather than a connector. */
+    let appClientId: string | null = null;
+
     const onMessage = (data: Buffer) => {
       try {
-        const message = JSON.parse(data.toString()) as BridgeMessage;
+        const message = JSON.parse(data.toString()) as BridgeMessage & {
+          token?: string;
+          protocol?: number;
+          payload?: unknown;
+          text?: string;
+        };
+
+        // The windows speak the client protocol: flat frames, no envelope and no timestamp.
+        // A bridge hello always carries `payload`, so the two handshakes cannot be confused.
+        if (appClientId) {
+          if (message.type === 'ping') {
+            this.sendApp(ws, 'pong', {});
+            return;
+          }
+          this.emit('onAppMessage', appClientId, message);
+          return;
+        }
+        if (message.type === 'hello' && message.payload === undefined && typeof message.token === 'string') {
+          appClientId = this.handleAppHello(ws, message);
+          return;
+        }
+        // Allow authenticated bridge connections to send non-hello messages (ping, events, etc.)
+        if (state.authenticated && state.connectorId) {
+          // Authenticated bridge - proceed to message validation and routing
+        } else if (message.type !== 'hello') {
+          // No session exists yet: the first frame a window sends must be the flat hello, and a
+          // connection that never authenticated cannot keep talking (client protocol, S25.1).
+          ws.close(CloseCode.unauthorized, 'The first message must be hello');
+          return;
+        }
 
         // Validate message structure
         if (!message.type || typeof message.timestamp !== 'number') {
@@ -271,6 +542,9 @@ export class WsServer extends EventEmitter {
           case 'connector_event':
           case 'command':
           case 'command_result':
+          case 'send':
+          case 'abort':
+          case 'ui_response':
             this.emit('onMessage', state.connectorId, message);
             break;
           case 'disconnect':
@@ -281,7 +555,9 @@ export class WsServer extends EventEmitter {
         }
       } catch (error) {
         console.error('[WsServer] Error parsing message:', error);
-        this.sendError(ws, 'PARSE_ERROR', 'Invalid JSON');
+        // A window gets the flat client-protocol error; bridges get the envelope one.
+        if (appClientId) this.sendAppError(ws, 'bad_message', 'Invalid JSON');
+        else this.sendError(ws, 'PARSE_ERROR', 'Invalid JSON');
       }
     };
 
@@ -305,6 +581,178 @@ export class WsServer extends EventEmitter {
   /**
    * Handle hello message (authentication handshake)
    */
+  /**
+   * `POST /mcp`: the connectors' MCP endpoint (JSON-RPC 2.0), reached by the engine with the key its
+   * launch was given. A wrong key is refused before the body is read.
+   */
+  private handleMcp(req: IncomingMessage, res: import('http').ServerResponse): void {
+    const endpoint = this.mcpEndpoint;
+    if (req.method !== 'POST') {
+      res.writeHead(405, { Allow: 'POST' });
+      res.end();
+      return;
+    }
+    const authorization = typeof req.headers.authorization === 'string' ? req.headers.authorization : '';
+    const bearer = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : '';
+    if (!endpoint || bearer !== endpoint.key) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code: 'unauthorized', message: 'A valid key is required.' }));
+      return;
+    }
+
+    // The proxy speaks the full MCP protocol over streamable HTTP, per connector: the path
+    // carries the connector id and the proxy owns parsing, listing, calls and approvals.
+    endpoint.handle(req, res);
+  }
+
+  /**
+   * `POST /upload`: the desktop app sends a file the user dropped on the window.
+   *
+   * The access key travels in the Authorization header only (never the address, which ends up in
+   * logs), a foreign origin is refused before anything is read, and the store enforces the size
+   * limits while the body streams so a refused file never lands on disk.
+   */
+  private handleUpload(req: IncomingMessage, res: import('http').ServerResponse): void {
+    const origin = typeof req.headers.origin === 'string' ? req.headers.origin : undefined;
+    const allowOrigin = origin && this.allowedOrigins.has(origin) ? origin : undefined;
+    const cors: Record<string, string> = allowOrigin
+      ? {
+          'Access-Control-Allow-Origin': allowOrigin,
+          'Access-Control-Allow-Methods': 'POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'authorization, x-file-name, x-upload-id, content-type',
+        }
+      : {};
+
+    if (origin !== undefined && !allowOrigin) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code: 'origin_refused', message: 'That origin is not allowed.' }));
+      return;
+    }
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, cors);
+      res.end();
+      return;
+    }
+    if (req.method !== 'POST') {
+      res.writeHead(405, { ...cors, Allow: 'POST, OPTIONS' });
+      res.end();
+      return;
+    }
+
+    const authorization = typeof req.headers.authorization === 'string' ? req.headers.authorization : '';
+    const bearer = authorization.startsWith('Bearer ') ? authorization.slice('Bearer '.length) : '';
+    if (bearer !== this.getAuthToken()) {
+      res.writeHead(401, { ...cors, 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code: 'unauthorized', message: 'A valid access key is required.' }));
+      return;
+    }
+
+    const rawName = typeof req.headers['x-file-name'] === 'string' ? req.headers['x-file-name'] : '';
+    const name = rawName === '' ? '' : decodeURIComponent(rawName);
+    if (name.trim() === '') {
+      res.writeHead(400, { ...cors, 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code: 'name_required', message: 'A file name is required.' }));
+      return;
+    }
+
+    const uploadId = typeof req.headers['x-upload-id'] === 'string' ? req.headers['x-upload-id'] : undefined;
+    const declared = Number(req.headers['content-length'] ?? 0);
+    const store = this.uploads;
+    if (!store) {
+      res.writeHead(503, { ...cors, 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code: 'uploads_unavailable', message: 'Uploads are not available.' }));
+      return;
+    }
+
+    // A body that stops mid-flight leaves nothing behind: the store destroys what it wrote.
+    req.on('aborted', () => req.destroy());
+
+    void store
+      .receive(req, { name, ...(declared > 0 ? { length: declared } : {}), ...(uploadId ? { uploadId } : {}) })
+      .then((outcome) => {
+        if (outcome.ok) {
+          res.writeHead(200, { ...cors, 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(outcome.file));
+          return;
+        }
+        res.writeHead(outcome.status, { ...cors, 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ code: outcome.code, message: outcome.message }));
+      })
+      .catch((error: Error) => {
+        res.writeHead(500, { ...cors, 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ code: 'upload_failed', message: error.message }));
+      });
+  }
+
+  /**
+   * The client protocol's handshake: same daemon token, no connector type. A window gets the
+   * flat `ready` the protocol expects, and from then on its frames go to `onAppMessage`.
+   */
+  private handleAppHello(ws: WebSocket, message: { token?: string; protocol?: number }): string | null {
+    if (message.protocol !== PROTOCOL_VERSION) {
+      this.sendAppError(ws, 'PROTOCOL_MISMATCH', `Expected protocol v${PROTOCOL_VERSION}, got v${message.protocol}`);
+      ws.close(CloseCode.badProtocol, 'Protocol mismatch');
+      return null;
+    }
+    if (!message.token || message.token !== this.getAuthToken()) {
+      this.sendAppError(ws, 'INVALID_TOKEN', 'Invalid authentication token');
+      ws.close(CloseCode.unauthorized, 'Invalid token');
+      return null;
+    }
+
+    const clientId = `app-${++this.appSeq}`;
+    this.appClients.set(clientId, ws);
+    ws.on('close', () => {
+      this.appClients.delete(clientId);
+      // Whoever was signed in from that window is gone: the daemon cancels what it owned.
+      this.emit('onAppDisconnect', clientId);
+    });
+    const model = this.modelName?.();
+    this.sendApp(ws, 'ready', {
+      protocol: PROTOCOL_VERSION,
+      agentState: 'idle',
+      clientId,
+      ...(model ? { model } : {}),
+    });
+    console.log(`[WsServer] App client connected: ${clientId}`);
+    return clientId;
+  }
+
+  /** One flat client-protocol frame to a window. */
+  private sendApp(ws: WebSocket, type: string, payload: unknown): boolean {
+    if (ws.readyState !== WebSocket.OPEN) return false;
+    try {
+      ws.send(JSON.stringify({ type, ...(payload as Record<string, unknown>) }));
+      return true;
+    } catch (error) {
+      console.error('[WsServer] send to app failed:', error);
+      return false;
+    }
+  }
+
+  private sendAppError(ws: WebSocket, code: string, message: string): void {
+    this.sendApp(ws, 'error', { code, message });
+  }
+
+  /** Sends one flat frame to every connected window. */
+  broadcastApps(type: string, payload: unknown): number {
+    let sent = 0;
+    for (const ws of this.appClients.values()) {
+      if (this.sendApp(ws, type, payload)) sent++;
+    }
+    return sent;
+  }
+
+  /**
+   * Deliver to whoever the id names: a window (flat client protocol) or a connector (bridge
+   * envelope). The daemon routes engine events through this so one code path serves both.
+   */
+  deliver(target: string, type: BridgeMessageType | string, payload: unknown): boolean {
+    const app = this.appClients.get(target);
+    if (app) return this.sendApp(app, type, payload);
+    return this.sendToConnector(target, type as BridgeMessageType, payload);
+  }
+
   private handleHello(ws: WebSocket, message: BridgeMessage, state: ConnectionState): void {
     const payload = message.payload as HelloPayload;
 
@@ -323,8 +771,8 @@ export class WsServer extends EventEmitter {
     }
 
     // Validate connector type
-    if (!['telegram', 'gmail', 'discord', 'whatsapp'].includes(payload.connectorType)) {
-      this.sendError(ws, 'INVALID_CONNECTOR_TYPE', `Unknown connector type: ${payload.connectorType}`);
+    if (!payload.connectorType || !(CONNECTOR_TYPES as readonly string[]).includes(payload.connectorType)) {
+      this.sendError(ws, 'INVALID_CONNECTOR_TYPE', `Unknown connector type: ${payload.connectorType}. Accepted: ${CONNECTOR_TYPES.join(', ')}`);
       ws.close(1008, 'Invalid connector type');
       return;
     }
@@ -474,13 +922,16 @@ export class WsServer extends EventEmitter {
   sendToConnector(connectorId: string, messageType: BridgeMessageType, payload: unknown): boolean {
     const connector = this.registry.get(connectorId);
     if (!connector) {
+      console.log('[WsServer] sendToConnector: connector not found:', connectorId);
       return false;
     }
     const ws = (connector as ConnectorWithWs).ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.log('[WsServer] sendToConnector: ws not open for:', connectorId, ws?.readyState);
       return false;
     }
 
+    console.log('[WsServer] sendToConnector: sending', messageType, 'to', connectorId);
     this.send(ws, messageType, payload);
     return true;
   }
@@ -518,9 +969,36 @@ export class WsServer extends EventEmitter {
   /**
    * Get authentication token from config or env
    */
+  /** Where an uploaded file goes; set by the daemon once its workspace is known. */
+  uploads: UploadStore | null = null;
+
+  /**
+   * The connectors' MCP endpoint: the address the engine's server list points at, the key that
+   * launch was given, and what to list and call. The daemon owns the answers; the server only
+   * speaks JSON-RPC and checks the key.
+   */
+  mcpEndpoint: {
+    key: string;
+    handle(req: IncomingMessage, res: import('http').ServerResponse): void;
+  } | null = null;
+
+  /**
+   * Origins the desktop app's windows come from. Anything else is refused, here and on the upload
+   * endpoint, because a page the user happens to open must not drive their assistant.
+   */
+  allowedOrigins = new Set<string>(['tauri://localhost', 'https://tauri.localhost']);
+
+  /** Names the model the assistant is running, for the window's ready frame. */
+  modelName: (() => string | undefined) | null = null;
+
+  /** Windows connected over the client protocol (flat frames), by client id. */
+  private appClients = new Map<string, WebSocket>();
+  private appSeq = 0;
+
   private getAuthToken(): string {
-    // In production, this should come from a secure config
-    // For now, use a simple shared secret from env or default
-    return process.env['BRIDGE_AUTH_TOKEN'] || 'gentle-dot-bridge-secret';
+    if (this.authToken === undefined) {
+      throw new Error('The WebSocket server has no access key: start() was never called.');
+    }
+    return this.authToken;
   }
 }

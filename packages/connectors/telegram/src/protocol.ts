@@ -59,7 +59,6 @@ export const MAX_VOICE_AUDIO = 960_000;
 
 export type ClientMessage =
 	| { type: "hello"; token: string; protocol: number }
-	/** `text` may be empty when files are attached. */
 	| { type: "send"; text: string; requestId?: string; attachments?: AttachmentRef[] }
 	| { type: "abort" }
 	| { type: "ui_response"; requestId: string; value?: string; confirmed?: boolean; cancelled?: boolean }
@@ -80,3 +79,5 @@ export type ServerPayload =
 	| { type: "voice_unavailable"; requestId: string; reason: string };
 
 export type ServerMessage = ServerPayload & { seq: number };
+
+/** Why a window cannot change connectors itself (S25.2). */

@@ -8,9 +8,10 @@ export interface Config {
 	daemonUrl: string;
 	/** File holding the daemon's access key. */
 	tokenFile: string;
+	/** SQLite DB for nicknames (never the daemon token file). */
+	nicknameDb: string;
 }
 
-/** A configuration problem; the message names the variable and never repeats its value. */
 export class ConfigError extends Error {}
 
 const USER_ID = /^[1-9][0-9]{0,15}$/;
@@ -40,5 +41,6 @@ export function loadConfig(env: Record<string, string | undefined>, home: string
 		allowedUsers: new Set(ids.map(Number)),
 		daemonUrl,
 		tokenFile: env.GENTLE_DOT_TOKEN_FILE?.trim() || join(home, ".gentle-dot", "token"),
+	nicknameDb: env.DOT_TELEGRAM_NICKNAME_DB?.trim() || join(home, ".gentle-dot", "telegram-nicknames.db"),
 	};
 }
