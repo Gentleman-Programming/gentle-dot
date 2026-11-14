@@ -1906,6 +1906,11 @@ html[data-surface="glow"] body {
 	overflow-y: auto;
 }
 
+.chat-panel > .header-menu-scrim,
+.chat-panel > .header-menu {
+	position: absolute;
+}
+
 .header-menu-head {
 	display: flex;
 	align-items: center;
@@ -1950,6 +1955,11 @@ button.menu-row {
 	font-size: 13px;
 	text-align: left;
 	cursor: pointer;
+}
+
+.header-menu button.menu-row {
+	width: calc(100% - 12px);
+	margin-inline: 6px;
 }
 
 button.menu-row:hover:not(:disabled) {
