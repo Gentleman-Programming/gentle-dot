@@ -32,10 +32,166 @@ function Harness({
 	);
 }
 
-const open = () => userEvent.click(screen.getByRole("button", { name: "Voice language" }));
+const open = () => userEvent.click(screen.getByRole("combobox", { name: "Voice language" }));
 const listbox = () => screen.getByRole("listbox", { name: "Voice language" });
 
 describe("SelectMenu", () => {
+	it("A1 exposes the popup and pending option without changing confirmed selection", async () => {
+		const onChange = vi.fn();
+		const view = render(<Harness onChange={onChange} />);
+		const trigger = screen.getByRole("combobox", { name: "Voice language" });
+		expect(trigger).toHaveAttribute("aria-expanded", "false");
+		expect(trigger).not.toHaveAttribute("aria-activedescendant");
+		await userEvent.click(trigger);
+		expect(trigger).toHaveFocus();
+		expect(trigger).toHaveAttribute("aria-controls", listbox().id);
+		expect(listbox().id).not.toBe("");
+		const confirmed = screen.getByRole("option", { name: "Automatic (system language)" });
+		expect(trigger).toHaveAttribute("aria-activedescendant", confirmed.id);
+		await userEvent.keyboard("{ArrowDown}");
+		const pending = screen.getByRole("option", { name: "Español" });
+		expect(pending.id).not.toBe("");
+		expect(trigger).toHaveAttribute("aria-activedescendant", pending.id);
+		expect(pending).toHaveAttribute("aria-selected", "false");
+		expect(confirmed).toHaveAttribute("aria-selected", "true");
+		fireEvent.mouseMove(screen.getByRole("option", { name: "English" }));
+		expect(trigger).toHaveAttribute(
+			"aria-activedescendant",
+			screen.getByRole("option", { name: "English" }).id,
+		);
+		await userEvent.keyboard("{Escape}");
+		expect(trigger).not.toHaveAttribute("aria-activedescendant");
+		expect(trigger).not.toHaveAttribute("aria-controls");
+		expect(onChange).not.toHaveBeenCalled();
+		view.rerender(<SelectMenu label="Voice language" value="" options={[]} onChange={onChange} />);
+		await userEvent.click(trigger);
+		expect(trigger).not.toHaveAttribute("aria-activedescendant");
+		expect(screen.queryAllByRole("option")).toHaveLength(0);
+		await userEvent.keyboard("{Enter}");
+		expect(onChange).not.toHaveBeenCalled();
+	});
+
+	it("A2 exposes the closed combobox name separately from its visible text value", async () => {
+		render(<Harness />);
+		const trigger = screen.getByRole("combobox", { name: "Voice language" });
+		expect(trigger).toHaveAccessibleName("Voice language");
+		// A select-only ARIA combobox exposes its value from its text contents, not aria-valuenow.
+		expect(trigger).toHaveTextContent(/^Automatic \(system language\)$/);
+		expect(trigger).not.toHaveAttribute("aria-valuenow");
+		await userEvent.click(trigger);
+		await userEvent.click(screen.getByRole("option", { name: "English" }));
+		expect(trigger).toHaveAccessibleName("Voice language");
+		expect(trigger).toHaveTextContent(/^English$/);
+		expect(trigger).toHaveAttribute("aria-expanded", "false");
+	});
+
+	it("A3 names provider groups with unique headings across similar labels and instances", () => {
+		const groups = [
+			{ label: "A B", options: [{ value: "a", label: "First" }] },
+			{ label: "A-B", options: [{ value: "b", label: "Second" }] },
+			{ label: "A B", options: [{ value: "c", label: "Third" }] },
+		];
+		render(
+			<>
+				<SelectMenu label="First picker" value="a" groups={groups} onChange={vi.fn()} />
+				<SelectMenu label="Second picker" value="a" groups={groups} onChange={vi.fn()} />
+			</>,
+		);
+		// Programmatic click keeps both instances open to inspect all live ID references.
+		for (const trigger of screen.getAllByRole("combobox")) fireEvent.click(trigger);
+		const headings = screen.getAllByRole("group");
+		expect(headings).toHaveLength(6);
+		for (const [index, group] of headings.entries()) {
+			expect(group).toHaveAccessibleName(groups[index % groups.length]?.label);
+			const heading = document.getElementById(group.getAttribute("aria-labelledby") ?? "");
+			expect(group).toContainElement(heading);
+			expect(within(group).getAllByRole("option")).toHaveLength(1);
+		}
+		const ids = Array.from(document.querySelectorAll("[id]")).map((element) => element.id);
+		expect(new Set(ids).size).toBe(ids.length);
+	});
+
+	it("A4 scrolls only the popup on open and keyboard or pointer exploration", async () => {
+		vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+			if (this.getAttribute("role") === "listbox") return new DOMRect(0, 100, 200, 60);
+			if (this.getAttribute("role") === "option")
+				return new DOMRect(0, this.textContent === "Español" ? 80 : 170, 200, 20);
+			return new DOMRect(0, 0, 200, 30);
+		});
+		render(<Harness />);
+		await open();
+		const list = listbox();
+		expect(list.scrollTop).toBe(30);
+		await userEvent.keyboard("{ArrowDown}");
+		expect(list.scrollTop).toBe(10);
+		fireEvent.mouseMove(screen.getByRole("option", { name: "English" }));
+		expect(list.scrollTop).toBe(40);
+		expect(document.documentElement.scrollTop).toBe(0);
+		expect(document.body.scrollTop).toBe(0);
+	});
+
+	it("uses global indexes after multiple provider groups", async () => {
+		const onChange = vi.fn();
+		render(
+			<SelectMenu
+				label="Models"
+				value=""
+				onChange={onChange}
+				options={[{ value: "", label: "Default" }]}
+				groups={[
+					{
+						label: "A",
+						options: [
+							{ value: "a1", label: "A1" },
+							{ value: "a2", label: "A2" },
+						],
+					},
+					{ label: "B", options: [{ value: "b1", label: "B1" }] },
+				]}
+			/>,
+		);
+		await userEvent.click(screen.getByRole("combobox", { name: "Models" }));
+		fireEvent.mouseMove(screen.getByRole("option", { name: "B1" }));
+		await userEvent.keyboard("{Enter}");
+		expect(onChange).toHaveBeenCalledExactlyOnceWith("b1");
+		expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+	});
+
+	it("discards cancelled navigation when reopened", async () => {
+		const onChange = vi.fn();
+		render(<Harness onChange={onChange} />);
+		await open();
+		await userEvent.keyboard("{ArrowDown}{Escape}");
+		expect(onChange).not.toHaveBeenCalled();
+		await open();
+		await userEvent.keyboard("{Enter}");
+		expect(onChange).toHaveBeenCalledExactlyOnceWith("");
+		expect(screen.getByRole("combobox", { name: "Voice language" })).toHaveTextContent("Automatic");
+	});
+
+	it("reopens at the authoritative value after options and value change", async () => {
+		const onChange = vi.fn();
+		const view = render(
+			<SelectMenu
+				label="Choice"
+				value="b"
+				onChange={onChange}
+				options={[
+					{ value: "a", label: "A" },
+					{ value: "b", label: "B" },
+				]}
+			/>,
+		);
+		await userEvent.click(screen.getByRole("combobox", { name: "Choice" }));
+		await userEvent.keyboard("{Escape}");
+		view.rerender(
+			<SelectMenu label="Choice" value="c" onChange={onChange} options={[{ value: "c", label: "C" }]} />,
+		);
+		await userEvent.click(screen.getByRole("combobox", { name: "Choice" }));
+		await userEvent.keyboard("{Enter}");
+		expect(onChange).toHaveBeenCalledExactlyOnceWith("c");
+	});
+
 	afterEach(() => {
 		vi.restoreAllMocks();
 		vi.unstubAllGlobals();
@@ -131,7 +287,7 @@ describe("SelectMenu", () => {
 		await open();
 		await userEvent.click(screen.getByRole("option", { name: "English" }));
 		expect(onChange).toHaveBeenCalledExactlyOnceWith("en");
-		expect(screen.getByRole("button", { name: "Voice language" })).toHaveTextContent("English");
+		expect(screen.getByRole("combobox", { name: "Voice language" })).toHaveTextContent("English");
 	});
 
 	it("keeps disabled triggers closed", async () => {
@@ -145,7 +301,7 @@ describe("SelectMenu", () => {
 				disabled
 			/>,
 		);
-		const trigger = screen.getByRole("button", { name: "Disabled" });
+		const trigger = screen.getByRole("combobox", { name: "Disabled" });
 		await userEvent.click(trigger);
 		expect(trigger).toBeDisabled();
 		expect(trigger).toHaveAttribute("aria-expanded", "false");
@@ -164,12 +320,12 @@ describe("SelectMenu", () => {
 		await open();
 		await userEvent.click(screen.getByRole("option", { name: "Model" }));
 		expect(onChange).toHaveBeenCalledExactlyOnceWith("model");
-		expect(screen.getByRole("button", { name: "Voice language" })).toHaveTextContent("Model");
+		expect(screen.getByRole("combobox", { name: "Voice language" })).toHaveTextContent("Model");
 		expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
 	});
-	it("renders a trigger button styled by the theme, not a native select", () => {
+	it("renders a select-only combobox styled by the theme, not a native select", () => {
 		const { container } = render(<Harness />);
-		const trigger = screen.getByRole("button", { name: "Voice language" });
+		const trigger = screen.getByRole("combobox", { name: "Voice language" });
 		expect(trigger).toHaveTextContent("Automatic (system language)");
 		expect(container.querySelector("select")).toBeNull();
 		expect(screen.queryByRole("listbox")).toBeNull();
@@ -197,7 +353,7 @@ describe("SelectMenu", () => {
 		await open();
 		await userEvent.click(screen.getByRole("option", { name: "Español" }));
 		expect(onChange).toHaveBeenCalledWith("es");
-		expect(screen.getByRole("button", { name: "Voice language" })).toHaveTextContent("Español");
+		expect(screen.getByRole("combobox", { name: "Voice language" })).toHaveTextContent("Español");
 		expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
 	});
 
@@ -231,11 +387,15 @@ describe("SelectMenu", () => {
 	});
 
 	it("keeps focus reachable: the list opens focused, closes with Tab, and returns focus to the trigger", async () => {
-		render(<Harness />);
-		const trigger = screen.getByRole("button", { name: "Voice language" });
+		const onChange = vi.fn();
+		render(<Harness onChange={onChange} />);
+		const trigger = screen.getByRole("combobox", { name: "Voice language" });
 		await userEvent.click(trigger);
 		expect(document.activeElement).toBe(trigger);
+		await userEvent.keyboard("{ArrowDown}");
 		await userEvent.tab();
 		expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+		expect(trigger).toHaveTextContent("Automatic (system language)");
+		expect(onChange).not.toHaveBeenCalled();
 	});
 });

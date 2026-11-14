@@ -1,4 +1,4 @@
-import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 /** One selectable row of the menu. */
@@ -28,18 +28,18 @@ export interface SelectMenuProps {
 	disabled?: boolean;
 }
 
-const slug = (label: string) => label.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-
 const flat = (props: Pick<SelectMenuProps, "options" | "groups">): SelectOption[] => [
 	...(props.options ?? []),
 	...(props.groups ?? []).flatMap((group) => group.options),
 ];
 
-/** The theme's select: a trigger button plus a portaled listbox, so the popup is drawn by our
+/** The theme's select-only combobox plus a portaled listbox, so the popup is drawn by our
  * theme instead of the browser's native one (the four native `<select>` the app had drew the
  * OS dropdown). Keyboard: arrows move, Enter picks, Escape and Tab close; clicking outside
  * closes; focus stays on the trigger the whole time, like a native combobox. */
 export function SelectMenu({ label, value, onChange, options, groups, compact, disabled }: SelectMenuProps) {
+	const id = useId();
+	const listId = `${id}-list`;
 	const [open, setOpen] = useState(false);
 	const [active, setActive] = useState(() =>
 		Math.max(
@@ -71,11 +71,40 @@ export function SelectMenu({ label, value, onChange, options, groups, compact, d
 	}, []);
 	const all = flat({ options, groups });
 	const current = all.find((option) => option.value === value);
+	const activeIndex = Math.min(active, Math.max(0, all.length - 1));
+	const activeId = open && all.length > 0 ? `${id}-option-${activeIndex}` : undefined;
+
+	useEffect(() => {
+		const list = popup.current;
+		const option = activeId ? document.getElementById(activeId) : null;
+		if (!list || !option) return;
+		const bounds = list.getBoundingClientRect();
+		const row = option.getBoundingClientRect();
+		// Scroll only the popup, never the page or the trigger's clipping ancestors.
+		if (row.top < bounds.top) list.scrollTop += row.top - bounds.top;
+		else if (row.bottom > bounds.bottom) list.scrollTop += row.bottom - bounds.bottom;
+	}, [activeId]);
+
+	const show = () => {
+		setActive(
+			Math.max(
+				0,
+				all.findIndex((option) => option.value === value),
+			),
+		);
+		measure();
+		setOpen(true);
+	};
 
 	useEffect(() => {
 		if (!open) return;
 		const onKey = (event: KeyboardEvent) => {
-			if (event.key === "Escape" || event.key === "Tab") setOpen(false);
+			if (event.key === "Escape" && !event.defaultPrevented) {
+				// Capture before enclosing popovers and the panel's window listener.
+				event.preventDefault();
+				event.stopPropagation();
+				setOpen(false);
+			} else if (event.key === "Tab") setOpen(false);
 		};
 		const onClick = (event: MouseEvent) => {
 			const target = event.target as Node;
@@ -86,12 +115,12 @@ export function SelectMenu({ label, value, onChange, options, groups, compact, d
 			if (event.target instanceof Node && popup.current?.contains(event.target)) return;
 			measure();
 		};
-		window.addEventListener("keydown", onKey);
+		window.addEventListener("keydown", onKey, true);
 		window.addEventListener("mousedown", onClick);
 		window.addEventListener("resize", onMove);
 		window.addEventListener("scroll", onMove, true);
 		return () => {
-			window.removeEventListener("keydown", onKey);
+			window.removeEventListener("keydown", onKey, true);
 			window.removeEventListener("mousedown", onClick);
 			window.removeEventListener("resize", onMove);
 			window.removeEventListener("scroll", onMove, true);
@@ -104,7 +133,8 @@ export function SelectMenu({ label, value, onChange, options, groups, compact, d
 	};
 
 	const move = (delta: number) => {
-		const next = (active + delta + all.length) % all.length;
+		if (all.length === 0) return;
+		const next = (activeIndex + delta + all.length) % all.length;
 		setActive(next);
 	};
 
@@ -114,11 +144,12 @@ export function SelectMenu({ label, value, onChange, options, groups, compact, d
 			(event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Enter" || event.key === " ")
 		) {
 			event.preventDefault();
-			measure();
-			setOpen(true);
+			event.stopPropagation();
+			show();
 			return;
 		}
 		if (!open) return;
+		if (["ArrowDown", "ArrowUp", "Enter"].includes(event.key)) event.stopPropagation();
 		if (event.key === "ArrowDown") {
 			event.preventDefault();
 			move(1);
@@ -127,7 +158,7 @@ export function SelectMenu({ label, value, onChange, options, groups, compact, d
 			move(-1);
 		} else if (event.key === "Enter") {
 			event.preventDefault();
-			const option = all[active];
+			const option = all[activeIndex];
 			if (option) pick(option);
 		}
 	};
@@ -136,12 +167,18 @@ export function SelectMenu({ label, value, onChange, options, groups, compact, d
 		<div
 			key={option.value}
 			role="option"
+			id={`${id}-option-${index}`}
+			onMouseDown={(event) => event.preventDefault()}
 			aria-selected={option.value === value}
 			tabIndex={-1}
-			className={`select-menu-option${index === active ? " active" : ""}`}
+			className={`select-menu-option${index === activeIndex ? " active" : ""}`}
 			onClick={() => pick(option)}
 			onKeyDown={(event) => {
-				if (event.key === "Enter") pick(option);
+				if (event.key === "Enter") {
+					event.preventDefault();
+					event.stopPropagation();
+					pick(option);
+				}
 			}}
 			onMouseMove={() => setActive(index)}
 		>
@@ -153,16 +190,19 @@ export function SelectMenu({ label, value, onChange, options, groups, compact, d
 		<div className={`select-menu${compact ? " compact" : ""}`} ref={root}>
 			<button
 				type="button"
+				role="combobox"
 				className="select-menu-trigger"
 				aria-label={label}
 				aria-haspopup="listbox"
 				aria-expanded={open}
+				aria-controls={open ? listId : undefined}
+				aria-activedescendant={activeId}
 				disabled={disabled}
 				onKeyDown={onTriggerKey}
 				ref={trigger}
 				onClick={() => {
-					if (!open) measure();
-					setOpen(!open);
+					if (open) setOpen(false);
+					else show();
 				}}
 			>
 				<span className="select-menu-value">{current?.label ?? value}</span>
@@ -179,7 +219,6 @@ export function SelectMenu({ label, value, onChange, options, groups, compact, d
 					aria-hidden="true"
 					focusable="false"
 				>
-					<title>icon</title>
 					<path d="M6 9l6 6 6-6" />
 				</svg>
 			</button>
@@ -191,6 +230,7 @@ export function SelectMenu({ label, value, onChange, options, groups, compact, d
 							onPointerDown={(event) => event.stopPropagation()}
 							className="select-menu-list"
 							role="listbox"
+							id={listId}
 							aria-label={label}
 							style={
 								anchor.bottom !== undefined
@@ -199,12 +239,19 @@ export function SelectMenu({ label, value, onChange, options, groups, compact, d
 							}
 						>
 							{(options ?? []).map(optionRow)}
-							{(groups ?? []).map((group) => (
-								<div key={group.label} className="select-menu-group">
-									<div className="select-menu-heading" id={`select-group-${slug(group.label)}`}>
+							{(groups ?? []).map((group, groupIndex) => (
+								// biome-ignore lint/a11y/useSemanticElements: listbox option groups are not form fieldsets
+								<div
+									// biome-ignore lint/suspicious/noArrayIndexKey: stateless groups may share labels; local index matches their heading IDs
+									key={`${groupIndex}-${group.label}`}
+									className="select-menu-group"
+									role="group"
+									aria-labelledby={`${id}-group-${groupIndex}`}
+								>
+									<div className="select-menu-heading" id={`${id}-group-${groupIndex}`}>
 										{group.label}
 									</div>
-									{group.options.map((option, index) => optionRow(option, index + (options?.length ?? 0)))}
+									{group.options.map((option) => optionRow(option, all.indexOf(option)))}
 								</div>
 							))}
 						</div>,

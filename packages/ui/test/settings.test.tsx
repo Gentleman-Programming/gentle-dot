@@ -395,17 +395,31 @@ describe("an invalid memory setting (S9)", () => {
 });
 
 describe("voice language (S30.6)", () => {
+	it("Escape only closes the language list and cancelled navigation does not persist", async () => {
+		await openSettings();
+		const language = screen.getByRole("combobox", { name: "Voice language" });
+		await userEvent.click(language);
+		await userEvent.keyboard("{ArrowDown}{Escape}");
+		expect(screen.queryByRole("listbox", { name: "Voice language" })).toBeNull();
+		expect(invoked("hide_panel")).toHaveLength(0);
+		expect(localStorage.getItem("gentle-dot-voice-language")).toBeNull();
+		await userEvent.click(language);
+		await userEvent.keyboard("{Enter}");
+		expect(language).toHaveTextContent("Automatic (system language)");
+		expect(localStorage.getItem("gentle-dot-voice-language")).toBeNull();
+	});
+
 	it("does not offer macOS voice language on Windows", async () => {
 		vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Windows NT 10.0");
 		await openSettings();
-		expect(screen.queryByRole("button", { name: "Voice language" })).toBeNull();
+		expect(screen.queryByRole("combobox", { name: "Voice language" })).toBeNull();
 	});
 	it("defaults to the system language and remembers the one chosen for macOS speech", async () => {
 		await openSettings();
-		await userEvent.click(screen.getByRole("button", { name: "Voice language" }));
+		await userEvent.click(screen.getByRole("combobox", { name: "Voice language" }));
 		await userEvent.click(screen.getByRole("option", { name: "Español" }));
 		expect(localStorage.getItem("gentle-dot-voice-language")).toBe("es-ES");
-		await userEvent.click(screen.getByRole("button", { name: "Voice language" }));
+		await userEvent.click(screen.getByRole("combobox", { name: "Voice language" }));
 		await userEvent.click(screen.getByRole("option", { name: "Automatic (system language)" }));
 		expect(localStorage.getItem("gentle-dot-voice-language")).toBeNull();
 	});

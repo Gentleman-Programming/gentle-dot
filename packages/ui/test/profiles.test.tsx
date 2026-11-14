@@ -9,7 +9,7 @@ import { openPanelMenu } from "./panel-menu.ts";
 
 /** Opens the SelectMenu with that accessible name and picks the option with that text. */
 async function openSelect(menuLabel: string, optionText: string): Promise<void> {
-	await userEvent.click(screen.getByRole("button", { name: menuLabel }));
+	await userEvent.click(screen.getByRole("combobox", { name: menuLabel }));
 	await userEvent.click(screen.getByRole("option", { name: optionText }));
 }
 
@@ -112,6 +112,28 @@ describe("profiles state", () => {
 });
 
 describe("ProfilesPanel", () => {
+	it("keeps keyboard model selection and Tab traversal in the profile editor", async () => {
+		const { send } = panel();
+		await userEvent.click(within(item("deep")).getByRole("button", { name: "Edit" }));
+		await userEvent.click(screen.getByRole("combobox", { name: "Builder model" }));
+		await userEvent.keyboard("{ArrowDown}{Enter}");
+		expect(screen.getByRole("combobox", { name: "Builder model" })).toHaveTextContent("Fake Model");
+		await userEvent.click(screen.getByRole("combobox", { name: "Builder model" }));
+		await userEvent.tab();
+		expect(screen.queryByRole("listbox", { name: "Builder model" })).not.toBeInTheDocument();
+		expect(screen.getByRole("combobox", { name: "Builder thinking" })).toHaveFocus();
+		await userEvent.click(screen.getByRole("button", { name: "Save" }));
+		expect(send).toHaveBeenCalledExactlyOnceWith({
+			type: "profile_save",
+			name: "deep",
+			roles: {
+				orchestrator: { model: "fake/fake-model", thinking: "high" },
+				"custom-agent": { model: "x/y" },
+				"gentle-ai-worker": { model: "fake/fake-model" },
+			},
+		});
+	});
+
 	it("lists profiles, marks the one in use, and switches with Use", async () => {
 		const { send } = panel();
 		expect(within(item("quick")).getByText("In use")).toBeInTheDocument();
@@ -125,7 +147,7 @@ describe("ProfilesPanel", () => {
 	it("edits a profile per role with models grouped by provider and keeps routes it does not show", async () => {
 		const { send } = panel();
 		await userEvent.click(within(item("deep")).getByRole("button", { name: "Edit" }));
-		const model = screen.getByRole("button", { name: "Builder model" });
+		const model = screen.getByRole("combobox", { name: "Builder model" });
 		await userEvent.click(model);
 		const modelList = screen.getByRole("listbox", { name: "Builder model" });
 		const groups = [...modelList.querySelectorAll(".select-menu-heading")].map((g) => g.textContent);
@@ -155,7 +177,9 @@ describe("ProfilesPanel", () => {
 		panel(state);
 		await userEvent.click(within(item("gone")).getByRole("button", { name: "Edit" }));
 		await openSelect("Main assistant model", "anthropic/opus (not available)");
-		expect(screen.getByRole("button", { name: "Main assistant model" })).toHaveTextContent("anthropic/opus");
+		expect(screen.getByRole("combobox", { name: "Main assistant model" })).toHaveTextContent(
+			"anthropic/opus",
+		);
 	});
 
 	it("creates a new profile only with a valid, unused name", async () => {
