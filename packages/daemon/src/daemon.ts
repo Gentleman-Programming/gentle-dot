@@ -1791,15 +1791,27 @@ export class Daemon {
 
   private stopImpl(): Promise<void> {
     if (!this.stopping) {
-      this.stopping = this.doStop().finally(() => {
-        this.stopped = true;
-        this.resolveClosed();
-      });
+      this.stopping = (async () => {
+        try {
+          // Phase 1: Stop the engine (shell, ws, etc.) - this makes supervisor report 'stopped'
+          await this.stopEngine();
+          
+          // Phase 2: Drain app channel (can be slow, may fail)
+          await this.drainChannels();
+        } finally {
+          // Always resolve closed, whether drain succeeded or failed
+          this.resolveClosed();
+        }
+      })();
     }
     return this.stopping;
   }
 
-  private async doStop(): Promise<void> {
+  /**
+   * Stops the engine (shell, ws, registry). Sets stopped=true so supervisor reports 'stopped'.
+   * Does NOT drain the app channel - that happens in drainChannels().
+   */
+  private async stopEngine(): Promise<void> {
     if (this.shutdown) {
       console.log('[Daemon] Shutting down...');
     }
@@ -1821,12 +1833,6 @@ export class Daemon {
     this.stopChildGuardWatch = null;
     this.connectorStore?.close();
 
-    const appChannelClose = this.appChannel.close();
-    if (appChannelClose && typeof appChannelClose.then === 'function') {
-      await appChannelClose;
-    }
-    console.log('[Daemon] App Channel stopped');
-
     await this.wsServer.stop();
     console.log('[Daemon] WebSocket server stopped');
 
@@ -1837,6 +1843,21 @@ export class Daemon {
     console.log('[Daemon] Daemon stopped');
     // The caller owns the process: exiting here made stop() unusable in tests (and in any
     // host that embeds the daemon) because it killed the whole process group.
+
+    // Mark stopped so supervisor reports 'stopped' immediately after engine stop
+    this.stopped = true;
+  }
+
+  /**
+   * Drains the app channel. Runs after engine stop, before resolving closed.
+   * If channel close fails, the error propagates to the stop() promise.
+   */
+  private async drainChannels(): Promise<void> {
+    const appChannelClose = this.appChannel.close();
+    if (appChannelClose && typeof appChannelClose.then === 'function') {
+      await appChannelClose;
+    }
+    console.log('[Daemon] App Channel stopped');
   }
 
   /**
