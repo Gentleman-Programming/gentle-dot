@@ -14,7 +14,6 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { McpOAuthState } from "@earendil-works/pi-mcp/oauth";
@@ -29,7 +28,7 @@ import type {
 import { MAX_CONNECTOR_DRAFTS } from "@gentle-dot/protocol";
 import { childGuardFile, childGuardText } from "./child-guard.ts";
 import { resolveRecord, resolveValue, storedSignIn } from "./connector-credentials.ts";
-import { type ScannedServer, scanClientConfigs, valueNotes } from "./connector-import.ts";
+import { importLocations, type ScannedServer, scanClientConfigs, valueNotes } from "./connector-import.ts";
 import {
 	INTEGRITY_KEY_ID,
 	macMatches,
@@ -107,6 +106,7 @@ export interface CatalogEntry {
 /** Fixed loopback redirects for sign-ins with the user's own OAuth app, so they can be registered once. */
 export const SLACK_REDIRECT = "http://localhost:38417/callback";
 export const GMAIL_REDIRECT = "http://localhost:38418/callback";
+export const WHATSAPP_REDIRECT = "http://localhost:38419/callback";
 
 const CLIENT_ID: SetupField = { key: "client_id", label: "Client ID", secret: false };
 
@@ -126,13 +126,13 @@ export const CATALOG: readonly CatalogEntry[] = [
 		reads: "Search and read your pages, databases, and comments.",
 		sends: "Create and edit pages and add comments, after you approve each one.",
 		readOnlyTools: [
-			"notion-search",
-			"notion-fetch",
-			"notion-get-comments",
-			"notion-get-teams",
-			"notion-get-users",
-			"notion-query-data-sources",
-			"notion-query-meeting-notes",
+			"notion/get_page",
+			"notion/search_pages",
+			"notion/get_database",
+			"notion/query_database",
+			"notion/get_block",
+			"notion/get_block_children",
+			"notion/get_users",
 		],
 	},
 	{
@@ -143,22 +143,12 @@ export const CATALOG: readonly CatalogEntry[] = [
 		reads: "Find and read issues, projects, cycles, and comments.",
 		sends: "Create and update issues, projects, and comments, after you approve each one.",
 		readOnlyTools: [
-			"list_issues",
-			"get_issue",
-			"list_comments",
-			"list_projects",
-			"get_project",
-			"list_teams",
-			"get_team",
-			"list_users",
-			"get_user",
-			"list_issue_statuses",
-			"get_issue_status",
-			"list_issue_labels",
-			"list_cycles",
-			"list_documents",
-			"get_document",
-			"search_documentation",
+			"linear/get_issue",
+			"linear/list_issues",
+			"linear/get_project",
+			"linear/list_projects",
+			"linear/get_teams",
+			"linear/search_issues",
 		],
 	},
 	{
@@ -169,21 +159,16 @@ export const CATALOG: readonly CatalogEntry[] = [
 		reads: "Search and read Jira issues and Confluence pages.",
 		sends: "Create and edit Jira issues and Confluence pages, and comment, after you approve each one.",
 		readOnlyTools: [
-			"atlassianUserInfo",
-			"getAccessibleAtlassianResources",
-			"search",
-			"fetch",
-			"searchJiraIssuesUsingJql",
-			"getJiraIssue",
-			"listJiraIssueComments",
-			"listJiraProjects",
-			"lookupJiraAccountId",
-			"searchConfluence",
-			"getConfluenceContent",
-			"listConfluenceContent",
-			"listConfluenceSpaces",
-			"getConfluenceSpace",
-			"listConfluenceComments",
+			"jira/get_issue",
+			"jira/search_issues",
+			"jira/get_project",
+			"jira/list_projects",
+			"confluence/get_page",
+			"confluence/search_pages",
+			"confluence/get_space",
+			"confluence/list_spaces",
+			"atlassian/get_user",
+			"atlassian/search_users",
 		],
 	},
 	{
@@ -260,17 +245,13 @@ export const CATALOG: readonly CatalogEntry[] = [
 		reads: "Search messages, channels, and people, and read channels, threads, and canvases.",
 		sends: "Send and schedule messages as you, after you approve each one. Read only hides them.",
 		readOnlyTools: [
-			"slack_search_public",
-			"slack_search_public_and_private",
-			"slack_search_channels",
-			"slack_search_users",
-			"slack_read_channel",
-			"slack_read_thread",
-			"slack_read_canvas",
-			"slack_read_user_profile",
-			"slack_list_channel_members",
-			"slack_get_reactions",
-			"slack_read_file",
+			"slack/list_channels",
+			"slack/get_channel",
+			"slack/get_message",
+			"slack/get_thread_replies",
+			"slack/get_user",
+			"slack/list_users",
+			"slack/get_file",
 		],
 		guide: {
 			steps: [
@@ -324,6 +305,53 @@ export const CATALOG: readonly CatalogEntry[] = [
 			],
 			redirectUrl: GMAIL_REDIRECT,
 			note: "Gmail's server is a Developer Preview: your account must be in the Google Workspace Developer Preview Program. While the app is in testing, Google asks you to sign in again every 7 days. The gmail.compose permission lets the assistant draft and send mail: each draft or message asks for your approval first, and read only hides them.",
+		},
+	},
+	{
+		id: "whatsapp",
+		name: "WhatsApp",
+		server: {
+			url: "https://graph.facebook.com/v21.0",
+			oauth: {
+				clientId: placeholder("phone_number_id"),
+				clientSecret: placeholder("access_token"),
+				callbackUrl: WHATSAPP_REDIRECT,
+			},
+		},
+		fields: [
+			{ key: "phone_number_id", label: "Phone Number ID", secret: false },
+			{ key: "access_token", label: "Access Token", secret: true },
+			{ key: "verify_token", label: "Webhook Verify Token", secret: true },
+			{ key: "app_secret", label: "App Secret", secret: true },
+		],
+		oauth: false,
+		reads: "Receive and read WhatsApp messages.",
+		sends: "Send WhatsApp messages via Meta Cloud API.",
+		readOnlyTools: [
+			"whatsapp_list_contacts",
+			"whatsapp_get_contact",
+			"whatsapp_list_templates",
+			"whatsapp_get_template",
+			"whatsapp_get_message_status",
+			"whatsapp_get_media",
+		],
+		guide: {
+			steps: [
+				"Open Meta Business Manager and create (or select) a Business Account.",
+				"In the Business Account, go to WhatsApp > Getting Started > Create a WhatsApp Business Profile.",
+				"Copy the Phone Number ID and the Permanent Access Token from the WhatsApp settings page.",
+				"Set a Webhook Verify Token (any random string) and configure the webhook callback URL to point to this computer (e.g., via ngrok or Cloudflare Tunnel).",
+				"Copy the App Secret from the Meta App settings (Basic Information).",
+				"Choose Continue here, paste the Phone Number ID, Access Token, Verify Token, and App Secret.",
+				"Verify the webhook receives events by sending a test message.",
+				"Test sending a template message from the assistant.",
+			],
+			links: [
+				{ label: "Meta Business Manager", url: "https://business.facebook.com/" },
+				{ label: "WhatsApp Cloud API docs", url: "https://developers.facebook.com/docs/whatsapp/cloud-api" },
+			],
+			redirectUrl: WHATSAPP_REDIRECT,
+			note: "Uses Meta's official WhatsApp Cloud API. Requires a verified Meta Business Account. The webhook verify token and app secret secure the webhook endpoint. Baileys mode (WebSocket to WhatsApp Web) is also available as an alternative via the connector's config.",
 		},
 	},
 ];
@@ -840,6 +868,11 @@ export class ConnectorStore {
 				this.log("connectors.json was signed before and is missing; starting with no connectors");
 				this.onSetAside(MISSING_NOTICE);
 			}
+			// The empty record is signed in its place: the next start verifies it instead of reporting a
+			// file that never existed (a fresh install) or one already reported.
+			this.edited = true;
+			mkdirSync(this.options.dataDir, { recursive: true, mode: 0o700 });
+			writePrivateFile(this.file, this.recordText());
 			return;
 		}
 		const record = this.loaded.record;
@@ -981,10 +1014,10 @@ export class ConnectorStore {
 		const { spec, server } = await this.unlocked(id);
 		const env = this.options.env ?? process.env;
 		if ("command" in server) {
-			const resolved = resolveRecord(server.env, env, spec.name);
+			const resolved = resolveRecord(server.env, env, spec.name, this.options.log);
 			return resolved ? { env: resolved } : {};
 		}
-		const headers = resolveRecord(server.headers, env, spec.name);
+		const headers = resolveRecord(server.headers, env, spec.name, this.options.log);
 		const ownAuthorization = Object.keys(server.headers ?? {}).some(
 			(h) => h.toLowerCase() === "authorization",
 		);
@@ -993,7 +1026,12 @@ export class ConnectorStore {
 			server.url,
 			{ load: () => this.signInState(id), save: (state) => this.saveSignIn(id, state) },
 			() => {
-				const { clientId, clientSecret, callbackUrl } = oauthSettings(spec.name, server, env);
+				const { clientId, clientSecret, callbackUrl } = oauthSettings(
+					spec.name,
+					server,
+					env,
+					this.options.log,
+				);
 				return {
 					...(clientId ? { clientId } : {}),
 					...(clientSecret ? { clientSecret } : {}),
@@ -1011,7 +1049,7 @@ export class ConnectorStore {
 		const stored = this.signInState(id);
 		return {
 			serverUrl: server.url,
-			settings: oauthSettings(spec.name, server, this.options.env ?? process.env),
+			settings: oauthSettings(spec.name, server, this.options.env ?? process.env, this.options.log),
 			...(stored ? { stored } : {}),
 		};
 	}
@@ -1060,6 +1098,13 @@ export class ConnectorStore {
 		const changed: string[] = [];
 		const record = this.recordText();
 		const current = readOrUndefined(this.file);
+		try {
+			require('node:fs').appendFileSync(
+				`ENF equal=${current === record} cur=${
+					JSON.stringify(current?.slice(0, 90)) ?? 'undef'
+				} rec=${JSON.stringify(record.slice(0, 90))}\n`,
+			);
+		} catch {}
 		if (current !== record && !(current === undefined && noConnectors)) {
 			writePrivateFile(this.file, record);
 			changed.push(this.file);
@@ -1615,12 +1660,13 @@ function oauthSettings(
 	name: string,
 	server: Extract<ServerTemplate, { url: string }>,
 	env: NodeJS.ProcessEnv,
+	log?: (line: string) => void,
 ): OAuthSettings {
 	const { oauth } = server;
 	return {
 		...(oauth?.clientId ? { clientId: oauth.clientId } : {}),
 		...(oauth?.clientSecret
-			? { clientSecret: resolveValue(oauth.clientSecret, env, `${name} client secret`) }
+			? { clientSecret: resolveValue(oauth.clientSecret, env, `${name} client secret`, log) }
 			: {}),
 		...(oauth?.callbackUrl ? { callbackUrl: oauth.callbackUrl } : {}),
 		...(oauth?.callbackPort !== undefined ? { callbackPort: oauth.callbackPort } : {}),
@@ -1782,8 +1828,12 @@ export interface ConnectorOAuthOptions {
 
 export interface ConnectorManagerOptions {
 	store: ConnectorStore;
+	/** Prepares the curated Discord runtime before asking for credentials or enabling it. */
+	prepareConnector?: (id: string, signal: AbortSignal) => Promise<void>;
+	/** Whether that runtime is ready; absent where nothing needs preparing. */
+	connectorPrepared?: (id: string) => boolean;
 	oauth?: ConnectorOAuthOptions;
-	/** The home folder "Import my MCP servers" scans; default the user's. */
+	/** The home folder "Import my MCP servers" scans; default the user's, with AppData where Windows says. */
 	importHome?: string;
 	log?: (line: string) => void;
 }
@@ -1811,6 +1861,11 @@ export class ConnectorManager {
 	/** The window that registered the computer helper; it goes away with that window. */
 	private computerOwner: object | undefined;
 	private setupFlow: Setup | undefined;
+	private preparation:
+		| { owner: object; id: string; connectorId: string; controller: AbortController }
+		| undefined;
+	private preparationDone: Promise<void> = Promise.resolve();
+	private closed = false;
 	private readonly failed = new Set<string>();
 	private readonly waiting = new Map<string, ConnectorDraft>();
 	private scanned = new Map<string, ScannedServer>();
@@ -1824,6 +1879,8 @@ export class ConnectorManager {
 
 	/** Puts back connector files changed outside the Connectors screen (for example after a run). */
 	enforce(): void {
+		try {
+		} catch {}
 		try {
 			this.options.store.enforce();
 		} catch (error) {
@@ -1894,46 +1951,83 @@ export class ConnectorManager {
 
 	/** Adds or turns on a connector: asks for the values it still needs, then signs in when it has no sign-in yet. */
 	connect(owner: object, id: string, emit: Emit): ConnectorRefusal | undefined {
+		return this.prepareConfiguration(owner, id, emit, (flowId) =>
+			this.connectPrepared(owner, id, emit, flowId),
+		);
+	}
+
+	private connectPrepared(
+		owner: object,
+		id: string,
+		emit: Emit,
+		flowId?: string,
+	): ConnectorRefusal | undefined {
 		const saved = this.options.store.state().connectors[id];
 		const spec = specOf(id, saved);
 		if (!spec) return REFUSALS.unknown;
 		if (this.busy()) return REFUSALS.busy;
 		if (missingValues(spec, saved?.values)) {
 			// Nothing is added until every value is there.
-			this.askValues(owner, id, spec.fields, emit, (values, flowId) =>
-				this.keepValues(
-					id,
-					values,
-					emit,
-					flowId,
-					(current) => ({ ...current, enabled: true }),
-					() => this.afterSetup(owner, id, emit, flowId),
-				),
+			this.askValues(
+				owner,
+				id,
+				spec.fields,
+				emit,
+				(values, flowId) =>
+					this.keepValues(
+						id,
+						values,
+						emit,
+						flowId,
+						(current) => ({ ...current, enabled: true }),
+						() => this.afterSetup(owner, id, emit, flowId),
+					),
+				flowId,
 			);
 			return undefined;
 		}
 		this.save(id, (current) => ({ ...current, enabled: true }));
-		this.afterSetup(owner, id, emit, `connector-${randomUUID()}`);
+		this.afterSetup(owner, id, emit, flowId ?? `connector-${randomUUID()}`);
 		return undefined;
 	}
 
 	/** Asks again for the values the user typed (a new token, another OAuth client). */
 	setup(owner: object, id: string, emit: Emit): ConnectorRefusal | undefined {
 		const saved = this.options.store.state().connectors[id];
+		if (!specOf(id, saved)) return REFUSALS.unknown;
+		if (!saved) return REFUSALS.notAdded;
+		return this.prepareConfiguration(owner, id, emit, (flowId) =>
+			this.setupPrepared(owner, id, emit, flowId),
+		);
+	}
+
+	private setupPrepared(
+		owner: object,
+		id: string,
+		emit: Emit,
+		flowId?: string,
+	): ConnectorRefusal | undefined {
+		const saved = this.options.store.state().connectors[id];
 		const spec = specOf(id, saved);
 		if (!spec) return REFUSALS.unknown;
 		if (!saved) return REFUSALS.notAdded;
 		if (spec.fields.length === 0) return REFUSALS.noSetup;
 		if (this.busy()) return REFUSALS.busy;
-		this.askValues(owner, id, spec.fields, emit, (values, flowId) =>
-			this.keepValues(
-				id,
-				values,
-				emit,
-				flowId,
-				(current) => current,
-				() => this.afterSetup(owner, id, emit, flowId),
-			),
+		this.askValues(
+			owner,
+			id,
+			spec.fields,
+			emit,
+			(values, flowId) =>
+				this.keepValues(
+					id,
+					values,
+					emit,
+					flowId,
+					(current) => current,
+					() => this.afterSetup(owner, id, emit, flowId),
+				),
+			flowId,
 		);
 		return undefined;
 	}
@@ -1951,6 +2045,12 @@ export class ConnectorManager {
 
 	/** Answers the flow `owner` started: a typed value, a pasted address, or a cancellation. */
 	reply(owner: object, flowId: string, answer: { value?: string; cancelled?: boolean }): boolean {
+		const preparation = this.preparation;
+		if (preparation?.id === flowId) {
+			if (preparation.owner !== owner || !answer.cancelled) return false;
+			preparation.controller.abort();
+			return true;
+		}
 		const setup = this.setupFlow;
 		if (setup && setup.id === flowId) {
 			if (setup.owner !== owner) return false;
@@ -1976,17 +2076,27 @@ export class ConnectorManager {
 
 	/** A window that goes away takes its sign-in with it. */
 	cancelOwnedBy(owner: object): void {
+		if (this.preparation?.owner === owner) this.preparation.controller.abort();
 		if (this.setupFlow?.owner === owner) this.cancelSetup(this.setupFlow);
 		if (this.flow?.owner === owner) this.cancel(this.flow);
 	}
 
+	/** Daemon shutdown must await acquisition exit and staging cleanup, not only request abort. */
+	async close(): Promise<void> {
+		this.closed = true;
+		this.cancelAll();
+		await this.preparationDone;
+	}
+
 	cancelAll(): void {
+		this.preparation?.controller.abort();
 		if (this.setupFlow) this.cancelSetup(this.setupFlow);
 		if (this.flow) this.cancel(this.flow);
 	}
 
 	/** Turns a connector off; its sign-in is kept for when it is turned on again. */
 	disconnect(id: string): ConnectorRefusal | undefined {
+		if (this.preparation?.connectorId === id) this.preparation.controller.abort();
 		return this.change(id, (saved) => ({ ...saved, enabled: false }));
 	}
 
@@ -1996,6 +2106,7 @@ export class ConnectorManager {
 
 	/** Forgets the connector and its secrets (its sign-in, tokens, and typed values) in the app's store. */
 	async remove(id: string): Promise<ConnectorRefusal | undefined> {
+		if (this.preparation?.connectorId === id) this.preparation.controller.abort();
 		const saved = this.options.store.state().connectors[id];
 		const spec = specOf(id, saved);
 		if (!spec) return REFUSALS.unknown;
@@ -2077,12 +2188,12 @@ export class ConnectorManager {
 
 	/** Reads the other apps' configurations (only reads them) and lists what it found, without any value. */
 	scan(): ImportCandidate[] {
-		const home = this.options.importHome ?? homedir();
+		const { home, ...folders } = importLocations(this.options.importHome);
 		const groups = new Map<string, { candidate: ImportCandidate; server: ScannedServer }>();
 		const found = new Map<string, ScannedServer>();
 		const computerUrl = this.options.store.computerUrl();
 		const computer = computerUrl === undefined ? undefined : fingerprint({ url: computerUrl });
-		for (const server of scanClientConfigs(home)) {
+		for (const server of scanClientConfigs(home, folders)) {
 			const key = server.server ? fingerprint(server.server) : `${server.source}:${server.name}`;
 			// The helper is built in; a copy of it elsewhere is never offered.
 			if (key === computer) continue;
@@ -2216,13 +2327,79 @@ export class ConnectorManager {
 	): ConnectorInfo["status"] {
 		if (!saved?.enabled) return "off";
 		if (missingValues(spec, saved.values)) return "needs_setup";
+		if (this.needsPreparation(id, saved)) return "needs_preparation";
 		if (this.failed.has(id)) return "error";
 		if (spec.oauth && !this.options.store.isSignedIn(id)) return "needs_signin";
 		return "connected";
 	}
 
+	/** The curated Discord whose runtime is not on this computer yet (only where it is prepared). */
+	private needsPreparation(id: string, saved: SavedConnector | undefined): boolean {
+		const prepared = this.options.connectorPrepared;
+		return prepared !== undefined && id === "discord" && !saved?.custom && !prepared(id);
+	}
+
 	private busy(): boolean {
-		return this.flow !== undefined || this.setupFlow !== undefined;
+		return (
+			this.closed || this.flow !== undefined || this.setupFlow !== undefined || this.preparation !== undefined
+		);
+	}
+
+	private prepareConfiguration(
+		owner: object,
+		id: string,
+		emit: Emit,
+		proceed: (flowId?: string) => ConnectorRefusal | undefined,
+	): ConnectorRefusal | undefined {
+		const saved = this.options.store.state().connectors[id];
+		if (!specOf(id, saved)) return REFUSALS.unknown;
+		if (this.busy()) return REFUSALS.busy;
+		const prepare = this.options.prepareConnector;
+		if (!prepare || id !== "discord" || saved?.custom) return proceed();
+		if (this.options.connectorPrepared?.(id)) return proceed();
+		const pending = {
+			owner,
+			id: `connector-setup-${randomUUID()}`,
+			connectorId: id,
+			controller: new AbortController(),
+		};
+		this.preparation = pending;
+		emit({
+			type: "auth_event",
+			flowId: pending.id,
+			event: { kind: "progress", message: "Preparing Discord…" },
+		});
+		this.preparationDone = (async () => {
+			try {
+				await prepare(id, pending.controller.signal);
+				pending.controller.signal.throwIfAborted();
+				this.preparation = undefined;
+				const refused = proceed(pending.id);
+				if (refused)
+					emit({
+						type: "auth_done",
+						flowId: pending.id,
+						providerId: id,
+						ok: false,
+						message: refused.message,
+					});
+			} catch (error) {
+				if (!pending.controller.signal.aborted)
+					this.log(`could not prepare connector ${id}: ${(error as Error).message}`);
+				emit({
+					type: "auth_done",
+					flowId: pending.id,
+					providerId: id,
+					ok: false,
+					message: pending.controller.signal.aborted
+						? "Preparation cancelled."
+						: "Could not prepare Discord. Try connecting again.",
+				});
+			} finally {
+				if (this.preparation === pending) this.preparation = undefined;
+			}
+		})();
+		return undefined;
 	}
 
 	/** Changes one connector, keeping what is not changed, then has the engine read it again. */
@@ -2278,8 +2455,9 @@ export class ConnectorManager {
 		fields: readonly SetupField[],
 		emit: Emit,
 		finish: (values: Record<string, string>, flowId: string) => void,
+		flowId?: string,
 	): void {
-		const id = `connector-setup-${randomUUID()}`;
+		const id = flowId ?? `connector-setup-${randomUUID()}`;
 		this.setupFlow = {
 			id,
 			connectorId,
