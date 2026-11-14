@@ -1150,6 +1150,7 @@ export class Daemon {
    * Handle messages from bridges (WebSocket)
    */
   private async handleBridgeMessage(connectorId: string, message: any): Promise<void> {
+    console.log('[Daemon] handleBridgeMessage:', connectorId, message.type);
     switch (message.type) {
       case 'send': {
         // A bridge may nest the body under `payload` or send it flat, the way the panel does.
@@ -1318,6 +1319,7 @@ export class Daemon {
 
     try {
       let result: unknown;
+      let handledInternally = false;
 
       switch (action) {
 
@@ -1328,6 +1330,7 @@ export class Daemon {
             status: c.status,
             capabilities: c.capabilities,
           }));
+          handledInternally = true;
           break;
         }
 
@@ -1341,19 +1344,33 @@ export class Daemon {
             capabilities: connector.capabilities,
             metadata: connector.metadata,
           } : null;
+          handledInternally = true;
           break;
         }
 
         default:
-          throw new Error(`Unknown command: ${action}`);
+          // Forward unknown commands to the bridge (e.g., list_messages, send_message, etc.)
+          break;
       }
 
-      // Send result back to bridge
-      this.wsServer.sendToConnector(connectorId, 'command_result', {
-        commandId,
-        success: true,
-        result,
-      });
+      if (handledInternally) {
+        // Send result back to bridge
+        this.wsServer.sendToConnector(connectorId, 'command_result', {
+          commandId,
+          success: true,
+          result,
+        });
+      } else {
+        // Forward to the bridge for execution
+        const forwarded = this.wsServer.sendToConnector(connectorId, 'command', payload);
+        if (!forwarded) {
+          this.wsServer.sendToConnector(connectorId, 'command_result', {
+            commandId,
+            success: false,
+            error: `Connector ${connectorId} not connected or unavailable`,
+          });
+        }
+      }
 
     } catch (error) {
       this.wsServer.sendToConnector(connectorId, 'command_result', {
@@ -1611,7 +1628,7 @@ export class Daemon {
 
     // The connectors reach the engine through the daemon: its server list points at our own MCP
     // endpoint, and the key is new on every launch so a stale file is visibly different.
-    const proxyKey = randomBytes(24).toString('base64url');
+    const proxyKey = process.env['BRIDGE_AUTH_TOKEN'] || randomBytes(24).toString('base64url');
     this.connectorStore.setProxy({
       url: `http://127.0.0.1:${this.config.daemon.port}/mcp`,
       key: proxyKey,

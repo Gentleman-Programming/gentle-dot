@@ -26,6 +26,16 @@ export default defineConfig({
 					testTimeout: 30_000,
 				},
 			},
+			{
+				test: {
+					name: "connectors-telegram",
+					include: [
+						"packages/connectors/telegram/src/**/*.test.ts",
+					],
+					environment: "node",
+					testTimeout: 30_000,
+				},
+			},
 			"packages/ui",
 		],
 	},

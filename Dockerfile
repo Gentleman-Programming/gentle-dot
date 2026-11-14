@@ -29,6 +29,7 @@ FROM node:24.14.1-bookworm-slim
 COPY --from=build /app/packages/daemon /app/packages/daemon
 COPY --from=build /app/packages/protocol /app/packages/protocol
 COPY --from=build /app/packages/bridges /app/packages/bridges
+COPY --from=build /app/packages/connectors /app/packages/connectors
 COPY --from=build /app/tsconfig.base.json /app/tsconfig.base.json
 COPY --from=build /app/node_modules /app/node_modules
 RUN apt-get update \

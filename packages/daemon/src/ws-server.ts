@@ -291,6 +291,11 @@ export class WsServer extends EventEmitter {
       return;
     }
 
+    if (url.pathname === '/oauth2callback') {
+      this.handleOAuthCallback(req, res);
+      return;
+    }
+
     // The daemon no longer ships a window (the desktop app does), but the root answers so a
     // browser or a health check that lands here sees something alive instead of a 404.
     if (url.pathname === '/' && req.method === 'GET') {
@@ -416,6 +421,48 @@ export class WsServer extends EventEmitter {
   }
 
   /**
+   * Handle OAuth2 callback from Google
+   * Exchanges authorization code for tokens and forwards to Gmail connector
+   */
+  private async handleOAuthCallback(req: IncomingMessage, res: import('http').ServerResponse): Promise<void> {
+    const url = new URL(req.url || '/', `http://${req.headers.host}`);
+    const code = url.searchParams.get('code');
+    const error = url.searchParams.get('error');
+
+    if (error) {
+      console.error('[OAuth Callback] OAuth error:', error);
+      res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<html><body><h1>OAuth Error</h1><p>${error}</p></body></html>`);
+      return;
+    }
+
+    if (!code) {
+      res.writeHead(400, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<html><body><h1>OAuth Error</h1><p>No authorization code received</p></body></html>');
+      return;
+    }
+
+    // Find the Gmail connector and forward the code
+    const gmailConnector = this.registry.getByType('gmail')[0];
+    if (gmailConnector) {
+      const success = this.sendToConnector(gmailConnector.connectorId, 'command', {
+        commandId: `oauth-${Date.now()}`,
+        action: 'handle_oauth_callback',
+        params: { code },
+      });
+      if (success) {
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end('<html><body><h1>Success</h1><p>Authorization complete. You can close this window.</p></body></html>');
+        return;
+      }
+    }
+
+    console.error('[OAuth Callback] No Gmail connector registered');
+    res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end('<html><body><h1>Error</h1><p>No Gmail connector available</p></body></html>');
+  }
+
+  /**
    * Handle new WebSocket connection
    */
   private handleConnection(ws: WebSocket, req: IncomingMessage): void {
@@ -452,9 +499,12 @@ export class WsServer extends EventEmitter {
           appClientId = this.handleAppHello(ws, message);
           return;
         }
-        // No session exists yet: the first frame a window sends must be the flat hello, and a
-        // connection that never authenticated cannot keep talking (client protocol, S25.1).
-        if (message.type !== 'hello') {
+        // Allow authenticated bridge connections to send non-hello messages (ping, events, etc.)
+        if (state.authenticated && state.connectorId) {
+          // Authenticated bridge - proceed to message validation and routing
+        } else if (message.type !== 'hello') {
+          // No session exists yet: the first frame a window sends must be the flat hello, and a
+          // connection that never authenticated cannot keep talking (client protocol, S25.1).
           ws.close(CloseCode.unauthorized, 'The first message must be hello');
           return;
         }
@@ -872,13 +922,16 @@ export class WsServer extends EventEmitter {
   sendToConnector(connectorId: string, messageType: BridgeMessageType, payload: unknown): boolean {
     const connector = this.registry.get(connectorId);
     if (!connector) {
+      console.log('[WsServer] sendToConnector: connector not found:', connectorId);
       return false;
     }
     const ws = (connector as ConnectorWithWs).ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.log('[WsServer] sendToConnector: ws not open for:', connectorId, ws?.readyState);
       return false;
     }
 
+    console.log('[WsServer] sendToConnector: sending', messageType, 'to', connectorId);
     this.send(ws, messageType, payload);
     return true;
   }
