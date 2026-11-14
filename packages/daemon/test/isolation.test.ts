@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { type DotDaemon, createDaemon as startDaemon } from "../src/daemon.ts";
 import {
 	ensureMemoryProject,
 	isolatedAgentEnv,

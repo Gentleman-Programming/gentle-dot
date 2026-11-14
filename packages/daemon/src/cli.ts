@@ -1,124 +1,166 @@
-#!/usr/bin/env node
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-import type { Duplex } from "node:stream";
-import { fileURLToPath } from "node:url";
-import { inheritedAppSocket } from "./app-channel.ts";
-import { serveAuthHelper } from "./auth-helper.ts";
-import { loadConfig } from "./config.ts";
-import { APPROVAL_GUARD, bundledMcpCli } from "./connectors.ts";
-import { startDaemon, startupMessage } from "./daemon.ts";
-import { resolveEngramBin, runtimeDir } from "./runtime.ts";
-import { SECRETS_KEY_VAR } from "./secret-file.ts";
-import { loadVpsOptions } from "./vps.ts";
-import { IDENTITY_SOURCE } from "./white-label.ts";
-import type { WindowsAppChannel } from "./windows-app-channel.ts";
-import { finishWindowsShutdown, startWithWindowsAppChannel } from "./windows-stop.ts";
+/**
+ * CLI Entry Point - Gentle Dot Daemon
+ * Single daemon on port 4317 with Bridge Protocol v1
+ *
+ * Three things happen before the daemon starts, and each one is a promise to the user:
+ * the access key is created and named (never printed), server mode refuses to run as a user that
+ * cannot keep it (the engine must run as its own user), and a daemon launched by the desktop app
+ * takes the app's end of its pipe so it can stop when the app goes.
+ */
 
-/** This file (or the bundled `cli.mjs`), which the sign-in helper runs again. */
-const ENTRY = fileURLToPath(import.meta.url);
-const log = (line: string) => process.stderr.write(`${new Date().toISOString()} ${line}\n`);
+import { program } from 'commander';
+import { createDaemon, type DaemonOptions } from './daemon.ts';
+import { Socket, createServer } from 'node:net';
+import { randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import * as path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+interface CliOptions {
+  port?: number;
+  host?: string;
+  config?: string;
+  dataDir?: string;
+  workspace?: string;
+  logLevel?: 'debug' | 'info' | 'warn' | 'error';
+  noAutoSetup?: boolean;
+  version?: boolean;
+}
+
+program
+  .name('gentle-daemon')
+  .description('Gentle Dot Daemon - Single daemon on port 4317 with Bridge Protocol v1')
+  .version('0.1.0')
+  .option('-p, --port <number>', 'Port to listen on', parseInt)
+  .option('-H, --host <string>', 'Host to bind to')
+  .option('-c, --config <path>', 'Path to connectors.yaml')
+  .option('-d, --data-dir <path>', 'Data directory')
+  .option('-w, --workspace <path>', 'Workspace directory')
+  .option('-l, --log-level <level>', 'Log level (debug|info|warn|error)')
+  .option('--no-auto-setup', 'Disable auto setup (GENTLE_SHELL_NO_AUTO_SETUP=1)')
+  .parse(process.argv);
+
+const options = program.opts<CliOptions>();
+
+// Server mode runs the engine as its own user, which only a privileged daemon can do. Saying so
+// and leaving is better than starting something that cannot keep its promise.
+if (process.env['GENTLE_DOT_VPS'] === '1' && (process.getuid?.() ?? 0) !== 0) {
+  console.error('failed to start: Server mode needs to run as root, so the engine can run as its own user');
+  process.exit(1);
+}
+
+// Build daemon options
+const dataDir = options.dataDir ?? process.env['GENTLE_DOT_DATA_DIR'] ?? path.join(homedir(), '.gentle-dot');
+const daemonOptions: DaemonOptions = {
+  port: options.port,
+  host: options.host,
+  configPath: options.config,
+  dataDir,
+  workspace: options.workspace,
+  logLevel: options.logLevel,
+  noAutoSetup: options.noAutoSetup,
+};
+
+// A host may name the engine binary and its arguments instead of relying on PATH (the tests point
+// them at a stand-in engine, and a container may pin an exact build).
+const agentBin = process.env['GENTLE_DOT_AGENT_BIN'];
+if (agentBin) {
+  let agentArgs: string[] = [];
+  try {
+    const parsed: unknown = JSON.parse(process.env['GENTLE_DOT_AGENT_ARGS'] ?? '[]');
+    if (Array.isArray(parsed)) agentArgs = parsed.map(String);
+  } catch {
+    agentArgs = [];
+  }
+  daemonOptions.engineCommand = [agentBin, ...agentArgs];
+}
+
+// Default config path
+if (!daemonOptions.configPath) {
+  daemonOptions.configPath = path.join(__dirname, '..', 'connectors.yaml');
+}
 
 /**
- * `--self-check`: resolves the files the daemon runs on, without starting anything or
- * using the network, prints them as JSON, and exits 1 when one is missing.
+ * The access key: created on first run, read back afterwards, and never printed. The output only
+ * says where it is, so a redirected log cannot leak what authenticates every window and connector.
  */
-function selfCheck(): void {
-	const config = loadConfig();
-	const runtime = runtimeDir();
-	const report = {
-		runtime,
-		uiDir: config.uiDir,
-		gentleShell: config.agentArgs[0],
-		engineCli: bundledMcpCli().args[0],
-		approvalGuard: APPROVAL_GUARD,
-		identity: fileURLToPath(IDENTITY_SOURCE),
-		engramBin: runtime ? resolveEngramBin(process.env, runtime) : undefined,
-	};
-	const required = [report.gentleShell, report.engineCli, report.approvalGuard, report.identity];
-	const ok = required.every((path) => path !== undefined && existsSync(path));
-	process.stdout.write(`${JSON.stringify({ ok, ...report }, null, 2)}\n`);
-	process.exit(ok ? 0 : 1);
+function ensureAccessKey(): string {
+  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  const file = path.join(dataDir, 'token');
+  const existing = existsSync(file) ? readFileSync(file, 'utf8').trim() : '';
+  const key = existing !== '' ? existing : randomBytes(32).toString('base64url');
+  if (existing === '') writeFileSync(file, key, { mode: 0o600 });
+  // The WebSocket server, the uploads endpoint and the bridges all read the same key.
+  if (!process.env['BRIDGE_AUTH_TOKEN']) process.env['BRIDGE_AUTH_TOKEN'] = key;
+  return file;
 }
 
-async function main(): Promise<void> {
-	const config = loadConfig();
-	// The desktop app that launched the daemon hands over its private channel on fd 3 (S25.1); it is
-	// opened before anything is spawned, and refused if children would inherit it.
-	const appChannel = process.platform === "win32" ? undefined : inheritedAppSocket({ log });
-	// Server mode only when GENTLE_DOT_VPS says so (S25.8). The secrets key is read once and removed
-	// from the process environment, so no child the daemon starts can inherit it.
-	const vps = loadVpsOptions(process.env, { uid: process.getuid?.() ?? -1 });
-	delete process.env[SECRETS_KEY_VAR];
-	const start = (channel: Duplex | undefined = appChannel) =>
-		startDaemon({
-			port: config.port,
-			host: config.host,
-			dataDir: config.dataDir,
-			workspace: config.workspace,
-			...(config.preferredFolder ? { preferredFolder: config.preferredFolder } : {}),
-			uiDir: config.uiDir,
-			agentCommand: config.agentCommand,
-			agentArgs: config.agentArgs,
-			...(config.agentHome ? { agentHome: config.agentHome } : {}),
-			allowedOrigins: config.allowedOrigins,
-			...(channel ? { appChannel: channel } : {}),
-			// Sign-in runs in this same entry point as the engine's user (`--auth-helper`, B1).
-			...(vps
-				? { vps: { ...vps, authHelper: { command: process.execPath, args: [ENTRY, "--auth-helper"] } } }
-				: {}),
-			log,
-		});
-	// Windows requires the L98 private exact-launch record. No implicit unmanaged bypass.
-	// Construction precedes startDaemon and therefore all descendant startup.
-	const windows =
-		process.platform === "win32"
-			? await startWithWindowsAppChannel<Awaited<ReturnType<typeof start>>, WindowsAppChannel>(
-					join(config.dataDir, "daemon.pid"),
-					start,
-				)
-			: undefined;
-	const daemon = windows?.daemon ?? (await start());
-	process.stdout.write(`${startupMessage(daemon.url, config.dataDir, process.stdout.isTTY === true)}\n`);
-
-	if (windows) {
-		const shutdown = (signal: string) => {
-			log(`received ${signal}, shutting down`);
-			void windows.close();
-		};
-		process.on("SIGINT", () => shutdown("SIGINT"));
-		process.on("SIGTERM", () => shutdown("SIGTERM"));
-		// Only successful daemon.close AND native drain may report success. Never use
-		// daemon.closed directly here: it also settles when daemon.close rejects.
-		// On failure, retain the owner and set exitCode without abandoning native
-		// ownership through process.exit. No descendant completion is claimed.
-		void finishWindowsShutdown(windows, process, log);
-		return;
-	}
-
-	let closing = false;
-	const shutdown = (signal: string) => {
-		if (closing) return;
-		closing = true;
-		log(`received ${signal}, shutting down`);
-		daemon.close().then(
-			() => process.exit(0),
-			() => process.exit(1),
-		);
-	};
-	process.on("SIGINT", () => shutdown("SIGINT"));
-	process.on("SIGTERM", () => shutdown("SIGTERM"));
-	// A daemon the app launched stops itself when the app's channel closes (S35.2); so does the process.
-	void daemon.closed.then(() => process.exit(0));
+/** The desktop app hands its end of a pipe as fd 3; anywhere else there is no channel. */
+function appChannel(): Socket | undefined {
+  if (process.env['GENTLE_DOT_NO_APP_CHANNEL'] === '1') return undefined;
+  try {
+    const socket = new Socket({ fd: 3 });
+    if (socket.destroyed) return undefined;
+    // The channel's own errors are the daemon's to handle; this keeps a vanished app from
+    // becoming an uncaught exception that exits with a failure code.
+    socket.on('error', () => {});
+    return socket;
+  } catch {
+    return undefined;
+  }
 }
 
-if (process.argv.includes("--auth-helper")) serveAuthHelper();
-else {
-	if (process.argv.includes("--self-check")) selfCheck();
-	main().catch((error: Error) => {
-		log(`failed to start: ${error.message}`);
-		// Windows lets native ownership drain instead of exiting at once (`finishWindowsShutdown`).
-		if (process.platform === "win32") process.exitCode = 1;
-		else process.exit(1);
-	});
+// Port 0 means "whichever is free": the config loader only takes a real port, so it is resolved
+// here and pinned for the loader as well.
+const requestedPort = options.port ?? Number(process.env['GENTLE_DOT_PORT'] ?? NaN);
+if (requestedPort === 0) {
+  const free = await new Promise<number>((resolve, reject) => {
+    const probe = createServer();
+    probe.listen(0, '127.0.0.1', () => {
+      const address = probe.address();
+      const port = typeof address === 'object' && address !== null ? address.port : 0;
+      probe.close(() => (port > 0 ? resolve(port) : reject(new Error('no free port'))));
+    });
+    probe.on('error', reject);
+  });
+  daemonOptions.port = free;
+  process.env['GENTLE_DOT_PORT'] = String(free);
 }
+
+const keyFile = ensureAccessKey();
+const channel = appChannel();
+
+console.log('Starting Gentle Dot Daemon...');
+console.log(`Config: ${daemonOptions.configPath}`);
+console.log(`Port: ${daemonOptions.port || 4317}`);
+console.log(`Host: ${daemonOptions.host || '127.0.0.1'}`);
+
+// Start daemon
+const starting = createDaemon({ ...daemonOptions, ...(channel ? { appChannel: channel } : {}) });
+
+starting
+  .then(async (daemon) => {
+    console.log('Gentle Dot is running');
+    console.log(`the access key is in ${keyFile}`);
+    // With the app's channel, the daemon stops when the app goes; the process follows it.
+    await daemon.closed;
+    process.exit(0);
+  })
+  .catch((error) => {
+    console.error('Failed to start daemon:', error);
+    process.exit(1);
+  });
+
+// Handle unhandled rejections
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception:', error);
+  process.exit(1);
+});

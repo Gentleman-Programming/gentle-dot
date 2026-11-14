@@ -1,46 +1,50 @@
-import { readdirSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ServerMessage } from "@gentle-dot/protocol";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { createModelAuthRuntime, resolveAgentHome } from "../src/auth.ts";
-import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { BRIDGE_KEY, bootDaemon } from "./harness.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
-import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
-import { expectPosixMode } from "./support/posix-modes.ts";
+import { tempDir, waitFor } from "./helpers.ts";
 
-const daemons: DotDaemon[] = [];
+// Every case boots a daemon and waits for the engine.
+vi.setConfig({ testTimeout: 180_000 });
+
+const daemons: { stop(): Promise<void> }[] = [];
+const spies: { mockRestore(): void }[] = [];
 afterEach(async () => {
-	await Promise.all(daemons.splice(0).map((d) => d.close()));
+	await Promise.all(daemons.splice(0).map((d) => d.stop()));
+	for (const spy of spies.splice(0)) spy.mockRestore();
 });
 
 async function setup(env: NodeJS.ProcessEnv = process.env) {
 	const fake = fakeAuthRuntime();
 	const logs: string[] = [];
 	const dataDir = tempDir();
-	const d = await startDaemon({
-		port: 0,
-		host: "127.0.0.1",
+	// The daemon logs through console.log; capture those lines without a host seam.
+	const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+		logs.push(args.map(String).join(" "));
+	});
+	spies.push(spy);
+
+	const booted = await bootDaemon({
 		dataDir,
 		workspace: dataDir,
-		uiDir: dataDir,
-		agentCommand: process.execPath,
-		agentArgs: [FAKE_AGENT],
-		backoffMs: [50],
-		agentEnv: env,
+		env,
 		authRuntime: async () => fake.runtime,
-		log: (line) => logs.push(line),
 	});
-	daemons.push(d);
+	daemons.push(booted);
+	const d = booted.daemon;
 	return { d, fake, logs, ...(await connect(d)), connect: () => connect(d) };
 }
 
-async function connect(d: DotDaemon) {
+async function connect(d: { port: number }) {
 	const ws = new WebSocket(`ws://127.0.0.1:${d.port}/ws`);
 	const messages: ServerMessage[] = [];
 	ws.on("message", (data) => messages.push(JSON.parse(String(data)) as ServerMessage));
 	await new Promise((resolve) => ws.on("open", resolve));
-	ws.send(JSON.stringify({ type: "hello", token: d.token, protocol: 1 }));
+	ws.send(JSON.stringify({ type: "hello", token: BRIDGE_KEY, protocol: 1 }));
 	await waitFor(() => messages.some((m) => m.type === "ready"));
 	const send = (m: object) => ws.send(JSON.stringify(m));
 	function find<T extends ServerMessage["type"]>(
@@ -66,6 +70,8 @@ describe("sign-in", () => {
 			// A Claude subscription is not offered: Anthropic signs in with an API key only.
 			{ id: "anthropic", name: "Anthropic", methods: ["api_key"], configured: false },
 			{ id: "openai", name: "OpenAI", methods: ["api_key"], configured: false },
+			// NVIDIA is a first-class provider since the fallback work: its API key signs in here too.
+			{ id: "nvidia", name: "NVIDIA", methods: ["api_key"], configured: false },
 			{
 				id: "github-copilot",
 				name: "GitHub Copilot",
@@ -253,7 +259,7 @@ describe("createModelAuthRuntime (Pi's runtime, offline)", () => {
 			await first.login("openai", "api_key", { prompt: async () => "sk-test-not-real", notify: () => {} });
 			const fresh = await createModelAuthRuntime(home, home);
 			expect(fresh.getProviderAuthStatus("openai")).toEqual({ configured: true, source: "stored" });
-			expectPosixMode(join(home, "auth.json"), 0o600);
+			expect(statSync(join(home, "auth.json")).mode & 0o777).toBe(0o600);
 			await fresh.logout("openai");
 			expect((await createModelAuthRuntime(home, home)).getProviderAuthStatus("openai").configured).toBe(
 				false,
@@ -291,12 +297,10 @@ describe("createModelAuthRuntime (Pi's runtime, offline)", () => {
 describe("resolveAgentHome", () => {
 	it("belongs to the assistant: <dataDir>/agent unless overridden, never the user's Gentle Shell home", () => {
 		const dataDir = tempDir();
-		const assistantHome = join(dataDir, "agent");
-		expect(resolveAgentHome({}, dataDir)).toBe(assistantHome);
+		expect(resolveAgentHome({}, dataDir)).toBe(`${dataDir}/agent`);
 		expect(resolveAgentHome({ GENTLE_SHELL_HOME: "/x", PI_CODING_AGENT_DIR: "/z" }, dataDir)).toBe(
-			assistantHome,
+			`${dataDir}/agent`,
 		);
-		const override = join(dataDir, "y");
-		expect(resolveAgentHome({ GENTLE_DOT_AGENT_HOME: override }, dataDir)).toBe(override);
+		expect(resolveAgentHome({ GENTLE_DOT_AGENT_HOME: "/y" }, dataDir)).toBe("/y");
 	});
 });

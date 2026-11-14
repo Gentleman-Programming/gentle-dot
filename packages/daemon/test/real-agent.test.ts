@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import type { ServerMessage } from "@gentle-dot/protocol";
 import { afterAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
-import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { type DotDaemon, createDaemon as startDaemon } from "../src/daemon.ts";
 import { HIDDEN_NAMES } from "../src/white-label.ts";
 import { tempDir, waitFor } from "./helpers.ts";
 

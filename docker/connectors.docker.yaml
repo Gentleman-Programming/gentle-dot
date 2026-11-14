@@ -1,0 +1,61 @@
+# Configuración central del Daemon Gentle Dot
+# Puerto único: 4317
+# Todos los conectores se conectan vía WebSocket (Bridge Protocol v1)
+
+daemon:
+  port: 4317
+  host: "0.0.0.0"
+  data_dir: "~/.gentle-dot"
+  workspace: "~/.gentle-dot/workspace"
+  log_level: "info"
+
+connectors:
+  telegram:
+    enabled: true
+    mode: "read_write"
+    nickname_required: true
+    long_polling: true
+    webhook_url: ""
+    # Token se carga desde TELEGRAM_BOT_TOKEN_* (ver Reglas de Oro #12)
+
+  gmail:
+    enabled: true
+    mode: "read_write"
+    oauth_scopes:
+      - "https://www.googleapis.com/auth/gmail.readonly"
+      - "https://www.googleapis.com/auth/gmail.send"
+      - "https://www.googleapis.com/auth/gmail.modify"
+    webhook_secret_env: "GMAIL_WEBHOOK_SECRET"
+    # MCP Oficial: usa OAuth + Webhook
+
+  discord:
+    enabled: true
+    mode: "read_write"
+    bot_token_env: "DISCORD_BOT_TOKEN"
+    client_id_env: "DISCORD_CLIENT_ID"
+    slash_commands: true
+    intents:
+      - "Guilds"
+      - "GuildMessages"
+      - "MessageContent"
+      - "DirectMessages"
+    # MCP Community: Discord.js + Slash Commands
+
+  whatsapp:
+    enabled: true
+    mode: "read_write"
+    modes:
+      baileys:
+        enabled: true
+        multi_device: true
+        session_store: "sqlite"
+        qr_refresh_interval: 3600
+        auto_reconnect: true
+        # Bridge nativo: Baileys (no hay MCP oficial)
+      meta_cloud:
+        enabled: true
+        phone_number_id_env: "WHATSAPP_PHONE_ID"
+        access_token_env: "WHATSAPP_ACCESS_TOKEN"
+        webhook_verify_token_env: "WHATSAPP_WEBHOOK_VERIFY"
+        template_namespace: "whatsapp:hsm:xxxx"
+        # MCP Oficial: Meta Cloud API

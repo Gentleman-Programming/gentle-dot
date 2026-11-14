@@ -1,7 +1,7 @@
 # Gentle Dot — always-on desktop and web assistant backed by Gentle Shell
 
 Objective: a local, always-available assistant (floating Dot on macOS, menu bar, global shortcut, and browser) whose hidden engine is Gentle Shell with Engram. Design: `docs/design.md`.
-Branch: `feat/gentle-dot` · Delivery strategy: `single-pr` (user choice, L7; forecast ~3,500 authored lines, recorded as a size exception) · Test runner: Vitest (`pnpm test`), Playwright (`pnpm e2e`), `cargo test` for `apps/desktop`.
+Branch: `feat/gentle-dot` · Delivery strategy: `reviewable-slices` (decisión 2026-11-08, reemplaza `single-pr` de L7: la propuesta se aprueba por partes, así que la unidad de revisión es cada fila T con su evidencia; los PRs se arman encadenados por tandas de T) · Test runner: Vitest (`pnpm test`), Playwright (`pnpm e2e`), `cargo test` for `apps/desktop`.
 
 ## Specs
 
@@ -210,9 +210,9 @@ Branch: `feat/gentle-dot` · Delivery strategy: `single-pr` (user choice, L7; fo
 | T23g | S25.7 | delegated writer (Rust Linux + containers), parallel with T23f | done (verified, B1/B2 fixed and rechecked) | `837a42d`, `920455b` | Linux: Secret Service store and documented limit |
 | T23h | S25.8 | delegated writer (context backstop), after T23f | done (verified; B1 fixed; full re-verification no blockers) | `35b942b`, `162473c`, `4d1035e` | VPS: engine as another OS user, encrypted secrets, PIN approvals |
 | T35 | S35.1 | inline | in progress | — | No jiti cache inside the bundle |
-| T36 | S35.2, S35.3 | delegated writer (daemon + Rust daemon spawn), parallel with T37/T38 | in progress | — | Daemon lifetime and engine home ownership |
-| T37 | S35.4, S35.5 (#25) | delegated writer (UI), parallel | in progress | — | Composer send result; voice re-check |
-| T38 | S35.5 (#10) | delegated writer (Rust voice), parallel | in progress | — | Configuration change is not an interruption |
+| T36 | S35.2, S35.3 | delegated writer (daemon + Rust daemon spawn), parallel with T37/T38 | in progress | `f8f4339` lifecycle tests PASS | Daemon lifetime and engine home ownership |
+| T37 | S35.4, S35.5 (#25) | inline | done | `ffbca1d` PASS; composer keeps unsent message (#21), voice re-check on model change (#25) | Composer send result; voice re-check |
+| T38 | S35.5 (#10) | inline | done | `049adf2` PASS; macOS AVAudioEngine config change no longer interrupts recording | Configuration change is not an interruption |
 | T22 | S18 (hardening, L47 B1/B2) | delegated writer | done (accepted with documented gaps, L52) | `8651bba`; parent re-ran 328 tests + typecheck | Option A: authoritative in-memory connector state with revert, credential reads blocked, path-independent bash checks, full approval preview, redirect manual, private Engram stop, onboarding overlap fix |
 | T23 | S25 | explore (delegated, read-only) → spec → implement (stage 2) | in progress | map L109; units T23a–T23h | Daemon-side MCP proxy with Keychain tokens |
 | T9 | S1–S6, S9–S12 | delegated verifier (high risk: process supervision, auth) | done | L24 + L31 | Full verification: unit, integration, Playwright, `@real-agent`, `tauri build` + launch, manual macOS checklist with observed results |
@@ -353,3 +353,16 @@ Environment notes: Node v24.14.1 and pnpm are present. `cargo` is on PATH but `r
 - **L106 (2026-10-09, user):** "porque tiene un space el banner?"; then "sacalo y creo que deberiamos de cambiar por otra cosa, que uno pueda configurar su atajo no siempre space"; placement "Nueva pantalla de ajustes (recomendado)". Banner regenerated without the key chip and README names ⌥ Space as the default (`2556674`, in PR #2). Recorded as S33/T33.
 - **L105 (2026-10-09, user):** "merge". PR #1 merged with a merge commit (`ae9e9e9`) to keep the work-unit commits; no CI checks exist on the repo yet. The README and banner are live on main.
 - **Next step:** the user's check of review-before-send, live text, the model chip at launch, and NaN with computer control; then Apple Speech fed with native buffers; S25 before a stable release; T30 verifier verdict; the T29c UI hook (download button, "Transcribing…"); drag-drop handler; pin sherpa-onnx libs; rebuild for a real-Mac round; the T29c UI hook; pin sherpa-onnx libs in packaging; drag-drop handler change; T29c, T31, T30 verdict; then the T29c UI hook, the drag-drop change, and a rebuild for a real-Mac round; grant both permissions, take a screenshot (the Dot must be absent), click and type in a harmless app, a risky "Send" confirmation, ⌥⇧Esc panic, a blocked app (System Settings), and `screencapture -x /tmp/t.png` from the agent's bash must fail (R1); the community tester runs docs/linux-testing.md when the user shares it; T23/S25 before any public release.
+
+## Corte de entrega (2026-11-08)
+
+- **Límite del slice acumulado**: `0fdf37e` — sincronización completa con upstream (Gentle Shell
+  4.7.0), fixes de seguridad (aislamiento del engine, veto de origin), fixes de protocolo
+  (4401/4400, bad_message), white-label (presentText en asks, /gentle:* rechazado) y el rescate
+  del gateway viejo a su cobertura vigente. Punto medido: tag `yardstick-486` (486 pasan / 85
+  fallan de 589).
+- **Regla desde acá**: el trabajo nuevo NO se apila sobre `feat/gentle-dot`. Cada tanda de
+  tareas T va en su propia rama de slice (base: la punta vigente), con su medición antes/después,
+  y se entrega como PR encadenado.
+- Próximas tandas candidatas: `mcp-proxy` (30 tests, decisión de arquitectura), `app-channel`
+  (9, API drain/platform de upstream), `vps-gateway` (11).
