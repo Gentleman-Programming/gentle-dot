@@ -1,8 +1,8 @@
 import type { ClientMessage, ServerMessage, ServerPayload } from "@gentle-dot/protocol";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useReducer } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatSurface } from "../src/components/ChatSurface.tsx";
 import { type DotAction, type DotState, initialState, reduce } from "../src/store.ts";
 
@@ -55,7 +55,205 @@ async function openPicker(send = vi.fn(), initial = ready) {
 const list = () => screen.getByRole("listbox", { name: "Models" });
 const option = (name: string) => within(list()).getByRole("option", { name: new RegExp(`^${name}`) });
 
+// Model a short viewport without relying on jsdom layout or scrolling any ancestor.
+function mockModelListGeometry() {
+	const original = HTMLElement.prototype.getBoundingClientRect;
+	vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+		const viewport = this.closest('[role="listbox"][aria-label="Models"]');
+		if (!viewport) return original.call(this);
+		const index = Array.from(viewport.querySelectorAll('[role="option"]')).indexOf(this);
+		const top = this === viewport ? 100 : 100 + index * 70 - viewport.scrollTop;
+		return { top, bottom: top + (this === viewport ? 60 : 20) } as DOMRect;
+	});
+}
+
+afterEach(() => vi.restoreAllMocks());
+
 describe("model picker (S32)", () => {
+	it.each(["row", "search"])(
+		"ignores stationary pointer retargeting after arrows (started on %s)",
+		async (start) => {
+			mockModelListGeometry();
+			const { send } = await openPicker();
+			const search = screen.getByRole("searchbox", { name: "Search models" });
+			const move = (target: HTMLElement, clientX = 20) =>
+				fireEvent(target, new MouseEvent("pointermove", { bubbles: true, clientX, clientY: 110 }));
+			move(start === "row" ? option("GPT-5") : search);
+			for (const [name, scrollTop] of [
+				["GPT-4o mini", 30],
+				["NaN Big", 100],
+			] as const) {
+				await userEvent.keyboard("{ArrowDown}");
+				move(option("GPT-5"));
+				move(option("GPT-5"));
+				expect(option(name)).toHaveAttribute("aria-selected", "true");
+				expect(option("GPT-5")).toHaveAttribute("aria-selected", "false");
+				expect(search).toHaveAttribute("aria-activedescendant", option(name).id);
+				expect(list().scrollTop).toBe(scrollTop);
+				expect(search).toHaveFocus();
+				expect(send.mock.calls).toEqual([[{ type: "models_list" }]]);
+			}
+			if (start === "row") {
+				await userEvent.keyboard("{Enter}");
+				expect(send.mock.calls).toEqual([
+					[{ type: "models_list" }],
+					[{ type: "model_set", provider: "nan", id: "big", thinking: "medium" }],
+				]);
+			} else {
+				move(option("daily"), 21);
+				expect(option("daily")).toHaveAttribute("aria-selected", "true");
+				expect(search).toHaveAttribute("aria-activedescendant", option("daily").id);
+				expect(list().scrollTop).toBe(170);
+				expect(search).toHaveFocus();
+				await userEvent.click(option("daily"));
+				expect(send.mock.calls).toEqual([
+					[{ type: "models_list" }],
+					[{ type: "profile_apply", name: "daily" }],
+				]);
+			}
+			expect(screen.queryByRole("dialog", { name: "Choose a model" })).not.toBeInTheDocument();
+		},
+	);
+
+	it("scrolls only the model list down, up and around while search keeps focus until Enter", async () => {
+		mockModelListGeometry();
+		const { send, dialog } = await openPicker();
+		const search = screen.getByRole("searchbox", { name: "Search models" });
+		const viewport = list();
+		const pageTop = document.documentElement.scrollTop;
+		const bodyTop = document.body.scrollTop;
+		await userEvent.keyboard("{ArrowDown}");
+		expect(viewport.scrollTop).toBe(30);
+		expect(option("GPT-4o mini")).toHaveAttribute("aria-selected", "true");
+		expect(search).toHaveAttribute("aria-activedescendant", option("GPT-4o mini").id);
+		expect(search).toHaveFocus();
+		await userEvent.keyboard("{ArrowUp}");
+		expect(viewport.scrollTop).toBe(0);
+		expect(option("GPT-5")).toHaveAttribute("aria-selected", "true");
+		await userEvent.keyboard("{ArrowUp}");
+		expect(viewport.scrollTop).toBe(170);
+		expect(option("daily")).toHaveAttribute("aria-selected", "true");
+		await userEvent.keyboard("{ArrowDown}");
+		expect(viewport.scrollTop).toBe(0);
+		expect(search).toHaveFocus();
+		expect(dialog.scrollTop).toBe(0);
+		expect(document.documentElement.scrollTop).toBe(pageTop);
+		expect(document.body.scrollTop).toBe(bodyTop);
+		expect(send.mock.calls).toEqual([[{ type: "models_list" }]]);
+		await userEvent.keyboard("{Enter}");
+		expect(send.mock.calls).toEqual([
+			[{ type: "models_list" }],
+			[{ type: "model_set", provider: "openai", id: "gpt-5", thinking: "medium" }],
+		]);
+		expect(screen.queryByRole("dialog", { name: "Choose a model" })).not.toBeInTheDocument();
+	});
+
+	it("reveals the filtered first row even when its active index stays zero and handles empty results", async () => {
+		mockModelListGeometry();
+		const { send } = await openPicker();
+		const search = screen.getByRole("searchbox", { name: "Search models" });
+		list().scrollTop = 100;
+		await userEvent.type(search, "nan");
+		expect(list().scrollTop).toBe(0);
+		expect(option("NaN Big")).toHaveAttribute("aria-selected", "true");
+		expect(search).toHaveAttribute("aria-activedescendant", option("NaN Big").id);
+		expect(search).toHaveFocus();
+		await userEvent.type(search, "zzz");
+		await userEvent.keyboard("{ArrowDown}{ArrowUp}{Enter}");
+		expect(within(list()).queryAllByRole("option")).toEqual([]);
+		expect(search).not.toHaveAttribute("aria-activedescendant");
+		expect(screen.getByText("No models match.")).toBeInTheDocument();
+		expect(search).toHaveFocus();
+		expect(send.mock.calls).toEqual([[{ type: "models_list" }]]);
+	});
+
+	it.each([false, true])(
+		"reveals the offscreen current model on opening or list arrival (loaded=%s)",
+		async (loaded) => {
+			mockModelListGeometry();
+			const send = vi.fn();
+			const payload: ServerPayload = {
+				...models,
+				current: { provider: "nan", id: "big", name: "NaN Big" },
+			};
+			const initial = loaded
+				? reduce(ready, { type: "server", message: { ...payload, seq: 1 } as ServerMessage })
+				: ready;
+			render(<Harness initial={initial} send={send} />);
+			await userEvent.click(screen.getByRole("button", { name: loaded ? "Model: NaN Big" : "Model: GPT-5" }));
+			if (!loaded) dispatchServer(payload);
+			expect(list().scrollTop).toBe(100);
+			expect(option("NaN Big")).toHaveAttribute("aria-selected", "true");
+			const search = screen.getByRole("searchbox", { name: "Search models" });
+			expect(search).toHaveAttribute("aria-activedescendant", option("NaN Big").id);
+			expect(search).toHaveFocus();
+			expect(send.mock.calls).toEqual([[{ type: "models_list" }]]);
+		},
+	);
+
+	it.each([false, true])(
+		"Escape closes the later picker before the drawer (Thinking=%s)",
+		async (thinking) => {
+			const send = vi.fn();
+			render(<Harness initial={ready} send={send} />);
+			await userEvent.click(screen.getByRole("button", { name: "Panel menu" }));
+			const chip = screen.getByRole("button", { name: "Model: GPT-5" });
+			for (let n = 0; n < 40 && document.activeElement !== chip; n++) await userEvent.tab();
+			expect(chip).toHaveFocus();
+			await userEvent.keyboard("{Enter}");
+			dispatchServer(models);
+			expect(screen.getByRole("navigation", { name: "Panel menu" })).toBeInTheDocument();
+			expect(screen.getByRole("dialog", { name: "Choose a model" })).toBeInTheDocument();
+			if (thinking) await userEvent.click(screen.getByRole("combobox", { name: "Thinking" }));
+			await userEvent.keyboard("{Escape}");
+			expect(screen.getByRole("navigation", { name: "Panel menu" })).toBeInTheDocument();
+			if (thinking) {
+				expect(screen.queryByRole("listbox", { name: "Thinking" })).not.toBeInTheDocument();
+				expect(screen.getByRole("dialog", { name: "Choose a model" })).toBeInTheDocument();
+				await userEvent.keyboard("{Escape}");
+				expect(screen.getByRole("navigation", { name: "Panel menu" })).toBeInTheDocument();
+			}
+			expect(screen.queryByRole("dialog", { name: "Choose a model" })).not.toBeInTheDocument();
+			expect(chip).toHaveFocus();
+			expect(send.mock.calls).toEqual([[{ type: "models_list" }]]);
+		},
+	);
+
+	it("Escape closes Thinking before the model picker", async () => {
+		const { send } = await openPicker();
+		await userEvent.click(screen.getByRole("combobox", { name: "Thinking" }));
+		await userEvent.keyboard("{Escape}");
+		expect(screen.queryByRole("listbox", { name: "Thinking" })).not.toBeInTheDocument();
+		expect(screen.getByRole("dialog", { name: "Choose a model" })).toBeInTheDocument();
+		expect(send.mock.calls).toEqual([[{ type: "models_list" }]]);
+		await userEvent.keyboard("{Escape}");
+		expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+	});
+
+	it.each(["{ArrowDown}", "{ArrowUp}", "{Enter}", " "])(
+		"Thinking owns its opening key %s and navigation without moving or submitting a model",
+		async (key) => {
+			const { send } = await openPicker();
+			const search = screen.getByRole("searchbox", { name: "Search models" });
+			const selected = search.getAttribute("aria-activedescendant");
+			screen.getByRole("combobox", { name: "Thinking" }).focus();
+			await userEvent.keyboard(key);
+			expect(screen.getByRole("listbox", { name: "Thinking" })).toBeInTheDocument();
+			expect(search).toHaveAttribute("aria-activedescendant", selected);
+			await userEvent.keyboard("{ArrowDown}");
+			expect(search).toHaveAttribute("aria-activedescendant", selected);
+			await userEvent.keyboard("{ArrowUp}");
+			expect(search).toHaveAttribute("aria-activedescendant", selected);
+			expect(send.mock.calls).toEqual([[{ type: "models_list" }]]);
+			await userEvent.keyboard("{ArrowDown}{Enter}");
+			expect(send.mock.calls).toEqual([
+				[{ type: "models_list" }],
+				[{ type: "model_set", provider: "openai", id: "gpt-5", thinking: "high" }],
+			]);
+			expect(screen.getByRole("dialog", { name: "Choose a model" })).toBeInTheDocument();
+		},
+	);
+
 	it("shows the current model in a compact chip and opens a list grouped by account, with profiles", async () => {
 		const { send, dialog } = await openPicker();
 		expect(send).toHaveBeenCalledWith({ type: "models_list" });

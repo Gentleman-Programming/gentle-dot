@@ -120,6 +120,77 @@ describe("hide the rose (S26.1)", () => {
 });
 
 describe("full-screen chat (S26.2)", () => {
+	it.each([false, true])(
+		"nested picker Escape preserves the drawer and panel (fullscreen=%s)",
+		async (fullscreen) => {
+			h.state = {
+				...h.state,
+				model: "GPT-5",
+				models: {
+					...h.state.models,
+					current: { provider: "openai", id: "gpt-5", name: "GPT-5", thinking: "medium" },
+					groups: [
+						{
+							provider: "openai",
+							name: "OpenAI",
+							models: [
+								{
+									provider: "openai",
+									id: "gpt-5",
+									name: "GPT-5",
+									images: true,
+									thinkingLevels: ["medium", "high"],
+								},
+							],
+						},
+					],
+				},
+			};
+			const { container } = await renderApp("?surface=panel");
+			await openPanelMenu();
+			if (fullscreen) {
+				await userEvent.click(await screen.findByRole("button", { name: "Full screen" }));
+				await waitFor(() => expect(chat(container)).toHaveClass("chat-fullscreen"));
+			}
+			const calls = invoked("set_panel_fullscreen").length;
+			const chip = screen.getByRole("button", { name: "Model: GPT-5" });
+			for (let n = 0; n < 40 && document.activeElement !== chip; n++) await userEvent.tab();
+			expect(chip).toHaveFocus();
+			await userEvent.keyboard("{Enter}");
+			await userEvent.click(screen.getByRole("combobox", { name: "Thinking" }));
+			await userEvent.keyboard("{Escape}");
+			expect(screen.queryByRole("listbox", { name: "Thinking" })).not.toBeInTheDocument();
+			expect(screen.getByRole("dialog", { name: "Choose a model" })).toBeInTheDocument();
+			expect(screen.getByRole("navigation", { name: "Panel menu" })).toBeInTheDocument();
+			expect(invoked("hide_panel")).toHaveLength(0);
+			expect(invoked("set_panel_fullscreen")).toHaveLength(calls);
+			await userEvent.keyboard("{Escape}");
+			expect(screen.queryByRole("dialog", { name: "Choose a model" })).not.toBeInTheDocument();
+			expect(screen.getByRole("navigation", { name: "Panel menu" })).toBeInTheDocument();
+			expect(invoked("hide_panel")).toHaveLength(0);
+			expect(invoked("set_panel_fullscreen")).toHaveLength(calls);
+			expect(chat(container)?.classList.contains("chat-fullscreen")).toBe(fullscreen);
+		},
+	);
+
+	it.each([false, true])(
+		"menu Escape leaves panel visibility and fullscreen unchanged (fullscreen=%s)",
+		async (fullscreen) => {
+			const { container } = await renderApp("?surface=panel");
+			await openPanelMenu();
+			if (fullscreen) {
+				await userEvent.click(await screen.findByRole("button", { name: "Full screen" }));
+				await waitFor(() => expect(chat(container)).toHaveClass("chat-fullscreen"));
+			}
+			const calls = invoked("set_panel_fullscreen").length;
+			await userEvent.keyboard("{Escape}");
+			expect(screen.queryByRole("navigation", { name: "Panel menu" })).not.toBeInTheDocument();
+			expect(invoked("hide_panel")).toHaveLength(0);
+			expect(invoked("set_panel_fullscreen")).toHaveLength(calls);
+			expect(chat(container)?.classList.contains("chat-fullscreen")).toBe(fullscreen);
+		},
+	);
+
 	it("the header button fills the screen and the same button restores it", async () => {
 		const { container } = await renderApp("?surface=panel");
 		await openPanelMenu();

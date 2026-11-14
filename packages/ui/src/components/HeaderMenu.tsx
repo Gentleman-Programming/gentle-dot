@@ -108,10 +108,15 @@ export function PanelMenuDrawer({
 	}, []);
 	useEffect(() => {
 		const onKey = (event: KeyboardEvent) => {
-			if (event.key === "Escape") onClose();
+			if (event.key === "Escape" && !event.defaultPrevented) {
+				event.preventDefault();
+				event.stopPropagation();
+				onClose();
+			}
 		};
-		window.addEventListener("keydown", onKey);
-		return () => window.removeEventListener("keydown", onKey);
+		// Let focused popovers handle Escape first, but consume it before App's window listener.
+		document.addEventListener("keydown", onKey);
+		return () => document.removeEventListener("keydown", onKey);
 	}, [onClose]);
 	return (
 		<>

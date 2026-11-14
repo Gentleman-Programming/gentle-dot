@@ -45,6 +45,8 @@ export function ModelPicker({ model, models, send, dispatch, disabled }: ModelPi
 	const [active, setActive] = useState(0);
 	const chip = useRef<HTMLButtonElement>(null);
 	const root = useRef<HTMLDivElement>(null);
+	const list = useRef<HTMLDivElement>(null);
+	const pointer = useRef<{ x: number; y: number } | null>(null);
 	const id = useId();
 	const items = open ? visibleItems(models, query) : [];
 	const current = models.current;
@@ -84,6 +86,7 @@ export function ModelPicker({ model, models, send, dispatch, disabled }: ModelPi
 			setOpen(false);
 			return;
 		}
+		pointer.current = null;
 		setQuery("");
 		dispatch({ type: "models_opened" });
 		send({ type: "models_list" });
@@ -121,6 +124,18 @@ export function ModelPicker({ model, models, send, dispatch, disabled }: ModelPi
 
 	const optionId = (index: number) => `${id}-option-${index}`;
 	const highlighted = Math.min(active, items.length - 1);
+
+	useEffect(() => {
+		const viewport = list.current;
+		const option = viewport?.querySelectorAll<HTMLElement>('[role="option"]')[highlighted];
+		if (!viewport || !option || items.length === 0) return;
+		const bounds = viewport.getBoundingClientRect();
+		const row = option.getBoundingClientRect();
+		// Keep focus in search and scroll only the list, never the panel or page.
+		if (row.top < bounds.top) viewport.scrollTop += row.top - bounds.top;
+		else if (row.bottom > bounds.bottom) viewport.scrollTop += row.bottom - bounds.bottom;
+	}, [highlighted, items]);
+
 	const groups = [...new Set(items.filter((i) => i.kind === "model").map((i) => i.group))];
 	const profiles = items.filter((i) => i.kind === "profile");
 	const renderOption = (item: Item) => {
@@ -137,7 +152,10 @@ export function ModelPicker({ model, models, send, dispatch, disabled }: ModelPi
 				aria-selected={index === highlighted}
 				aria-current={isCurrent ? "true" : undefined}
 				className="model-option"
-				onPointerMove={() => setActive(index)}
+				onPointerMove={(event) => {
+					// Scrolling can retarget a stationary pointer; only movement takes over from keys.
+					if (pointer.current?.x !== event.clientX || pointer.current?.y !== event.clientY) setActive(index);
+				}}
 				onClick={() => choose(item)}
 			>
 				<span className="model-option-name">{item.kind === "model" ? item.model.name : item.pick.name}</span>
@@ -175,7 +193,15 @@ export function ModelPicker({ model, models, send, dispatch, disabled }: ModelPi
 				<span aria-hidden="true">▾</span>
 			</button>
 			{open ? (
-				<div className="model-popover" role="dialog" aria-label="Choose a model" onKeyDown={onKeyDown}>
+				<div
+					className="model-popover"
+					role="dialog"
+					aria-label="Choose a model"
+					onKeyDown={onKeyDown}
+					onPointerMove={(event) => {
+						pointer.current = { x: event.clientX, y: event.clientY };
+					}}
+				>
 					<input
 						type="search"
 						className="model-search"
@@ -201,7 +227,7 @@ export function ModelPicker({ model, models, send, dispatch, disabled }: ModelPi
 					) : null}
 					{!loaded ? <p className="model-note">Loading models…</p> : null}
 					{loaded && items.length === 0 ? <p className="model-note">No models match.</p> : null}
-					<div className="model-list" id={`${id}-list`} role="listbox" aria-label="Models">
+					<div ref={list} className="model-list" id={`${id}-list`} role="listbox" aria-label="Models">
 						{groups.map((group) =>
 							renderGroup(
 								group,
