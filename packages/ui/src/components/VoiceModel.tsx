@@ -10,7 +10,7 @@ import {
 } from "../voice-native.ts";
 
 /** The archive's size (pinned in the desktop app), shown before anything downloads. */
-const DOWNLOAD_BYTES = 487_170_055;
+const DOWNLOAD_BYTES = 487_211_443;
 
 const ENGINES: Record<VoiceModelStatus["engine"], string> = {
 	parakeet: "Using: local model (Parakeet), works offline",
