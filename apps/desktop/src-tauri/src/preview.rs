@@ -21,7 +21,15 @@ impl OwnedRoot {
         mut protect: impl FnMut(&Path) -> Result<(), String>,
     ) -> Result<Vec<(&'static str, PathBuf)>, String> {
         let environment = self.environment();
-        for path in environment.iter().map(|(_, path)| path).collect::<std::collections::BTreeSet<_>>() {
+        let mut directories = environment.iter().map(|(_, path)| path.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        // Prepare the runtime's nested profile paths before any first-use mkdir.
+        let app_data = self.data.join("home").join("AppData");
+        directories.extend([
+            app_data.clone(), app_data.join("Roaming"), app_data.join("Local"),
+            self.webview_dir(), self.webview_dir().join("EBWebView"),
+        ]);
+        for path in &directories {
             if path != self.data_dir() { create(path)?; }
             protect(path)?;
         }

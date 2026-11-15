@@ -1524,6 +1524,31 @@ mod native {
         }
 
         #[test]
+        fn preview_prepares_windows_and_webview_directories_before_first_use() {
+            let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let parent = std::env::temp_dir().join(format!("dot-preview-profile-{}-{nonce}", std::process::id()));
+            std::fs::create_dir(&parent).unwrap();
+            let root = parent.join("gentle-dot-preview-profile");
+            let preview = crate::preview::prepare(crate::preview::IDENTIFIER,
+                Some(crate::preview::PRODUCT_NAME), false, 0, Some(&root),
+                |path| create_private_preview_directory(path).map_err(|error| error.to_string()),
+                |path| crate::windows_process::private_directory(path).map_err(|error| error.to_string()),
+            ).unwrap();
+            preview.prepare_environment(
+                |path| create_private_preview_directory(path).map_err(|error| error.to_string()),
+                |path| crate::windows_process::private_directory(path).map_err(|error| error.to_string()),
+            ).unwrap();
+            let sid = current_user_sid().unwrap();
+            for path in [root.join("home").join("AppData").join("Roaming"),
+                root.join("home").join("AppData").join("Local"), preview.webview_dir().join("EBWebView")] {
+                // Model a Windows consumer's ordinary first-use mkdir, without repairing ownership.
+                std::fs::create_dir_all(&path).unwrap();
+                assert!(user_owns(&path, sid.as_ptr() as PSID).unwrap(),
+                    "runtime profile directory must already belong to TokenUser");
+            }
+        }
+
+        #[test]
         fn preview_directories_use_token_user_and_reject_existing_root() {
             let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
             let parent = std::env::temp_dir().join(format!("dot-preview-owner-{}-{nonce}", std::process::id()));
