@@ -36,7 +36,9 @@ test('identity and fresh-root admission precede configuration, plugins, stores a
  assert.ok(run.indexOf('crate::preview::prepare(')>=0);
  assert.ok(run.indexOf('crate::preview::prepare(')<run.indexOf('config::load_preview_config('));
  assert.ok(run.indexOf('config::load_preview_config(')<run.indexOf('tauri::Builder::default()'));
+ assert.match(run,/daemon::create_private_preview_directory\(root\)/);
  assert.match(run,/crate::windows_process::private_directory\(root\)/);
+ assert.match(run,/preview\.prepare_environment\(/);
  assert.match(run,/\.build\(context\)/);
 });
 test('preview selects MemoryStore without constructing the production backend',()=>{
@@ -75,7 +77,10 @@ test('production configuration reads remain present only outside preview; previe
 });
 test('policy remains std-only, exclusively creates roots, rejects aliases and preserves native guards',()=>{
  const policy=read('apps/desktop/src-tauri/src/preview.rs');
- assert.match(policy,/std::fs::create_dir\(root\)/);assert.match(policy,/Component::ParentDir/);assert.match(policy,/metadata.file_attributes\(\) & 0x400/);
+ assert.match(policy,/create\(root\)\.map_err/);
+ assert.ok(policy.indexOf('create(root).map_err') < policy.indexOf('protect(root)?'));
+ assert.match(policy,/if path != self\.data_dir\(\) \{ create\(path\)\?; \}/);
+ assert.match(policy,/Component::ParentDir/);assert.match(policy,/metadata.file_attributes\(\) & 0x400/);
  assert.doesNotMatch(policy,/create_dir_all|remove_dir|remove_file|std::env::var|connector_store|CredentialStore|tauri::/);
  const launch=read('apps/desktop/src-tauri/src/daemon/launch.rs');assert.ok(launch.includes('dir.is_absolute() && holds_git(dir)'));
  const daemon=read('apps/desktop/src-tauri/src/daemon.rs');assert.ok(daemon.includes('windows::open_private_log(data_dir)'));

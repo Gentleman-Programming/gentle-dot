@@ -222,6 +222,11 @@ pub fn start_plan(healthy: bool, owns_child: bool, wants_channel: bool, orphan: 
     }
 }
 
+#[cfg(all(windows, feature = "local-preview"))]
+pub(crate) fn create_private_preview_directory(path: &Path) -> io::Result<()> {
+    windows::create_private_preview_directory(path)
+}
+
 #[cfg(windows)]
 pub fn open_private_log(data_dir: &Path) -> io::Result<File> {
     windows::open_private_log(data_dir)

@@ -1035,6 +1035,12 @@ pub fn run() {
             context.config().bundle.active, context.config().app.windows.len(), root.as_deref(),
             |root| {
                 #[cfg(windows)]
+                return daemon::create_private_preview_directory(root).map_err(err);
+                #[cfg(not(windows))]
+                { let _ = root; Err("local-preview requires Windows".into()) }
+            },
+            |root| {
+                #[cfg(windows)]
                 return crate::windows_process::private_directory(root).map_err(err);
                 #[cfg(not(windows))]
                 { let _ = root; Err("local-preview requires Windows".into()) }
@@ -1047,14 +1053,23 @@ pub fn run() {
     #[cfg(feature = "local-preview")]
     {
         // Before Tauri/plugins/threads. Production builds never change profile locations.
-        let environment = preview.environment();
-        for path in environment.iter().map(|(_, path)| path).collect::<std::collections::BTreeSet<_>>() {
-            #[cfg(windows)]
-            if let Err(error) = crate::windows_process::private_directory(path) {
-                eprintln!("gentle-dot preview: cannot protect synthetic profile directory: {error}");
-                std::process::exit(1);
-            }
-        }
+        let environment = preview.prepare_environment(
+            |path| {
+                #[cfg(windows)]
+                return daemon::create_private_preview_directory(path).map_err(err);
+                #[cfg(not(windows))]
+                { let _ = path; Err("local-preview requires Windows".into()) }
+            },
+            |path| {
+                #[cfg(windows)]
+                return crate::windows_process::private_directory(path).map_err(err);
+                #[cfg(not(windows))]
+                { let _ = path; Err("local-preview requires Windows".into()) }
+            },
+        ).unwrap_or_else(|error| {
+            eprintln!("gentle-dot preview: cannot protect synthetic profile directory: {error}");
+            std::process::exit(1);
+        });
         for (key, path) in environment { std::env::set_var(key, path); }
         std::env::set_var("GENTLE_DOT_ENGRAM", "private");
         std::env::set_var("GENTLE_DOT_PREVIEW_MEMORY_ADMISSION", "1");
