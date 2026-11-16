@@ -1,0 +1,44 @@
+name: Mars Windows test artifacts
+
+on:
+  push:
+    branches:
+      - 'build/mars-windows-ci-*'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-artifacts:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      PSModuleAnalysisCachePath: ${{ github.workspace }}/build/mars-ci/cache/ps/ModuleAnalysisCache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.15.0'
+          cache: ''
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.10'
+          cache: false
+      - name: Build isolated Windows test artifacts
+        shell: pwsh
+        run: ./scripts/windows/build-mars-ci.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mars-windows-x64-test
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 7
+          path: |
+            build/mars-ci/artifacts/*-setup.exe
+            build/mars-ci/artifacts/SHA256SUMS.txt
+            build/mars-ci/artifacts/provenance.json
