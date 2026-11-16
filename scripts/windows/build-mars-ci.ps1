@@ -16,6 +16,20 @@ function Run([string]$Program, [string[]]$Arguments) {
     & $Program @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$Program failed (exit $LASTEXITCODE)" }
 }
+function NativeTool([string]$Name) {
+    # Application lookup can return multiple PATH matches even without -All.
+    $command = Get-Command -Name $Name -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    $path = (Resolve-Path -LiteralPath $command.Source -ErrorAction Stop).ProviderPath
+    if (-not [IO.Path]::IsPathRooted($path) -or -not (Test-Path -LiteralPath $path -PathType Leaf) -or
+        $path -match '[;\r\n"]') { throw "Invalid native tool path: $Name" }
+    return [string]$path
+}
+function AssertNativeTools {
+    # The unchanged producer invokes bare names, so absolute Run paths alone are insufficient.
+    foreach ($name in @('node.exe','pnpm.cmd','go.exe','rustup.exe','rustc.exe','cargo.exe','git.exe','tar.exe','cmd.exe')) {
+        $null = NativeTool $name
+    }
+}
 function Hash([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 function Json([string]$Path, $Value) {
     [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 12) + "`n", [Text.UTF8Encoding]::new($false))
@@ -36,17 +50,26 @@ if (-not $DeveloperChild) {
         'apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release')) {
         if (Test-Path (Join-Path $repo $path)) { throw "Fresh checkout required: $path exists" }
     }
-    $nodeDir = Split-Path (Get-Command node.exe -CommandType Application).Source
-    $pnpmDir = Split-Path (Get-Command pnpm.cmd -CommandType Application).Source
-    $goDir = Split-Path (Get-Command go.exe -CommandType Application).Source
-    $rustDir = Split-Path (Get-Command rustup.exe -CommandType Application).Source
-    $gitDir = Split-Path (Get-Command git.exe -CommandType Application).Source
+    $nodeDir = Split-Path -LiteralPath (NativeTool 'node.exe')
+    $pnpmDir = Split-Path -LiteralPath (NativeTool 'pnpm.cmd')
+    $goDir = Split-Path -LiteralPath (NativeTool 'go.exe')
+    $rustDir = Split-Path -LiteralPath (NativeTool 'rustup.exe')
+    $gitDir = Split-Path -LiteralPath (NativeTool 'git.exe')
     foreach ($dir in @($cache, $artifacts, "$cache/temp", "$cache/home", "$cache/ps")) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
     # Hosted child processes only; no machine/user environment or local session control changes.
-    $env:PATH = @($nodeDir, $pnpmDir, $goDir, $rustDir, $gitDir,
-        "$env:SystemRoot/System32", $env:SystemRoot, $PSHOME) -join ';'
+    $env:PATH = @(
+        $nodeDir
+        $pnpmDir
+        $goDir
+        $rustDir
+        $gitDir
+        "$env:SystemRoot/System32"
+        $env:SystemRoot
+        $PSHOME
+    ) -join ';'
+    AssertNativeTools
     $env:HOME = "$cache/home"
     $env:USERPROFILE = $env:HOME
     $env:APPDATA = "$cache/home/AppData/Roaming"
@@ -98,8 +121,8 @@ if (-not $DeveloperChild) {
 if (-not $env:INCLUDE -or -not $env:LIB -or $env:GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED -ne '1') {
     throw 'Developer environment or packaged-required marker missing'
 }
-$compiler = (Get-Command cl.exe -CommandType Application).Source
-if (-not [IO.Path]::IsPathRooted($compiler) -or -not (Test-Path $compiler -PathType Leaf)) { throw 'Compiler missing' }
+AssertNativeTools
+$compiler = NativeTool 'cl.exe'
 $listing = (Invoke-WebRequest 'https://nodejs.org/dist/v24.15.0/SHASUMS256.txt').Content
 if ($listing -is [byte[]]) { $listing = [Text.Encoding]::UTF8.GetString($listing) }
 $headersArchive = DownloadNodeInput 'node-v24.15.0-headers.tar.gz' $listing

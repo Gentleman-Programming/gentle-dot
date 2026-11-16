@@ -14,7 +14,11 @@ owned by the existing Windows producer; it is not a frozen workspace install.
 
 `./scripts/windows/build-mars-ci.ps1` requires hosted Windows CI; `-Help` describes
 its interface. It uses project-owned caches/configs, a bounded child PATH and the
-runner's MSVC developer environment. Official Node headers and node.lib must each
+runner's MSVC developer environment. Native tools select the first canonical
+application path explicitly: multiple PATH matches must not become a nested array
+in the bounded PATH. Bare tool resolution is checked both before initial tool
+execution and after MSVC child initialization, since the producer also uses bare
+commands. Official Node headers and node.lib must each
 have exactly one SHA256 listing entry and match before use. The existing addon
 builder supplies Node-API 8, /MD and node.lib without a separate libuv.
 
