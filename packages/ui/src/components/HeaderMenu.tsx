@@ -107,11 +107,15 @@ export function PanelMenuDrawer({
 		close.current?.focus();
 	}, []);
 	useEffect(() => {
+		// Capture phase: the panel's own Esc handler (App) is on window too and was registered first,
+		// so marking the event handled is how this Esc closes only the drawer, not the panel.
 		const onKey = (event: KeyboardEvent) => {
-			if (event.key === "Escape") onClose();
+			if (event.key !== "Escape" || event.defaultPrevented) return;
+			event.preventDefault();
+			onClose();
 		};
-		window.addEventListener("keydown", onKey);
-		return () => window.removeEventListener("keydown", onKey);
+		window.addEventListener("keydown", onKey, true);
+		return () => window.removeEventListener("keydown", onKey, true);
 	}, [onClose]);
 	return (
 		<>

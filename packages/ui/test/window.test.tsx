@@ -165,6 +165,19 @@ describe("full-screen chat (S26.2)", () => {
 		expect(invoked("set_panel_fullscreen")).toHaveLength(2);
 	});
 
+	it("Esc with the panel menu open closes only the menu, not the panel", async () => {
+		await renderApp("?surface=panel");
+		await openPanelMenu();
+		expect(screen.getByRole("navigation", { name: "Panel menu" })).toBeInTheDocument();
+
+		fireEvent.keyDown(window, { key: "Escape" });
+		await waitFor(() =>
+			expect(screen.queryByRole("navigation", { name: "Panel menu" })).not.toBeInTheDocument(),
+		);
+		expect(invoked("hide_panel")).toHaveLength(0);
+		expect(invoked("set_panel_fullscreen")).toHaveLength(0);
+	});
+
 	it("leaves an Esc that something inside the panel already handled alone", async () => {
 		const { container } = await renderApp("?surface=panel");
 		await openPanelMenu();

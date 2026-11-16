@@ -35,6 +35,14 @@ const flat = (props: Pick<SelectMenuProps, "options" | "groups">): SelectOption[
 	...(props.groups ?? []).flatMap((group) => group.options),
 ];
 
+/** Where a group's options start in `flat`, so the highlighted row is the one Enter picks. */
+const start = (
+	groups: NonNullable<SelectMenuProps["groups"]>,
+	index: number,
+	options?: SelectOption[],
+): number =>
+	(options?.length ?? 0) + groups.slice(0, index).reduce((count, group) => count + group.options.length, 0);
+
 /** The theme's select: a trigger button plus a portaled listbox, so the popup is drawn by our
  * theme instead of the browser's native one (the four native `<select>` the app had drew the
  * OS dropdown). Keyboard: arrows move, Enter picks, Escape and Tab close; clicking outside
@@ -199,12 +207,14 @@ export function SelectMenu({ label, value, onChange, options, groups, compact, d
 							}
 						>
 							{(options ?? []).map(optionRow)}
-							{(groups ?? []).map((group) => (
+							{(groups ?? []).map((group, groupIndex, list) => (
 								<div key={group.label} className="select-menu-group">
 									<div className="select-menu-heading" id={`select-group-${slug(group.label)}`}>
 										{group.label}
 									</div>
-									{group.options.map((option, index) => optionRow(option, index + (options?.length ?? 0)))}
+									{group.options.map((option, index) =>
+										optionRow(option, start(list, groupIndex, options) + index),
+									)}
 								</div>
 							))}
 						</div>,
