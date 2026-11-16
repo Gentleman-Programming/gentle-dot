@@ -71,8 +71,16 @@ test('production configuration reads remain present only outside preview; previe
  const config=read('apps/desktop/src-tauri/src/config.rs');
  assert.match(config,/#\[cfg\(not\(feature = "local-preview"\)\)\]\s+pub fn load_config\(\)/);
  const preview=section(config,'pub fn load_preview_config(','pub const INVALID_CONFIG');
- assert.ok(preview.includes('crate::preview::port('));assert.ok(preview.includes('save_memory('));assert.ok(preview.includes('MemoryMode::Private'));
- assert.doesNotMatch(preview,/read_to_string|resolve_data_dir|home_dir/);
+ assert.ok(preview.includes('crate::preview::port('));assert.ok(preview.includes('MemoryMode::Private'));
+ assert.match(config,/#\[cfg\(feature = "local-preview"\)\]\s+pub fn load_preview_config\(/);
+ assert.match(preview,/let text = with_memory\(None, MemoryMode::Private\)\?;/);
+ assert.match(preview,/let path = root\.data_dir\(\)\.join\("config.json"\);/);
+ assert.match(preview,/#\[cfg\(windows\)\]\s+let created = crate::daemon::create_private_preview_config\(&path\);/);
+ assert.match(preview,/#\[cfg\(not\(windows\)\)\]\s+let created = \{\s+let mut options = std::fs::OpenOptions::new\(\);\s+options.write\(true\).create_new\(true\);\s+#\[cfg\(unix\)\]\s+std::os::unix::fs::OpenOptionsExt::mode\(&mut options, 0o600\);\s+options.open\(&path\)\s+\};/);
+ assert.match(preview,/created.and_then\(\|mut out\| \{\s+out.write_all\(text.as_bytes\(\)\)\?;\s+out.sync_all\(\)/);
+ const windows=read('apps/desktop/src-tauri/src/daemon/windows.rs');
+ assert.match(windows,/#\[cfg\(feature = "local-preview"\)\]\s+pub\(crate\) fn create_private_preview_config\(path: &Path\) -> io::Result<File> \{\s+let sid = current_user_sid\(\)\?;\s+let descriptor = Descriptor::for_user\(sid.as_ptr\(\) as PSID\)\?;\s+private_file\(path, GENERIC_WRITE, CREATE_NEW, &descriptor\)\s+\}/);
+ assert.doesNotMatch(preview,/read_to_string|resolve_data_dir|home_dir|save_memory\(/);
  assert.match(config,/let dir = resolve_data_dir\(crate::platform::Os::CURRENT/);
 });
 test('policy remains std-only, exclusively creates roots, rejects aliases and preserves native guards',()=>{
