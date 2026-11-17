@@ -105,6 +105,22 @@ describe("bundled engine entry representation", () => {
 });
 
 describe("packaged agent spawn environment", () => {
+	it("keeps the source bundled engine headless without changing source provisioning", () => {
+		const source = bundledGentleShell({});
+		const inherited = {
+			GENTLE_SHELL_INTERACTIVE_HOST: "1",
+			GENTLE_SHELL_NO_AUTO_SETUP: "0",
+			GENTLE_PI_SKIP_GENTLE_AI_INSTALL: "0",
+		};
+		for (const platform of ["win32", "linux", "darwin"] as const) {
+			expect(agentSpawnEnv(process.execPath, [source], inherited, platform)).toEqual({
+				GENTLE_SHELL_NO_AUTO_SETUP: "0",
+				GENTLE_PI_SKIP_GENTLE_AI_INSTALL: "0",
+			});
+		}
+		expect(inherited.GENTLE_SHELL_INTERACTIVE_HOST).toBe("1");
+	});
+
 	const runtime = join(process.cwd(), "packaged-runtime");
 	const script = join(runtime, "daemon", "node_modules", "gentle-pi", "bin", "gentle-shell.mjs");
 	const env = {

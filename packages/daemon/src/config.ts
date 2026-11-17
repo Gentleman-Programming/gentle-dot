@@ -70,9 +70,9 @@ export function bundledGentleShell(env: NodeJS.ProcessEnv = process.env): string
 }
 
 /**
- * Disable launch-time provisioning only for the installed Windows default engine.
- * GENTLE_DOT_RUNTIME is supplied by the desktop runtime launcher; matching the
- * executable and bundled script also leaves programmatic custom agents alone.
+ * Keep Dot's bundled RPC engine headless, without changing explicit custom agents.
+ * Installed Windows defaults also retain both launch-time provisioning gates;
+ * source and Unix launches keep their existing provisioning behavior.
  */
 export function agentSpawnEnv(
 	command: string,
@@ -82,22 +82,36 @@ export function agentSpawnEnv(
 ): NodeJS.ProcessEnv {
 	const runtime = runtimeDir(env);
 	if (
-		platform !== "win32" ||
-		!runtime ||
 		command !== process.execPath ||
 		env.GENTLE_DOT_AGENT_BIN ||
 		env.GENTLE_DOT_AGENT_SCRIPT ||
-		env.GENTLE_DOT_AGENT_ARGS ||
-		args[0] !== engineEntryPath(join(runtimeModules(runtime), "gentle-pi", "bin", "gentle-shell.mjs"))
+		env.GENTLE_DOT_AGENT_ARGS
 	)
 		return env;
-	return {
-		...env,
-		// gentle-shell's first-run companion provisioning gate.
-		GENTLE_SHELL_NO_AUTO_SETUP: "1",
-		// Its missing package-local gentle-ai self-heal and installer gate.
-		GENTLE_PI_SKIP_GENTLE_AI_INSTALL: "1",
-	};
+	const windowsRuntime = platform === "win32" && runtime !== undefined;
+	if (!windowsRuntime && env.GENTLE_SHELL_INTERACTIVE_HOST === undefined) return env;
+
+	let bundled: string;
+	if (runtime) {
+		bundled = engineEntryPath(join(runtimeModules(runtime), "gentle-pi", "bin", "gentle-shell.mjs"));
+	} else {
+		try {
+			bundled = bundledGentleShell(env);
+		} catch {
+			// A programmatic custom launch does not require a bundled engine to be installed.
+			return env;
+		}
+	}
+	if (args[0] !== bundled) return env;
+
+	const child = { ...env };
+	delete child.GENTLE_SHELL_INTERACTIVE_HOST;
+	if (windowsRuntime) {
+		// Retain both independent provisioning gates on installed Windows runtimes only.
+		child.GENTLE_SHELL_NO_AUTO_SETUP = "1";
+		child.GENTLE_PI_SKIP_GENTLE_AI_INSTALL = "1";
+	}
+	return child;
 }
 
 /** The web UI: the runtime's `ui/` in an installed app, the UI package's build otherwise. */

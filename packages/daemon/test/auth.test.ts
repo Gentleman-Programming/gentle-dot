@@ -1,7 +1,7 @@
 import { linkSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { ServerMessage } from "@gentle-dot/protocol";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { createModelAuthRuntime, resolveAgentHome } from "../src/auth.ts";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
@@ -265,6 +265,12 @@ describe("sign-in", () => {
 });
 
 describe("createModelAuthRuntime (Pi's runtime, offline)", () => {
+	beforeAll(async () => {
+		// Preload dependencies; keep credential operations and their deadline in each test.
+		await import("@earendil-works/pi-coding-agent");
+		await import("jiti");
+	});
+
 	it("stores an API key in the assistant's home and a fresh runtime sees it", async () => {
 		const home = join(tempDir(), "agent");
 		const saved = process.env.OPENAI_API_KEY;
