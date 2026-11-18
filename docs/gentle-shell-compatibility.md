@@ -44,6 +44,12 @@ An isolated snapshot with unchanged project configuration and SDK 1.5.0 passed f
 
 The compiler resolved `ws` through the real `@types/ws` 8.18.2 `index.d.mts`. Earlier TS7016/TS7006 findings did not reproduce in this snapshot; the earlier LSP server's cause and current state are not established. A parent post-run comparison found no drift in the 75 original/snapshot source inputs.
 
-These are source-level results, not a full-suite, frozen-pnpm-install or installed-runtime certification. Full Shell launcher operation, NaN streaming and packaged/installed 4.8 operation remain separate functional checks. Tests use synthetic auth data and fake loopback services, never real credentials or providers.
+These are source-level results, not a full-suite, frozen-pnpm-install or installed-runtime certification. Tests use synthetic auth data and fake loopback services, never real credentials or providers.
 
-Dependency resolution, candidate runtime packaging and the pinned Gentle AI helper remain separate checks. A dependency version change alone does not establish runtime compatibility.
+### NaN streaming characterization
+
+`packages/daemon/test/nan-provider.test.ts` exercises the real Shell 4.8 provider factory with SDK 1.5.0's extension-loader compatibility view. Four cases cover `stream` and `streamSimple`, each with a normal stop and fragmented tool arguments. The transport is an in-memory SSE response, not an external provider. Assertions check the request, text events, final text and tool arguments, stop reason, one transport call, and zero discovery or ambient-fetch calls.
+
+The four streaming cases and six authentication cases passed with the daemon typecheck. Eleven earlier configuration, profile and SDK-approval cases also passed: 21 selected cases across two runs, not one full-suite run. A parent post-run check verified all 76 original/snapshot source inputs against their preparation hashes with zero drift. This later characterization is not a new independent-verifier verdict.
+
+Full Shell launcher operation and packaged/installed 4.8 operation remain unverified. Process-local fetch mocks do not establish egress containment for launcher descendants. Dependency resolution, candidate runtime packaging and the pinned Gentle AI helper remain separate checks. A dependency version change alone does not establish runtime compatibility.
