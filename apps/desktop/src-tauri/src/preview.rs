@@ -14,6 +14,28 @@ impl OwnedRoot {
     pub fn data_dir(&self) -> &Path { &self.data }
     pub fn webview_dir(&self) -> PathBuf { self.data.join("webview") }
 
+    /// Create only new synthetic children; an existing child is never adopted or repaired.
+    pub fn prepare_environment(
+        &self,
+        mut create: impl FnMut(&Path) -> Result<(), String>,
+        mut protect: impl FnMut(&Path) -> Result<(), String>,
+    ) -> Result<Vec<(&'static str, PathBuf)>, String> {
+        let environment = self.environment();
+        let mut directories = environment.iter().map(|(_, path)| path.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        // Prepare the runtime's nested profile paths before any first-use mkdir.
+        let app_data = self.data.join("home").join("AppData");
+        directories.extend([
+            app_data.clone(), app_data.join("Roaming"), app_data.join("Local"),
+            self.webview_dir(), self.webview_dir().join("EBWebView"),
+        ]);
+        for path in &directories {
+            if path != self.data_dir() { create(path)?; }
+            protect(path)?;
+        }
+        Ok(environment)
+    }
+
     /// Override profile locations before any plugin/thread starts. No profile discovery.
     pub fn environment(&self) -> Vec<(&'static str, PathBuf)> {
         [
@@ -34,6 +56,7 @@ pub fn prepare(
     bundled: bool,
     configured_windows: usize,
     root: Option<&Path>,
+    create: impl FnOnce(&Path) -> Result<(), String>,
     protect: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<OwnedRoot, String> {
     if identifier != IDENTIFIER || product_name != Some(PRODUCT_NAME) || bundled || configured_windows != 0 {
@@ -77,7 +100,7 @@ pub fn prepare(
             if metadata.file_attributes() & 0x400 != 0 { return Err(invalid()); }
         }
     }
-    std::fs::create_dir(root).map_err(|_| invalid())?; // Exclusive: existing files/directories fail untouched.
+    create(root).map_err(|_| invalid())?; // Exclusive: existing files/directories fail untouched.
     protect(root)?; // Reuse native privacy/ACL invariants, not an alternate synthetic guard.
     Ok(OwnedRoot { data: root.to_path_buf() })
 }
@@ -110,8 +133,12 @@ mod tests {
         parent
     }
 
+    fn create(path: &Path) -> Result<(), String> {
+        fs::create_dir(path).map_err(|error| error.to_string())
+    }
+
     fn admit(path: Option<&Path>, calls: &Cell<usize>) -> Result<OwnedRoot, String> {
-        prepare(IDENTIFIER, Some(PRODUCT_NAME), false, 0, path, |_| {
+        prepare(IDENTIFIER, Some(PRODUCT_NAME), false, 0, path, create, |_| {
             calls.set(calls.get() + 1);
             Ok(())
         })
@@ -146,7 +173,7 @@ mod tests {
             (IDENTIFIER, Some(PRODUCT_NAME), false, 1),
         ] {
             let calls = Cell::new(0);
-            assert!(prepare(id, name, bundle, windows, Some(&root), |_| {
+            assert!(prepare(id, name, bundle, windows, Some(&root), create, |_| {
                 calls.set(calls.get() + 1); Ok(())
             }).is_err());
             assert_eq!(calls.get(), 0);
@@ -188,7 +215,7 @@ mod tests {
         let parent = fixture();
         let root = parent.join("gentle-dot-preview-acl-failure");
         let calls = Cell::new(0);
-        let result = prepare(IDENTIFIER, Some(PRODUCT_NAME), false, 0, Some(&root), |_| {
+        let result = prepare(IDENTIFIER, Some(PRODUCT_NAME), false, 0, Some(&root), create, |_| {
             calls.set(calls.get() + 1); Err("synthetic ACL refusal".into())
         });
         assert_eq!(result.unwrap_err(), "synthetic ACL refusal");

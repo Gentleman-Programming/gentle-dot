@@ -182,6 +182,11 @@ export function applyMemoryMode(base: NodeJS.ProcessEnv, memory: MemoryMode): No
 	return { ...base, GENTLE_DOT_ENGRAM: "private" };
 }
 
+type PreviewMemoryAdmission = {
+	env: NodeJS.ProcessEnv;
+	memory: Awaited<ReturnType<typeof privateMemory>>;
+};
+
 export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	// A generic Duplex or fd number is not Windows descendant-exclusion admission.
 	// Only actual main-thread/native ownership transfer on the production startup
@@ -193,6 +198,17 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	)
 		throw new Error("Windows app channel requires validated production ownership before startup");
 	const log = options.log ?? (() => {});
+	let preview: PreviewMemoryAdmission | undefined;
+	const base = options.agentEnv ?? process.env;
+	// Only the compile-time preview shell emits this marker. Private mode alone is
+	// not preview; keep all unmarked preparation and memory bootstrap in their old order.
+	if (base.GENTLE_DOT_PREVIEW_MEMORY_ADMISSION === "1") {
+		const env = applyMemoryMode({ ...base }, memoryMode(base, options.dataDir));
+		if (!options.agentHome || env.GENTLE_DOT_ENGRAM !== "private")
+			throw new Error("Cannot start preview memory: private mode and engine home are required");
+		const access = options.vps ? (options.vps.access ?? engineAccess(options.vps.engine)) : directAccess;
+		preview = { env, memory: await privateMemory(env, options.dataDir, log, access) };
+	}
 	// One daemon per data folder (W24): the port bind only stops a second daemon on the same port, so
 	// the folders the daemon owns are claimed here, before anything is written into them.
 	const claimDirs = daemonClaimDirs(options.dataDir, options.agentHome);
@@ -203,7 +219,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	const claim = claimDaemonDirs(claimDirs);
 	if (claim.status !== "claimed") throw new Error(daemonClaimMessage(claim));
 	try {
-		return await startClaimedDaemon(options, log, claim.files);
+		return await startClaimedDaemon(options, log, claim.files, preview);
 	} catch (error) {
 		// A daemon that did not start must not leave its claim behind either.
 		releaseDaemonClaims(claim.files);
@@ -215,6 +231,7 @@ async function startClaimedDaemon(
 	options: DaemonOptions,
 	log: (line: string) => void,
 	claims: string[],
+	preview?: PreviewMemoryAdmission,
 ): Promise<DotDaemon> {
 	const openApp = () =>
 		options.appChannel
@@ -252,7 +269,7 @@ async function startClaimedDaemon(
 				`The user's preferred working folder is ${options.preferredFolder}. Use absolute paths there unless told otherwise.`,
 			]
 		: [];
-	let agentEnv = { ...(options.agentEnv ?? process.env) };
+	let agentEnv = { ...(preview?.env ?? options.agentEnv ?? process.env) };
 	// The server's secrets key is the daemon's only, whatever the engine is (S25.8).
 	delete agentEnv[SECRETS_KEY_VAR];
 	// Memory is a setting, not an environment variable (SW9, W26): the mode `config.json` names is
@@ -260,9 +277,13 @@ async function startClaimedDaemon(
 	// isolation, so the engine, its subagents and the private memory server all see one switch.
 	// `GENTLE_DOT_ENGRAM` stays the documented override — `memoryMode` lets it win over the file, as
 	// `GENTLE_DOT_PORT` does for `port` — and it is what `isolatedAgentEnv` and `privateMemory` read.
-	agentEnv = applyMemoryMode(agentEnv, memoryMode(agentEnv, options.dataDir));
+	if (!preview) agentEnv = applyMemoryMode(agentEnv, memoryMode(agentEnv, options.dataDir));
 	const homeArgs: string[] = [];
-	const memory = options.agentHome ? await privateMemory(agentEnv, options.dataDir, log, access) : undefined;
+	// An admitted existing listener has undefined cleanup. Test the admission wrapper,
+	// never its handle with ??, or startup could repeat the permissive legacy lookup.
+	const memory = preview
+		? preview.memory
+		: options.agentHome ? await privateMemory(agentEnv, options.dataDir, log, access) : undefined;
 	if (options.agentHome) {
 		homeArgs.push("--home", options.agentHome);
 		// The engine also writes under the home folder; it gets one of its own.

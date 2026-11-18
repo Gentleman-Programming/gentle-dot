@@ -14,12 +14,31 @@ test('preview is compile-time opt-in and normal product identity remains unchang
  const preview=JSON.parse(read('apps/desktop/src-tauri/tauri.preview.conf.json'));
  assert.equal(preview.identifier,'dev.gentleman.gentle-dot.preview');assert.equal(preview.productName,'Gentle Dot Preview');assert.equal(preview.bundle.active,false);assert.deepEqual(preview.app.windows,[]);
 });
+test("preview memory admission marker is emitted only inside the compile-time preview environment block", () => {
+	const source = shell();
+	const block = section(
+		source,
+		'    #[cfg(feature = "local-preview")]\n    {\n        // Before Tauri/plugins/threads.',
+		"    // GNOME on Wayland",
+	);
+	assert.ok(block.startsWith('    #[cfg(feature = "local-preview")]'));
+	const emission = /^\s*std::env::set_var\(\s*"GENTLE_DOT_PREVIEW_MEMORY_ADMISSION"\s*,\s*"1"\s*\);/gm;
+	assert.equal(
+		[...block.matchAll(emission)].length,
+		1,
+		"preview must actually emit the internal admission marker",
+	);
+	const setters = /^\s*std::env::set_var\(\s*"GENTLE_DOT_PREVIEW_MEMORY_ADMISSION"\s*,/gm;
+	assert.equal([...source.matchAll(setters)].length, 1, "no production or duplicate marker setter");
+});
 test('identity and fresh-root admission precede configuration, plugins, stores and startup',()=>{
  const run=shell().slice(shell().indexOf('pub fn run()'));
  assert.ok(run.indexOf('crate::preview::prepare(')>=0);
  assert.ok(run.indexOf('crate::preview::prepare(')<run.indexOf('config::load_preview_config('));
  assert.ok(run.indexOf('config::load_preview_config(')<run.indexOf('tauri::Builder::default()'));
+ assert.match(run,/daemon::create_private_preview_directory\(root\)/);
  assert.match(run,/crate::windows_process::private_directory\(root\)/);
+ assert.match(run,/preview\.prepare_environment\(/);
  assert.match(run,/\.build\(context\)/);
 });
 test('preview selects MemoryStore without constructing the production backend',()=>{
@@ -52,13 +71,24 @@ test('production configuration reads remain present only outside preview; previe
  const config=read('apps/desktop/src-tauri/src/config.rs');
  assert.match(config,/#\[cfg\(not\(feature = "local-preview"\)\)\]\s+pub fn load_config\(\)/);
  const preview=section(config,'pub fn load_preview_config(','pub const INVALID_CONFIG');
- assert.ok(preview.includes('crate::preview::port('));assert.ok(preview.includes('save_memory('));assert.ok(preview.includes('MemoryMode::Private'));
- assert.doesNotMatch(preview,/read_to_string|resolve_data_dir|home_dir/);
+ assert.ok(preview.includes('crate::preview::port('));assert.ok(preview.includes('MemoryMode::Private'));
+ assert.match(config,/#\[cfg\(feature = "local-preview"\)\]\s+pub fn load_preview_config\(/);
+ assert.match(preview,/let text = with_memory\(None, MemoryMode::Private\)\?;/);
+ assert.match(preview,/let path = root\.data_dir\(\)\.join\("config.json"\);/);
+ assert.match(preview,/#\[cfg\(windows\)\]\s+let created = crate::daemon::create_private_preview_config\(&path\);/);
+ assert.match(preview,/#\[cfg\(not\(windows\)\)\]\s+let created = \{\s+let mut options = std::fs::OpenOptions::new\(\);\s+options.write\(true\).create_new\(true\);\s+#\[cfg\(unix\)\]\s+std::os::unix::fs::OpenOptionsExt::mode\(&mut options, 0o600\);\s+options.open\(&path\)\s+\};/);
+ assert.match(preview,/created.and_then\(\|mut out\| \{\s+out.write_all\(text.as_bytes\(\)\)\?;\s+out.sync_all\(\)/);
+ const windows=read('apps/desktop/src-tauri/src/daemon/windows.rs');
+ assert.match(windows,/#\[cfg\(feature = "local-preview"\)\]\s+pub\(crate\) fn create_private_preview_config\(path: &Path\) -> io::Result<File> \{\s+let sid = current_user_sid\(\)\?;\s+let descriptor = Descriptor::for_user\(sid.as_ptr\(\) as PSID\)\?;\s+private_file\(path, GENERIC_WRITE, CREATE_NEW, &descriptor\)\s+\}/);
+ assert.doesNotMatch(preview,/read_to_string|resolve_data_dir|home_dir|save_memory\(/);
  assert.match(config,/let dir = resolve_data_dir\(crate::platform::Os::CURRENT/);
 });
 test('policy remains std-only, exclusively creates roots, rejects aliases and preserves native guards',()=>{
  const policy=read('apps/desktop/src-tauri/src/preview.rs');
- assert.match(policy,/std::fs::create_dir\(root\)/);assert.match(policy,/Component::ParentDir/);assert.match(policy,/metadata.file_attributes\(\) & 0x400/);
+ assert.match(policy,/create\(root\)\.map_err/);
+ assert.ok(policy.indexOf('create(root).map_err') < policy.indexOf('protect(root)?'));
+ assert.match(policy,/if path != self\.data_dir\(\) \{ create\(path\)\?; \}/);
+ assert.match(policy,/Component::ParentDir/);assert.match(policy,/metadata.file_attributes\(\) & 0x400/);
  assert.doesNotMatch(policy,/create_dir_all|remove_dir|remove_file|std::env::var|connector_store|CredentialStore|tauri::/);
  const launch=read('apps/desktop/src-tauri/src/daemon/launch.rs');assert.ok(launch.includes('dir.is_absolute() && holds_git(dir)'));
  const daemon=read('apps/desktop/src-tauri/src/daemon.rs');assert.ok(daemon.includes('windows::open_private_log(data_dir)'));

@@ -273,9 +273,10 @@ interface PrivateMemoryOptions {
 
 /**
  * Owns cleanup only after confirming an empty private port before startup.
- * A failed or ambiguous lookup refuses ownership, not startup: the daemon starts,
- * logs it, and leaves that memory server running when it closes. An invalid port
- * is a configuration error and does stop startup. Before termination, both the
+ * Only the internal preview marker makes uncertain/unowned listeners refuse startup;
+ * private mode alone retains the production log-and-decline-cleanup behavior.
+ * Preview admission of an existing owned listener never grants cleanup ownership.
+ * An invalid port always stops startup. Before termination, both the
  * private data identity and a repeated stable listener PID must match.
  * PID reuse after the final check remains possible; nothing is killed by name.
  */
@@ -297,8 +298,20 @@ export async function privateMemory(
 		throw new Error("Cannot start private memory: port must be an integer from 1 to 65535");
 	}
 	const before = await listeningPid(port, options);
-	if (before.kind === "one") return undefined;
+	const preview = base.GENTLE_DOT_PREVIEW_MEMORY_ADMISSION === "1";
+	const refusal = "Cannot start preview memory: listener ownership is unverified";
+	if (before.kind === "one") {
+		if (preview) {
+			const expected = memoryInstanceId(dataDir, access);
+			const health = expected ? await (options.health ?? memoryHealth)(port).catch(() => undefined) : undefined;
+			if (!expected || health?.instance_id !== expected) throw new Error(refusal);
+			const again = await listeningPid(port, options);
+			if (again.kind !== "one" || again.pid !== before.pid) throw new Error(refusal);
+		}
+		return undefined;
+	}
 	if (before.kind !== "empty") {
+		if (preview) throw new Error(refusal);
 		// Not knowing is no reason to keep the assistant from starting, nor to claim the server.
 		log(`cannot verify private memory listener on port ${port} (${before.kind} lookup); will not stop it`);
 		return undefined;
@@ -311,13 +324,8 @@ export async function privateMemory(
 					log(`cannot verify private memory listener on port ${port}; left running`);
 				return;
 			}
-			let expected: string;
-			try {
-				const file = join(dataDir, "home", ".engram", ".instance-id");
-				expected = access(() => readFileSync(file, "utf8")).trim();
-			} catch {
-				return;
-			}
+			const expected = memoryInstanceId(dataDir, access);
+			if (expected === undefined) return;
 			const health = await (options.health ?? memoryHealth)(port).catch(() => undefined);
 			if (!expected || health?.instance_id !== expected) {
 				log(`the memory server on port ${port} serves other data; left running`);
@@ -336,6 +344,15 @@ export async function privateMemory(
 			}
 		},
 	};
+}
+
+function memoryInstanceId(dataDir: string, access: EngineAccess): string | undefined {
+	try {
+		const file = join(dataDir, "home", ".engram", ".instance-id");
+		return access(() => readFileSync(file, "utf8")).trim();
+	} catch {
+		return undefined;
+	}
 }
 
 function memoryHealth(port: string): Promise<{ instance_id?: unknown } | undefined> {
@@ -363,7 +380,9 @@ function runListenerCommand(
 			[...args],
 			{
 				encoding: "utf8",
-				timeout: listenerLookupTimeoutMs(command === "powershell.exe" ? "win32" : process.platform),
+				timeout: listenerLookupTimeoutMs(
+					win32.basename(command).toLowerCase() === "powershell.exe" ? "win32" : process.platform,
+				),
 				windowsHide: true,
 			},
 			(error, stdout, stderr) => {
@@ -380,7 +399,16 @@ function runListenerCommand(
 /** Enumerate Windows listeners before filtering, so an unused port is not a query error. */
 async function listeningPid(port: string, options: PrivateMemoryOptions): Promise<Listener> {
 	const windows = (options.platform ?? process.platform) === "win32";
-	const command = windows ? "powershell.exe" : "lsof";
+	// Source builds can capture a PATH without WindowsPowerShell; use the existing OS image.
+	const command = windows
+		? win32.join(
+				process.env.SystemRoot || "C:\\Windows",
+				"System32",
+				"WindowsPowerShell",
+				"v1.0",
+				"powershell.exe",
+			)
+		: "lsof";
 	const args = windows
 		? [
 				"-NoLogo",

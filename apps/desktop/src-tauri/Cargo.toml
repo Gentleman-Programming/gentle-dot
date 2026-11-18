@@ -9,6 +9,8 @@ publish = false
 [features]
 default = []
 local-preview = []
+# Embed the frontend for standalone builds instead of using build.devUrl.
+custom-protocol = ["tauri/custom-protocol"]
 
 [lib]
 name = "gentle_dot_lib"
