@@ -1,12 +1,20 @@
-# PR263 + Shell 4.8 collaboration handoff
+# PR263 + Shell 4.9 collaboration handoff
+
+## Published Linux collaboration base
+
+GitHub accepted `feat/stable-pablo-shell-4-8` at **`27f73fa403ff54d0458f2cf324c3e8d05bd9700c`** (normal push job12, exit0). Repository: [Gentleman-Programming/gentle-dot](https://github.com/Gentleman-Programming/gentle-dot/tree/feat/stable-pablo-shell-4-8). Independent `gh api` readback confirmed that exact SHA (job13, exit0). A documentation-only follow-up may advance the branch without changing this code base. No main/PR merge, app installation or Linux acceptance occurred. The branch name is historical: it contains Pablo's PR263 plus published Shell4.9.0 and retained SDK1.5.0.
+
+The human explicitly selected **Desactivar RDD en este clon de Dot y publicar**. Native mode change confirmed off, decided by clone_local; global remains on. This applies to the publisher's entire Dot clone and all its worktrees until the human requests re-enablement. It does not change Cinlo's clone, other repositories or review consent; do not automatically re-enable. Existing test and independent-verifier evidence remains required and recorded.
 
 ## Current dependency update — Shell4.9 SOURCE verified
 
-Source update commit: **`becf519ebc0e0bf803529fc62e0e75e6ab2a7895`**, parent01cead9, seven paths48insertions28deletions. Branch `feat/stable-pablo-shell-4-8` retains its historical name and all Pablo commits; the current dependency is4.9.0, not4.8. No remote availability is claimed. This dependency work unit, not the inherited19385-line/95-commit origin/main range, is the assessment/review slice.
+Source update commit: **`becf519ebc0e0bf803529fc62e0e75e6ab2a7895`**, parent01cead9, seven paths48insertions28deletions. Branch `feat/stable-pablo-shell-4-8` retains its historical name and all Pablo commits; the current dependency is4.9.0, not4.8. It is included in the confirmed published source base27f73fa. This dependency work unit, not the inherited19385-line/95-commit origin/main range, is the assessment/review slice.
 
 The human subsequently requested **"y se debe subir la version a la nueva que salio"**, clarified as **"El Shell que incluye Dot"**. The current working candidate upgrades only Dot's `gentle-pi` dependency/lock to official published4.9.0 (sourcece64a9a708e50c0ca899c8023140e63f29f293e1), retaining SDK1.5.0 under unchanged optional peer requirements. SDK1.5.2 was investigated, not silently added. Existing production/custom-agent environment and no-provision guards are unchanged.
 
 The focused public dependency/launcher contract observed RED against4.8 (1FAIL/3PASS/exit1), then GREEN after the pin/lock change (4PASS/0skip/exit0). Lock changes are limited to the selected version, resolved snapshot and official registry integrity; no dependency acquisition, lifecycle script, private fixture, compile or real engine session ran. `runtime-build.test.ts`'s expected version was updated but its artifact-building suite was not run. Independent Risk5 verifier `mwnrhzvv-c-dvtd` returned S3 MET/no new blocker, executing the four public contracts once (4PASS/0skip/exit0) and diffcheck0 without writes. New-candidate native assessment reports medium/reviewDuefalse; no START/consent/lineage/approval burn. The runtime acceptance limitations remain unchanged. Historical source evidence below remains4.8-only, not4.9 runtime acceptance. The separately authorized Shell timeout fix does not authorize modifying the installed runtime; source preparation is separate.
+
+References below to `build/pr263-verification-01` and synthetic scratch are retained publisher-local evidence, not files shipped on this branch. A Linux recipient must prepare their own dependencies and isolated test state; do not copy Windows junctions, personal profiles or credentials.
 
 ## Historical4.8 outcome — source integrated, publication BLOCKED
 
@@ -14,7 +22,7 @@ Local source-integration commit: **`7e12bc54de1ab6c7be38cf7934c79f11b1a8e8aa`** 
 
 Committed-range assessment: native medium/reviewDuefalse/under-budget; Risk2 independent source verification MET. No native START, consent, lineage or approval burn. This is not platform acceptance.
 
-**Remote delivery did not happen.** The foreground push was intercepted before execution because its bounded RDD preflight was cancelled/timed out. A supported inspect returned `operation_timeout`, `authority-unavailable`, actor unknown, mutation not started/authority not evaluated; no automatic retry. The human selected **Reintentar la comprobación nativa una vez**. That one fresh inspection returned the same timeout. Keep T4 blocked; do not retry, reset/rebuild authority, disable review, bypass the delivery path or offer a substitute transfer. No remote combined-branch identity is confirmed.
+**At this historical checkpoint, remote delivery had not happened.** The later explicit clone-local RDD decision and confirmed publication above supersede that status, not the native/platform proof limits. The foreground push was intercepted before execution because its bounded RDD preflight was cancelled/timed out. A supported inspect returned `operation_timeout`, `authority-unavailable`, actor unknown, mutation not started/authority not evaluated; no automatic retry. The human selected **Reintentar la comprobación nativa una vez**. That one fresh inspection returned the same timeout. Keep T4 blocked; do not retry, reset/rebuild authority, disable review, bypass the delivery path or offer a substitute transfer. No remote combined-branch identity is confirmed.
 
 ## Historical candidate identity — before local commit
 
@@ -26,7 +34,7 @@ Committed-range assessment: native medium/reviewDuefalse/under-budget; Risk2 ind
 
 The original parent merge applied exactly the reviewed 17 paths (936 insertions, 42 deletions), matching the PR head on those paths. Shell 4.8 baseline changes remain alongside them. Parent subsequently staged documentation; the narrowly authorized fixture correction below is a later unstaged delta, not part of the original reviewed PR. The worker did not stage or unstage anything.
 
-## Evidence observed on this integrated tree
+## Historical4.8 integrated-source evidence
 
 | Layer | Observation | Limit |
 | --- | --- | --- |
@@ -63,30 +71,37 @@ The table below preserves the initial pre-projection runner audit. At that point
 | `scripts/windows/test-daemon-startup.ps1` direct CI fixture | **UNRUN.** Needs separately authorized packaged runtime, native C# job adapter, loopback health and retained scratch; default scratch writes `build/arise-ci-t6`. Child environment is explicitly cleared. No real-runtime command is authorized or offered here. |
 | Preview Rust/native fixtures and standalone frontend build | **UNRUN.** Existing instructions are in `docs/install.md`; require separately authorized qualified toolchains/dependencies, UI output and native generated-path scope. Some preview Rust fixtures retain system-temp trees. No Cargo/Go/build/download was run. |
 
-## Independent source verification — MET
+## Historical4.8 independent source verification — MET
 
-Verifier `mwnkwgap-7-sn40` inspected the entire specification, integrated source/call paths, baseline, fixture correction, helper/receipt/report claims and Git identities without changing files or executing functional cases. No confirmed source-integration blocker was found. The original17 PR paths remain intact in the index; the separate working fixture input correction was reviewed explicitly and retains assertions/production semantics. Parent will stage that correction in the final integration commit.
+Verifier `mwnkwgap-7-sn40` inspected the entire specification, integrated source/call paths, baseline, fixture correction, helper/receipt/report claims and Git identities without changing files or executing functional cases. No confirmed source-integration blocker was found. At verification time the original17 PR paths were intact in the index; the separate fixture input correction was reviewed explicitly and retained assertions/production semantics. Both were subsequently included in source merge7e12bc5.
 
 Native assessment reports medium/under-budget and no due native review; the explicit Risk2 escalation's independent-verifier requirement is satisfied for this bounded source gate. No native START, consent, lineage, approval or burn is claimed. Functional runs remain parent/worker-attributed, not independently executed. A first malformed read-only Git inspection in the verifier produced usage; the corrected command succeeded, not a product/test failure. Optional additional regression advice is not a correction requirement and was not implemented.
 
 ## Remaining risks and Cinlo boundaries
 
-- **Risk 2 — security/shared integration proof pending:** parent-owned independent security review must assess admission ordering, TokenUser exclusive creation, production preservation and exact listener identity/PID behavior. Source contracts are not native boundary evidence.
-- **Risk 3 — functional/native proof limits:**58 selected memory cases passed across parent jobs2/3/5, including corrected-case GREEN and normal global Go setup. Two existing lsof-conditioned cases, PS7 startup fixture, Rust native ACL, real Shell/runtime/ownership/quit/relaunch and platform acceptance remain unverified. Parent independent verification remains pending. No historical budget was reset; R3-001 remains closed, not reopened by this map.
-- The separate producer `installerEnv`/NODE_OPTIONS gap is untouched. Shell 4.8 source pins do not qualify an artifact, authorize app replacement, or resume installation/hardware/provider/model activity.
+- **Risk 2 — native security proof pending:** independent SOURCE review of admission ordering, TokenUser creation, production preservation and listener identity/PID behavior was MET. Source contracts are not actual native ACL or installed-app boundary evidence.
+- **Risk 3 — functional/native proof limits:**58 selected memory cases passed across parent jobs2/3/5, including corrected-case GREEN and normal global Go setup. Two existing lsof-conditioned cases, PS7 startup fixture, Rust native ACL, real Shell/runtime/ownership/quit/relaunch and platform acceptance remain unverified. Independent SOURCE verification was MET; native/platform acceptance remains pending. No historical budget was reset; R3-001 remains closed, not reopened by this map.
+- The separate producer `installerEnv`/NODE_OPTIONS gap is untouched. Shell version source pins do not qualify an artifact, authorize app replacement, or resume installation/hardware/provider/model activity.
 - **Cinlo L1:** Linux x64 desktop/daemon/native acceptance still needs candidate-bound execution and accepted I1 shared-isolation evidence. Windows preview source checks do not satisfy it.
 - **L2:** depends on L1; producer/container observations are distinct from native disposable installation/update/removal and desktop launch.
 - **I2:** after recipient acceptance and approved named shared-file handoffs, reconcile exact contributor deltas on the parent-delivered branch/SHA. This document grants no shared-file or main-merge authority.
 - **I3:** remains pending a single exact candidate with I1, W1–W3, L1–L2, UI1–UI2 and I2 evidence; no release-ready/stable assertion follows here.
 - **C5:** remains paused. Do not import the unrelated secret-file correction or run C5/typecheck/new CI. Its source correction 1/1 and auxiliary repair 1/1 remain consumed; no third preparation attempt or renewed proof. C4 remains after C5.
 
-The source-integration SHA is now7e12bc54de1ab6c7be38cf7934c79f11b1a8e8aa, but no published SHA exists from this operation. Cinlo must not be told that the combined branch can already be fetched. No message was sent.
+The shared source base is **27f73fa403ff54d0458f2cf324c3e8d05bd9700c**, containing merge7e12bc5 and Shell4.9 dependency commitbecf519. GitHub publication and independent API readback are confirmed. No message was sent.
 
-## Message draft for the actual blocked state
+## Message draft for Cinlo's Linux continuation
 
-> Cinlo, ya tengo integrado localmente el PR de Pablo y actualizado el Shell de Dot a 4.9.0, manteniendo SDK 1.5.0. La rama sigue siendo `feat/stable-pablo-shell-4-8`, con la actualización en `becf519`. Pasaron los cuatro contratos de selección y arranque y la revisión independiente de fuente. Falta publicarla por el bloqueo de la comprobación nativa; te confirmo cuando esté disponible para continuar desde la misma base. Las validaciones nativas/Linux y los pendientes de C5 siguen abiertos.
+> Cinlo, ya está publicada la base con el PR de Pablo integrado y Shell 4.9.0, manteniendo SDK 1.5.0. Está en `Gentleman-Programming/gentle-dot`, rama `feat/stable-pablo-shell-4-8`, base de código `27f73fa`. Podés sacar tu rama de pruebas desde ahí y continuar con lo de Linux, sin pisar tus cambios actuales. Pasaron los contratos de fuente y la revisión independiente; las pruebas nativas/Linux y C5 no se dan por resueltas con esta publicación. El detalle está en `docs/pablo-shell-4-8-handoff.md`.
 
-This is a draft, not a sent message or a promise that remote delivery succeeded.
+Draft only, not sent. To preserve an existing Linux checkout's work, fetch the explicit repository and create a separate worktree rather than resetting the current branch (choose fresh names if these already exist):
+
+```sh
+git fetch https://github.com/Gentleman-Programming/gentle-dot.git feat/stable-pablo-shell-4-8
+git worktree add -b test/linux-pablo-shell-4-9 ../gentle-dot-linux-4-9 FETCH_HEAD
+```
+
+Continue only the previously authorized Linux activities and their existing dependency/approval boundaries; this does not reset C5 or any exhausted correction budget.
 
 ## Parent verification preparation and observation
 
@@ -116,7 +131,7 @@ One fixture correction adds `USERPROFILE: realHome` beside `HOME: realHome`, wit
 
 Prepared `parent-run-shared-mode.ps1`, identical to the current parent-sealed admission helper except fresh create-new `shared-mode-run.json`, external `pr263-shared-mode-<GUID>` scratch and anchored exact-full-name filter. Its normal globalSetup/Go compile, timeouts, ProcessStartInfo allowlist and inherited actual NODE_OPTIONS/recognized controls are unchanged. Parent command, not executed by worker: `powershell.exe -NoLogo -NoProfile -NonInteractive -File build/pr263-verification-01/parent-run-shared-mode.ps1 -Node 'C:/Program Files/nodejs/node.exe'`. It selects only the failed case, not31+26 already-passing cases. Parser.ParseFile ran once: exit0, `PASS ParseFile errors=0 execution=0`, empty stderr. At this preparation checkpoint corrected-case GREEN was unobserved and T2 remained open. Jobs4/5 below supersede only that pending-proof status; the failed receipt and consumed fixture correction remain preserved. Rust/native app/ACL/installed/Linux and PS7 startup checks remain explicitly unrun/unavailable.
 
-## Final bounded source self-review — T2 done; T3 pending
+## Historical bounded source self-review — before T3 completion
 
 Readback of both shared-mode helpers and actual receipts confirms:
 
@@ -126,6 +141,6 @@ Readback of both shared-mode helpers and actual receipts confirms:
 - **Aggregate:**31 admission +26 preservation +1 corrected shared-mode case = **58 selected cases passed across three runs**, with two existing lsof-conditioned cases unrun. Not a single60-case green suite, full platform validation or app-native acceptance. The11 previously observed source-contract passes are retained without replay. Original job3 assertion failure and job4 zero-selection remain evidence, not retroactive PASS.
 - **Diff self-review:** only the pre-existing fixture's synthetic base gained USERPROFILE beside HOME plus a comment; exact assertions/name/skips and production/API/platform behavior remain unchanged. Raw-byte baseline causality evidence remains linked above. Source fixture correction1/1 is consumed; no historical S7/S8/C5 budget renewed. Authored PR history, Shell4.8/SDK1.5 pins, bundled-default refusal/no-provision gates and unrelated producer/C5 boundaries remain intact.
 
-**T2 is done only for bounded collaboration-source integration and applicable self-checks. T3 independent security/shared-code verification (risks2/3) remains parent-owned and pending.** Rust native ACL/WebView, PS7 startup fixture, real Shell RPC, app/installer/device/provider and Linux qualification remain outside executed proof. No production/main merge, release, publication, final collaboration commit SHA or delivered-message fact is claimed. Parent records the final SHA after source verification.
+**At that historical checkpoint T2 was done for bounded collaboration-source integration/self-checks and T3 was pending. T3 subsequently returned MET as recorded above.** Rust native ACL/WebView, PS7 startup fixture, real Shell RPC, app/installer/device/provider and Linux qualification remain outside executed proof. No production/main merge, release, publication, final collaboration commit SHA or delivered-message fact is claimed. Parent records the final SHA after source verification.
 
 Cinlo may resume separately authorized activities from `feat/stable-pablo-shell-4-8` once the parent confirms the exact collaboration SHA. That supplies a source baseline only: L1/L2/I2/I3 dependencies, named shared-file handoffs and C5 pause/consumed limits still apply. No blanket native acceptance, provider/device consent, C5 retry or message-sending authority follows.
