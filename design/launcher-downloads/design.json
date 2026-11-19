@@ -1,0 +1,6 @@
+{
+  "title": "Gentle Dot launcher downloads",
+  "brief": "One complete download page backed by actual native CI release launchers; no fictitious download links.",
+  "feature": "odd/tasks/launcher-download-page.md",
+  "artboards": [{"file":"01-download.html","title":"A clear path to your desktop","tradeoff":"One focused selector rather than six competing download cards. Missing releases remain visibly unavailable.","width":1440,"height":1000}]
+}
