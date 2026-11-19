@@ -61,6 +61,22 @@ test('Windows CI is narrowly triggered, natively builds and retains all mandator
  assert.ok(steps.some(s=>s.uses==='actions/upload-artifact@v4'&&s.if?.includes('always()')));
 });
 
+test('native addon is built from matching checksum-verified inputs before runtime packaging',()=>{
+ const steps=workflow().jobs.build.steps;
+ const msvc=steps.findIndex(s=>s.uses==='ilammy/msvc-dev-cmd@v1.13.0');
+ const addon=steps.findIndex(s=>s.name==='Build required Windows native addon');
+ const producer=steps.findIndex(s=>s.run==='./scripts/windows/package.ps1 -Target windows-x64');
+ assert.ok(msvc>=0&&addon>msvc&&producer>addon,'missing native addon prerequisite ordering');
+ assert.equal(steps[msvc].with.arch,'x64');
+ const script=steps[addon].run;
+ assert.match(script,/node -p process.version/);assert.match(script,/https:\/\/nodejs.org\/download\/release\/\$version/);
+ assert.match(script,/SHASUMS256.txt/);assert.match(script,/Get-FileHash -Algorithm SHA256/);assert.match(script,/Checksum mismatch/);
+ assert.ok(script.indexOf('Get-FileHash')<script.indexOf('tar -xf')&&script.indexOf('tar -xf')<script.indexOf('run build:windows-stop'));
+ assert.match(script,/Get-Command cl.exe/);assert.match(script,/--compiler "\$compiler" --headers "\$inputs\/node-\$version\/include\/node" --node-lib "\$inputs\/node.lib"/);
+ assert.match(script,/if \(\$LASTEXITCODE -ne 0\) \{ throw 'Native addon build failed' \}/);
+ assert.match(script,/require\('.\/packages\/daemon\/native\/windows-stop.node'\)/);
+});
+
 test('publication only follows successful build, validates exact payload and creates a nonlatest prerelease',()=>{
  const p=workflow().jobs.publish;assert.equal(p.needs,'build');assert.deepEqual(p.permissions,{contents:'write'});assert.match(p.if,/success\(\)/);assert.match(p.if,/Gentleman-Programming\/gentle-dot/);
  const publish=p.steps.find(s=>s.run?.includes('gh release create'));assert.ok(publish);assert.ok(p.steps.some(s=>s.run?.includes('windows-preview-release.mjs')));

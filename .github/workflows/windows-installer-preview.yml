@@ -47,6 +47,34 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Native target plan failed' }
       - name: Frozen workspace dependencies
         run: pnpm install --frozen-lockfile
+      # Same public-input recipe as windows.yml; never weaken the runtime's addon guard.
+      - uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+      - name: Build required Windows native addon
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = node -p process.version
+          if ($LASTEXITCODE -ne 0 -or $version -ne 'v24.14.1') { throw 'Unexpected Node version for native addon' }
+          $inputs = Join-Path $env:RUNNER_TEMP 'node-addon-inputs'
+          New-Item -ItemType Directory -Path $inputs | Out-Null
+          $release = "https://nodejs.org/download/release/$version"
+          Invoke-WebRequest "$release/node-$version-headers.tar.gz" -OutFile "$inputs/headers.tar.gz"
+          Invoke-WebRequest "$release/win-x64/node.lib" -OutFile "$inputs/node.lib"
+          $sums = (Invoke-WebRequest "$release/SHASUMS256.txt").Content -split '\r?\n'
+          foreach ($pair in @(@("node-$version-headers.tar.gz", 'headers.tar.gz'), @('win-x64/node.lib', 'node.lib'))) {
+            $lines = @($sums | Where-Object { $_ -match "^[0-9a-f]{64}\s+$([regex]::Escape($pair[0]))$" })
+            if ($lines.Count -ne 1) { throw 'Expected exactly one published checksum' }
+            $actual = (Get-FileHash -Algorithm SHA256 (Join-Path $inputs $pair[1])).Hash.ToLowerInvariant()
+            if ($actual -ne ($lines[0] -split '\s+')[0]) { throw "Checksum mismatch for $($pair[0])" }
+          }
+          tar -xf "$inputs/headers.tar.gz" -C $inputs
+          if ($LASTEXITCODE -ne 0) { throw 'Node header extraction failed' }
+          $compiler = (Get-Command cl.exe).Source
+          pnpm --filter @gentle-dot/daemon run build:windows-stop -- --compiler "$compiler" --headers "$inputs/node-$version/include/node" --node-lib "$inputs/node.lib"
+          if ($LASTEXITCODE -ne 0) { throw 'Native addon build failed' }
+          node -e "require('./packages/daemon/native/windows-stop.node')"
+          if ($LASTEXITCODE -ne 0) { throw 'Native addon load failed' }
       - name: Build existing guarded Windows producer
         run: ./scripts/windows/package.ps1 -Target windows-x64
       - name: Collect exact QA payload before acceptance checks
