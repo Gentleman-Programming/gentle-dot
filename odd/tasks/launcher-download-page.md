@@ -8,9 +8,9 @@ Branch: feat/launcher-download-page; base:362619c6c03b9817033ace8cff572a7ef1e700
 - S3: "los app se crean en los CIs de cada sistema operativo"
 
 ## Tasks
-- T1 | S1-S2 | Sync existing brand tokens and create/open one truthful self-contained design direction | route: parent; DONE: existing root tokens synced, one artboard opened on canvas; functional implementation remains T2/T3. Commit: design unit pending.
-- T2 | S2-S3 | Implement/test-first real-release discovery and safe target-specific launcher links, including missing/error states | route: inline; IN PROGRESS; Risk2 remote-data/link validation; commit: pending, own unit.
-- T3 | S1-S3 | Implement responsive accessible download page using the release adapter, OS/architecture selection and truthful install guidance | route: inline, dependent on T2; pending; commit: pending.
+- T1 | S1-S2 | Sync existing brand tokens and create/open one truthful self-contained design direction | route: parent; DONE: existing root tokens synced, one artboard opened on canvas; functional implementation remains T2/T3. Commit:f678b76766c3f38451c31d5b66d43a8269101960.
+- T2 | S2-S3 | Implement/test-first real-release discovery and safe target-specific launcher links, including missing/error states | route: inline; DONE self-checks: stub RED2FAIL2PASS then GREEN4PASS/0skip, source URL/target/empty/error contracts; independent T4 pending. Risk2 remote-data/link validation; commit: pending, own unit.
+- T3 | S1-S3 | Implement responsive accessible download page using the release adapter, OS/architecture selection and truthful install guidance | route: inline, dependent on T2; IN PROGRESS; commit: pending.
 - T4 | S1-S3 | Verify public/browser behavior at narrow/wide sizes, fake downloads without installing, and independent Risk2 review | route: parent functional checks + gentle-ai-verify; pending; commit: pending.
 - T5 | S1-S3 | Document publishing/configuration limits and expose actual functional preview, without claiming nonexistent releases | route: parent; pending; commit: pending.
 
