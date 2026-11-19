@@ -2,6 +2,8 @@
 
 ## Current dependency update — Shell4.9 SOURCE verified
 
+Source update commit: **`becf519ebc0e0bf803529fc62e0e75e6ab2a7895`**, parent01cead9, seven paths48insertions28deletions. Branch `feat/stable-pablo-shell-4-8` retains its historical name and all Pablo commits; the current dependency is4.9.0, not4.8. No remote availability is claimed. This dependency work unit, not the inherited19385-line/95-commit origin/main range, is the assessment/review slice.
+
 The human subsequently requested **"y se debe subir la version a la nueva que salio"**, clarified as **"El Shell que incluye Dot"**. The current working candidate upgrades only Dot's `gentle-pi` dependency/lock to official published4.9.0 (sourcece64a9a708e50c0ca899c8023140e63f29f293e1), retaining SDK1.5.0 under unchanged optional peer requirements. SDK1.5.2 was investigated, not silently added. Existing production/custom-agent environment and no-provision guards are unchanged.
 
 The focused public dependency/launcher contract observed RED against4.8 (1FAIL/3PASS/exit1), then GREEN after the pin/lock change (4PASS/0skip/exit0). Lock changes are limited to the selected version, resolved snapshot and official registry integrity; no dependency acquisition, lifecycle script, private fixture, compile or real engine session ran. `runtime-build.test.ts`'s expected version was updated but its artifact-building suite was not run. Independent Risk5 verifier `mwnrhzvv-c-dvtd` returned S3 MET/no new blocker, executing the four public contracts once (4PASS/0skip/exit0) and diffcheck0 without writes. New-candidate native assessment reports medium/reviewDuefalse; no START/consent/lineage/approval burn. The runtime acceptance limitations remain unchanged. Historical source evidence below remains4.8-only, not4.9 runtime acceptance. The separately authorized Shell timeout fix does not authorize modifying the installed runtime; source preparation is separate.
@@ -82,7 +84,7 @@ The source-integration SHA is now7e12bc54de1ab6c7be38cf7934c79f11b1a8e8aa, but n
 
 ## Message draft for the actual blocked state
 
-> Cinlo, ya tengo integrado localmente el PR de Pablo con nuestro soporte de Shell 4.8, manteniendo SDK 1.5. La rama es `feat/stable-pablo-shell-4-8`, con commit de integración `7e12bc5`. Pasaron las verificaciones de fuente y la revisión independiente. Me falta publicarla porque la comprobación nativa está agotando el tiempo; te confirmo cuando esté disponible para que sigamos desde la misma base. Las validaciones nativas/Linux y los pendientes de C5 no están marcados como resueltos.
+> Cinlo, ya tengo integrado localmente el PR de Pablo y actualizado el Shell de Dot a 4.9.0, manteniendo SDK 1.5.0. La rama sigue siendo `feat/stable-pablo-shell-4-8`, con la actualización en `becf519`. Pasaron los cuatro contratos de selección y arranque y la revisión independiente de fuente. Falta publicarla por el bloqueo de la comprobación nativa; te confirmo cuando esté disponible para continuar desde la misma base. Las validaciones nativas/Linux y los pendientes de C5 siguen abiertos.
 
 This is a draft, not a sent message or a promise that remote delivery succeeded.
 
