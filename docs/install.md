@@ -167,6 +167,10 @@ The Windows-only Rust feature `local-preview` is **off by default**. It must be 
 
 After separate build authorization and prerequisite qualification, the Tauri build inputs are `--features local-preview --config tauri.preview.conf.json --no-bundle` from the desktop crate context. This source change does not run that build or qualify the resulting application.
 
+For an authorized **direct Cargo** preview, build the current UI first with the already-qualified Node and Vite (`node node_modules/vite/bin/vite.js build`, working directory `packages/ui`). Preserve existing generated output before Vite clears `packages/ui/dist/app`, and verify `index.html` and all referenced assets. Do not install missing dependencies implicitly.
+
+Then supply the preview overlay through the child process's `TAURI_CONFIG` and compile with `cargo build --release --offline --locked --features local-preview,custom-protocol --bin gentle-dot`. The opt-in `custom-protocol` feature forwards to `tauri/custom-protocol`, embedding the prepared frontend. Cargo alone does not run `beforeBuildCommand`, and `--release` alone does not select the embedded frontend: without it, the configured development URL can require a server on port 5173. Standalone preview acceptance must not depend on that server. Default Cargo features remain unchanged.
+
 Preview startup requires both:
 
 - `GENTLE_DOT_DATA_DIR`: a **nonexistent absolute local-drive directory** whose final name begins `gentle-dot-preview-`, with an existing parent. Relative paths, production data/install components, aliases, reparse parents and existing roots are refused. Do not pre-create the root; each launch needs a fresh one. Failed owned roots are retained, not reused or deleted automatically.

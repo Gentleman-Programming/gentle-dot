@@ -1,6 +1,6 @@
 # Windows runtime packaging and validation
 
-The Windows packaging path stages a relocatable runtime, records file hashes, builds a per-user NSIS installer, and provides a separate install smoke test. Source and fixture checks below do not prove a working installer or clean-machine acceptance.
+The Windows packaging path stages a relocatable runtime, records file hashes, builds a per-user NSIS installer, and provides a separate install smoke test. Source and fixture checks below do not prove a working installer or clean-machine acceptance. See the [stable acceptance checklist](windows-stable-acceptance-checklist.md) for pending W2/W3 evidence.
 
 ## What the staged path does
 

@@ -77,6 +77,8 @@ pub(super) fn command_line(program: &str, args: &[String]) -> io::Result<Vec<u16
 
 #[cfg(windows)]
 pub(super) use native::{acquire_recovered_launch, ensure_record_directory, open_private_log, retire_if_owner_exited, spawn, RecoveredLaunch, SpawnFailure, WindowsChild};
+#[cfg(all(windows, feature = "local-preview"))]
+pub(super) use native::{create_private_preview_config, create_private_preview_directory};
 
 #[cfg(windows)]
 mod native {
@@ -1488,6 +1490,173 @@ mod native {
         fn only_a_complete_single_frame_is_accepted() {
             assert!(require_frame_size(36).is_ok());
             for count in [0, 1, 35, 37, u32::MAX] { assert!(require_frame_size(count).is_err()); }
+        }
+    }
+
+    /// Only for an exclusively new preview directory, never adoption or repair.
+    #[cfg(feature = "local-preview")]
+    pub(crate) fn create_private_preview_directory(path: &Path) -> io::Result<()> {
+        let sid = current_user_sid()?;
+        let descriptor = Descriptor::for_user(sid.as_ptr() as PSID)?;
+        let name = wide(path.as_os_str())?;
+        let attributes = descriptor.attributes();
+        unsafe { checked(CreateDirectoryW(name.as_ptr(), &attributes)) }
+    }
+
+    /// Give only a newly created preview config explicit, protected TokenUser permissions.
+    #[cfg(feature = "local-preview")]
+    pub(crate) fn create_private_preview_config(path: &Path) -> io::Result<File> {
+        let sid = current_user_sid()?;
+        let descriptor = Descriptor::for_user(sid.as_ptr() as PSID)?;
+        private_file(path, GENERIC_WRITE, CREATE_NEW, &descriptor)
+    }
+
+    #[cfg(all(test, feature = "local-preview"))]
+    mod preview_directory_tests {
+        use super::*;
+        use std::cell::Cell;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        fn user_owns(path: &Path, expected: PSID) -> io::Result<bool> {
+            let name = wide(path.as_os_str())?;
+            let handle = owned(unsafe { CreateFileW(name.as_ptr(), READ_CONTROL,
+                FILE_SHARE_READ | FILE_SHARE_WRITE, null(), OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, null_mut()) })?;
+            let mut owner = null_mut();
+            let mut descriptor = null_mut();
+            let result = unsafe { GetSecurityInfo(handle.as_raw_handle(), SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION, &mut owner, null_mut(), null_mut(), null_mut(), &mut descriptor) };
+            if result != ERROR_SUCCESS { return Err(io::Error::from_raw_os_error(result as i32)); }
+            let _snapshot = SecuritySnapshot(descriptor);
+            Ok(!owner.is_null() && unsafe { EqualSid(owner, expected) } != 0)
+        }
+
+        fn config_fixture(label: &str) -> (crate::preview::OwnedRoot, PathBuf) {
+            let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let parent = std::env::temp_dir().join(format!("dot-preview-config-{label}-{}-{nonce}", std::process::id()));
+            std::fs::create_dir(&parent).unwrap();
+            let root = parent.join("gentle-dot-preview-config");
+            let preview = crate::preview::prepare(crate::preview::IDENTIFIER,
+                Some(crate::preview::PRODUCT_NAME), false, 0, Some(&root),
+                |path| create_private_preview_directory(path).map_err(|error| error.to_string()),
+                |path| crate::windows_process::private_directory(path).map_err(|error| error.to_string()),
+            ).unwrap();
+            (preview, parent)
+        }
+
+        fn config_access_masks(path: &Path) -> Vec<u32> {
+            let file = File::open(path).unwrap();
+            let sid = current_user_sid().unwrap();
+            validate_record_security(file.as_raw_handle(), sid.as_ptr() as PSID).unwrap();
+            let mut acl = null_mut();
+            let mut descriptor = null_mut();
+            let result = unsafe { GetSecurityInfo(file.as_raw_handle(), SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION, null_mut(), null_mut(), &mut acl, null_mut(), &mut descriptor) };
+            assert_eq!(result, ERROR_SUCCESS);
+            let _snapshot = SecuritySnapshot(descriptor);
+            assert!(!acl.is_null());
+            (0..unsafe { (*acl).AceCount }).map(|index| {
+                let mut raw = null_mut();
+                unsafe {
+                    checked(GetAce(acl, index as u32, &mut raw)).unwrap();
+                    (*raw.cast::<ACCESS_ALLOWED_ACE>()).Mask
+                }
+            }).collect()
+        }
+
+        #[test]
+        fn preview_config_remains_private_and_readable_after_log_open() {
+            let (preview, parent) = config_fixture("read");
+            let config = crate::config::load_preview_config(&preview).unwrap();
+            assert_eq!(config.port, 17417);
+            let path = preview.data_dir().join("config.json");
+            let before = std::fs::read(&path).unwrap();
+            assert_eq!(before, b"{\n  \"memory\": \"private\"\n}\n");
+            drop(crate::daemon::open_private_log(preview.data_dir()).unwrap());
+            assert_eq!(std::fs::read(&path).unwrap(), before,
+                "log setup must leave the preview config readable and unchanged");
+            assert_eq!(config_access_masks(&path), vec![0x001f01ff],
+                "config must retain one explicit, protected full-access ACE for TokenUser only");
+            std::fs::remove_dir_all(parent).unwrap();
+        }
+
+        #[test]
+        fn preview_config_refuses_existing_file_without_changing_it() {
+            use std::io::Write as _;
+            let (preview, parent) = config_fixture("existing");
+            let path = preview.data_dir().join("config.json");
+            let sid = current_user_sid().unwrap();
+            let descriptor = Descriptor::for_user(sid.as_ptr() as PSID).unwrap();
+            let mut file = private_file(&path, GENERIC_WRITE, CREATE_NEW, &descriptor).unwrap();
+            let before = b"{\"sentinel\":true,\"memory\":\"private\"}\n";
+            file.write_all(before).unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+            let security = config_access_masks(&path);
+            let count = std::fs::read_dir(preview.data_dir()).unwrap().count();
+            assert!(crate::config::load_preview_config(&preview).is_err(),
+                "fresh preview initialization must not adopt or rewrite an existing file");
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(config_access_masks(&path), security);
+            assert_eq!(std::fs::read_dir(preview.data_dir()).unwrap().count(), count);
+            std::fs::remove_dir_all(parent).unwrap();
+        }
+
+        #[test]
+        fn preview_prepares_windows_and_webview_directories_before_first_use() {
+            let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let parent = std::env::temp_dir().join(format!("dot-preview-profile-{}-{nonce}", std::process::id()));
+            std::fs::create_dir(&parent).unwrap();
+            let root = parent.join("gentle-dot-preview-profile");
+            let preview = crate::preview::prepare(crate::preview::IDENTIFIER,
+                Some(crate::preview::PRODUCT_NAME), false, 0, Some(&root),
+                |path| create_private_preview_directory(path).map_err(|error| error.to_string()),
+                |path| crate::windows_process::private_directory(path).map_err(|error| error.to_string()),
+            ).unwrap();
+            preview.prepare_environment(
+                |path| create_private_preview_directory(path).map_err(|error| error.to_string()),
+                |path| crate::windows_process::private_directory(path).map_err(|error| error.to_string()),
+            ).unwrap();
+            let sid = current_user_sid().unwrap();
+            for path in [root.join("home").join("AppData").join("Roaming"),
+                root.join("home").join("AppData").join("Local"), preview.webview_dir().join("EBWebView")] {
+                // Model a Windows consumer's ordinary first-use mkdir, without repairing ownership.
+                std::fs::create_dir_all(&path).unwrap();
+                assert!(user_owns(&path, sid.as_ptr() as PSID).unwrap(),
+                    "runtime profile directory must already belong to TokenUser");
+            }
+        }
+
+        #[test]
+        fn preview_directories_use_token_user_and_reject_existing_root() {
+            let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let parent = std::env::temp_dir().join(format!("dot-preview-owner-{}-{nonce}", std::process::id()));
+            std::fs::create_dir(&parent).unwrap();
+            let root = parent.join("gentle-dot-preview-owner");
+            let calls = Cell::new(0);
+            let admit = || crate::preview::prepare(crate::preview::IDENTIFIER,
+                Some(crate::preview::PRODUCT_NAME), false, 0, Some(&root),
+                |path| create_private_preview_directory(path).map_err(|error| error.to_string()), |path| {
+                    calls.set(calls.get() + 1);
+                    crate::windows_process::private_directory(path).map_err(|error| error.to_string())
+                });
+            let preview = admit().unwrap();
+            preview.prepare_environment(
+                |path| create_private_preview_directory(path).map_err(|error| error.to_string()),
+                |path| crate::windows_process::private_directory(path).map_err(|error| error.to_string()),
+            ).unwrap();
+            let sid = current_user_sid().unwrap();
+            assert!(user_owns(&root, sid.as_ptr() as PSID).unwrap(), "fresh preview root must belong to TokenUser");
+            assert!(user_owns(&root.join("home"), sid.as_ptr() as PSID).unwrap(), "fresh preview home must belong to TokenUser");
+            let sentinel = root.join("sentinel");
+            std::fs::write(&sentinel, b"unchanged").unwrap();
+            let entries = std::fs::read_dir(&root).unwrap().count();
+            let before = calls.get();
+            assert!(admit().is_err());
+            assert_eq!(calls.get(), before, "existing root must not reach the protection callback");
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"unchanged");
+            assert_eq!(std::fs::read_dir(&root).unwrap().count(), entries);
+            assert!(user_owns(&root, sid.as_ptr() as PSID).unwrap());
         }
     }
 

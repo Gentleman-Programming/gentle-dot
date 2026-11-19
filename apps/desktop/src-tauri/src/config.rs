@@ -154,11 +154,28 @@ pub fn load_config() -> Result<DesktopConfig, String> {
 /// Only an admitted fresh root can reach preview configuration. No home fallback or old file read.
 #[cfg(feature = "local-preview")]
 pub fn load_preview_config(root: &crate::preview::OwnedRoot) -> Result<DesktopConfig, String> {
+    use std::io::Write;
     let port = crate::preview::port(std::env::var("GENTLE_DOT_PORT").ok().as_deref())?;
     let mut config = parse_config(root.data_dir().to_path_buf(), None, |_| None);
     config.port = port;
     config.memory = Ok(MemoryMode::Private);
-    save_memory(&root.data_dir().join("config.json"), MemoryMode::Private)?;
+    let text = with_memory(None, MemoryMode::Private)?;
+    let path = root.data_dir().join("config.json");
+    // Fresh preview configuration must not depend on the root's later log ACL update.
+    #[cfg(windows)]
+    let created = crate::daemon::create_private_preview_config(&path);
+    #[cfg(not(windows))]
+    let created = {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        options.open(&path)
+    };
+    created.and_then(|mut out| {
+        out.write_all(text.as_bytes())?;
+        out.sync_all()
+    }).map_err(|error| format!("Gentle Dot cannot save config.json ({error})."))?;
     Ok(config)
 }
 
