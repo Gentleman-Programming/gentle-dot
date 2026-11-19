@@ -1,0 +1,119 @@
+name: Windows installer prerelease
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'qa/windows-installer-preview/**'
+permissions:
+  contents: read
+concurrency:
+  group: windows-installer-preview-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.repository == 'Gentleman-Programming/gentle-dot'
+    runs-on: windows-2022
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.1'
+          architecture: x64
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.10'
+          architecture: x64
+          cache: false
+      - name: Native x64 toolchain and target plan
+        run: |
+          rustup set default-host x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'Rust host selection failed' }
+          rustup toolchain install stable --profile minimal
+          if ($LASTEXITCODE -ne 0) { throw 'Rust installation failed' }
+          rustup default stable
+          if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain selection failed' }
+          $hostInfo = rustc -vV
+          if ($LASTEXITCODE -ne 0 -or $hostInfo -notcontains 'host: x86_64-pc-windows-msvc') { throw 'Native x64 Rust is required' }
+          node scripts/package/ci-native.mjs plan --target windows-x64 --source $env:GITHUB_SHA > "$env:RUNNER_TEMP/native-plan.json"
+          if ($LASTEXITCODE -ne 0) { throw 'Native target plan failed' }
+      - name: Frozen workspace dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build existing guarded Windows producer
+        run: ./scripts/windows/package.ps1 -Target windows-x64
+      - name: Collect exact QA payload before acceptance checks
+        id: collect
+        run: node scripts/package/ci-native.mjs collect --target windows-x64 --source $env:GITHUB_SHA --out build/windows-preview
+      - name: Packaged Node and daemon startup contract
+        run: ./scripts/windows/test-daemon-startup.ps1 -Runtime "./build/windows/runtime"
+      - name: Isolated install, readiness, reinstall and uninstall
+        run: |
+          $plan = Get-Content "$env:RUNNER_TEMP/native-plan.json" -Raw | ConvertFrom-Json
+          $installers = @(Get-ChildItem -LiteralPath $plan.installers[0].directory -Filter '*-setup.exe' -File)
+          if ($installers.Count -ne 1) { throw 'Expected exactly one NSIS installer' }
+          ./scripts/windows/smoke-install.ps1 -Installer $installers[0].FullName -DiagnosticsPath "$env:RUNNER_TEMP/windows-smoke-diagnostics.json"
+      - name: Retain QA payload even when a later check fails
+        if: always() && steps.collect.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer-preview
+          path: build/windows-preview/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain sanitized startup diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-preview-diagnostics
+          path: ${{ runner.temp }}/windows-smoke-diagnostics.json
+          if-no-files-found: warn
+          retention-days: 14
+  publish:
+    needs: build
+    if: success() && github.repository == 'Gentleman-Programming/gentle-dot'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.1'
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-installer-preview
+          path: build/windows-preview
+      - name: Verify every published byte against source-bound QA identities
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: node scripts/package/windows-preview-release.mjs build/windows-preview "$SOURCE_SHA"
+      - name: Publish testing prerelease, never latest stable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          TAG="windows-preview-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          cat > "$RUNNER_TEMP/preview-notes.md" <<EOF
+          Windows x64 installer for manual testing. NOT a stable release.
+          Source: $SOURCE_SHA
+          CI run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          Packaged daemon startup and isolated installer lifecycle checks passed in CI.
+          Manual acceptance on the recipient's machine remains pending.
+          No publisher signature is asserted; Windows may show security warnings.
+          Runtime dependency resolution is not fully frozen; see QA-MANIFEST.json.
+          This prerelease does not appear on the stable public download page.
+          EOF
+          gh release create "$TAG" build/windows-preview/* --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --prerelease --latest=false --title "Windows x64 installer preview #$GITHUB_RUN_NUMBER" --notes-file "$RUNNER_TEMP/preview-notes.md"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url --jq .url >> "$GITHUB_STEP_SUMMARY"
