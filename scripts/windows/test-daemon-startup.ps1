@@ -3,11 +3,14 @@
 CI-only packaged Node and daemon launch contract; not installed or agent-idle acceptance.
 .PARAMETER Runtime
 Fresh CI staged runtime containing node/node.exe and daemon/cli.mjs.
+.PARAMETER DiagnosticsPath
+Optional new .json file for bounded sanitized outcome, exit code and health metadata.
+No child output, profile values or raw exception details are captured.
 .DESCRIPTION
 Clears the child environment, creates a fresh isolated profile, probes loopback health,
 and stops only the owned process tree. Prints one fixed outcome; no raw child logs.
 #>
-param([string]$Runtime = '')
+param([string]$Runtime = '', [string]$DiagnosticsPath = '')
 
 function New-DaemonStartupEnvironment {
     param([string]$Runtime, [string]$Scratch, [int]$Port)
@@ -96,6 +99,7 @@ namespace GentleDot.CI {
         [DllImport("kernel32.dll")] static extern uint ResumeThread(IntPtr thread);
         [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
         [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+        [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr process, out uint code);
         [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] static extern IntPtr CreateFileW(string name, uint access, uint sharing, ref Security security, uint disposition, uint flags, IntPtr template);
         [DllImport("kernel32.dll")] static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, uint flags, ref IntPtr size);
         [DllImport("kernel32.dll")] static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, IntPtr attribute, IntPtr value, IntPtr size, IntPtr previous, IntPtr returned);
@@ -162,6 +166,13 @@ namespace GentleDot.CI {
         public bool HasExited {
             get { uint state = WaitForSingleObject(process, 0); Require(state == 0 || state == 258); return state == 0; }
         }
+        public int? ExitCode {
+            get {
+                if (!HasExited) return null;
+                uint code; Require(GetExitCodeProcess(process, out code));
+                return unchecked((int)code);
+            }
+        }
         public bool Stop() {
             // Root exit is irrelevant: terminate and verify the ENTIRE owned job.
             if (job == IntPtr.Zero || !TerminateJobObject(job, 1)) return false;
@@ -213,8 +224,10 @@ function New-DaemonStartupClock {
     return [Diagnostics.Stopwatch]::StartNew()
 }
 
+function Get-DaemonStartupDiagnosticProbe([int]$Port) { Get-SmokeObservation -Port $Port }
+
 function Invoke-DaemonStartupContract {
-    param([string]$Runtime)
+    param([string]$Runtime, [string]$DiagnosticsPath = '')
     $ErrorActionPreference = 'Stop'
     if ($env:CI -cne 'true') { return 'daemon-startup-not-ci' }
     try {
@@ -225,6 +238,7 @@ function Invoke-DaemonStartupContract {
         }
     } catch { return 'daemon-startup-invalid-runtime' }
     $owner = $null; $outcome = 'daemon-startup-failed'
+    $port = $null; $pollCount = 0; $alive = $null; $exitCode = $null; $probe = $null
     try {
         Import-Module "$PSScriptRoot/smoke-diagnostics.psm1" -Force
         $scratch = New-DaemonStartupScratch
@@ -238,14 +252,36 @@ function Invoke-DaemonStartupContract {
         $outcome = 'daemon-startup-timeout'
         while ($clock.ElapsedMilliseconds -lt 30000) {
             if (Test-DaemonStartupExited $owner) { $outcome = 'daemon-startup-earlyexit'; break }
+            $pollCount++
             if (Receive-DaemonStartupHealth -Port $port) { $outcome = 'daemon-startup-passed'; break }
             Wait-DaemonStartupPoll
         }
     } catch { $outcome = 'daemon-startup-failed' }
     finally {
+        # Optional observation after the readiness decision, before owned-job cleanup.
+        # Numeric exit status only; native stdout/stderr remain the OS null sink.
+        if ($DiagnosticsPath -and $null -ne $owner) {
+            try {
+                $alive = -not (Test-DaemonStartupExited $owner)
+                if (-not $alive -and $null -ne $owner.ExitCode) { $exitCode = [int]$owner.ExitCode }
+            } catch { $alive = $null; $exitCode = $null }
+            try { $probe = Get-DaemonStartupDiagnosticProbe -Port $port } catch { $probe = $null }
+        }
         if ($null -ne $owner) {
             try { if (-not (Stop-DaemonStartupProcess $owner)) { $outcome = 'daemon-startup-cleanup-failed' } }
             catch { $outcome = 'daemon-startup-cleanup-failed' }
+        }
+        if ($DiagnosticsPath) {
+            try {
+                $kind = switch ($outcome) {
+                    'daemon-startup-passed' { 'success' }
+                    'daemon-startup-timeout' { 'timeout' }
+                    'daemon-startup-earlyexit' { 'earlyexit' }
+                    default { 'other' }
+                }
+                $diagnostic = New-SmokeDiagnostic -Outcome $kind -Alive $alive -ExitCode $exitCode -PollCount $pollCount -ErrorKind 'none' -Probe $probe
+                Write-SmokeDiagnostic -Path $DiagnosticsPath -Diagnostic $diagnostic
+            } catch { } # Diagnostics never replace the original outcome or modify existing files.
         }
     }
     return $outcome
@@ -253,7 +289,7 @@ function Invoke-DaemonStartupContract {
 
 # Dot-sourcing exposes contracts for inert tests; direct execution is CI-only.
 if ($MyInvocation.InvocationName -ne '.') {
-    $outcome = Invoke-DaemonStartupContract -Runtime $Runtime
+    $outcome = Invoke-DaemonStartupContract -Runtime $Runtime -DiagnosticsPath $DiagnosticsPath
     Write-Output $outcome
     if ($outcome -eq 'daemon-startup-passed') { exit 0 }
     exit 1

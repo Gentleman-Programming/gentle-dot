@@ -10,7 +10,36 @@ concurrency:
   group: windows-installer-preview-${{ github.ref }}
   cancel-in-progress: false
 jobs:
+  contracts:
+    if: github.repository == 'Gentleman-Programming/gentle-dot'
+    runs-on: windows-2022
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.1'
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Workflow and publication source contracts
+        run: node --test scripts/package/test/windows-preview-release.test.mjs scripts/package/test/ci-workflow.test.mjs
+      - name: Inert startup contracts including opt-in diagnostics
+        run: |
+          $env:GENTLE_DOT_CI_TEST_ROOT = Join-Path $env:RUNNER_TEMP 'retained-startup-contracts'
+          New-Item -ItemType Directory -Path $env:GENTLE_DOT_CI_TEST_ROOT | Out-Null
+          $env:GENTLE_DOT_TEST_PWSH = (Get-Command pwsh.exe).Source
+          node --test scripts/windows/test/daemon-startup.test.mjs
   build:
+    needs: contracts
+    outputs:
+      runtime-sha256: ${{ steps.archive.outputs.sha256 }}
     if: github.repository == 'Gentleman-Programming/gentle-dot'
     runs-on: windows-2022
     timeout-minutes: 120
@@ -80,14 +109,6 @@ jobs:
       - name: Collect exact QA payload before acceptance checks
         id: collect
         run: node scripts/package/ci-native.mjs collect --target windows-x64 --source $env:GITHUB_SHA --out build/windows-preview
-      - name: Packaged Node and daemon startup contract
-        run: ./scripts/windows/test-daemon-startup.ps1 -Runtime "./build/windows/runtime"
-      - name: Isolated install, readiness, reinstall and uninstall
-        run: |
-          $plan = Get-Content "$env:RUNNER_TEMP/native-plan.json" -Raw | ConvertFrom-Json
-          $installers = @(Get-ChildItem -LiteralPath $plan.installers[0].directory -Filter '*-setup.exe' -File)
-          if ($installers.Count -ne 1) { throw 'Expected exactly one NSIS installer' }
-          ./scripts/windows/smoke-install.ps1 -Installer $installers[0].FullName -DiagnosticsPath "$env:RUNNER_TEMP/windows-smoke-diagnostics.json"
       - name: Retain QA payload even when a later check fails
         if: always() && steps.collect.outcome == 'success'
         uses: actions/upload-artifact@v4
@@ -96,16 +117,84 @@ jobs:
           path: build/windows-preview/
           if-no-files-found: error
           retention-days: 14
-      - name: Retain sanitized startup diagnostics
-        if: failure()
+      - name: Archive only the staged product runtime for isolated checks
+        id: archive
+        run: |
+          tar -cf "$env:RUNNER_TEMP/windows-runtime.tar" -C build/windows runtime
+          if ($LASTEXITCODE -ne 0) { throw 'Staged runtime archive failed' }
+          $hash = (Get-FileHash -Algorithm SHA256 "$env:RUNNER_TEMP/windows-runtime.tar").Hash.ToLowerInvariant()
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-preview-runtime
+          path: ${{ runner.temp }}/windows-runtime.tar
+          if-no-files-found: error
+          retention-days: 14
+  checks:
+    name: Check ${{ matrix.kind }}
+    needs: build
+    runs-on: windows-2022
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: [startup, lifecycle]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.1'
+          architecture: x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-installer-preview
+          path: build/windows-preview
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-preview-runtime
+          path: build/runtime-transfer
+      - name: Verify and restore this build runtime
+        env:
+          RUNTIME_SHA256: ${{ needs.build.outputs.runtime-sha256 }}
+        run: |
+          $archive = 'build/runtime-transfer/windows-runtime.tar'
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($env:RUNTIME_SHA256 -cnotmatch '^[a-f0-9]{64}$' -or $hash -cne $env:RUNTIME_SHA256) { throw 'Runtime archive identity mismatch' }
+          node scripts/package/windows-preview-release.mjs build/windows-preview $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'QA payload identity mismatch' }
+          New-Item -ItemType Directory -Path build/windows -Force | Out-Null
+          tar -xf $archive -C build/windows
+          if ($LASTEXITCODE -ne 0) { throw 'Runtime restore failed' }
+          node scripts/windows/runtime-integrity.mjs verify build/windows/runtime build/windows-preview/runtime-manifest.json
+          if ($LASTEXITCODE -ne 0) { throw 'Restored runtime integrity mismatch' }
+      - name: Packaged Node and daemon startup contract
+        if: matrix.kind == 'startup'
+        run: ./scripts/windows/test-daemon-startup.ps1 -Runtime "./build/windows/runtime" -DiagnosticsPath "$env:RUNNER_TEMP/startup-diagnostics.json"
+      - name: Isolated install, readiness, reinstall and uninstall
+        if: matrix.kind == 'lifecycle'
+        run: |
+          $installers = @(Get-ChildItem -LiteralPath build/windows-preview -Filter '*-setup.exe' -File)
+          if ($installers.Count -ne 1) { throw 'Expected exactly one source-bound NSIS installer' }
+          ./scripts/windows/smoke-install.ps1 -Installer $installers[0].FullName -DiagnosticsPath "$env:RUNNER_TEMP/lifecycle-diagnostics.json"
+      - name: Retain only sanitized acceptance diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-preview-diagnostics
-          path: ${{ runner.temp }}/windows-smoke-diagnostics.json
+          name: windows-preview-${{ matrix.kind }}-diagnostics
+          path: |
+            ${{ runner.temp }}/startup-diagnostics.json
+            ${{ runner.temp }}/lifecycle-diagnostics.json
           if-no-files-found: warn
           retention-days: 14
   publish:
-    needs: build
+    needs: [contracts, build, checks]
     if: success() && github.repository == 'Gentleman-Programming/gentle-dot'
     runs-on: ubuntu-24.04
     timeout-minutes: 15

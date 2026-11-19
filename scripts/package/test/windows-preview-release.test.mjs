@@ -53,9 +53,9 @@ test('Windows CI is narrowly triggered, natively builds and retains all mandator
  assert.equal(steps.find(s=>s.uses==='actions/setup-node@v4').with.architecture,'x64');
  assert.ok(steps.some(s=>s.run==='pnpm install --frozen-lockfile'));
  const build=steps.findIndex(s=>s.run==='./scripts/windows/package.ps1 -Target windows-x64');
- const start=steps.findIndex(s=>s.run==='./scripts/windows/test-daemon-startup.ps1 -Runtime "./build/windows/runtime"');
- const smoke=steps.findIndex(s=>s.run?.includes('./scripts/windows/smoke-install.ps1'));
- assert.ok(build>=0 && start>build && smoke>start);
+ const all=Object.values(w.jobs).flatMap(job=>job.steps);
+ assert.ok(build>=0);assert.ok(all.some(s=>s.run?.includes('./scripts/windows/test-daemon-startup.ps1 -Runtime')));
+ assert.ok(all.some(s=>s.run?.includes('./scripts/windows/smoke-install.ps1')));
  assert.ok(steps.some(s=>s.id==='collect' && s.run?.includes('ci-native.mjs collect --target windows-x64')));
  for(const step of steps)assert.equal(step['continue-on-error'],undefined);
  assert.ok(steps.some(s=>s.uses==='actions/upload-artifact@v4'&&s.if?.includes('always()')));
@@ -77,8 +77,35 @@ test('native addon is built from matching checksum-verified inputs before runtim
  assert.match(script,/require\('.\/packages\/daemon\/native\/windows-stop.node'\)/);
 });
 
+test('startup and lifecycle fan out after one immutable build and all gate publication',()=>{
+ const w=workflow(), c=w.jobs.checks;assert.ok(c,'separate acceptance job required');
+ assert.equal(c.needs,'build');assert.equal(c['runs-on'],'windows-2022');
+ assert.equal(c.strategy['fail-fast'],false);assert.deepEqual(c.strategy.matrix.kind,['startup','lifecycle']);assert.deepEqual(c.permissions,{contents:'read'});
+ assert.equal(w.jobs.build.needs,'contracts');
+ assert.ok(w.jobs.contracts.steps.some(s=>s.run?.includes('scripts/package/test/windows-preview-release.test.mjs')));
+ assert.ok(w.jobs.contracts.steps.some(s=>s.run?.includes('scripts/windows/test/daemon-startup.test.mjs')));
+ const restore=c.steps.find(s=>s.name==='Verify and restore this build runtime');
+ assert.match(restore.run,/Get-FileHash -Algorithm SHA256/);assert.match(restore.run,/RUNTIME_SHA256/);
+ assert.ok(restore.run.indexOf('Get-FileHash')<restore.run.indexOf('tar -xf'));
+ assert.match(restore.run,/runtime-integrity.mjs verify/);assert.match(restore.run,/windows-preview-release.mjs/);
+ assert.ok(c.steps.some(s=>s.if==="matrix.kind == 'startup'"&&s.run?.includes('-DiagnosticsPath')));
+ assert.ok(c.steps.some(s=>s.if==="matrix.kind == 'lifecycle'"&&s.run?.includes('-DiagnosticsPath')));
+ assert.ok(c.steps.some(s=>s.uses==='actions/upload-artifact@v4'&&s.if==='always()'));
+ assert.ok(!w.jobs.build.steps.some(s=>s.run?.includes('test-daemon-startup.ps1')||s.run?.includes('smoke-install.ps1')));
+});
+
+test('startup diagnostics stay opt-in, numeric and after readiness, preserving default quiet containment',()=>{
+ const source=readFileSync('scripts/windows/test-daemon-startup.ps1','utf8');
+ assert.match(source,/\[string\]\$DiagnosticsPath = ''/);assert.match(source,/GetExitCodeProcess\(IntPtr/);
+ assert.match(source,/public int\? ExitCode/);assert.match(source,/if \(\$DiagnosticsPath/);
+ assert.match(source,/Write-SmokeDiagnostic -Path \$DiagnosticsPath/);
+ assert.ok(source.indexOf("$outcome = 'daemon-startup-earlyexit'")<source.indexOf('Write-SmokeDiagnostic -Path $DiagnosticsPath'));
+ assert.match(source,/CreateFileW\("NUL"/);assert.match(source,/\.Environment\.Clear\(\)/);
+ assert.doesNotMatch(source,/ReadToEnd|BeginOutputReadLine|BeginErrorReadLine|Write-(Error|Warning)/);
+});
+
 test('publication only follows successful build, validates exact payload and creates a nonlatest prerelease',()=>{
- const p=workflow().jobs.publish;assert.equal(p.needs,'build');assert.deepEqual(p.permissions,{contents:'write'});assert.match(p.if,/success\(\)/);assert.match(p.if,/Gentleman-Programming\/gentle-dot/);
+ const p=workflow().jobs.publish;assert.deepEqual(p.needs,['contracts','build','checks']);assert.deepEqual(p.permissions,{contents:'write'});assert.match(p.if,/success\(\)/);assert.match(p.if,/Gentleman-Programming\/gentle-dot/);
  const publish=p.steps.find(s=>s.run?.includes('gh release create'));assert.ok(publish);assert.ok(p.steps.some(s=>s.run?.includes('windows-preview-release.mjs')));
  assert.match(publish.run,/--prerelease/);assert.match(publish.run,/--latest=false/);assert.match(publish.run,/--target "\$SOURCE_SHA"/);assert.match(publish.run,/windows-preview-\$GITHUB_RUN_ID-\$GITHUB_RUN_ATTEMPT/);
  assert.equal(publish.env.GH_TOKEN,'${{ github.token }}');

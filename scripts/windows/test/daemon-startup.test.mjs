@@ -190,6 +190,28 @@ test('OS adapter structurally assigns a suspended process to kill-on-close job b
  assert.match(source,/if \(assigned\) TerminateJobObject\(job, 1\); else TerminateProcess\(child.Process, 1\)/);
  assert.doesNotMatch(source,/GetProcessById|BREAKAWAY_OK|CREATE_BREAKAWAY_FROM_JOB/);
 });
+test('opt-in early-exit diagnostic records only bounded metadata without changing readiness or cleanup', () => {
+ const path=join(scratch,'startup.json');
+ const result=JSON.parse(ps(`$env:CI='true'; $mode='earlyexit'; ${mocks};
+ function Start-DaemonStartupProcess { $script:starts++; return [pscustomobject]@{ExitCode=7;Raw='SECRET'} }
+ function Get-DaemonStartupDiagnosticProbe { return @{tcpState='refused';httpState='notattempted';jsonState='notattempted';healthState='notattempted';secret='SECRET'} }
+ $r=Invoke-DaemonStartupContract -Runtime ${quote(runtime)} -DiagnosticsPath ${quote(path)}
+ [ordered]@{outcome=$r;starts=$script:starts;stops=$script:stops;polls=$script:polls} | ConvertTo-Json -Compress`));
+ assert.deepEqual(result,{outcome:'daemon-startup-earlyexit',starts:1,stops:1,polls:0});
+ const raw=readFileSync(path,'utf8'), d=JSON.parse(raw);
+ assert.equal(d.schema,1);assert.equal(d.outcome,'earlyexit');assert.equal(d.processAlive,false);assert.equal(d.exitCode,7);assert.equal(d.pollCount,0);
+ assert.ok(Buffer.byteLength(raw)<=1024);assert.doesNotMatch(raw,/SECRET|Raw|secret/);
+});
+test('diagnostic refusal preserves existing bytes and the original success and owned cleanup', () => {
+ const path=join(scratch,'existing.json');writeFileSync(path,'existing-canary');
+ const before=readFileSync(path);
+ const result=JSON.parse(ps(`$env:CI='true'; $mode='success'; ${mocks};
+ function Get-DaemonStartupDiagnosticProbe { return @{} }
+ $r=Invoke-DaemonStartupContract -Runtime ${quote(runtime)} -DiagnosticsPath ${quote(path)}
+ [ordered]@{outcome=$r;starts=$script:starts;stops=$script:stops;polls=$script:polls} | ConvertTo-Json -Compress`));
+ assert.deepEqual(result,{outcome:'daemon-startup-passed',starts:1,stops:1,polls:1});assert.deepEqual(readFileSync(path),before);
+});
+
 test('source suppresses raw output and uses contained cleanup; existing smoke unchanged', () => {
  const source = readFileSync(scriptPath,'utf8');
  assert.match(source,/\.Environment\.Clear\(\)/);
