@@ -13,15 +13,16 @@ const source = JSON.parse(
 	readFileSync(new URL("../../../packages/daemon/package.json", import.meta.url), "utf8"),
 );
 
-test("selects Gentle Shell 4.8.0 in both source and packaged runtime dependencies", () => {
-	assert.equal(source.dependencies["gentle-pi"], "4.8.0");
-	assert.equal(lockedDependencies()["gentle-pi"], "4.8.0");
+test("selects Gentle Shell 4.9.0 in both source and packaged runtime dependencies", () => {
+	assert.equal(source.dependencies["gentle-pi"], "4.9.0");
+	assert.equal(lockedDependencies()["gentle-pi"], "4.9.0");
 });
 
 test("retains exact matching SDK dependencies and runtime sibling overrides", () => {
 	const direct = lockedDependencies();
 	for (const name of ["pi-ai", "pi-coding-agent", "pi-mcp", "pi-tui"]) {
 		const dependency = `@earendil-works/${name}`;
+		assert.equal(source.dependencies[dependency], "1.5.0");
 		assert.equal(direct[dependency], source.dependencies[dependency]);
 	}
 	const version = direct["@earendil-works/pi-coding-agent"];

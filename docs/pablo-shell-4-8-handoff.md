@@ -1,6 +1,12 @@
 # PR263 + Shell 4.8 collaboration handoff
 
-## Current outcome — source integrated, publication BLOCKED
+## Current dependency update — Shell4.9 SOURCE verified
+
+The human subsequently requested **"y se debe subir la version a la nueva que salio"**, clarified as **"El Shell que incluye Dot"**. The current working candidate upgrades only Dot's `gentle-pi` dependency/lock to official published4.9.0 (sourcece64a9a708e50c0ca899c8023140e63f29f293e1), retaining SDK1.5.0 under unchanged optional peer requirements. SDK1.5.2 was investigated, not silently added. Existing production/custom-agent environment and no-provision guards are unchanged.
+
+The focused public dependency/launcher contract observed RED against4.8 (1FAIL/3PASS/exit1), then GREEN after the pin/lock change (4PASS/0skip/exit0). Lock changes are limited to the selected version, resolved snapshot and official registry integrity; no dependency acquisition, lifecycle script, private fixture, compile or real engine session ran. `runtime-build.test.ts`'s expected version was updated but its artifact-building suite was not run. Independent Risk5 verifier `mwnrhzvv-c-dvtd` returned S3 MET/no new blocker, executing the four public contracts once (4PASS/0skip/exit0) and diffcheck0 without writes. New-candidate native assessment reports medium/reviewDuefalse; no START/consent/lineage/approval burn. The runtime acceptance limitations remain unchanged. Historical source evidence below remains4.8-only, not4.9 runtime acceptance. The separately authorized Shell timeout fix does not authorize modifying the installed runtime; source preparation is separate.
+
+## Historical4.8 outcome — source integrated, publication BLOCKED
 
 Local source-integration commit: **`7e12bc54de1ab6c7be38cf7934c79f11b1a8e8aa`** on `feat/stable-pablo-shell-4-8`. Its two parents are290be77223aa910ec26635c2d85ab27834c9f776 and80c5a1d73cf69d2d706b4f36915172a7ed74e58a; all12 original PR commits remain in history. The merge includes the documented fixture-only Windows-home correction and handoff/task records. The exact290..7e12 slice has19paths1124diffLines; the19341lines/93commits origin/main advisory includes inherited work, not this review slice.
 

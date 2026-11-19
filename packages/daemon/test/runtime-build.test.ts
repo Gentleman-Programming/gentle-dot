@@ -140,7 +140,7 @@ describe.skipIf(skipBuild)("build:runtime", () => {
 			"@earendil-works/pi-coding-agent": "1.5.0",
 			"@earendil-works/pi-mcp": "1.5.0",
 			"@earendil-works/pi-tui": "1.5.0",
-			"gentle-pi": "4.8.0",
+			"gentle-pi": "4.9.0",
 			jiti: "2.7.0",
 			ws: "8.22.0",
 		});
