@@ -1,6 +1,14 @@
 # PR263 + Shell 4.8 collaboration handoff
 
-## Candidate identity — source integration, not delivery
+## Current outcome — source integrated, publication BLOCKED
+
+Local source-integration commit: **`7e12bc54de1ab6c7be38cf7934c79f11b1a8e8aa`** on `feat/stable-pablo-shell-4-8`. Its two parents are290be77223aa910ec26635c2d85ab27834c9f776 and80c5a1d73cf69d2d706b4f36915172a7ed74e58a; all12 original PR commits remain in history. The merge includes the documented fixture-only Windows-home correction and handoff/task records. The exact290..7e12 slice has19paths1124diffLines; the19341lines/93commits origin/main advisory includes inherited work, not this review slice.
+
+Committed-range assessment: native medium/reviewDuefalse/under-budget; Risk2 independent source verification MET. No native START, consent, lineage or approval burn. This is not platform acceptance.
+
+**Remote delivery did not happen.** The foreground push was intercepted before execution because its bounded RDD preflight was cancelled/timed out. A supported inspect returned `operation_timeout`, `authority-unavailable`, actor unknown, mutation not started/authority not evaluated; no automatic retry. The human selected **Reintentar la comprobación nativa una vez**. That one fresh inspection returned the same timeout. Keep T4 blocked; do not retry, reset/rebuild authority, disable review, bypass the delivery path or offer a substitute transfer. No remote combined-branch identity is confirmed.
+
+## Historical candidate identity — before local commit
 
 - Branch: `feat/stable-pablo-shell-4-8`.
 - Baseline/first parent: `290be77223aa910ec26635c2d85ab27834c9f776`.
@@ -64,7 +72,13 @@ Native assessment reports medium/under-budget and no due native review; the expl
 - **I3:** remains pending a single exact candidate with I1, W1–W3, L1–L2, UI1–UI2 and I2 evidence; no release-ready/stable assertion follows here.
 - **C5:** remains paused. Do not import the unrelated secret-file correction or run C5/typecheck/new CI. Its source correction 1/1 and auxiliary repair 1/1 remain consumed; no third preparation attempt or renewed proof. C4 remains after C5.
 
-Parent must supply the final source-integration/published SHA before the delivery message. Cinlo may use a confirmed collaboration baseline for separately authorized work; this does not claim installed/native acceptance. No message was sent.
+The source-integration SHA is now7e12bc54de1ab6c7be38cf7934c79f11b1a8e8aa, but no published SHA exists from this operation. Cinlo must not be told that the combined branch can already be fetched. No message was sent.
+
+## Message draft for the actual blocked state
+
+> Cinlo, ya tengo integrado localmente el PR de Pablo con nuestro soporte de Shell 4.8, manteniendo SDK 1.5. La rama es `feat/stable-pablo-shell-4-8`, con commit de integración `7e12bc5`. Pasaron las verificaciones de fuente y la revisión independiente. Me falta publicarla porque la comprobación nativa está agotando el tiempo; te confirmo cuando esté disponible para que sigamos desde la misma base. Las validaciones nativas/Linux y los pendientes de C5 no están marcados como resueltos.
+
+This is a draft, not a sent message or a promise that remote delivery succeeded.
 
 ## Parent verification preparation and observation
 
