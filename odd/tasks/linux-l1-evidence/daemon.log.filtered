@@ -1,0 +1,119 @@
+2026-11-19T22:38:32.403Z cannot verify private memory listener on port 7438 (failed lookup); will not stop it
+2026-11-19T22:38:32.410Z connectors.json was signed before and is missing; starting with no connectors
+2026-11-19T22:38:33.078Z [agent] gentle-shell: first run in /tmp/gentle-dot-l1-nyFVMl/agent: installing the Gentle AI companion packages (one time; set GENTLE_SHELL_NO_AUTO_SETUP=1 to skip)
+gentle-shell: provisioning /tmp/gentle-dot-l1-nyFVMl/agent with the gentle-ai companion packages
+2026-11-19T22:38:35.233Z [agent] WARNING: installing with --scope=global (default). Agent config files (system prompts, skills/, agents/, etc.)
+will be written to each selected agent's global config directory and will affect ALL workspaces for those agents on this machine.
+To install only into the current workspace, rerun with --scope=workspace.
+2026-11-19T22:38:35.472Z [agent] Installing npm:gentle-engram...
+2026-11-19T22:38:37.051Z [agent] 
+added 1 package in 2s
+2026-11-19T22:38:37.051Z [agent] npm notice
+npm notice New major version of npm available! 11.20.0 -> 12.2.3
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.2.3
+npm notice To update run: npm install -g npm@12.2.3
+npm notice
+2026-11-19T22:38:37.061Z [agent] Installed npm:gentle-engram
+2026-11-19T22:38:37.223Z [agent] Installing npm:pi-web-access...
+2026-11-19T22:38:52.035Z [agent] 
+added 211 packages in 15s
+2026-11-19T22:38:52.057Z [agent] Installed npm:pi-web-access
+2026-11-19T22:38:52.222Z [agent] Installing npm:pi-btw...
+2026-11-19T22:38:53.529Z [agent] 
+added 1 package in 1s
+2026-11-19T22:38:53.540Z [agent] Installed npm:pi-btw
+2026-11-19T22:38:53.556Z [agent] Verification checks: 3 passed, 0 failed, 0 warnings, 0 skipped
+[ok] verify:file:/tmp/gentle-dot-l1-nyFVMl/home/.pi/gentle-ai/persona.json - required file exists
+[ok] verify:engram:binary - engram binary on PATH (restart shell if missing)
+[ok] verify:engram:version - engram version returns valid output
+You're ready. Start building.
+2026-11-19T22:38:53.557Z [agent] gentle-shell: kept your Pi persona unchanged (gentle-ai rewrote /tmp/gentle-dot-l1-nyFVMl/home/.pi/gentle-ai/persona.json; tracked upstream)
+2026-11-19T22:38:53.559Z [agent] gentle-shell: disabled Pi's builtin codemode in /tmp/gentle-dot-l1-nyFVMl/agent/settings.json (Gentle Shell ships its own codemode tool)
+2026-11-19T22:46:41.782Z received SIGTERM, shutting down
+2026-11-19T22:46:41.783Z the desktop app's channel closed
+2026-11-19T22:46:41.783Z the desktop app's channel closed; stopping the assistant
+2026-11-19T22:48:05.480Z cannot verify private memory listener on port 7438 (failed lookup); will not stop it
+2026-11-19T23:57:37.940Z received SIGTERM, shutting down
+2026-11-19T23:57:37.940Z the desktop app's channel closed
+2026-11-19T23:57:37.940Z the desktop app's channel closed; stopping the assistant
+2026-11-20T00:14:11.326Z cannot verify private memory listener on port 7438 (failed lookup); will not stop it
+2026-11-20T00:41:45.583Z could not switch the running model: Model not found: deepseek/deepseek-flash
+2026-11-20T00:42:05.068Z could not switch the running model: Model not found: cliproxyapi/gpt-cinneko/gpt-6.1-sol
+2026-11-20T00:55:39.382Z received SIGTERM, shutting down
+2026-11-20T00:55:39.383Z the desktop app's channel closed
+2026-11-20T00:55:39.383Z the desktop app's channel closed; stopping the assistant
+2026-11-20T00:56:05.298Z cannot verify private memory listener on port 7438 (failed lookup); will not stop it
+2026-11-20T01:04:18.728Z received SIGTERM, shutting down
+2026-11-20T01:04:18.730Z the desktop app's channel closed
+2026-11-20T01:04:18.730Z the desktop app's channel closed; stopping the assistant
+2026-11-20T01:58:10.374Z received SIGTERM, shutting down
+2026-11-20T01:58:10.375Z the desktop app's channel closed
+2026-11-20T01:58:10.375Z the desktop app's channel closed; stopping the assistant
+2026-11-20T01:58:10.544Z stopped the private memory server (pid 1094735)
+2026-11-20T02:26:27.888Z could not switch the running model: Model not found: deepseek/deepseek-flash
+2026-11-20T02:36:48.524Z the assistant drafted a connector: Filesystem
+2026-11-20T02:37:35.943Z received SIGTERM, shutting down
+2026-11-20T02:37:35.944Z the desktop app's channel closed
+2026-11-20T02:37:35.944Z the desktop app's channel closed; stopping the assistant
+2026-11-20T02:37:36.126Z stopped the private memory server (pid 1257081)
+2026-11-20T02:59:20.802Z received SIGTERM, shutting down
+2026-11-20T02:59:20.803Z the desktop app's channel closed
+2026-11-20T02:59:20.803Z the desktop app's channel closed; stopping the assistant
+2026-11-20T02:59:20.982Z stopped the private memory server (pid 1353660)
+2026-11-20T03:28:37.775Z connector notion needs a new sign-in
+2026-11-20T03:28:37.928Z connector notion needs a new sign-in
+2026-11-20T03:28:37.929Z connector notion needs a new sign-in
+2026-11-20T03:29:04.837Z signed in to connector notion
+2026-11-20T03:33:26.056Z the assistant drafted a connector: Notion
+2026-11-20T03:53:08.318Z added connector notion-2 from the assistant's draft
+2026-11-20T03:53:10.048Z connector notion-2 needs a new sign-in
+2026-11-20T03:53:10.273Z connector notion-2 needs a new sign-in
+2026-11-20T03:53:10.273Z connector notion-2 needs a new sign-in
+2026-11-20T03:53:12.073Z could not reach connector notion: MCP request aborted
+2026-11-20T03:53:12.073Z could not reach connector notion: MCP connection closed
+2026-11-20T03:53:12.073Z could not reach connector notion: MCP connection closed
+2026-11-20T03:53:29.653Z signed in to connector notion-2
+2026-11-20T03:53:56.186Z could not reach connector notion: MCP request aborted
+2026-11-20T03:53:56.186Z could not reach connector notion: MCP connection closed
+2026-11-20T03:53:56.186Z could not reach connector notion: MCP connection closed
+2026-11-20T03:53:56.936Z could not reach connector notion-2: MCP request aborted
+2026-11-20T03:53:56.936Z could not reach connector notion-2: MCP connection closed
+2026-11-20T03:53:56.936Z could not reach connector notion-2: MCP connection closed
+2026-11-20T03:54:05.142Z could not reach connector notion: MCP request aborted
+2026-11-20T03:54:05.143Z could not reach connector notion: MCP connection closed
+2026-11-20T03:54:05.143Z could not reach connector notion: MCP connection closed
+2026-11-20T03:54:05.271Z could not reach connector notion-2: MCP request aborted
+2026-11-20T03:54:05.272Z could not reach connector notion-2: MCP connection closed
+2026-11-20T03:54:05.272Z could not reach connector notion-2: MCP connection closed
+2026-11-20T03:57:56.857Z received SIGTERM, shutting down
+2026-11-20T03:57:56.863Z the desktop app's channel closed
+2026-11-20T03:57:56.867Z the desktop app's channel closed; stopping the assistant
+2026-11-20T03:57:57.135Z stopped the private memory server (pid 1464850)
+2026-11-20T03:58:05.556Z could not reach connector notion: MCP request aborted
+2026-11-20T03:58:05.556Z could not reach connector notion: MCP connection closed
+2026-11-20T03:58:05.557Z could not reach connector notion: MCP connection closed
+2026-11-20T04:17:04.367Z received SIGTERM, shutting down
+2026-11-20T04:17:04.368Z the desktop app's channel closed
+2026-11-20T04:17:04.371Z the desktop app's channel closed; stopping the assistant
+2026-11-20T04:17:04.545Z stopped the private memory server (pid 1594968)
+2026-11-20T04:34:19.525Z could not reach connector notion-2: MCP request aborted
+2026-11-20T04:34:19.525Z could not reach connector notion-2: MCP connection closed
+2026-11-20T04:34:19.525Z could not reach connector notion-2: MCP connection closed
+2026-11-20T04:34:19.578Z could not reach connector notion: MCP request aborted
+2026-11-20T04:34:19.578Z could not reach connector notion: MCP connection closed
+2026-11-20T04:34:19.578Z could not reach connector notion: MCP connection closed
+2026-11-20T04:38:56.986Z the assistant drafted a connector: Filesystem
+2026-11-20T05:04:06.311Z received SIGTERM, shutting down
+2026-11-20T05:04:06.312Z the desktop app's channel closed
+2026-11-20T05:04:06.312Z the desktop app's channel closed; stopping the assistant
+2026-11-20T05:04:06.481Z stopped the private memory server (pid 1666827)
+2026-11-20T05:21:00.092Z could not reach connector notion: MCP request aborted
+2026-11-20T05:21:00.092Z could not reach connector notion: MCP connection closed
+2026-11-20T05:21:00.093Z could not reach connector notion: MCP connection closed
+2026-11-20T05:21:00.120Z could not reach connector notion-2: MCP request aborted
+2026-11-20T05:21:00.120Z could not reach connector notion-2: MCP connection closed
+2026-11-20T05:21:00.120Z could not reach connector notion-2: MCP connection closed
+2026-11-20T05:26:18.974Z received SIGTERM, shutting down
+2026-11-20T05:26:18.975Z the desktop app's channel closed
+2026-11-20T05:26:18.980Z the desktop app's channel closed; stopping the assistant
+2026-11-20T05:26:19.185Z stopped the private memory server (pid 1778304)

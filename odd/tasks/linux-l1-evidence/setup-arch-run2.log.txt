@@ -1,0 +1,82 @@
+
+==> 1. Checking the system
+    Distribution: Omarchy (Omarchy)
+    Source tree:  /home/cinlodev/Projects/collab/gentle-dot
+    Session:      wayland, desktop Hyprland
+
+==> 2. System libraries (WebKitGTK, tray, build tools)
+    All present: webkit2gtk-4.1 base-devel curl wget file openssl appmenu-gtk-module libayatana-appindicator librsvg xdotool git xz
+
+==> 3. Node.js 24 and pnpm
+    Using /home/cinlodev/.local/share/mise/installs/node/latest/bin/node (v26.13.1)
+    pnpm 11.5.0
+
+==> 4. Rust 1.90 or later (rustup, for your user)
+    Using rustc 1.99.1 (58cf8f9c3 2026-10-13) (Arch Linux rust 1:1.99.1-1)
+
+==> 5. Installing JavaScript dependencies (pnpm install)
+Scope: all 5 workspace projects
+Already up to date
+Done in 36ms using pnpm v11.5.0
+
+==> 6. Building the UI and the assistant (pnpm build)
+$ pnpm --filter @gentle-dot/ui build
+$ vite build
+vite v8.3.3 building client environment for production...
+transforming...
+✓ 319 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/app/index.html                    0.51 kB │ gzip:   0.32 kB
+dist/app/assets/index-C50GjgDO.css    34.65 kB │ gzip:   7.51 kB
+dist/app/assets/dist-js-wLbSmZcg.js    0.13 kB │ gzip:   0.13 kB
+dist/app/assets/event-DbkHMVb6.js      1.35 kB │ gzip:   0.64 kB
+dist/app/assets/window-BGrM0K75.js    13.19 kB │ gzip:   3.15 kB
+dist/app/assets/index-bdZzzRYk.js    510.13 kB │ gzip: 157.30 kB
+
+✓ built in 193ms
+[plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+
+==> 7. Building the desktop app (a few minutes the first time)
+$ tauri build --no-bundle
+        Info Looking up installed tauri packages to check mismatched versions...
+     Running beforeBuildCommand `pnpm --filter @gentle-dot/ui build`
+$ vite build
+vite v8.3.3 building client environment for production...
+transforming...
+✓ 319 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/app/index.html                    0.51 kB │ gzip:   0.32 kB
+dist/app/assets/index-C50GjgDO.css    34.65 kB │ gzip:   7.51 kB
+dist/app/assets/dist-js-wLbSmZcg.js    0.13 kB │ gzip:   0.13 kB
+dist/app/assets/event-DbkHMVb6.js      1.35 kB │ gzip:   0.64 kB
+dist/app/assets/window-BGrM0K75.js    13.19 kB │ gzip:   3.15 kB
+dist/app/assets/index-bdZzzRYk.js    510.13 kB │ gzip: 157.30 kB
+
+✓ built in 189ms
+[plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+   Compiling gentle-dot v0.1.0 (/home/cinlodev/Projects/collab/gentle-dot/apps/desktop/src-tauri)
+    Finished `release` profile [optimized] target(s) in 25.39s
+       Built application at: /home/cinlodev/Projects/collab/gentle-dot/apps/desktop/src-tauri/target/release/gentle-dot
+    Built /home/cinlodev/Projects/collab/gentle-dot/apps/desktop/src-tauri/target/release/gentle-dot
+
+==> 8. Installing the launcher
+    Command: /home/cinlodev/.local/bin/gentle-dot (add --toggle to show or hide the panel)
+    Menu entry: /home/cinlodev/.local/share/applications/gentle-dot.desktop
+
+==> 9. Next steps
+    Testing checklist: /home/cinlodev/Projects/collab/gentle-dot/docs/linux-testing.md
+    Hyprland: add the window rules and the SUPER + ALT + D binding from
+      /home/cinlodev/Projects/collab/gentle-dot/scripts/linux/hyprland/gentle-dot.lua   (hyprland.lua, Omarchy 4)
+      /home/cinlodev/Projects/collab/gentle-dot/scripts/linux/hyprland/gentle-dot.conf  (hyprland.conf)
+
+Done.
