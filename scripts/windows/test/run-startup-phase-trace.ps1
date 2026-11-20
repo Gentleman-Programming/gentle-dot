@@ -58,13 +58,28 @@ function Assert-TraceTree([string]$Path) {
     }
 }
 
-function Invoke-TraceBundle([string]$BundleDir) {
+function Get-TraceRunnerTemp([string]$Path) {
+    $raw = $Path.Replace('/', '\')
+    if ($raw -notmatch '\A[a-z]:\\') { throw 'root' }
+    foreach ($part in ($raw.Substring(3) -replace '\\\z' -split '\\')) {
+        if (-not $part -or $part -match '[. ]\z|[\x00-\x1f:<>"|?*]|\A(?:con|prn|aux|nul|com[0-9\u00b9\u00b2\u00b3]|lpt[0-9\u00b9\u00b2\u00b3])(?:\.|\z)') { throw 'component' }
+    }
+    $temp = [IO.Path]::GetFullPath($raw).TrimEnd('\')
+    if ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($temp)).DriveType -ne 'Fixed') { throw 'drive' }
+    for ($dir = [IO.DirectoryInfo]::new($temp); $null -ne $dir; $dir = $dir.Parent) {
+        Assert-TraceOrdinary $dir.FullName
+        if (-not $dir.Exists) { throw 'directory' }
+    }
+    return $temp
+}
+
+function Invoke-TraceBundle([string]$Suffix) {
     # Windows PowerShell can wrap redirected native stderr in ErrorRecord objects.
     $ErrorActionPreference = 'Continue'
     $PSNativeCommandUseErrorActionPreference = $false
-    $output = @(node (Join-Path $PSScriptRoot 'startup-phase-bundle.mjs') --out-dir $BundleDir 2>&1)
-    if ($LASTEXITCODE -eq 0) { return }
-    if ($output.Count -eq 1 -and [string]$output[0] -cmatch '\ASTARTUP_PHASE_BUNDLE: (scratch-refused|source-drift|anchor-drift|build-failed)\z') {
+    $output = @(node (Join-Path $PSScriptRoot 'startup-phase-bundle.mjs') --runner-suffix $Suffix 2>&1)
+    if ($LASTEXITCODE -eq 0 -and $output.Count -eq 1 -and [string]$output[0] -ceq 'STARTUP_PHASE_BUNDLE: ok') { return }
+    if ($LASTEXITCODE -eq 1 -and $output.Count -eq 1 -and [string]$output[0] -cmatch '\ASTARTUP_PHASE_BUNDLE: (scratch-refused|scratch-create-failed|scratch-write-failed|source-drift|anchor-drift|build-failed)\z') {
         return "STARTUP_PHASE_BUNDLE: $($Matches[1])"
     }
     return 'trace-bundle-failed'
@@ -77,10 +92,12 @@ if ($MyInvocation.InvocationName -ne '.') {
     $socket = $null
     try {
         . "$PSScriptRoot/../test-staged-desktop-startup.ps1"
-        if ($args.Count -or -not (Test-StagedStartupTraceHost)) { throw 'host' }
+        if ($args.Count -or -not (Test-StagedStartupTraceHost) -or
+            $env:GITHUB_WORKFLOW_REF -cne 'Gentleman-Programming/gentle-dot/.github/workflows/windows-storage-diagnostic.yml@refs/heads/qa/windows-storage-diagnostic-44794993333') { throw 'host' }
+        $failure = 'STARTUP_PHASE_BUNDLE: scratch-refused'
+        $temp = Get-TraceRunnerTemp $env:RUNNER_TEMP
+        $env:RUNNER_TEMP = $temp
         $failure = 'trace-input-failed'
-        $temp = [IO.Path]::GetFullPath($env:RUNNER_TEMP)
-        if ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($temp)).DriveType -ne 'Fixed') { throw 'drive' }
         $root = Join-Path $temp 'windows-storage-diagnostic-44794993333'
         $original = Join-Path $root 'runtime'
         $manifest = Join-Path $root 'qa/runtime-manifest.json'
@@ -103,8 +120,11 @@ if ($MyInvocation.InvocationName -ne '.') {
             $random.GetBytes($bytes)
             $id = [Convert]::ToHexString($bytes).ToLowerInvariant()
         } finally { $random.Dispose() }
-        $bundleDir = Join-Path ([IO.Path]::GetTempPath()) "gentle-dot-startup-trace-$suffix"
-        $bundleFailure = Invoke-TraceBundle $bundleDir
+        $failure = 'STARTUP_PHASE_BUNDLE: scratch-refused'
+        $null = Get-TraceRunnerTemp $temp
+        $bundleDir = Join-Path $temp "gentle-dot-startup-trace-$suffix"
+        $failure = 'trace-bundle-failed'
+        $bundleFailure = Invoke-TraceBundle $suffix
         if ($null -ne $bundleFailure) { $failure = $bundleFailure; throw 'bundle' }
         Assert-TraceTree $bundleDir
         $bundle = Join-Path $bundleDir 'startup-phase-cli.mjs'

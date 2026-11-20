@@ -64,6 +64,9 @@ test('managed trace authenticates the desktop and runs only after the frozen bui
   assert.match(steps[6].run, /pnpm install --frozen-lockfile --ignore-scripts/);
   assert.equal(steps[7].run, './scripts/windows/test/run-startup-phase-trace.ps1');
   assert.ok(steps[7]['timeout-minutes'] <= 3);
+  const wrapper = read('scripts/windows/test/run-startup-phase-trace.ps1');
+  assert.match(wrapper, /\$temp = Get-TraceRunnerTemp \$env:RUNNER_TEMP[\s\S]*Join-Path \$temp "gentle-dot-startup-trace-\$suffix"[\s\S]*Invoke-TraceBundle \$suffix/);
+  assert.doesNotMatch(wrapper, /GetTempPath|--out-dir/);
 });
 
 test('PowerShell wrapper emits only fixed classifications or a validated Node result', () => {

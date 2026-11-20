@@ -181,10 +181,16 @@ Exit 0 prints `STARTUP_PHASE_BUNDLE: ok` and creates only
 `startup-phase-cli.mjs` in that directory. Exit 2 prints usage; exit 1 prints
 `STARTUP_PHASE_BUNDLE: scratch-refused`, `source-drift`, `anchor-drift` or
 `build-failed` to stderr (each with the same prefix). Raw esbuild diagnostics
-are suppressed. Existing output is never overwritten. If the hosted wrapper's
-builder exits nonzero, the wrapper reports the exact allowlisted category when
-it is the only captured line, or `trace-bundle-failed` otherwise. Neither case
-launches the desktop.
+are suppressed. Existing output is never overwritten. Only the exact GitHub-hosted
+storage diagnostic workflow, job and push ref may use `--runner-suffix <32 lowercase hex>`.
+The wrapper validates a fixed-drive, non-reparse `RUNNER_TEMP` and passes only its
+random suffix on the command line. The builder pins the canonical runner temp
+outside the checkout and exclusively creates the same fixed child and file there.
+Hosted failures distinguish `scratch-refused` (admission), `scratch-create-failed`
+(directory allocation), and `scratch-write-failed` (output verification/write).
+If the hosted builder exits with code 1 and only one exact allowlisted category,
+the wrapper reports that category; other unexpected results become
+`trace-bundle-failed`. Neither failure path launches the desktop.
 `buildDiagnosticBundle(outDir)`, `instrumentSource(name, source)`, `phases`, and
 `makePhaseTrace(env, platform, createSocket)` are importable; importing does not build.
 

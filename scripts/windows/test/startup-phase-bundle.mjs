@@ -1,3 +1,4 @@
+import childProcess from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -109,23 +110,111 @@ export function instrumentSource(name, source) {
   return name === 'cli' ? text.replace('#!/usr/bin/env node\n', `#!/usr/bin/env node\n${traceImport}`) : traceImport + text;
 }
 
+const branch = 'refs/heads/qa/windows-storage-diagnostic-44794993333';
+const repository = 'Gentleman-Programming/gentle-dot';
+const hostedTrace = Object.freeze({
+  CI: 'true', GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted', GITHUB_JOB: 'checks',
+  GITHUB_REPOSITORY: repository, GITHUB_WORKFLOW: 'Windows storage diagnostic 44794993333',
+  GITHUB_WORKFLOW_REF: `${repository}/.github/workflows/windows-storage-diagnostic.yml@${branch}`,
+  GITHUB_EVENT_NAME: 'push', GITHUB_REF: branch,
+});
+
+function outsideRepo(temp, canonicalize) {
+  const fromRepo = relative(canonicalize(repo), temp);
+  return isAbsolute(fromRepo) || fromRepo === '..' || fromRepo.startsWith(`..${sep}`);
+}
+
+function absent(path) {
+  try { lstatSync(path); } catch (error) { if (error.code === 'ENOENT') return true; throw error; }
+  return false;
+}
+
 function scratchDir(arg) {
   try {
     if (!isAbsolute(arg) || resolve(arg) !== arg || !/^gentle-dot-startup-trace-[a-f0-9]{32}$/.test(basename(arg)))
       throw new Error();
     const temp = realpathSync(tmpdir());
     const parent = realpathSync(dirname(arg));
-    const fromRepo = relative(realpathSync(repo), temp);
-    const outsideRepo = isAbsolute(fromRepo) || fromRepo === '..' || fromRepo.startsWith(`..${sep}`);
-    if (parent !== temp || !outsideRepo) throw new Error();
+    if (parent !== temp || !outsideRepo(temp, realpathSync)) throw new Error();
     const out = join(temp, basename(arg));
-    try { lstatSync(out); } catch (error) { if (error.code === 'ENOENT') return out; }
+    if (absent(out)) return out;
   } catch { /* Fixed refusal below, without path/error details. */ }
   throw new Error('scratch-refused');
 }
 
+function isFixedRunnerDrive(root) {
+  const drive = root.slice(0, 2).toUpperCase();
+  if (!/^[A-Z]:$/.test(drive)) return false;
+  // This diagnostic is scoped to the hosted Windows image. Do not resolve a
+  // shell or system directory from its inherited environment.
+  const system = 'C:\\Windows';
+  const result = childProcess.spawnSync(`${system}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`,
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+      `$ErrorActionPreference='Stop'; if ([IO.DriveInfo]::new('${drive}\\').DriveType -eq [IO.DriveType]::Fixed) { [Console]::Write('fixed') } else { exit 1 }`],
+    { cwd: `${system}\\System32`, env: { SystemRoot: system, WINDIR: system },
+      shell: false, windowsHide: true, encoding: 'utf8', timeout: 5000, maxBuffer: 128 });
+  return !result.error && result.signal === null && result.status === 0 &&
+    result.stdout === 'fixed' && result.stderr === '';
+}
+
+function runnerScratch(suffix, env) {
+  const refused = () => new Error('scratch-refused');
+  try {
+    if (process.platform !== 'win32' || suffix?.length !== 32 || !/^[a-f0-9]{32}$/.test(suffix) ||
+        !Object.entries(hostedTrace).every(([key, value]) => env[key] === value)) throw refused();
+    const raw = env.RUNNER_TEMP?.replaceAll('/', '\\');
+    // Before resolving: no relative, UNC/device namespace, ADS, dot or DOS device components.
+    if (!raw || !/^[a-z]:\\/i.test(raw)) throw refused();
+    const components = raw.slice(3).replace(/\\$/, '').split('\\');
+    if (components.some(part => !part || /[. ]$|[\x00-\x1f:<>"|?*]/.test(part) ||
+        /^(?:con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³])(?:\.|$)/i.test(part))) throw refused();
+    const selected = resolve(raw);
+    const canonicalize = realpathSync.native;
+    const identity = (path) => {
+      const stat = lstatSync(path, { bigint: true });
+      if (!stat.isDirectory()) throw refused();
+      return stat;
+    };
+    const verify = (pin) => {
+      try {
+        for (let path = selected; ; path = dirname(path)) {
+          identity(path);
+          if (dirname(path) === path) break;
+        }
+        const root = canonicalize(selected);
+        if (relative(selected, root) !== '' || !outsideRepo(root, canonicalize)) throw refused();
+        const current = identity(root);
+        const alias = identity(selected);
+        if (current.ino === 0n || current.dev !== alias.dev || current.ino !== alias.ino ||
+            (pin && (current.dev !== pin.dev || current.ino !== pin.ino || root !== pin.root))) throw refused();
+        return { root, dev: current.dev, ino: current.ino };
+      } catch { throw refused(); }
+    };
+    const pin = verify();
+    if (!isFixedRunnerDrive(pin.root)) throw refused();
+    const out = join(pin.root, `gentle-dot-startup-trace-${suffix}`);
+    if (!absent(out)) throw refused();
+    return {
+      out,
+      beforeCreate: () => verify(pin),
+      beforeWrite: () => {
+        verify(pin);
+        const child = identity(out);
+        if (child.dev !== pin.dev || canonicalize(out) !== out) throw refused();
+      },
+    };
+  } catch { throw refused(); }
+}
+
 export async function buildDiagnosticBundle(arg, testBuild) {
-  const out = scratchDir(arg);
+  return bundle({ out: scratchDir(arg) }, testBuild);
+}
+
+export async function buildRunnerDiagnosticBundle(suffix, env, testBuild) {
+  return bundle(runnerScratch(suffix, env), testBuild);
+}
+
+async function bundle({ out, beforeCreate, beforeWrite }, testBuild) {
   const outfile = join(out, 'startup-phase-cli.mjs');
   const names = ['cli', 'windows-stop', 'daemon'];
   const transformed = new Map(names.map((name) => [name, instrumentSource(name, readFileSync(sourceUrl(name), 'utf8'))]));
@@ -157,23 +246,32 @@ export async function buildDiagnosticBundle(arg, testBuild) {
     result = await build(options);
   } catch { throw new Error('build-failed'); }
   if (result.outputFiles.length !== 1 || result.outputFiles[0].path !== outfile) throw new Error('build-failed');
+  beforeCreate?.();
+  try { mkdirSync(out); }
+  catch { throw new Error(beforeCreate ? 'scratch-create-failed' : 'scratch-refused'); }
   try {
-    mkdirSync(out);
+    beforeWrite?.();
     writeFileSync(outfile, result.outputFiles[0].contents, { flag: 'wx' });
-  } catch { throw new Error('scratch-refused'); }
+  } catch { throw new Error(beforeWrite ? 'scratch-write-failed' : 'scratch-refused'); }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [option, arg, ...rest] = process.argv.slice(2);
-  if (option !== '--out-dir' || !arg || rest.length) {
-    process.stderr.write('usage: startup-phase-bundle.mjs --out-dir <new absolute trace scratch directory>\n');
+  const hosted = option === '--runner-suffix';
+  if ((!hosted && option !== '--out-dir') || !arg || rest.length) {
+    process.stderr.write(hosted
+      ? 'usage: startup-phase-bundle.mjs --runner-suffix <32 lowercase hex>\n'
+      : 'usage: startup-phase-bundle.mjs --out-dir <new absolute trace scratch directory>\n');
     process.exitCode = 2;
   } else {
     try {
-      await buildDiagnosticBundle(arg);
+      if (hosted) await buildRunnerDiagnosticBundle(arg, process.env);
+      else await buildDiagnosticBundle(arg);
       process.stdout.write('STARTUP_PHASE_BUNDLE: ok\n');
     } catch (error) {
-      const category = ['scratch-refused', 'source-drift', 'anchor-drift'].includes(error.message) ? error.message : 'build-failed';
+      const categories = ['scratch-refused', 'source-drift', 'anchor-drift'];
+      if (hosted) categories.push('scratch-create-failed', 'scratch-write-failed');
+      const category = categories.includes(error.message) ? error.message : 'build-failed';
       process.stderr.write(`STARTUP_PHASE_BUNDLE: ${category}\n`);
       process.exitCode = 1;
     }
