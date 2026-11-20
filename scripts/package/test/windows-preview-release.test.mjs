@@ -94,6 +94,17 @@ test('startup and lifecycle fan out after one immutable build and all gate publi
  assert.ok(!w.jobs.build.steps.some(s=>s.run?.includes('test-daemon-startup.ps1')||s.run?.includes('smoke-install.ps1')));
 });
 
+test('only preview lifecycle opts into synthetic startup-phase evidence and retains the existing JSON only',()=>{
+ const w=workflow(),steps=w.jobs.checks.steps;
+ const lifecycle=steps.find(s=>s.run?.includes('./scripts/windows/smoke-install.ps1'));
+ const opted=Object.values(w.jobs).flatMap(j=>j.steps).filter(s=>s.env?.GENTLE_DOT_CI_SMOKE_PHASE!==undefined);
+ assert.deepEqual(opted,[lifecycle]);assert.equal(lifecycle.if,"matrix.kind == 'lifecycle'");
+ assert.equal(lifecycle.env.GENTLE_DOT_CI_SMOKE_PHASE,'1');
+ assert.ok(w.jobs.contracts.steps.some(s=>s.run?.includes('scripts/windows/test/smoke-diagnostics.test.mjs')));
+ const upload=steps.filter(s=>s.uses==='actions/upload-artifact@v4');
+ assert.equal(upload.length,1);assert.equal(upload[0].with.path.trim(),'${{ runner.temp }}/startup-diagnostics.json\n${{ runner.temp }}/lifecycle-diagnostics.json');
+});
+
 test('only startup receives the exact producer desktop, bound by its own SHA-256',()=>{
  const w=workflow(), b=w.jobs.build, steps=w.jobs.checks.steps;
  const transfer=b.steps.find(s=>s.id==='desktop');

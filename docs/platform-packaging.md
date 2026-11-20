@@ -182,6 +182,7 @@ personal/local profile, credential file or log is read for diagnostics.
 | `probe.httpState`, `probe.httpStatus` | notattempted/response/statuserror/timeout/failure/other; nullable status 100–599 |
 | `probe.jsonState` | notattempted/valid/invalid/oversize/other |
 | `probe.healthShape`, `probe.healthState` | missing/array/object/other; notattempted/valid/invalidshape/other |
+| Optional `startupPhase` (hosted Windows preview lifecycle only) | nomarkers/logonly/recordpresent/unknown |
 
 Legacy fields describe the existing readiness loop: successful REST requests
 establish reachability but their status is unavailable from that helper; failed
@@ -205,6 +206,18 @@ no `probe`. TCP and HTTP use separate connections and can race with process exit
 a connected TCP check is not proof that the earlier readiness request connected.
 This small bounded extra observation does not retry readiness, restart the app,
 change its 240-second deadline or feed success/failure decisions.
+
+The preview lifecycle explicitly enables `startupPhase` with
+`GENTLE_DOT_CI_SMOKE_PHASE=1` on a GitHub-hosted Actions runner. After the readiness
+loop and before cleanup, it checks only metadata for `daemon.log` and `daemon.pid`
+in the newly generated QA data directory. `nomarkers` means neither was visible;
+`logonly` means native launch reached the log open but no ownership record was
+visible; `recordpresent` means both were visible (record creation follows suspended
+process creation and Job membership verification, but precedes resume). A record
+can be incomplete or retired before the snapshot, so this cannot prove resume,
+channel handshake, or the exact cause. Unexpected marker types, inconsistent
+presence, or lookup failures report `unknown`. No file bodies are read. The field
+is absent outside this opt-in and is retained only in the existing lifecycle JSON.
 Unknown strings become fixed enums. Arbitrary content is never recursively redacted
 or serialized: no stdout/stderr, app/daemon logs, health error text, exception
 messages, URLs, headers, tokens, profiles, environment, usernames, paths or commands.

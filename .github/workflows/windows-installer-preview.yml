@@ -35,7 +35,7 @@ jobs:
           $env:GENTLE_DOT_CI_TEST_ROOT = Join-Path $env:RUNNER_TEMP 'retained-startup-contracts'
           New-Item -ItemType Directory -Path $env:GENTLE_DOT_CI_TEST_ROOT | Out-Null
           $env:GENTLE_DOT_TEST_PWSH = (Get-Command pwsh.exe).Source
-          node --test scripts/windows/test/daemon-startup.test.mjs scripts/windows/test/staged-desktop-startup.test.mjs
+          node --test scripts/windows/test/daemon-startup.test.mjs scripts/windows/test/staged-desktop-startup.test.mjs scripts/windows/test/smoke-diagnostics.test.mjs
   build:
     needs: contracts
     outputs:
@@ -199,6 +199,8 @@ jobs:
         run: ./scripts/windows/test-staged-desktop-startup.ps1 -Runtime "./build/windows/runtime" -Desktop "./build/desktop-transfer/gentle-dot.exe" -DesktopSha256 $env:DESKTOP_SHA256 -DiagnosticsPath "$env:RUNNER_TEMP/startup-diagnostics.json"
       - name: Isolated install, readiness, reinstall and uninstall
         if: matrix.kind == 'lifecycle'
+        env:
+          GENTLE_DOT_CI_SMOKE_PHASE: '1'
         run: |
           $installers = @(Get-ChildItem -LiteralPath build/windows-preview -Filter '*-setup.exe' -File)
           if ($installers.Count -ne 1) { throw 'Expected exactly one source-bound NSIS installer' }

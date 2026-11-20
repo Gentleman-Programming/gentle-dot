@@ -5,13 +5,14 @@ Runs the explicitly authorized NSIS lifecycle with repo-local isolated test data
 Path to the setup executable. Destination must fit the verified staged runtime budget.
 .PARAMETER DiagnosticsPath
 Optional new JSON file for bounded sanitized startup metadata (no logs or profile contents).
-Omit to retain the existing invocation without diagnostic output.
+Omit to retain the existing invocation without diagnostic output. The hosted preview
+lifecycle can additionally opt into a startup-phase enum based on synthetic QA file presence.
 #>
 param([Parameter(Mandatory=$true)][string]$Installer, [string]$DiagnosticsPath = '')
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $outcome = 'other'; $pollCount = 0; $health = $null
-$alive = $null; $exitCode = $null; $reachable = $null; $httpStatus = $null; $errorKind = 'none'; $probe = $null
+$alive = $null; $exitCode = $null; $reachable = $null; $httpStatus = $null; $errorKind = 'none'; $probe = $null; $startupPhase = $null
 try {
 if ($DiagnosticsPath) { Import-Module "$PSScriptRoot/smoke-diagnostics.psm1" -Force }
 $repo = (Resolve-Path "$PSScriptRoot/../..").Path
@@ -85,9 +86,10 @@ try {
     if (-not $ready) { $outcome = 'timeout'; throw 'Installed app did not reach agentState=idle within 240 seconds' }
     VerifyRuntime
 } finally {
-    # One bounded diagnostic-only observation after the readiness decision, before cleanup.
-    # It must never become a readiness input or replace the original failure.
+    # Bounded diagnostic-only snapshots after the readiness decision, before cleanup.
+    # They must never become readiness inputs or replace the original failure.
     if ($DiagnosticsPath) {
+        try { $startupPhase = Get-SmokeStartupPhase -Data $data } catch { $startupPhase = 'unknown' }
         try { $probe = Get-SmokeObservation -Port $port } catch { $probe = @{} }
         try {
             if ($null -ne $app) {
@@ -120,7 +122,7 @@ Write-Output 'Installation, runtime hashes, daemon readiness, stopped-app reinst
 } finally {
     if ($DiagnosticsPath) {
         try {
-            $diagnostic = New-SmokeDiagnostic -Outcome $outcome -Alive $alive -ExitCode $exitCode -PollCount $pollCount -Reachable $reachable -HttpStatus $httpStatus -Health $health -ErrorKind $errorKind -Probe $probe
+            $diagnostic = New-SmokeDiagnostic -Outcome $outcome -Alive $alive -ExitCode $exitCode -PollCount $pollCount -Reachable $reachable -HttpStatus $httpStatus -Health $health -ErrorKind $errorKind -Probe $probe -StartupPhase $startupPhase
             Write-SmokeDiagnostic -Path $DiagnosticsPath -Diagnostic $diagnostic
         } catch { Write-Warning 'Sanitized smoke diagnostics unavailable' -WarningAction Continue }
     }

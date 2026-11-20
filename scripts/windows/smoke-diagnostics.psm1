@@ -97,8 +97,33 @@ function Get-SmokeObservation {
     return $probe
 }
 
+function Get-SmokeMarkerPresent([string]$Path) {
+    try { $attributes = [IO.File]::GetAttributes($Path) }
+    catch [IO.FileNotFoundException] { return $false }
+    if ($attributes -band ([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint)) {
+        throw 'Unexpected smoke marker type'
+    }
+    return $true
+}
+
+function Get-SmokeStartupPhase([string]$Data) {
+    if ($env:GENTLE_DOT_CI_SMOKE_PHASE -cne '1' -or $env:GITHUB_ACTIONS -cne 'true' -or
+        $env:RUNNER_ENVIRONMENT -cne 'github-hosted') { return }
+    # Caller supplies only this invocation's generated QA data root. No log/record bodies.
+    try {
+        $attributes = [IO.File]::GetAttributes($Data)
+        if (-not ($attributes -band [IO.FileAttributes]::Directory) -or ($attributes -band [IO.FileAttributes]::ReparsePoint)) { return 'unknown' }
+        $log = Get-SmokeMarkerPresent ([IO.Path]::Combine($Data, 'daemon.log'))
+        $record = Get-SmokeMarkerPresent ([IO.Path]::Combine($Data, 'daemon.pid'))
+        if ($log -and $record) { return 'recordpresent' }
+        if ($log) { return 'logonly' }
+        if (-not $record) { return 'nomarkers' }
+    } catch { return 'unknown' }
+    return 'unknown'
+}
+
 function New-SmokeDiagnostic {
-    param($Outcome, $Alive, $ExitCode, $PollCount, $Reachable, $HttpStatus, $Health, $ErrorKind, $Probe)
+    param($Outcome, $Alive, $ExitCode, $PollCount, $Reachable, $HttpStatus, $Health, $ErrorKind, $Probe, $StartupPhase)
     $shape = 'other'; $ok = $null; $state = 'unknown'
     if ($null -eq $Health) { $shape = 'missing' }
     elseif ($Health -is [array]) { $shape = 'array' }
@@ -131,13 +156,16 @@ function New-SmokeDiagnostic {
         errorKind = Select-SmokeEnum $ErrorKind @('none','timeout','transport') 'other'
     }
     if ($Probe -is [System.Collections.IDictionary]) { $diagnostic['probe'] = ConvertTo-SmokeProbe $Probe }
+    if ($null -ne $StartupPhase) {
+        $diagnostic['startupPhase'] = Select-SmokeEnum $StartupPhase @('nomarkers','logonly','recordpresent') 'unknown'
+    }
     return $diagnostic
 }
 
 function Write-SmokeDiagnostic {
     param([string]$Path, [System.Collections.IDictionary]$Diagnostic)
     # Re-project, never serialize arbitrary caller properties or nested content.
-    $safe = New-SmokeDiagnostic -Outcome $Diagnostic.outcome -Alive $Diagnostic.processAlive -ExitCode $Diagnostic.exitCode -PollCount $Diagnostic.pollCount -Reachable $Diagnostic.listenerReachable -HttpStatus $Diagnostic.httpStatus -ErrorKind $Diagnostic.errorKind
+    $safe = New-SmokeDiagnostic -Outcome $Diagnostic.outcome -Alive $Diagnostic.processAlive -ExitCode $Diagnostic.exitCode -PollCount $Diagnostic.pollCount -Reachable $Diagnostic.listenerReachable -HttpStatus $Diagnostic.httpStatus -ErrorKind $Diagnostic.errorKind -StartupPhase $Diagnostic['startupPhase']
     $safe.healthShape = Select-SmokeEnum $Diagnostic.healthShape @('missing','array','object') 'other'
     if ($Diagnostic.healthOk -is [bool]) { $safe.healthOk = $Diagnostic.healthOk }
     $safe.agentState = Select-SmokeEnum $Diagnostic.agentState @('starting','idle','thinking','working','needs_you','restarting','error') 'unknown'
@@ -149,4 +177,4 @@ function Write-SmokeDiagnostic {
     try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
 }
 
-Export-ModuleMember -Function New-SmokeDiagnostic, Get-SmokeErrorKind, Write-SmokeDiagnostic, Get-SmokeObservation, Get-SmokeTcpState
+Export-ModuleMember -Function New-SmokeDiagnostic, Get-SmokeErrorKind, Write-SmokeDiagnostic, Get-SmokeObservation, Get-SmokeTcpState, Get-SmokeStartupPhase

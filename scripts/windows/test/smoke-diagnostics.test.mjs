@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawnSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createServer as createTcpServer } from 'node:net';
-import { readFileSync, mkdirSync, mkdtempSync, existsSync } from 'node:fs';
+import { readFileSync, mkdirSync, mkdtempSync, existsSync, writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import test from 'node:test';
 
@@ -19,9 +19,9 @@ const ps = process.env.GENTLE_DOT_TEST_PWSH;
 assert.ok(ps, 'Explicit existing PowerShell 7 required');
 const quote = s => `'${s.replaceAll("'", "''")}'`;
 function run(body) {
- const script = `$ErrorActionPreference='Stop'; Import-Module ${quote(resolve('scripts/windows/smoke-diagnostics.psm1'))} -Force; ${body}`;
+ const script = `$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; Import-Module ${quote(resolve('scripts/windows/smoke-diagnostics.psm1'))} -Force; ${body}`;
  const result = spawnSync(ps, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { env, encoding: 'utf8' });
- assert.equal(result.status, 0, result.stderr);
+ assert.equal(result.status, 0, result.stdout + result.stderr);
  assert.equal(result.stderr, '');
  return result.stdout.trim();
 }
@@ -118,7 +118,7 @@ test('safe exception classification and rejected output requests do not mutate s
  assert.ok(before.length <= 1024);
  assert.equal(run(`try { Write-SmokeDiagnostic -Path ${quote(file)} -Diagnostic (New-SmokeDiagnostic -Outcome success) } catch { 'rejected' }`), 'rejected');
  assert.deepEqual(readFileSync(file), before);
- assert.deepEqual(run(`Get-SmokeErrorKind ([System.TimeoutException]::new('SECRET')); Get-SmokeErrorKind ([System.Net.WebException]::new('SECRET')); Get-SmokeErrorKind ([System.Exception]::new('SECRET'))`).split(/\r?\n/), ['timeout', 'transport', 'other']);
+ assert.deepEqual(run(`Add-Type -AssemblyName System.Net.Http; Get-SmokeErrorKind ([System.TimeoutException]::new('SECRET')); Get-SmokeErrorKind ([System.Net.WebException]::new('SECRET')); Get-SmokeErrorKind ([System.Exception]::new('SECRET'))`).split(/\r?\n/), ['timeout', 'transport', 'other']);
  const rejected = join(scratch, 'rejected.txt');
  assert.equal(run(`try { Write-SmokeDiagnostic -Path ${quote(rejected)} -Diagnostic (New-SmokeDiagnostic) } catch { 'rejected' }`), 'rejected');
  assert.deepEqual(readFileSync(file), before);
@@ -128,6 +128,40 @@ test('safe exception classification and rejected output requests do not mutate s
  assert.ok(bytes.length <= 1024);
  assert.doesNotMatch(bytes.toString(), /SECRET|stdout/);
  assert.equal(JSON.parse(bytes).healthShape, 'other');
+});
+test('hosted preview phase observes only fixed synthetic file metadata and projects a closed enum', () => {
+ const folders = Object.fromEntries(['empty', 'log', 'record', 'invalid'].map(name => {
+  const dir = join(scratch, name);
+  mkdirSync(dir);
+  return [name, dir];
+ }));
+ const synthetic = Buffer.from('SECRET synthetic bytes');
+ for (const dir of [folders.log, folders.record]) writeFileSync(join(dir, 'daemon.log'), synthetic);
+ const record = join(folders.record, 'daemon.pid');
+ writeFileSync(record, synthetic);
+ mkdirSync(join(folders.invalid, 'daemon.log'));
+ const file = join(scratch, 'phase.json');
+ const phases = run(`
+ $root=${quote(folders.record)}
+ $env:GENTLE_DOT_CI_SMOKE_PHASE='1'; $env:GITHUB_ACTIONS='true'; $env:RUNNER_ENVIRONMENT='self-hosted'
+ if ($null -ne (Get-SmokeStartupPhase -Data $root)) { throw 'self-hosted observation' }
+ $env:RUNNER_ENVIRONMENT='github-hosted'; $env:GITHUB_ACTIONS='false'
+ if ($null -ne (Get-SmokeStartupPhase -Data $root)) { throw 'non-Actions observation' }
+ $env:GITHUB_ACTIONS='true'; $env:GENTLE_DOT_CI_SMOKE_PHASE='0'
+ if ($null -ne (Get-SmokeStartupPhase -Data $root)) { throw 'unrequested observation' }
+ $env:GENTLE_DOT_CI_SMOKE_PHASE='1'
+ foreach ($dir in @(${Object.values(folders).map(quote).join(',')},${quote(join(scratch, 'absent'))})) { Get-SmokeStartupPhase -Data $dir }
+ $d=New-SmokeDiagnostic -StartupPhase (Get-SmokeStartupPhase -Data $root)
+ if ($d.startupPhase -cne 'recordpresent') { throw 'phase not projected' }
+ $d['startupPhase']='SECRET'; Write-SmokeDiagnostic -Path ${quote(file)} -Diagnostic $d
+ `);
+ assert.deepEqual(phases.split(/\r?\n/), ['nomarkers', 'logonly', 'recordpresent', 'unknown', 'unknown']);
+ const before = readFileSync(file);
+ assert.ok(before.length <= 1024); assert.doesNotMatch(before.toString(), /SECRET|daemon\.pid|daemon\.log/);
+ assert.equal(JSON.parse(before).startupPhase, 'unknown');
+ assert.equal(run(`try { Write-SmokeDiagnostic -Path ${quote(file)} -Diagnostic (New-SmokeDiagnostic -StartupPhase nomarkers) } catch { 'rejected' }`), 'rejected');
+ assert.deepEqual(readFileSync(file), before);
+ // Intentionally do not read either marker's body even in the fixture.
 });
 test('actual diagnostic finally preserves the original failure with WarningPreference Stop', () => {
  const rejected = join(scratch, 'warning-stop.txt');
@@ -141,7 +175,7 @@ test('actual diagnostic finally preserves the original failure with WarningPrefe
  $emit=[scriptblock]::Create($text.Substring(1, $text.Length-2))
  $DiagnosticsPath=${quote(rejected)}; $WarningPreference='Stop'
  $outcome='timeout'; $alive=$null; $exitCode=$null; $pollCount=480
- $reachable=$null; $httpStatus=$null; $health=$null; $errorKind='transport'
+ $reachable=$null; $httpStatus=$null; $health=$null; $errorKind='transport'; $startupPhase=$null
  $caught=$null
  try { try { throw 'original-smoke-failure' } finally { & $emit 3>$null } }
  catch { $caught=$_.Exception.Message }
@@ -163,7 +197,10 @@ test('opt-in wiring preserves old invocation, readiness and failure/cleanup rule
  assert.match(source, /\$outcome = 'timeout'/);
  assert.match(source, /taskkill.exe \/PID \$app.Id \/T \/F/);
  assert.match(source, /# Reinstall only after cleanup/);
- assert.match(source, /if \(\$DiagnosticsPath\) \{\s*try \{ \$probe = Get-SmokeObservation -Port \$port \} catch \{ \$probe = @\{\} \}/);
+ assert.match(source, /if \(\$DiagnosticsPath\) \{\s*try \{ \$startupPhase = Get-SmokeStartupPhase -Data \$data \} catch \{ \$startupPhase = 'unknown' \}\s*try \{ \$probe = Get-SmokeObservation -Port \$port \} catch \{ \$probe = @\{\} \}/);
  assert.equal(source.match(/Get-SmokeObservation/g)?.length, 1);
+ assert.equal(source.match(/Get-SmokeStartupPhase/g)?.length, 1);
+ assert.ok(source.indexOf("$outcome = 'timeout'") < source.indexOf('Get-SmokeStartupPhase'));
+ assert.ok(source.indexOf('Get-SmokeStartupPhase') < source.indexOf('taskkill.exe'));
  assert.equal(run(`$tokens=$null; $errors=$null; [void][System.Management.Automation.Language.Parser]::ParseFile(${quote(resolve('scripts/windows/smoke-install.ps1'))}, [ref]$tokens, [ref]$errors); if ($errors.Count) { throw 'Invalid smoke syntax' }; 'syntax-ok'`), 'syntax-ok');
 });
