@@ -14,9 +14,9 @@ param([string]$Runtime = '', [string]$Desktop = '', [string]$DesktopSha256 = '',
 
 . "$PSScriptRoot/test-daemon-startup.ps1" -Runtime $Runtime -DiagnosticsPath $DiagnosticsPath
 
-function Test-StagedNodeVersion($Runtime, $Environment) {
+function Test-StagedNodeVersion($Info) {
     Initialize-DaemonStartupOwner
-    $owner = [GentleDot.CI.OwnedDaemon]::CheckNodeVersion((Join-Path $Runtime 'node/node.exe'), $Runtime, $Environment)
+    $owner = [GentleDot.CI.OwnedDaemon]::CheckNodeVersion($Info.FileName, $Info.WorkingDirectory, $Info.Environment)
     try {
         $clock = New-DaemonStartupClock
         while (-not $owner.HasExited -and $clock.ElapsedMilliseconds -lt 5000) { Wait-DaemonStartupPoll }
@@ -81,10 +81,10 @@ function Invoke-StagedDesktopStartup {
         foreach ($key in @('GENTLE_DOT_DATA_DIR','HOME','APPDATA','LOCALAPPDATA','TEMP','XDG_CACHE_HOME','WEBVIEW2_USER_DATA_FOLDER')) {
             [void][IO.Directory]::CreateDirectory($envMap[$key])
         }
-        if (-not (Test-StagedNodeVersion -Runtime $Runtime -Environment $envMap)) {
+        $info = New-DaemonStartupStartInfo -Runtime $Runtime -Environment $envMap
+        if (-not (Test-StagedNodeVersion $info)) {
             $outcome = 'node-version'
         } else {
-            $info = New-DaemonStartupStartInfo -Runtime $Runtime -Environment $envMap
             $info.FileName = $Desktop
             $info.ArgumentList.Clear() # Genuine desktop manager; no raw Node CLI arguments.
             $owner = New-DaemonStartupOwner $info
