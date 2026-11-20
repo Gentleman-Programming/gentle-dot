@@ -163,6 +163,44 @@ test('hosted preview phase observes only fixed synthetic file metadata and proje
  assert.deepEqual(readFileSync(file), before);
  // Intentionally do not read either marker's body even in the fixture.
 });
+test('installed Node snapshot requires the exact child image and later creation; projects enum only', () => {
+ const artifact = join(scratch, 'installed-node.json');
+ const image = join(scratch, 'runtime', 'node', 'node.exe');
+ const rows = run(`
+ $app = [Diagnostics.Process]::GetCurrentProcess()
+ $image = ${quote(image)}
+ $module = Get-Module smoke-diagnostics
+ & $module {
+   function script:Get-CimInstance {
+     param($Query, $OperationTimeoutSec, $ErrorAction)
+     $calls.Add($Query)
+     if ($OperationTimeoutSec -ne 2 -or $ErrorAction -ne 'Stop') { throw 'Unexpected CIM options' }
+     switch ($mode) {
+       'match' { [pscustomobject]@{ExecutablePath=$image.ToUpperInvariant(); CreationDate=$app.StartTime.AddSeconds(1)} }
+       'other' { [pscustomobject]@{ExecutablePath='C:\\SECRET\\node.exe'; CreationDate=$app.StartTime.AddSeconds(1)} }
+       'older' { [pscustomobject]@{ExecutablePath=$image; CreationDate=$app.StartTime.AddSeconds(-1)} }
+       'missing' { [pscustomobject]@{ExecutablePath=$null; CreationDate=$app.StartTime.AddSeconds(1)} }
+       'failure' { throw 'SECRET' }
+     }
+   }
+ }
+ $calls = [Collections.Generic.List[string]]::new()
+ $mode = 'match'
+ if ($null -ne (Get-SmokeInstalledNodeState -App $app -NodeImage $image)) { throw 'Ungated observation' }
+ if ($calls.Count -ne 0) { throw 'Ungated query' }
+ $env:GENTLE_DOT_CI_SMOKE_PHASE='1'; $env:GITHUB_ACTIONS='true'; $env:RUNNER_ENVIRONMENT='github-hosted'
+ foreach ($mode in @('match','none','other','older','missing','failure')) { Get-SmokeInstalledNodeState -App $app -NodeImage $image }
+ if ($calls.Count -ne 6 -or @($calls | Where-Object { $_ -cne "SELECT ExecutablePath, CreationDate FROM Win32_Process WHERE ParentProcessId = $($app.Id) AND Name = 'node.exe'" }).Count) { throw 'Unexpected query count or projection' }
+ $d=New-SmokeDiagnostic -StartupPhase recordpresent -InstalledNodeState live-owned-node
+ if ($d.installedNodeState -cne 'live-owned-node') { throw 'Missing state' }
+ $d['installedNodeState']='SECRET'; Write-SmokeDiagnostic -Path ${quote(artifact)} -Diagnostic $d
+ `);
+ assert.deepEqual(rows.split(/\r?\n/), ['live-owned-node', 'absent', 'absent', 'absent', 'unknown', 'unknown']);
+ const output = readFileSync(artifact, 'utf8');
+ assert.doesNotMatch(output, /SECRET|node\.exe|CreationDate|ParentProcessId/);
+ assert.equal(JSON.parse(output).installedNodeState, 'unknown');
+ assert.equal(JSON.parse(output).startupPhase, 'recordpresent');
+});
 test('actual diagnostic finally preserves the original failure with WarningPreference Stop', () => {
  const rejected = join(scratch, 'warning-stop.txt');
  const output = run(`
@@ -175,7 +213,7 @@ test('actual diagnostic finally preserves the original failure with WarningPrefe
  $emit=[scriptblock]::Create($text.Substring(1, $text.Length-2))
  $DiagnosticsPath=${quote(rejected)}; $WarningPreference='Stop'
  $outcome='timeout'; $alive=$null; $exitCode=$null; $pollCount=480
- $reachable=$null; $httpStatus=$null; $health=$null; $errorKind='transport'; $startupPhase=$null
+ $reachable=$null; $httpStatus=$null; $health=$null; $errorKind='transport'; $startupPhase=$null; $installedNodeState=$null
  $caught=$null
  try { try { throw 'original-smoke-failure' } finally { & $emit 3>$null } }
  catch { $caught=$_.Exception.Message }
@@ -202,5 +240,7 @@ test('opt-in wiring preserves old invocation, readiness and failure/cleanup rule
  assert.equal(source.match(/Get-SmokeStartupPhase/g)?.length, 1);
  assert.ok(source.indexOf("$outcome = 'timeout'") < source.indexOf('Get-SmokeStartupPhase'));
  assert.ok(source.indexOf('Get-SmokeStartupPhase') < source.indexOf('taskkill.exe'));
+ assert.ok(source.indexOf("$outcome = 'timeout'") < source.indexOf('Get-SmokeInstalledNodeState'));
+ assert.ok(source.indexOf('Get-SmokeInstalledNodeState') < source.indexOf('taskkill.exe'));
  assert.equal(run(`$tokens=$null; $errors=$null; [void][System.Management.Automation.Language.Parser]::ParseFile(${quote(resolve('scripts/windows/smoke-install.ps1'))}, [ref]$tokens, [ref]$errors); if ($errors.Count) { throw 'Invalid smoke syntax' }; 'syntax-ok'`), 'syntax-ok');
 });

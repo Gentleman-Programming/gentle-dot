@@ -6,13 +6,13 @@ Path to the setup executable. Destination must fit the verified staged runtime b
 .PARAMETER DiagnosticsPath
 Optional new JSON file for bounded sanitized startup metadata (no logs or profile contents).
 Omit to retain the existing invocation without diagnostic output. The hosted preview
-lifecycle can additionally opt into a startup-phase enum based on synthetic QA file presence.
+lifecycle can additionally opt into startup phase and installed Node process metadata.
 #>
 param([Parameter(Mandatory=$true)][string]$Installer, [string]$DiagnosticsPath = '')
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $outcome = 'other'; $pollCount = 0; $health = $null
-$alive = $null; $exitCode = $null; $reachable = $null; $httpStatus = $null; $errorKind = 'none'; $probe = $null; $startupPhase = $null
+$alive = $null; $exitCode = $null; $reachable = $null; $httpStatus = $null; $errorKind = 'none'; $probe = $null; $startupPhase = $null; $installedNodeState = $null
 try {
 if ($DiagnosticsPath) { Import-Module "$PSScriptRoot/smoke-diagnostics.psm1" -Force }
 $repo = (Resolve-Path "$PSScriptRoot/../..").Path
@@ -91,6 +91,9 @@ try {
     if ($DiagnosticsPath) {
         try { $startupPhase = Get-SmokeStartupPhase -Data $data } catch { $startupPhase = 'unknown' }
         try { $probe = Get-SmokeObservation -Port $port } catch { $probe = @{} }
+        if ($startupPhase -eq 'recordpresent') {
+            try { $installedNodeState = Get-SmokeInstalledNodeState -App $app -NodeImage (Join-Path $destination 'runtime/node/node.exe') } catch { $installedNodeState = 'unknown' }
+        }
         try {
             if ($null -ne $app) {
                 $alive = -not $app.HasExited
@@ -122,7 +125,7 @@ Write-Output 'Installation, runtime hashes, daemon readiness, stopped-app reinst
 } finally {
     if ($DiagnosticsPath) {
         try {
-            $diagnostic = New-SmokeDiagnostic -Outcome $outcome -Alive $alive -ExitCode $exitCode -PollCount $pollCount -Reachable $reachable -HttpStatus $httpStatus -Health $health -ErrorKind $errorKind -Probe $probe -StartupPhase $startupPhase
+            $diagnostic = New-SmokeDiagnostic -Outcome $outcome -Alive $alive -ExitCode $exitCode -PollCount $pollCount -Reachable $reachable -HttpStatus $httpStatus -Health $health -ErrorKind $errorKind -Probe $probe -StartupPhase $startupPhase -InstalledNodeState $installedNodeState
             Write-SmokeDiagnostic -Path $DiagnosticsPath -Diagnostic $diagnostic
         } catch { Write-Warning 'Sanitized smoke diagnostics unavailable' -WarningAction Continue }
     }

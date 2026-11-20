@@ -106,9 +106,13 @@ function Get-SmokeMarkerPresent([string]$Path) {
     return $true
 }
 
+function Test-SmokeHostedPhase {
+    return ($env:GENTLE_DOT_CI_SMOKE_PHASE -ceq '1' -and $env:GITHUB_ACTIONS -ceq 'true' -and
+        $env:RUNNER_ENVIRONMENT -ceq 'github-hosted')
+}
+
 function Get-SmokeStartupPhase([string]$Data) {
-    if ($env:GENTLE_DOT_CI_SMOKE_PHASE -cne '1' -or $env:GITHUB_ACTIONS -cne 'true' -or
-        $env:RUNNER_ENVIRONMENT -cne 'github-hosted') { return }
+    if (-not (Test-SmokeHostedPhase)) { return }
     # Caller supplies only this invocation's generated QA data root. No log/record bodies.
     try {
         $attributes = [IO.File]::GetAttributes($Data)
@@ -122,8 +126,28 @@ function Get-SmokeStartupPhase([string]$Data) {
     return 'unknown'
 }
 
+function Get-SmokeInstalledNodeState([Diagnostics.Process]$App, [string]$NodeImage) {
+    if (-not (Test-SmokeHostedPhase) -or $null -eq $App) { return }
+    try {
+        if ($App.HasExited) { return 'unknown' }
+        $started = $App.StartTime.ToUniversalTime()
+        $query = "SELECT ExecutablePath, CreationDate FROM Win32_Process WHERE ParentProcessId = $($App.Id) AND Name = 'node.exe'"
+        $children = @(Get-CimInstance -Query $query -OperationTimeoutSec 2 -ErrorAction Stop | Select-Object -First 2)
+        if ($App.HasExited) { return 'unknown' }
+        $state = 'absent'
+        foreach ($child in $children) {
+            if ([string]::IsNullOrEmpty($child.ExecutablePath)) { $state = 'unknown'; continue }
+            if (-not [string]::Equals($child.ExecutablePath, $NodeImage, [StringComparison]::OrdinalIgnoreCase)) { continue }
+            if ($child.CreationDate -isnot [datetime]) { $state = 'unknown'; continue }
+            if ($child.CreationDate.ToUniversalTime() -gt $started) { return 'live-owned-node' }
+        }
+        if ($children.Count -eq 2) { return 'unknown' } # May have stopped enumeration early.
+        return $state
+    } catch { return 'unknown' }
+}
+
 function New-SmokeDiagnostic {
-    param($Outcome, $Alive, $ExitCode, $PollCount, $Reachable, $HttpStatus, $Health, $ErrorKind, $Probe, $StartupPhase)
+    param($Outcome, $Alive, $ExitCode, $PollCount, $Reachable, $HttpStatus, $Health, $ErrorKind, $Probe, $StartupPhase, $InstalledNodeState)
     $shape = 'other'; $ok = $null; $state = 'unknown'
     if ($null -eq $Health) { $shape = 'missing' }
     elseif ($Health -is [array]) { $shape = 'array' }
@@ -159,13 +183,16 @@ function New-SmokeDiagnostic {
     if ($null -ne $StartupPhase) {
         $diagnostic['startupPhase'] = Select-SmokeEnum $StartupPhase @('nomarkers','logonly','recordpresent') 'unknown'
     }
+    if ($null -ne $InstalledNodeState) {
+        $diagnostic['installedNodeState'] = Select-SmokeEnum $InstalledNodeState @('live-owned-node','absent') 'unknown'
+    }
     return $diagnostic
 }
 
 function Write-SmokeDiagnostic {
     param([string]$Path, [System.Collections.IDictionary]$Diagnostic)
     # Re-project, never serialize arbitrary caller properties or nested content.
-    $safe = New-SmokeDiagnostic -Outcome $Diagnostic.outcome -Alive $Diagnostic.processAlive -ExitCode $Diagnostic.exitCode -PollCount $Diagnostic.pollCount -Reachable $Diagnostic.listenerReachable -HttpStatus $Diagnostic.httpStatus -ErrorKind $Diagnostic.errorKind -StartupPhase $Diagnostic['startupPhase']
+    $safe = New-SmokeDiagnostic -Outcome $Diagnostic.outcome -Alive $Diagnostic.processAlive -ExitCode $Diagnostic.exitCode -PollCount $Diagnostic.pollCount -Reachable $Diagnostic.listenerReachable -HttpStatus $Diagnostic.httpStatus -ErrorKind $Diagnostic.errorKind -StartupPhase $Diagnostic['startupPhase'] -InstalledNodeState $Diagnostic['installedNodeState']
     $safe.healthShape = Select-SmokeEnum $Diagnostic.healthShape @('missing','array','object') 'other'
     if ($Diagnostic.healthOk -is [bool]) { $safe.healthOk = $Diagnostic.healthOk }
     $safe.agentState = Select-SmokeEnum $Diagnostic.agentState @('starting','idle','thinking','working','needs_you','restarting','error') 'unknown'
@@ -177,4 +204,4 @@ function Write-SmokeDiagnostic {
     try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
 }
 
-Export-ModuleMember -Function New-SmokeDiagnostic, Get-SmokeErrorKind, Write-SmokeDiagnostic, Get-SmokeObservation, Get-SmokeTcpState, Get-SmokeStartupPhase
+Export-ModuleMember -Function New-SmokeDiagnostic, Get-SmokeErrorKind, Write-SmokeDiagnostic, Get-SmokeObservation, Get-SmokeTcpState, Get-SmokeStartupPhase, Get-SmokeInstalledNodeState

@@ -183,6 +183,7 @@ personal/local profile, credential file or log is read for diagnostics.
 | `probe.jsonState` | notattempted/valid/invalid/oversize/other |
 | `probe.healthShape`, `probe.healthState` | missing/array/object/other; notattempted/valid/invalidshape/other |
 | Optional `startupPhase` (hosted Windows preview lifecycle only) | nomarkers/logonly/recordpresent/unknown |
+| Optional `installedNodeState` (same opt-in, record present) | live-owned-node/absent/unknown |
 
 Legacy fields describe the existing readiness loop: successful REST requests
 establish reachability but their status is unavailable from that helper; failed
@@ -218,6 +219,15 @@ can be incomplete or retired before the snapshot, so this cannot prove resume,
 channel handshake, or the exact cause. Unexpected marker types, inconsistent
 presence, or lookup failures report `unknown`. No file bodies are read. The field
 is absent outside this opt-in and is retained only in the existing lifecycle JSON.
+With that hosted opt-in and `recordpresent`, one local CIM query requests only
+image and creation metadata for `node.exe` children of the launched desktop,
+with a two-second CIM operation timeout and no application retry. `live-owned-node`
+means a child with the exact installed image and a later creation time was seen
+while the desktop was alive. `absent` means no match in a complete sample;
+provider failures, incomplete identification or a desktop exit yield `unknown`.
+This is neither a Job-membership check nor proof of FD3 adoption or readiness.
+The process and TCP samples are separate and may race with process exit.
+
 Unknown strings become fixed enums. Arbitrary content is never recursively redacted
 or serialized: no stdout/stderr, app/daemon logs, health error text, exception
 messages, URLs, headers, tokens, profiles, environment, usernames, paths or commands.
