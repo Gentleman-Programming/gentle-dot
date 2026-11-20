@@ -58,6 +58,18 @@ function Assert-TraceTree([string]$Path) {
     }
 }
 
+function Invoke-TraceBundle([string]$BundleDir) {
+    # Windows PowerShell can wrap redirected native stderr in ErrorRecord objects.
+    $ErrorActionPreference = 'Continue'
+    $PSNativeCommandUseErrorActionPreference = $false
+    $output = @(node (Join-Path $PSScriptRoot 'startup-phase-bundle.mjs') --out-dir $BundleDir 2>&1)
+    if ($LASTEXITCODE -eq 0) { return }
+    if ($output.Count -eq 1 -and [string]$output[0] -cmatch '\ASTARTUP_PHASE_BUNDLE: (scratch-refused|source-drift|anchor-drift|build-failed)\z') {
+        return "STARTUP_PHASE_BUNDLE: $($Matches[1])"
+    }
+    return 'trace-bundle-failed'
+}
+
 if ($MyInvocation.InvocationName -ne '.') {
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
@@ -92,8 +104,8 @@ if ($MyInvocation.InvocationName -ne '.') {
             $id = [Convert]::ToHexString($bytes).ToLowerInvariant()
         } finally { $random.Dispose() }
         $bundleDir = Join-Path ([IO.Path]::GetTempPath()) "gentle-dot-startup-trace-$suffix"
-        node (Join-Path $PSScriptRoot 'startup-phase-bundle.mjs') --out-dir $bundleDir >$null 2>$null
-        if ($LASTEXITCODE -ne 0) { throw 'bundle' }
+        $bundleFailure = Invoke-TraceBundle $bundleDir
+        if ($null -ne $bundleFailure) { $failure = $bundleFailure; throw 'bundle' }
         Assert-TraceTree $bundleDir
         $bundle = Join-Path $bundleDir 'startup-phase-cli.mjs'
 

@@ -11,7 +11,7 @@ const ps = process.env.GENTLE_DOT_TEST_PWSH;
 const quote = value => `'${value.replaceAll("'", "''")}'`;
 const shell = (args) => spawnSync(ps, ['-NoProfile', '-NonInteractive', ...args], {
   encoding: 'utf8', timeout: 10000,
-  env: Object.fromEntries(['SystemRoot', 'WINDIR', 'TEMP', 'TMP'].map(key => [key, process.env[key]])),
+  env: Object.fromEntries(['SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'PATHEXT'].map(key => [key, process.env[key]])),
 });
 
 test('runner fixes provenance and prepares a separately verified runtime before opening the receiver', () => {
@@ -29,6 +29,37 @@ test('non-hosted direct entry returns only the fixed host refusal', { skip: !ps 
   assert.equal(r.status, 1);
   assert.equal(r.stderr, '');
   assert.equal(r.stdout.trim(), 'trace-host-failed');
+});
+
+test('bundle failure reports only an exact, unambiguous allowlisted line', { skip: !ps }, () => {
+  const node = quote(process.execPath);
+  const command = `
+    $ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; . ${quote(runner)}
+    & { Set-Alias node ${node}; Invoke-TraceBundle 'invalid-relative-scratch' }
+    function node { $global:LASTEXITCODE = $code; $lines }
+    $code = 1
+    foreach ($category in @('source-drift', 'anchor-drift', 'build-failed', 'scratch-refused')) {
+      $lines = "STARTUP_PHASE_BUNDLE: $category"
+      Invoke-TraceBundle 'unused'
+    }
+    foreach ($lines in @('STARTUP_PHASE_BUNDLE: BUILD-FAILED', 'STARTUP_PHASE_BUNDLE: build-failed ',
+      'synthetic raw detail STARTUP_PHASE_BUNDLE: build-failed', 'STARTUP_PHASE_BUNDLE: unknown', '')) {
+      Invoke-TraceBundle 'unused'
+    }
+    $lines = @('STARTUP_PHASE_BUNDLE: build-failed', 'synthetic raw detail')
+    Invoke-TraceBundle 'unused'
+    $code = 0
+    $lines = 'STARTUP_PHASE_BUNDLE: ok'
+    Invoke-TraceBundle 'unused'
+  `;
+  const r = shell(['-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stderr, '');
+  assert.equal(r.stdout.replaceAll('\r\n', '\n'), [
+    'STARTUP_PHASE_BUNDLE: scratch-refused',
+    ...['source-drift', 'anchor-drift', 'build-failed', 'scratch-refused'].map(c => `STARTUP_PHASE_BUNDLE: ${c}`),
+    ...Array(6).fill('trace-bundle-failed'), '',
+  ].join('\n'));
 });
 
 test('exclusive IPv4 receiver accepts only correlated increasing enum packets from one endpoint', { skip: !ps }, () => {

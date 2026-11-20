@@ -181,7 +181,10 @@ Exit 0 prints `STARTUP_PHASE_BUNDLE: ok` and creates only
 `startup-phase-cli.mjs` in that directory. Exit 2 prints usage; exit 1 prints
 `STARTUP_PHASE_BUNDLE: scratch-refused`, `source-drift`, `anchor-drift` or
 `build-failed` to stderr (each with the same prefix). Raw esbuild diagnostics
-are suppressed. Existing output is never overwritten.
+are suppressed. Existing output is never overwritten. If the hosted wrapper's
+builder exits nonzero, the wrapper reports the exact allowlisted category when
+it is the only captured line, or `trace-bundle-failed` otherwise. Neither case
+launches the desktop.
 `buildDiagnosticBundle(outDir)`, `instrumentSource(name, source)`, `phases`, and
 `makePhaseTrace(env, platform, createSocket)` are importable; importing does not build.
 
