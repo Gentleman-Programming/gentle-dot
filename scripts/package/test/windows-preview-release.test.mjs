@@ -77,11 +77,18 @@ test('native addon is built from matching checksum-verified inputs before runtim
  assert.match(script,/require\('.\/packages\/daemon\/native\/windows-stop.node'\)/);
 });
 
+test('build and contracts are independent roots but both gate native acceptance',()=>{
+ const {build,contracts,checks}=workflow().jobs;
+ assert.equal(build.needs,undefined,'native build must not wait for contracts');
+ assert.equal(contracts.needs,undefined,'contracts must not wait for native build');
+ assert.deepEqual(checks.needs,['contracts','build']);
+ assert.equal(checks.if,undefined,'native acceptance must use the default success gate');
+});
+
 test('startup and lifecycle fan out after one immutable build and all gate publication',()=>{
  const w=workflow(), c=w.jobs.checks;assert.ok(c,'separate acceptance job required');
- assert.equal(c.needs,'build');assert.equal(c['runs-on'],'windows-2022');
+ assert.equal(c['runs-on'],'windows-2022');
  assert.equal(c.strategy['fail-fast'],false);assert.deepEqual(c.strategy.matrix.kind,['startup','lifecycle']);assert.deepEqual(c.permissions,{contents:'read'});
- assert.equal(w.jobs.build.needs,'contracts');
  assert.ok(w.jobs.contracts.steps.some(s=>s.run?.includes('scripts/package/test/windows-preview-release.test.mjs')));
  assert.ok(w.jobs.contracts.steps.some(s=>s.run?.includes('scripts/windows/test/daemon-startup.test.mjs')));
  const restore=c.steps.find(s=>s.name==='Verify and restore this build runtime');
@@ -134,7 +141,11 @@ test('startup diagnostics stay opt-in, numeric and after readiness, preserving d
 });
 
 test('publication only follows successful build, validates exact payload and creates a nonlatest prerelease',()=>{
- const p=workflow().jobs.publish;assert.deepEqual(p.needs,['contracts','build','checks']);assert.deepEqual(p.permissions,{contents:'write'});assert.match(p.if,/success\(\)/);assert.match(p.if,/Gentleman-Programming\/gentle-dot/);
+ const {publish:p,contracts}=workflow().jobs;
+ assert.deepEqual(p.needs,['contracts','build','checks']);
+ assert.equal(contracts['continue-on-error'],undefined,'failed contracts must block publication');
+ assert.equal(p.if,"success() && github.repository == 'Gentleman-Programming/gentle-dot'");
+ assert.deepEqual(p.permissions,{contents:'write'});
  const publish=p.steps.find(s=>s.run?.includes('gh release create'));assert.ok(publish);assert.ok(p.steps.some(s=>s.run?.includes('windows-preview-release.mjs')));
  assert.match(publish.run,/--prerelease/);assert.match(publish.run,/--latest=false/);assert.match(publish.run,/--target "\$SOURCE_SHA"/);assert.match(publish.run,/windows-preview-\$GITHUB_RUN_ID-\$GITHUB_RUN_ATTEMPT/);
  assert.equal(publish.env.GH_TOKEN,'${{ github.token }}');

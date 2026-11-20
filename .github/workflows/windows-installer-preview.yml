@@ -37,7 +37,6 @@ jobs:
           $env:GENTLE_DOT_TEST_PWSH = (Get-Command pwsh.exe).Source
           node --test scripts/windows/test/daemon-startup.test.mjs scripts/windows/test/staged-desktop-startup.test.mjs scripts/windows/test/smoke-diagnostics.test.mjs
   build:
-    needs: contracts
     outputs:
       runtime-sha256: ${{ steps.archive.outputs.sha256 }}
       desktop-sha256: ${{ steps.desktop.outputs.sha256 }}
@@ -145,7 +144,7 @@ jobs:
           retention-days: 14
   checks:
     name: Check ${{ matrix.kind }}
-    needs: build
+    needs: [contracts, build]
     runs-on: windows-2022
     timeout-minutes: 20
     permissions:
