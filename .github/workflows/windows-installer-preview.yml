@@ -191,7 +191,7 @@ jobs:
         with:
           name: windows-preview-desktop
           path: build/desktop-transfer
-      - name: Packaged Node and staged native desktop startup contract
+      - name: Packaged Node preflight and staged native desktop startup contract
         if: matrix.kind == 'startup'
         env:
           DESKTOP_SHA256: ${{ needs.build.outputs.desktop-sha256 }}

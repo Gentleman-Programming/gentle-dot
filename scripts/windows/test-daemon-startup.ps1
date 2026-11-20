@@ -118,6 +118,21 @@ namespace GentleDot.CI {
             Require(executable.IndexOf('"') < 0);
             return StartCore(executable, " -e \"process.exit(process.version==='v24.14.1'?0:1)\"", directory, environment);
         }
+        // Preview-only probes: derive the executable from the verified runtime and never
+        // interpolate paths, switches, or code supplied by the caller into the arguments.
+        public static OwnedDaemon CheckCliSyntax(string runtime, IDictionary<string,string> environment) {
+            return StartPackagedNodeProbe(runtime, " --check -- daemon/cli.mjs", environment);
+        }
+        public static OwnedDaemon CheckCliSelfCheck(string runtime, IDictionary<string,string> environment) {
+            return StartPackagedNodeProbe(runtime, " -- daemon/cli.mjs --self-check", environment);
+        }
+        public static OwnedDaemon CheckWindowsAddon(string runtime, IDictionary<string,string> environment) {
+            return StartPackagedNodeProbe(runtime, " --input-type=commonjs -e \"require(require('node:path').join(process.cwd(),'daemon','native','windows-stop.node'))\"", environment);
+        }
+        static OwnedDaemon StartPackagedNodeProbe(string runtime, string arguments, IDictionary<string,string> environment) {
+            Require(System.IO.Path.IsPathRooted(runtime) && runtime.IndexOf('"') < 0 && runtime.IndexOf('\0') < 0);
+            return StartCore(System.IO.Path.Combine(runtime, "node", "node.exe"), arguments, runtime, environment);
+        }
         static OwnedDaemon StartCore(string executable, string arguments, string directory, IDictionary<string,string> environment) {
             IntPtr job = IntPtr.Zero, sink = IntPtr.Zero, attributes = IntPtr.Zero;
             IntPtr handles = IntPtr.Zero, block = IntPtr.Zero;

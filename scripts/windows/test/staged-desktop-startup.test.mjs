@@ -95,6 +95,99 @@ test('staged Node version check receives the exact isolated environment at the t
  assert.deepEqual(files.map(file=>readFileSync(file)),before);
 });
 
+test('packaged preflight runs fixed quiet stages before desktop and fails closed', {skip:!ps}, () => {
+ const {root,desktop,runtime,files,digest} = fixture();
+ const native = join(runtime,'daemon','native');
+ const addon = join(native,'windows-stop.node');
+ const fallback = `${addon}.js`;
+ mkdirSync(native);
+ writeFileSync(fallback,'inert extension fallback');
+ const before = [...files,fallback].map(file=>readFileSync(file));
+ const body = `
+ $ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; . ${q(script)}; $env:CI='true'
+ if ($PSVersionTable.PSVersion.Major -eq 5) {
+   $script:arguments = [Collections.Generic.List[string]]::new()
+   Update-TypeData -TypeName System.Diagnostics.ProcessStartInfo -MemberType ScriptProperty -MemberName ArgumentList -Value { ,$script:arguments }
+ }
+ Add-Type -TypeDefinition @'
+ using System;
+ using System.Collections.Generic;
+ namespace GentleDot.CI {
+   public sealed class OwnedDaemon {
+     public static string Calls, Mode, Runtime, Data;
+     public static int Stops, Disposals;
+     string stage;
+     static OwnedDaemon Probe(string stage, string directory, IDictionary<string,string> env) {
+       Calls += stage + ",";
+       if (directory != Runtime || env["GENTLE_DOT_RUNTIME"] != Runtime || env["GENTLE_DOT_DATA_DIR"] != Data ||
+           env.ContainsKey("NODE_OPTIONS") || env.ContainsKey("GENTLE_DOT_RUNTIME_DIR")) throw new Exception("private details");
+       if (Mode == "throw-" + stage) throw new Exception("private details");
+       return new OwnedDaemon { stage = stage };
+     }
+     public static OwnedDaemon CheckCliSyntax(string dir, IDictionary<string,string> env) { return Probe("syntax", dir, env); }
+     public static OwnedDaemon CheckCliSelfCheck(string dir, IDictionary<string,string> env) { return Probe("self-check", dir, env); }
+     public static OwnedDaemon CheckWindowsAddon(string dir, IDictionary<string,string> env) { return Probe("addon", dir, env); }
+     public bool HasExited { get { return Mode != "timeout-" + stage; } }
+     public int? ExitCode { get { return Mode == stage ? 7 : 0; } }
+     public bool Stop() { Stops++; return Mode != "cleanup-" + stage; }
+     public void Dispose() { Disposals++; }
+   }
+ }
+'@
+ function Get-DaemonStartupNativeSource { throw 'native compilation not allowed in this test' }
+ function New-DaemonStartupScratch { ${q(root)} }
+ function Get-DaemonStartupPort { return (12345+$script:ports++) }
+ function Test-StagedNodeVersion { $true }
+ function New-DaemonStartupClock { $script:clock=[pscustomobject]@{ElapsedMilliseconds=0}; $script:clock }
+ function Wait-DaemonStartupPoll { $script:waits++; $script:clock.ElapsedMilliseconds+=250 }
+ function New-DaemonStartupOwner {
+   $script:starts++
+   $o=[pscustomobject]@{HasExited=$true; ExitCode=1}
+   $o | Add-Member ScriptMethod Stop { return $true }
+   $o | Add-Member ScriptMethod Dispose {}
+   return $o
+ }
+ function Get-StagedListenerPid { throw 'unexpected listener observation' }
+ $stub=[GentleDot.CI.OwnedDaemon]
+ $stub::Runtime=${q(runtime)}; $stub::Data=${q(join(root,'data'))}; $env:NODE_OPTIONS='not forwarded'
+ $addon=${q(addon)}
+ foreach ($mode in @('missing-addon','syntax','self-check','addon','timeout-self-check','throw-addon','cleanup-syntax','pass','directory-addon')) {
+   if ($mode -eq 'syntax') { [IO.File]::WriteAllText($addon,'regular inert addon') }
+   if ($mode -eq 'directory-addon') {
+     [IO.File]::Move($addon, "$addon.retained")
+     [void][IO.Directory]::CreateDirectory($addon)
+     [IO.File]::WriteAllText((Join-Path $addon 'index.js'),'inert directory fallback')
+   }
+   $stub::Mode=$mode; $stub::Calls=''; $stub::Stops=0; $stub::Disposals=0; $script:starts=0; $script:waits=0; $script:ports=0
+   $r=Invoke-StagedDesktopStartup -Runtime ${q(runtime)} -Desktop ${q(desktop)} -DesktopSha256 ${q(digest)}
+   "$r,$($stub::Calls)$($stub::Stops),$($stub::Disposals),$starts,$waits"
+ }`;
+ const r=spawnSync(ps,[...flags,'-EncodedCommand',Buffer.from(body,'utf16le').toString('base64')],{env:isolated(root),encoding:'utf8'});
+ assert.equal(r.status,0,r.stderr); assert.equal(r.stderr,'');
+ assert.equal(r.stdout,[
+  'staged-desktop-startup-preflight-addon,syntax,self-check,2,2,0,0',
+  'staged-desktop-startup-preflight-syntax,syntax,1,1,0,0',
+  'staged-desktop-startup-preflight-self-check,syntax,self-check,2,2,0,0',
+  'staged-desktop-startup-preflight-addon,syntax,self-check,addon,3,3,0,0',
+  'staged-desktop-startup-preflight-self-check,syntax,self-check,2,2,0,20',
+  'staged-desktop-startup-preflight-addon,syntax,self-check,addon,2,2,0,0',
+  'staged-desktop-startup-preflight-syntax-cleanup-failed,syntax,1,1,0,0',
+  'staged-desktop-startup-earlyexit,syntax,self-check,addon,3,3,1,0',
+  'staged-desktop-startup-preflight-addon,syntax,self-check,2,2,0,0',
+  '',
+ ].join('\r\n'));
+ assert.deepEqual([...files,fallback].map(file=>readFileSync(file)),before);
+ assert.equal(readFileSync(`${addon}.retained`,'utf8'),'regular inert addon');
+ assert.equal(readFileSync(join(addon,'index.js'),'utf8'),'inert directory fallback');
+ const source = readFileSync(resolve('scripts/windows/test-daemon-startup.ps1'),'utf8');
+ const methodBody = name => source.match(new RegExp(`^        (?:public )?static OwnedDaemon ${name}\\([^\\r\\n]+\\) \\{\\r?\\n([\\s\\S]+?)^        \\}`, 'm'))?.[1].trim();
+ for (const [method,args] of [
+  ['CheckCliSyntax',' --check -- daemon/cli.mjs'], ['CheckCliSelfCheck',' -- daemon/cli.mjs --self-check'],
+  ['CheckWindowsAddon',String.raw` --input-type=commonjs -e \"require(require('node:path').join(process.cwd(),'daemon','native','windows-stop.node'))\"`],
+ ]) assert.equal(methodBody(method),`return StartPackagedNodeProbe(runtime, "${args}", environment);`);
+ assert.match(methodBody('StartPackagedNodeProbe'),/StartCore\(System\.IO\.Path\.Combine\(runtime, "node", "node.exe"\), arguments, runtime, environment\)/);
+});
+
 test('health is accepted only with stable owned listener and successful job cleanup', {skip:!ps}, () => {
  const {root,desktop,runtime,files,digest} = fixture();
  const before = files.map(file=>readFileSync(file));
@@ -109,7 +202,8 @@ test('health is accepted only with stable owned listener and successful job clea
  function Get-DaemonStartupPort { return (12345+$script:ports++) }
  function New-DaemonStartupClock { $script:clock=[pscustomobject]@{ElapsedMilliseconds=0}; $script:clock }
  function Wait-DaemonStartupPoll { $script:clock.ElapsedMilliseconds=30000 }
- function Test-StagedNodeVersion { param($Runtime,$Environment) return ($mode -ne 'version') }
+ function Test-StagedNodeVersion { param($Info) return ($mode -ne 'version') }
+ function Invoke-StagedPackagedPreflight { 'passed' }
  function New-DaemonStartupOwner {
    param($Info); $script:starts++
    if ($Info.FileName -cne ${q(desktop)} -or $Info.ArgumentList.Count -ne 0 -or

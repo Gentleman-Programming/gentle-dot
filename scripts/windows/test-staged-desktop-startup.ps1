@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
 CI-only startup check of the same-build native desktop and already verified staged runtime, without NSIS.
+After verifying Node version, quietly preflights CLI syntax, CLI self-check and addon loading before managed startup.
 .PARAMETER Runtime
 Explicit staged runtime previously verified against the producer runtime manifest.
 .PARAMETER Desktop
@@ -24,6 +25,40 @@ function Test-StagedNodeVersion($Info) {
         $passed = $owner.ExitCode -eq 0
     } finally { $clean = Stop-DaemonStartupProcess $owner }
     return ($passed -and $clean)
+}
+
+function Invoke-StagedPackagedPreflight($Info) {
+    foreach ($stage in @('syntax','self-check','addon')) {
+        $probeOwner = $null; $passed = $false; $clean = $true
+        try {
+            Initialize-DaemonStartupOwner
+            $probeOwner = switch ($stage) {
+                'syntax' { [GentleDot.CI.OwnedDaemon]::CheckCliSyntax($Info.WorkingDirectory, $Info.Environment) }
+                'self-check' { [GentleDot.CI.OwnedDaemon]::CheckCliSelfCheck($Info.WorkingDirectory, $Info.Environment) }
+                'addon' {
+                    # The restored inventory is already verified. Require this exact regular
+                    # file before Node can try extension or directory resolution fallbacks.
+                    $addon = Join-Path $Info.WorkingDirectory 'daemon/native/windows-stop.node'
+                    $attributes = [IO.File]::GetAttributes($addon)
+                    if ($attributes -band ([IO.FileAttributes]'Directory, ReparsePoint, Device')) {
+                        throw 'Packaged addon is not a regular file'
+                    }
+                    [GentleDot.CI.OwnedDaemon]::CheckWindowsAddon($Info.WorkingDirectory, $Info.Environment)
+                }
+            }
+            $clock = New-DaemonStartupClock
+            while ($clock.ElapsedMilliseconds -lt 5000 -and -not $probeOwner.HasExited) { Wait-DaemonStartupPoll }
+            $passed = $clock.ElapsedMilliseconds -lt 5000 -and $probeOwner.ExitCode -eq 0
+        } catch { $passed = $false }
+        finally {
+            if ($null -ne $probeOwner) {
+                try { $clean = Stop-DaemonStartupProcess $probeOwner } catch { $clean = $false }
+            }
+        }
+        if (-not $clean) { return "preflight-$stage-cleanup-failed" }
+        if (-not $passed) { return "preflight-$stage" }
+    }
+    return 'passed'
 }
 
 function Get-StagedListenerPid($Owner, [int]$Port, [string]$NodePath) {
@@ -73,6 +108,9 @@ function Invoke-StagedDesktopStartup {
         $memoryPort = Get-DaemonStartupPort
         if ($port -eq $memoryPort) { throw 'Repeated ephemeral port' }
         $envMap = New-DaemonStartupEnvironment -Runtime $Runtime -Scratch $scratch -Port $port
+        # The desktop forwards this same absolute staged override as GENTLE_DOT_RUNTIME
+        # when it launches Node. Snapshot the typed allowlist before building the desktop's env.
+        $preflightInfo = New-DaemonStartupStartInfo -Runtime $Runtime -Environment $envMap
         $envMap.Remove('GENTLE_DOT_RUNTIME')
         $envMap['GENTLE_DOT_RUNTIME_DIR'] = $Runtime
         $envMap['GENTLE_DOT_ENGRAM'] = 'private'
@@ -85,7 +123,8 @@ function Invoke-StagedDesktopStartup {
         $info = New-DaemonStartupStartInfo -Runtime $Runtime -Environment $envMap
         if (-not (Test-StagedNodeVersion $info)) {
             $outcome = 'node-version'
-        } else {
+        } elseif (($outcome = Invoke-StagedPackagedPreflight $preflightInfo) -eq 'passed') {
+            $outcome = 'failed' # Only managed health below can declare success.
             $info.FileName = $Desktop
             $info.ArgumentList.Clear() # Genuine desktop manager; no raw Node CLI arguments.
             $owner = New-DaemonStartupOwner $info

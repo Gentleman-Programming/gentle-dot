@@ -99,8 +99,20 @@ After verifying the QA payload, runtime archive and restored runtime, it runs:
 ./scripts/windows/test-staged-desktop-startup.ps1 -Runtime <verified-runtime> -Desktop <same-build-exe> -DesktopSha256 <producer-sha256> [-DiagnosticsPath <new-json>]
 ```
 
-The CI-only script checks desktop bytes before launching, asserts packaged Node
-24.14.1, and runs the real desktop manager with `GENTLE_DOT_RUNTIME_DIR` and an
+The CI-only script checks desktop bytes before launching and asserts packaged Node
+24.14.1. Before managed startup, that same runtime's Node runs three read-only
+probes with an allowlisted synthetic profile: `--check` of `daemon/cli.mjs`, its
+existing `--self-check`, and a standalone load of `daemon/native/windows-stop.node`
+without invoking exports. The exact addon path must be a regular file, not a
+reparse point; extension and directory fallbacks are rejected. Self-check
+evaluates the CLI imports and resolves config
+and required files; its path-bearing JSON goes to `NUL`. Each probe has a five-second
+exit deadline and requires whole-job cleanup. Failure stops the staged check with
+`staged-desktop-startup-preflight-syntax`, `-preflight-self-check`, or `-preflight-addon`
+(full prefix `staged-desktop-startup`), with `-cleanup-failed` appended if the job
+cannot be drained. Passing does not test Windows owner admission, FD3, or readiness.
+
+The script then runs the real desktop manager with `GENTLE_DOT_RUNTIME_DIR` and an
 isolated synthetic profile, including WebView and private memory state. This
 uses the native Windows owner/FD3 launch, not `node cli.mjs`. Within 30 seconds,
 it must see valid HTTP health bracketed by the same loopback listener PID,
