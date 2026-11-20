@@ -274,7 +274,12 @@ impl Voice {
         let State::Stopping(session) = std::mem::replace(&mut *state, idle) else { unreachable!() };
         drop(state);
         let answered = session.final_text.is_some();
-        let text = session.final_text.unwrap_or(session.transcript).trim().to_string();
+        let text = match session.final_text {
+            Some(final_text) if !final_text.trim().is_empty() => final_text,
+            _ => session.transcript,
+        }
+        .trim()
+        .to_string();
         if !answered {
             lock(&feed).cancel();
         }
@@ -352,6 +357,9 @@ impl Sink {
     /// The text so far.
     pub fn partial(&self, text: &str) {
         self.update(|session| {
+            if text.trim().is_empty() && !session.transcript.trim().is_empty() {
+                return None;
+            }
             session.transcript = text.to_string();
             Some(VoiceEvent::Partial(text.to_string()))
         });
@@ -360,7 +368,9 @@ impl Sink {
     /// The final text: it resolves `stop`, or waits for it.
     pub fn finished(&self, text: &str) {
         self.update(|session| {
-            session.transcript = text.to_string();
+            if !text.trim().is_empty() {
+                session.transcript = text.to_string();
+            }
             session.final_text = Some(text.to_string());
             None
         });
@@ -545,6 +555,30 @@ mod tests {
         rig.recognizer.sink().partial("almost done");
         assert_eq!(rig.voice.stop(), Ok(Transcript { text: "almost done".into() }));
         assert_eq!(rig.recognizer.log.lock().unwrap().cancelled, 1);
+    }
+
+    #[test]
+    fn stop_falls_back_to_the_latest_partial_when_final_is_empty() {
+        for empty_final in ["", "   "] {
+            let rig = granted();
+            *rig.recognizer.final_text.lock().unwrap() = Some(empty_final.into());
+            rig.start().unwrap();
+            rig.recognizer.sink().partial("Uno, dos, tres, cuatro.");
+            assert_eq!(rig.voice.stop(), Ok(Transcript { text: "Uno, dos, tres, cuatro.".into() }));
+            assert_eq!(rig.recognizer.log.lock().unwrap().finished, 1);
+            assert_eq!(rig.recognizer.log.lock().unwrap().cancelled, 0);
+        }
+    }
+
+    #[test]
+    fn stop_falls_back_to_non_empty_partial_when_later_partial_and_final_are_empty() {
+        let rig = granted();
+        *rig.recognizer.final_text.lock().unwrap() = Some("".into());
+        rig.start().unwrap();
+        rig.recognizer.sink().partial("Uno, dos, tres, cuatro.");
+        rig.recognizer.sink().partial("");
+        assert_eq!(rig.recorder.seen(), vec![VoiceEvent::Partial("Uno, dos, tres, cuatro.".into())]);
+        assert_eq!(rig.voice.stop(), Ok(Transcript { text: "Uno, dos, tres, cuatro.".into() }));
     }
 
     #[test]
