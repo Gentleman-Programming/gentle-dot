@@ -137,6 +137,11 @@ Run the portable contracts from the repository root:
 node --test scripts/windows/test/managed-admission.test.mjs
 ```
 
+On Windows, set `GENTLE_DOT_TEST_PWSH` to a PowerShell executable and
+`GENTLE_DOT_CI_TEST_ROOT` to a fresh, existing OS-temp directory to also run the
+inert runner regressions. These retain synthetic files for inspection and do
+not run Cargo or load the real addon.
+
 For native proof, use a Windows x64 runner with MSVC Rust/SDK and the desktop
 library-test prerequisites from the Windows Rust job: `packages/ui/dist/app`
 exists and the sherpa-onnx static libraries are available (do not reuse a partial
@@ -145,7 +150,7 @@ native addon** step first: x64 MSVC, Node 24.14.1, and checksum-verified headers
 and `node.lib` for that exact version. With that runner's Node on PATH, run:
 
 ```powershell
-$env:GENTLE_ADMISSION_NODE = (Get-Command node.exe -CommandType Application).Source
+$env:GENTLE_ADMISSION_NODE = (Get-Command node.exe -CommandType Application | Select-Object -First 1).Source
 Push-Location apps/desktop/src-tauri
 try {
   cargo test --locked --lib daemon::windows::native::admission_fixture::production_managed_admission -- --ignored --exact --nocapture
@@ -154,6 +159,12 @@ try {
   Pop-Location
 }
 ```
+
+The preview runner reports only a fixed prerequisite result: `checkout-unavailable`,
+`node-unavailable`, `node-probe-failed`, `node-identity-mismatch` (requires exactly
+Windows x64 Node 24.14.1), `checkout-addon-invalid`, `checkout-addon-load-failed`,
+or `frontend-missing` (`packages/ui/dist/app/index.html`). These results mean the
+fixture did not run. The diagnostic is not an acceptance gate.
 
 Use a local fixed-drive temp directory with no reparse ancestors or ambient Node
 IPC. The diagnostic uses a native suspended Job launch and actual stop records,

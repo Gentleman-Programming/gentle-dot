@@ -158,8 +158,11 @@ test('publication only follows successful build, validates exact payload and cre
 
 test('managed admission adds inert contracts and runs only after all required producer uploads',()=>{
  const {contracts,build}=workflow().jobs;
- assert.equal(contracts.steps.find(s=>s.run?.includes('scripts/windows/test/managed-admission.test.mjs'))?.run,
-  'node --test scripts/windows/test/managed-admission.test.mjs');
+ const inert=contracts.steps.find(s=>s.name==='Inert managed admission contracts')?.run;
+ assert.match(inert,/GENTLE_DOT_CI_TEST_ROOT = Join-Path \$env:RUNNER_TEMP 'retained-admission-contracts'/);
+ assert.match(inert,/New-Item -ItemType Directory -Path \$env:GENTLE_DOT_CI_TEST_ROOT/);
+ assert.match(inert,/GENTLE_DOT_TEST_PWSH = \(Get-Command pwsh\.exe/);
+ assert.match(inert,/^node --test scripts\/windows\/test\/managed-admission\.test\.mjs$/m);
  const diagnostic=build.steps.find(s=>s.id==='managed-admission');
  assert.ok(diagnostic);
  assert.equal(diagnostic.if,undefined);

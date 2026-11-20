@@ -37,7 +37,11 @@ jobs:
           $env:GENTLE_DOT_TEST_PWSH = (Get-Command pwsh.exe).Source
           node --test scripts/windows/test/daemon-startup.test.mjs scripts/windows/test/staged-desktop-startup.test.mjs scripts/windows/test/smoke-diagnostics.test.mjs
       - name: Inert managed admission contracts
-        run: node --test scripts/windows/test/managed-admission.test.mjs
+        run: |
+          $env:GENTLE_DOT_CI_TEST_ROOT = Join-Path $env:RUNNER_TEMP 'retained-admission-contracts'
+          New-Item -ItemType Directory -Path $env:GENTLE_DOT_CI_TEST_ROOT | Out-Null
+          $env:GENTLE_DOT_TEST_PWSH = (Get-Command pwsh.exe -CommandType Application | Select-Object -First 1).Source
+          node --test scripts/windows/test/managed-admission.test.mjs
   build:
     outputs:
       runtime-sha256: ${{ steps.archive.outputs.sha256 }}
