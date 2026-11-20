@@ -54,7 +54,7 @@ test('Windows CI is narrowly triggered, natively builds and retains all mandator
  assert.ok(steps.some(s=>s.run==='pnpm install --frozen-lockfile'));
  const build=steps.findIndex(s=>s.run==='./scripts/windows/package.ps1 -Target windows-x64');
  const all=Object.values(w.jobs).flatMap(job=>job.steps);
- assert.ok(build>=0);assert.ok(all.some(s=>s.run?.includes('./scripts/windows/test-daemon-startup.ps1 -Runtime')));
+ assert.ok(build>=0);assert.ok(all.some(s=>s.run?.includes('./scripts/windows/test-staged-desktop-startup.ps1 -Runtime')));
  assert.ok(all.some(s=>s.run?.includes('./scripts/windows/smoke-install.ps1')));
  assert.ok(steps.some(s=>s.id==='collect' && s.run?.includes('ci-native.mjs collect --target windows-x64')));
  for(const step of steps)assert.equal(step['continue-on-error'],undefined);
@@ -92,6 +92,24 @@ test('startup and lifecycle fan out after one immutable build and all gate publi
  assert.ok(c.steps.some(s=>s.if==="matrix.kind == 'lifecycle'"&&s.run?.includes('-DiagnosticsPath')));
  assert.ok(c.steps.some(s=>s.uses==='actions/upload-artifact@v4'&&s.if==='always()'));
  assert.ok(!w.jobs.build.steps.some(s=>s.run?.includes('test-daemon-startup.ps1')||s.run?.includes('smoke-install.ps1')));
+});
+
+test('only startup receives the exact producer desktop, bound by its own SHA-256',()=>{
+ const w=workflow(), b=w.jobs.build, steps=w.jobs.checks.steps;
+ const transfer=b.steps.find(s=>s.id==='desktop');
+ assert.ok(transfer,'missing staged desktop transfer');
+ assert.ok(b.steps.indexOf(transfer)>b.steps.findIndex(s=>s.run==='./scripts/windows/package.ps1 -Target windows-x64'));
+ assert.match(transfer.run,/apps\/desktop\/src-tauri\/target\/x86_64-pc-windows-msvc\/release\/gentle-dot\.exe/);
+ assert.match(transfer.run,/Get-FileHash -Algorithm SHA256/);
+ assert.equal(b.outputs['desktop-sha256'],'${{ steps.desktop.outputs.sha256 }}');
+ const startup=steps.find(s=>s.run?.includes('test-staged-desktop-startup.ps1'));
+ assert.equal(startup.if,"matrix.kind == 'startup'");
+ assert.equal(startup.env.DESKTOP_SHA256,'${{ needs.build.outputs.desktop-sha256 }}');
+ assert.match(startup.run,/-Desktop .* -DesktopSha256 \$env:DESKTOP_SHA256/);
+ assert.ok(steps.indexOf(startup)>steps.findIndex(s=>s.run?.includes('runtime-integrity.mjs verify')));
+ assert.equal(steps.find(s=>s.with?.name==='windows-preview-desktop')?.if,startup.if);
+ assert.ok(!steps.some(s=>s.run?.includes('test-daemon-startup.ps1')));
+ assert.ok(w.jobs.contracts.steps.some(s=>s.run?.includes('scripts/windows/test/staged-desktop-startup.test.mjs')));
 });
 
 test('startup diagnostics stay opt-in, numeric and after readiness, preserving default quiet containment',()=>{

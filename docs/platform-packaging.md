@@ -89,7 +89,29 @@ Missing upstream checksums, installers or producer runtime manifests fail the jo
 there is no `continue-on-error` fallback. ARM64 runner/tool availability is still a
 native CI prerequisite, not proven by the structural tests.
 
-### Packaged daemon launch contract (Windows x64 CI only)
+### Windows installer preview: staged native startup
+
+The preview workflow separately transfers the same-build `gentle-dot.exe` and
+its SHA-256 (not release assets). Only the startup job downloads that executable.
+After verifying the QA payload, runtime archive and restored runtime, it runs:
+
+```powershell
+./scripts/windows/test-staged-desktop-startup.ps1 -Runtime <verified-runtime> -Desktop <same-build-exe> -DesktopSha256 <producer-sha256> [-DiagnosticsPath <new-json>]
+```
+
+The CI-only script checks desktop bytes before launching, asserts packaged Node
+24.14.1, and runs the real desktop manager with `GENTLE_DOT_RUNTIME_DIR` and an
+isolated synthetic profile, including WebView and private memory state. This
+uses the native Windows owner/FD3 launch, not `node cli.mjs`. Within 30 seconds,
+it must see valid HTTP health bracketed by the same loopback listener PID,
+verified against both the packaged Node image and the owned Windows job. Desktop
+stdio goes to `NUL`; private product logs are not read or uploaded. Only a fixed
+`staged-desktop-startup-*` outcome and optional projected diagnostics leave the
+check. Suspended assignment and whole-job teardown use the existing CI adapter.
+This proves startup only, not agent idle, graceful Stop, or installed readiness.
+The independent NSIS lifecycle job is unchanged; both jobs must pass to publish.
+
+### Packaged daemon launch contract (legacy Windows x64 CI entry point)
 
 After build and before installer smoke, CI invokes:
 

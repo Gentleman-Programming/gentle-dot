@@ -35,11 +35,12 @@ jobs:
           $env:GENTLE_DOT_CI_TEST_ROOT = Join-Path $env:RUNNER_TEMP 'retained-startup-contracts'
           New-Item -ItemType Directory -Path $env:GENTLE_DOT_CI_TEST_ROOT | Out-Null
           $env:GENTLE_DOT_TEST_PWSH = (Get-Command pwsh.exe).Source
-          node --test scripts/windows/test/daemon-startup.test.mjs
+          node --test scripts/windows/test/daemon-startup.test.mjs scripts/windows/test/staged-desktop-startup.test.mjs
   build:
     needs: contracts
     outputs:
       runtime-sha256: ${{ steps.archive.outputs.sha256 }}
+      desktop-sha256: ${{ steps.desktop.outputs.sha256 }}
     if: github.repository == 'Gentleman-Programming/gentle-dot'
     runs-on: windows-2022
     timeout-minutes: 120
@@ -130,6 +131,18 @@ jobs:
           path: ${{ runner.temp }}/windows-runtime.tar
           if-no-files-found: error
           retention-days: 14
+      - name: Hash the exact desktop built with this runtime
+        id: desktop
+        run: |
+          $desktop = 'apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/gentle-dot.exe'
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $desktop -ErrorAction Stop).Hash.ToLowerInvariant()
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-preview-desktop
+          path: apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/gentle-dot.exe
+          if-no-files-found: error
+          retention-days: 14
   checks:
     name: Check ${{ matrix.kind }}
     needs: build
@@ -174,9 +187,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Runtime restore failed' }
           node scripts/windows/runtime-integrity.mjs verify build/windows/runtime build/windows-preview/runtime-manifest.json
           if ($LASTEXITCODE -ne 0) { throw 'Restored runtime integrity mismatch' }
-      - name: Packaged Node and daemon startup contract
+      - uses: actions/download-artifact@v4
         if: matrix.kind == 'startup'
-        run: ./scripts/windows/test-daemon-startup.ps1 -Runtime "./build/windows/runtime" -DiagnosticsPath "$env:RUNNER_TEMP/startup-diagnostics.json"
+        with:
+          name: windows-preview-desktop
+          path: build/desktop-transfer
+      - name: Packaged Node and staged native desktop startup contract
+        if: matrix.kind == 'startup'
+        env:
+          DESKTOP_SHA256: ${{ needs.build.outputs.desktop-sha256 }}
+        run: ./scripts/windows/test-staged-desktop-startup.ps1 -Runtime "./build/windows/runtime" -Desktop "./build/desktop-transfer/gentle-dot.exe" -DesktopSha256 $env:DESKTOP_SHA256 -DiagnosticsPath "$env:RUNNER_TEMP/startup-diagnostics.json"
       - name: Isolated install, readiness, reinstall and uninstall
         if: matrix.kind == 'lifecycle'
         run: |

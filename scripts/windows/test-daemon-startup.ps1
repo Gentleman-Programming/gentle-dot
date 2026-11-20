@@ -100,6 +100,9 @@ namespace GentleDot.CI {
         [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
         [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
         [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr process, out uint code);
+        [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+        [DllImport("kernel32.dll")] static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool member);
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, StringBuilder name, ref uint size);
         [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] static extern IntPtr CreateFileW(string name, uint access, uint sharing, ref Security security, uint disposition, uint flags, IntPtr template);
         [DllImport("kernel32.dll")] static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, uint flags, ref IntPtr size);
         [DllImport("kernel32.dll")] static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, IntPtr attribute, IntPtr value, IntPtr size, IntPtr previous, IntPtr returned);
@@ -108,6 +111,14 @@ namespace GentleDot.CI {
         static void Require(bool ok) { if (!ok) throw new InvalidOperationException("Contained launch failed"); }
         static void Close(ref IntPtr handle) { if (handle != IntPtr.Zero && handle != new IntPtr(-1)) CloseHandle(handle); handle = IntPtr.Zero; }
         public static OwnedDaemon Start(string executable, string entry, string directory, IDictionary<string,string> environment) {
+            Require(executable.IndexOf('"') < 0 && (String.IsNullOrEmpty(entry) || entry.IndexOf('"') < 0));
+            return StartCore(executable, String.IsNullOrEmpty(entry) ? "" : " \"" + entry + "\"", directory, environment);
+        }
+        public static OwnedDaemon CheckNodeVersion(string executable, string directory, IDictionary<string,string> environment) {
+            Require(executable.IndexOf('"') < 0);
+            return StartCore(executable, " -e \"process.exit(process.version==='v24.14.1'?0:1)\"", directory, environment);
+        }
+        static OwnedDaemon StartCore(string executable, string arguments, string directory, IDictionary<string,string> environment) {
             IntPtr job = IntPtr.Zero, sink = IntPtr.Zero, attributes = IntPtr.Zero;
             IntPtr handles = IntPtr.Zero, block = IntPtr.Zero;
             ProcessInfo child = new ProcessInfo(); bool initialized = false, assigned = false;
@@ -138,9 +149,7 @@ namespace GentleDot.CI {
                 StartupEx startup = new StartupEx(); startup.Info.Size = (uint)Marshal.SizeOf<StartupEx>();
                 startup.Info.Flags = 0x100; startup.Info.Input = sink; startup.Info.Output = sink; startup.Info.Error = sink;
                 startup.Attributes = attributes;
-                // These are exact Windows file paths (not shell commands); reject embedded quotes.
-                Require(executable.IndexOf('"') < 0 && entry.IndexOf('"') < 0);
-                var command = new StringBuilder("\"" + executable + "\" \"" + entry + "\"");
+                var command = new StringBuilder("\"" + executable + "\"" + arguments);
                 Require(CreateProcessW(executable, command, IntPtr.Zero, IntPtr.Zero, true,
                     CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW,
                     block, directory, ref startup, out child));
@@ -173,6 +182,20 @@ namespace GentleDot.CI {
                 return unchecked((int)code);
             }
         }
+        public bool OwnsLiveImage(uint pid, string executable) {
+            // Check the image and membership through the same queried OS process handle.
+            IntPtr candidate = OpenProcess(0x101000, false, pid); // SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION
+            if (candidate == IntPtr.Zero) return false;
+            try {
+                bool member;
+                uint size = 32768;
+                var image = new StringBuilder((int)size);
+                return IsProcessInJob(candidate, job, out member) && member &&
+                    QueryFullProcessImageNameW(candidate, 0, image, ref size) &&
+                    String.Equals(image.ToString(), executable, StringComparison.OrdinalIgnoreCase) &&
+                    WaitForSingleObject(candidate, 0) == 258;
+            } finally { Close(ref candidate); }
+        }
         public bool Stop() {
             // Root exit is irrelevant: terminate and verify the ENTIRE owned job.
             if (job == IntPtr.Zero || !TerminateJobObject(job, 1)) return false;
@@ -191,11 +214,16 @@ namespace GentleDot.CI {
 '@
 }
 
-function New-DaemonStartupOwner($Info) {
+function Initialize-DaemonStartupOwner {
     if (-not ('GentleDot.CI.OwnedDaemon' -as [type])) {
         Add-Type -TypeDefinition (Get-DaemonStartupNativeSource) -ErrorAction Stop 2>$null
     }
-    return [GentleDot.CI.OwnedDaemon]::Start($Info.FileName, $Info.ArgumentList[0], $Info.WorkingDirectory, $Info.Environment)
+}
+
+function New-DaemonStartupOwner($Info) {
+    Initialize-DaemonStartupOwner
+    $entry = if ($Info.ArgumentList.Count -gt 0) { $Info.ArgumentList[0] }
+    return [GentleDot.CI.OwnedDaemon]::Start($Info.FileName, $entry, $Info.WorkingDirectory, $Info.Environment)
 }
 
 function Start-DaemonStartupProcess {
