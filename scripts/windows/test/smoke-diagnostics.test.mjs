@@ -25,12 +25,12 @@ function run(body) {
  assert.equal(result.stderr, '');
  return result.stdout.trim();
 }
-async function observe(server, body) {
+async function observe(server, setup = '') {
  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
  const sockets = new Set();
  server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
  try {
-  const script = `$ErrorActionPreference='Stop'; Import-Module ${quote(resolve('scripts/windows/smoke-diagnostics.psm1'))} -Force; $p=Get-SmokeObservation -Port ${server.address().port}; ${body}`;
+  const script = `$ErrorActionPreference='Stop'; Import-Module ${quote(resolve('scripts/windows/smoke-diagnostics.psm1'))} -Force; ${setup} $p=Get-SmokeObservation -Port ${server.address().port}; ${emitProbe}`;
   const child = spawn(ps, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { env });
   let stdout = '', stderr = '';
   child.stdout.on('data', b => { stdout += b; }); child.stderr.on('data', b => { stderr += b; });
@@ -43,6 +43,12 @@ async function observe(server, body) {
  }
 }
 const emitProbe = `$d=New-SmokeDiagnostic -Outcome timeout -Probe $p; $d | ConvertTo-Json -Compress`;
+function observeResponse(server) {
+ // Give synthetic replies time to arrive on a busy runner. Timeout fixtures use the real deadline.
+ return observe(server, `& (Get-Module smoke-diagnostics) {
+  function script:New-SmokeHttpDeadline { [Threading.CancellationTokenSource]::new(5000) }
+ };`);
+}
 function checkProbe(output, expected) {
  assert.ok(Buffer.byteLength(output) <= 1024);
  assert.doesNotMatch(output, /SECRET|private|127\.0\.0\.1|https?:\/\/|Users|authorization/i);
@@ -55,23 +61,31 @@ test('TCP refusal, timeout and unreachable are distinguished without exception s
  assert.deepEqual(run(`Get-SmokeTcpState ([TimeoutException]::new('SECRET')); Get-SmokeTcpState ([OperationCanceledException]::new('SECRET')); Get-SmokeTcpState ([Net.Sockets.SocketException]::new(10060)); Get-SmokeTcpState ([Net.Sockets.SocketException]::new(10051)); Get-SmokeTcpState ([Net.Sockets.SocketException]::new(10065)); Get-SmokeTcpState ([Exception]::new('SECRET'))`).split(/\r?\n/), ['connecttimeout','connecttimeout','connecttimeout','unreachable','unreachable','other']);
  assert.deepEqual(run(`foreach ($port in @(0,65536)) { try { Get-SmokeObservation -Port $port } catch { 'rejected' } }`).split(/\r?\n/), ['rejected','rejected']);
 });
-test('connected HTTP status errors and response timeouts stay separate from TCP and JSON', async () => {
- const failed = await observe(createServer((req, res) => { res.writeHead(503, { 'x-private': 'SECRET' }); res.end('SECRET'); }), emitProbe);
+test('HTTP observation uses a private 500 ms deadline by default', () => {
+ const source = readFileSync('scripts/windows/smoke-diagnostics.psm1', 'utf8');
+ assert.match(source, /function New-SmokeHttpDeadline \{\s*\[Threading\.CancellationTokenSource\]::new\(500\)\s*\}/);
+ assert.match(source, /function Get-SmokeObservation \{[\s\S]*?\$deadline = New-SmokeHttpDeadline/);
+ assert.equal(run(`(Get-Module smoke-diagnostics).ExportedFunctions.ContainsKey('New-SmokeHttpDeadline')`), 'False');
+});
+test('HTTP status errors and transport failures stay separate from TCP and JSON', async () => {
+ const failed = await observeResponse(createServer((req, res) => { res.writeHead(503, { 'x-private': 'SECRET' }); res.end('SECRET'); }));
  checkProbe(failed, { ...baseProbe, httpState: 'statuserror', httpStatus: 503, jsonState: 'notattempted', healthShape: 'missing', healthState: 'notattempted' });
- const timed = await observe(createTcpServer(() => {}), emitProbe);
- checkProbe(timed, { ...baseProbe, httpState: 'timeout', httpStatus: null, jsonState: 'notattempted', healthShape: 'missing', healthState: 'notattempted' });
- const broken = await observe(createTcpServer(socket => { socket.on('data', () => socket.destroy()); }), emitProbe);
+ const broken = await observeResponse(createTcpServer(socket => { socket.on('data', () => socket.destroy()); }));
  checkProbe(broken, { ...baseProbe, httpState: 'failure', httpStatus: null, jsonState: 'notattempted', healthShape: 'missing', healthState: 'notattempted' });
  let requests = 0;
- const redirect = await observe(createServer((req, res) => { requests++; res.writeHead(302, { location: 'http://private.invalid/SECRET' }); res.end(); }), emitProbe);
+ const redirect = await observeResponse(createServer((req, res) => { requests++; res.writeHead(302, { location: 'http://private.invalid/SECRET' }); res.end(); }));
  checkProbe(redirect, { ...baseProbe, httpState: 'statuserror', httpStatus: 302, jsonState: 'notattempted', healthShape: 'missing', healthState: 'notattempted' });
  assert.equal(requests, 1, 'No automatic redirects or retries');
- const slowBody = await observe(createServer((req, res) => { res.writeHead(200); res.flushHeaders(); }), emitProbe);
+});
+test('withheld HTTP headers and body time out under the default deadline', async () => {
+ const timed = await observe(createTcpServer(() => {}));
+ checkProbe(timed, { ...baseProbe, httpState: 'timeout', httpStatus: null, jsonState: 'notattempted', healthShape: 'missing', healthState: 'notattempted' });
+ const slowBody = await observe(createServer((req, res) => { res.writeHead(200); res.flushHeaders(); }));
  checkProbe(slowBody, { ...baseProbe, httpState: 'timeout', jsonState: 'notattempted', healthShape: 'missing', healthState: 'notattempted' });
 });
 for (const [name, body] of [['empty', ''], ['whitespace', ' \t\r\n ']]) {
  test(`HTTP 200 ${name} body is invalid JSON, not a decoded JSON null`, async () => {
-  const output = await observe(createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(body); }), emitProbe);
+  const output = await observeResponse(createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(body); }));
   checkProbe(output, { ...baseProbe, jsonState: 'invalid', healthShape: 'missing', healthState: 'notattempted' });
  });
 }
@@ -86,7 +100,7 @@ test('JSON invalid, oversized and invalid health shapes remain bounded and never
   ['{"ok":true,"agentState":"idle","error":"SECRET"}', {}],
   ['{"ok":true,"agentState":"idle"}' + ' '.repeat(4065), {}],
  ]) {
-  const output = await observe(createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(body); }), emitProbe);
+  const output = await observeResponse(createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(body); }));
   checkProbe(output, { ...baseProbe, ...changes });
  }
 });

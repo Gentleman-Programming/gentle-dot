@@ -42,6 +42,10 @@ function ConvertTo-SmokeProbe([System.Collections.IDictionary]$Probe) {
     }
 }
 
+function New-SmokeHttpDeadline {
+    [Threading.CancellationTokenSource]::new(500)
+}
+
 function Get-SmokeObservation {
     param([Parameter(Mandatory=$true)][ValidateRange(1,65535)][int]$Port)
     # A single post-readiness snapshot, not a retry or a readiness input.
@@ -60,7 +64,7 @@ function Get-SmokeObservation {
     $handler.UseProxy = $false; $handler.UseCookies = $false; $handler.AllowAutoRedirect = $false
     $handler.MaxResponseHeadersLength = 8
     $client = [Net.Http.HttpClient]::new($handler)
-    $deadline = [Threading.CancellationTokenSource]::new(500)
+    $deadline = New-SmokeHttpDeadline
     $response = $null; $stream = $null
     try {
         $response = $client.GetAsync("http://127.0.0.1:$Port/health", [Net.Http.HttpCompletionOption]::ResponseHeadersRead, $deadline.Token).GetAwaiter().GetResult()
