@@ -107,6 +107,11 @@ mod native {
     use windows_sys::Win32::System::Pipes::*;
     use windows_sys::Win32::System::Threading::*;
 
+    #[cfg(test)]
+    mod admission_fixture {
+        include!("windows_admission_fixture.rs");
+    }
+
     // SDK winnt.h definitions, scoped here because the enabled windows-sys
     // namespaces do not expose them: ACE_HEADER.AceType and SID count are BYTEs.
     const ACCESS_ALLOWED_ACE_TYPE: u8 = 0x00;
@@ -477,6 +482,8 @@ mod native {
             // An unassigned failed child may remain suspended on persistent OS failure;
             // neither error nor closing a process handle is claimed to prove termination.
             if let Err(error) = self.complete(Duration::ZERO) {
+                #[cfg(test)]
+                if admission_fixture::quiet_drop() { return; }
                 eprintln!("gentle-dot: owned Windows daemon cleanup was not confirmed: {error}");
             }
         }
