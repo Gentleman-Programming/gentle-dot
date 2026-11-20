@@ -152,12 +152,53 @@ nor publication uses the result.
 
 The temporary read-only workflow runs only on a push to
 `qa/windows-storage-diagnostic-44794993333` in the official repository (T21/S8,
-`odd/tasks/windows-installer-preview-release.md` L53). It authenticates both
-original archives from completed run `44794993333` before unpacking, then checks
+`odd/tasks/windows-installer-preview-release.md` L53–L58). It authenticates the
+three original archives from completed run `44794993333` before unpacking, then checks
 the original source-bound QA payload and restored inventory before the same
-probe. The installer is verified as bytes, never executed. Missing, expired or
+probe. The desktop's separately pinned executable digest is checked before
+execution. The hosted-only managed trace restores a second runtime, verifies its
+full inventory before and after substituting only `daemon/cli.mjs`, and launches
+the pinned desktop with the existing quiet Job owner. It reports only the last
+correlated loopback phase (or `trace-no-evidence`) and a fixed startup outcome.
+Neither diagnostic qualifies a release. The installer is verified as bytes, never executed. Missing, expired or
 mismatched inputs fail closed without rebuilding. Inert local contracts:
 `node --test scripts/windows/test/packaged-storage-admission.test.mjs scripts/package/test/windows-storage-diagnostic.test.mjs scripts/package/test/windows-preview-release.test.mjs`.
+
+#### Diagnostic-only managed startup phase bundle
+
+From the matching checkout on a disposable Windows x64 GitHub Actions runner,
+use producer Node 24.14.1 and the already-installed frozen workspace (including
+`packages/daemon` esbuild 0.28.2 and bundled workspace dependencies). No reinstall,
+packaging or installer launch is needed. Choose a **new** absolute direct child of
+system TEMP named `gentle-dot-startup-trace-<32 lowercase hex>` (use a separate
+random suffix, not the session ID):
+
+```powershell
+node scripts/windows/test/startup-phase-bundle.mjs --out-dir $traceScratch
+```
+
+Exit 0 prints `STARTUP_PHASE_BUNDLE: ok` and creates only
+`startup-phase-cli.mjs` in that directory. Exit 2 prints usage; exit 1 prints
+`STARTUP_PHASE_BUNDLE: scratch-refused`, `source-drift`, `anchor-drift` or
+`build-failed` to stderr (each with the same prefix). Raw esbuild diagnostics
+are suppressed. Existing output is never overwritten.
+`buildDiagnosticBundle(outDir)`, `instrumentSource(name, source)`, `phases`, and
+`makePhaseTrace(env, platform, createSocket)` are importable; importing does not build.
+
+For the separate hosted launch, authenticate/verify the pinned artifacts first.
+Use the original desktop and a disposable copy of its matching runtime with only
+`daemon/cli.mjs` substituted, preserving its layout, native Job/FD3 ownership and
+synthetic state. Bind a private step-owned IPv4 UDP receiver on `127.0.0.1` first.
+In the diagnostic launch environment only (`CI=true`, `GITHUB_ACTIONS=true`), set
+`GENTLE_DOT_CI_TRACE_PORT` to the canonical decimal port (1–65535) and
+`GENTLE_DOT_CI_TRACE_ID` to fresh random lowercase 32-hex (memory only, not a
+credential). Accept only `<id> <phase>` datagrams with exact correlation and a
+phase from the exported ordered `phases`; project only the enum, never the ID.
+No datagrams or session metadata go to disk. UDP is best effort: loss/reordering
+is possible; no evidence is not a refusal, and the last observed phase is not an
+exact error. `entry` is after static imports; `*-refused` identifies a bounded
+failure site, `startup-failed` is otherwise generic, and `http-listening` is not
+attributed readiness. Neither acceptance nor publishing uses this bundle.
 
 #### Checkout-only managed admission diagnostic
 

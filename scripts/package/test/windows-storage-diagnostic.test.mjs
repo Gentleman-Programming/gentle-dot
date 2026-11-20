@@ -22,11 +22,11 @@ test('standalone diagnostic has one Windows job and only its exact read-only pus
   assert.equal(job.permissions, undefined);
   assert.match(job.steps[0].uses, /^actions\/checkout@[a-f0-9]{40}$/);
   assert.deepEqual(job.steps[0].with, { 'persist-credentials': false, ref: '${{ github.sha }}' });
-  assert.equal(job.steps.length, 4);
-  assert.deepEqual(job.steps.slice(1).map(step => step.env), [{ GH_TOKEN: '${{ github.token }}' }, undefined, undefined]);
+  assert.equal(job.steps.length, 8);
+  assert.deepEqual(job.steps.slice(1).map(step => step.env), [{ GH_TOKEN: '${{ github.token }}' }, ...Array(6).fill(undefined)]);
   assert.equal(job.steps[3].run, './scripts/windows/test/run-packaged-storage-admission.ps1');
   assert.equal(job.steps[3]['timeout-minutes'], 2);
-  assert.doesNotMatch(JSON.stringify(job.steps), /gh release|upload-artifact|package\.ps1|smoke-install|setup-node|GITHUB_JOB\s*=/);
+  assert.doesNotMatch(JSON.stringify(job.steps), /gh release|upload-artifact|package\.ps1|smoke-install|GITHUB_JOB\s*=/);
 });
 
 test('original producer and both archives are authenticated before unpacking or probing', () => {
@@ -50,6 +50,20 @@ test('original producer and both archives are authenticated before unpacking or 
   assert.doesNotMatch(acquire, /Expand-Archive|tar -xf/);
   assert.match(restore, /Expand-Archive[\s\S]*windows-preview-release\.mjs[\s\S]*tar -xf[\s\S]*runtime-integrity\.mjs verify/);
   assert.doesNotMatch(restore, /GH_TOKEN|gh api|setup\.exe/);
+});
+
+test('managed trace authenticates the desktop and runs only after the frozen builder dependencies', () => {
+  const { steps } = parse(read('.github/workflows/windows-storage-diagnostic.yml')).jobs.checks;
+  for (const pin of ['14660115322', 'windows-preview-desktop', '0ebd7f24240a85bccc6077b23fa50a413a87da901968ce74923301f1ae499e92']) {
+    assert.ok(steps[1].run.includes(pin));
+  }
+  assert.match(steps[2].run, /Get-FileHash[\s\S]*122f315f652cebc8d9a5d5e21658fac8e8253fa27c1bcfcbec59938e35adf4f4/);
+  assert.match(steps[4].uses, /^actions\/setup-node@[a-f0-9]{40}$/);
+  assert.equal(steps[4].with['node-version'], '24.14.1');
+  assert.match(steps[5].uses, /^pnpm\/action-setup@[a-f0-9]{40}$/);
+  assert.match(steps[6].run, /pnpm install --frozen-lockfile --ignore-scripts/);
+  assert.equal(steps[7].run, './scripts/windows/test/run-startup-phase-trace.ps1');
+  assert.ok(steps[7]['timeout-minutes'] <= 3);
 });
 
 test('PowerShell wrapper emits only fixed classifications or a validated Node result', () => {

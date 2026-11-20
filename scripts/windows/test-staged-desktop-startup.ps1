@@ -72,10 +72,23 @@ function Get-StagedListenerPid($Owner, [int]$Port, [string]$NodePath) {
     }
 }
 
+function Test-StagedStartupTraceHost {
+    return ($IsWindows -and $env:CI -ceq 'true' -and $env:GITHUB_ACTIONS -ceq 'true' -and
+        $env:RUNNER_ENVIRONMENT -ceq 'github-hosted' -and $env:GITHUB_JOB -ceq 'checks' -and
+        $env:GITHUB_REPOSITORY -ceq 'Gentleman-Programming/gentle-dot' -and
+        $env:GITHUB_WORKFLOW -ceq 'Windows storage diagnostic 44794993333' -and
+        $env:GITHUB_EVENT_NAME -ceq 'push' -and $env:GITHUB_REF -ceq 'refs/heads/qa/windows-storage-diagnostic-44794993333')
+}
+
 function Invoke-StagedDesktopStartup {
-    param([string]$Runtime, [string]$Desktop, [string]$DesktopSha256, [string]$DiagnosticsPath = '')
+    param([string]$Runtime, [string]$Desktop, [string]$DesktopSha256, [string]$DiagnosticsPath = '',
+        [int]$TracePort, [string]$TraceId)
     $ErrorActionPreference = 'Stop'
     if ($env:CI -cne 'true') { return 'staged-desktop-startup-not-ci' }
+    # Internal opt-in only: the preview CLI exposes neither field.
+    $trace = $PSBoundParameters.ContainsKey('TracePort') -or $PSBoundParameters.ContainsKey('TraceId')
+    if ($trace -and (-not (Test-StagedStartupTraceHost) -or $TracePort -lt 1 -or $TracePort -gt 65535 -or
+        $TraceId -cnotmatch '\A[a-f0-9]{32}\z' -or $DiagnosticsPath)) { return 'staged-desktop-startup-trace-refused' }
     try {
         if (-not $Runtime) { return 'staged-desktop-startup-invalid-runtime' }
         $Runtime = [IO.Path]::GetFullPath($Runtime)
@@ -127,6 +140,13 @@ function Invoke-StagedDesktopStartup {
             $outcome = 'failed' # Only managed health below can declare success.
             $info.FileName = $Desktop
             $info.ArgumentList.Clear() # Genuine desktop manager; no raw Node CLI arguments.
+            if ($trace) {
+                # Add only after quiet preflights, to the already isolated desktop map.
+                $info.Environment['CI'] = 'true'
+                $info.Environment['GITHUB_ACTIONS'] = 'true'
+                $info.Environment['GENTLE_DOT_CI_TRACE_PORT'] = [string]$TracePort
+                $info.Environment['GENTLE_DOT_CI_TRACE_ID'] = $TraceId
+            }
             $owner = New-DaemonStartupOwner $info
             $clock = New-DaemonStartupClock
             $outcome = 'timeout'; $kind = 'timeout'; $listenerState = 'notobserved'

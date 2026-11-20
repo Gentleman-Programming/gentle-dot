@@ -1,4 +1,4 @@
-# Temporary T21 / S8 diagnostic: odd/tasks/windows-installer-preview-release.md L53.
+# Temporary T21/T23 diagnostic: odd/tasks/windows-installer-preview-release.md L53-L58.
 name: Windows storage diagnostic 44794993333
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
-      - name: Acquire and authenticate the two pinned original archives
+      - name: Acquire and authenticate the three pinned original archives
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -49,13 +49,14 @@ jobs:
             $build = @($jobs.jobs | Where-Object { $_.name -ceq 'build' })
             if ($build.Count -ne 1 -or $build[0].run_id -ne $runId -or $build[0].head_sha -cne $source -or
                 $build[0].status -cne 'completed' -or $build[0].conclusion -cne 'success') { throw 'build' }
-            foreach ($name in @('Build existing guarded Windows producer', 'Collect exact QA payload before acceptance checks', 'Archive only the staged product runtime for isolated checks')) {
+            foreach ($name in @('Build existing guarded Windows producer', 'Collect exact QA payload before acceptance checks', 'Archive only the staged product runtime for isolated checks', 'Hash the exact desktop built with this runtime')) {
               $step = @($build[0].steps | Where-Object { $_.name -ceq $name -and $_.conclusion -ceq 'success' })
               if ($step.Count -ne 1) { throw 'build-step' }
             }
             $artifacts = @(
               @{ Id = 14659228446; Name = 'windows-preview-runtime'; Hash = '74dfbd3bc141eadc0d01ef2e4ea5fd645c60b4a3f5caaa05a8796435a6e851cf' }
               @{ Id = 14659433165; Name = 'windows-installer-preview'; Hash = '93d3199024ad5f465d3f9f5649698517955b01d3721e4c1a1e2c3f4f6e764aee' }
+              @{ Id = 14660115322; Name = 'windows-preview-desktop'; Hash = '0ebd7f24240a85bccc6077b23fa50a413a87da901968ce74923301f1ae499e92' }
             )
             foreach ($artifact in $artifacts) {
               $failure = 'artifact-identity-failed'
@@ -96,7 +97,25 @@ jobs:
             $failure = 'runtime-inventory-failed'
             node scripts/windows/runtime-integrity.mjs verify (Join-Path $root 'runtime') (Join-Path $qa 'runtime-manifest.json') >$null 2>$null
             if ($LASTEXITCODE -ne 0) { throw 'inventory' }
+            $failure = 'desktop-identity-failed'
+            Expand-Archive -LiteralPath (Join-Path $root 'windows-preview-desktop.zip') -DestinationPath (Join-Path $root 'desktop')
+            $desktop = Join-Path $root 'desktop/gentle-dot.exe'
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $desktop).Hash.ToLowerInvariant() -cne '122f315f652cebc8d9a5d5e21658fac8e8253fa27c1bcfcbec59938e35adf4f4') { throw 'desktop' }
           } catch { throw $failure }
       - name: Diagnose exact packaged storage; not installer acceptance
         timeout-minutes: 2
         run: ./scripts/windows/test/run-packaged-storage-admission.ps1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.14.1'
+          architecture: x64
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - name: Install frozen diagnostic builder inputs
+        run: |
+          try {
+            pnpm install --frozen-lockfile --ignore-scripts >$null 2>$null
+            if ($LASTEXITCODE -ne 0) { throw 'dependencies' }
+          } catch { throw 'trace-dependencies-failed' }
+      - name: Trace binary-pinned managed startup; not installer acceptance
+        timeout-minutes: 3
+        run: ./scripts/windows/test/run-startup-phase-trace.ps1
