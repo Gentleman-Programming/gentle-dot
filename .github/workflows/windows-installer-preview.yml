@@ -29,7 +29,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Workflow and publication source contracts
-        run: node --test scripts/package/test/windows-preview-release.test.mjs scripts/package/test/ci-workflow.test.mjs
+        run: node --test scripts/package/test/windows-preview-release.test.mjs scripts/package/test/ci-workflow.test.mjs scripts/windows/test/packaged-storage-admission.test.mjs
       - name: Inert startup contracts including opt-in diagnostics
         run: |
           $env:GENTLE_DOT_CI_TEST_ROOT = Join-Path $env:RUNNER_TEMP 'retained-startup-contracts'
@@ -209,6 +209,55 @@ jobs:
         with:
           name: windows-preview-desktop
           path: build/desktop-transfer
+      - name: Diagnose packaged Windows storage (non-gating)
+        id: packaged-storage
+        if: matrix.kind == 'startup'
+        timeout-minutes: 2
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Assert-OrdinaryDirectories([string]$path) {
+            if ($path -notmatch '^[A-Z]:\\[^\\]' -or [IO.DriveInfo]::new([IO.Path]::GetPathRoot($path)).DriveType -ne 'Fixed') { throw 'prerequisite' }
+            for ($dir = [IO.DirectoryInfo]::new($path); $null -ne $dir; $dir = $dir.Parent) {
+              $attributes = [IO.File]::GetAttributes($dir.FullName)
+              if (($attributes -band ([IO.FileAttributes]'ReparsePoint, Device')) -or
+                  -not ($attributes -band [IO.FileAttributes]::Directory)) { throw 'prerequisite' }
+            }
+          }
+          $result = 'prerequisite-failed'
+          $child = $null
+          try {
+            if ($env:CI -cne 'true' -or $env:GITHUB_ACTIONS -cne 'true' -or $env:GITHUB_JOB -cne 'checks') { throw 'prerequisite' }
+            $runtime = [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE 'build/windows/runtime'))
+            $temp = [IO.Path]::GetFullPath($env:RUNNER_TEMP)
+            Assert-OrdinaryDirectories $temp
+            foreach ($relative in @('node/node.exe', 'bin/private-storage.exe')) {
+              $image = Join-Path $runtime $relative
+              Assert-OrdinaryDirectories ([IO.Path]::GetDirectoryName($image))
+              $attributes = [IO.File]::GetAttributes($image)
+              if ($attributes -band ([IO.FileAttributes]'Directory, ReparsePoint, Device')) { throw 'prerequisite' }
+            }
+            $info = [Diagnostics.ProcessStartInfo]::new((Join-Path $runtime 'node/node.exe'))
+            $info.ArgumentList.Add((Join-Path $env:GITHUB_WORKSPACE 'scripts/windows/test/packaged-storage-admission.mjs'))
+            $info.WorkingDirectory = $runtime
+            $info.UseShellExecute = $false
+            $info.RedirectStandardOutput = $true
+            $info.RedirectStandardError = $true
+            $info.Environment.Clear()
+            foreach ($name in @('CI', 'GITHUB_ACTIONS', 'GITHUB_JOB', 'SystemRoot')) {
+              $info.Environment[$name] = [Environment]::GetEnvironmentVariable($name)
+            }
+            $info.Environment['RUNNER_TEMP'] = $temp
+            $child = [Diagnostics.Process]::Start($info)
+            $discard = $child.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
+            $output = $child.StandardOutput.ReadToEnd().TrimEnd("`r", "`n")
+            $child.WaitForExit()
+            $discard.GetAwaiter().GetResult()
+            $phase = '(?:ok|timeout|launch-failed|helper-failed|invocation-failed|unexpected-effect|skipped)'
+            if ($output -cmatch "\A$phase(?: $phase){3}\z" -and (($child.ExitCode -eq 0) -eq ($output -ceq 'ok ok ok ok'))) { $result = $output }
+          } catch { } finally { if ($null -ne $child) { $child.Dispose() } }
+          "Windows packaged storage (ordinary / verbatim / ensure / write-readback): **$result** (not an acceptance gate)." >> $env:GITHUB_STEP_SUMMARY
+          if ($result -cne 'ok ok ok ok') { exit 1 }
       - name: Packaged Node preflight and staged native desktop startup contract
         if: matrix.kind == 'startup'
         env:

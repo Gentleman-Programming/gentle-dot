@@ -151,9 +151,27 @@ test('publication only follows successful build, validates exact payload and cre
  assert.match(publish.run,/--prerelease/);assert.match(publish.run,/--latest=false/);assert.match(publish.run,/--target "\$SOURCE_SHA"/);assert.match(publish.run,/windows-preview-\$GITHUB_RUN_ID-\$GITHUB_RUN_ATTEMPT/);
  assert.equal(publish.env.GH_TOKEN,'${{ github.token }}');
  for(const [name,job] of Object.entries(workflow().jobs))for(const s of job.steps){
-  if(name!=='build'||s.id!=='managed-admission')assert.equal(s['continue-on-error'],undefined);
+  if(!((name==='build'&&s.id==='managed-admission')||(name==='checks'&&s.id==='packaged-storage')))assert.equal(s['continue-on-error'],undefined);
   if(!s.run?.includes('gh release create')&&s.env)assert.equal(s.env.GH_TOKEN,undefined);
  }
+});
+
+test('packaged storage is a bounded startup-only diagnostic after verified restore, not an acceptance gate',()=>{
+ const {contracts,checks}=workflow().jobs;
+ const step=checks.steps.find(s=>s.id==='packaged-storage');
+ assert.ok(step);
+ assert.ok(contracts.steps.some(s=>s.run?.includes('scripts/windows/test/packaged-storage-admission.test.mjs')));
+ assert.equal(step.if,"matrix.kind == 'startup'");
+ assert.equal(step['continue-on-error'],true);
+ assert.equal(step['timeout-minutes'],2);
+ const position=checks.steps.indexOf(step);
+ assert.ok(position>checks.steps.findIndex(s=>s.run?.includes('runtime-integrity.mjs verify')));
+ assert.ok(position<checks.steps.findIndex(s=>s.run?.includes('test-staged-desktop-startup.ps1')));
+ assert.match(step.run,/build\/windows\/runtime/);
+ assert.match(step.run,/node\/node\.exe/);
+ assert.match(step.run,/bin\/private-storage\.exe/);
+ assert.match(step.run,/ReparsePoint/);
+ assert.match(step.run,/GITHUB_STEP_SUMMARY/);
 });
 
 test('managed admission adds inert contracts and runs only after all required producer uploads',()=>{

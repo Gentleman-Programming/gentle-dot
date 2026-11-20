@@ -129,6 +129,25 @@ assignment and whole-job teardown use the existing CI adapter.
 This proves startup only, not agent idle, graceful Stop, or installed readiness.
 The independent NSIS lifecycle job is unchanged; both jobs must pass to publish.
 
+#### Packaged Windows storage diagnostic
+
+After archive and runtime verification, a separate non-gating startup step uses
+that runtime's Windows x64 Node 24.14.1 and exact `bin/private-storage.exe`.
+It rejects reparse points and uses a fresh runner-temp directory, not a product
+profile. It runs the same absent-parent `secure-file` no-write control with an
+ordinary executable path and with its canonical `\\?\` spelling. It then uses a
+passing spelling (preferring verbatim) to test `ensure-dir` and one atomic
+`write-file` with fixed synthetic bytes and exact readback. The helper calls
+use the production `execFileSync` options, including a 15-second timeout each.
+
+The job summary reports only fixed results for ordinary, verbatim, ensure and
+write/readback, or `prerequisite-failed`; no paths, raw output or probe artifacts
+are uploaded. A spelling difference narrows investigation to the invocation
+route; a helper exit is distinct from a launch or timeout failure. A passing
+result proves only the synthetic storage route on that runner, not installed
+startup or readiness. Neither native acceptance check nor publication uses the
+result. Inert local contracts: `node --test scripts/windows/test/packaged-storage-admission.test.mjs scripts/package/test/windows-preview-release.test.mjs`.
+
 #### Checkout-only managed admission diagnostic
 
 Run the portable contracts from the repository root:
