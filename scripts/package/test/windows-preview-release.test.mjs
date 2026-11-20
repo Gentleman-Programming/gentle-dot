@@ -57,7 +57,8 @@ test('Windows CI is narrowly triggered, natively builds and retains all mandator
  assert.ok(build>=0);assert.ok(all.some(s=>s.run?.includes('./scripts/windows/test-staged-desktop-startup.ps1 -Runtime')));
  assert.ok(all.some(s=>s.run?.includes('./scripts/windows/smoke-install.ps1')));
  assert.ok(steps.some(s=>s.id==='collect' && s.run?.includes('ci-native.mjs collect --target windows-x64')));
- for(const step of steps)assert.equal(step['continue-on-error'],undefined);
+ assert.equal(b['continue-on-error'],undefined);
+ for(const step of steps)if(step.id!=='managed-admission')assert.equal(step['continue-on-error'],undefined);
  assert.ok(steps.some(s=>s.uses==='actions/upload-artifact@v4'&&s.if?.includes('always()')));
 });
 
@@ -149,5 +150,54 @@ test('publication only follows successful build, validates exact payload and cre
  const publish=p.steps.find(s=>s.run?.includes('gh release create'));assert.ok(publish);assert.ok(p.steps.some(s=>s.run?.includes('windows-preview-release.mjs')));
  assert.match(publish.run,/--prerelease/);assert.match(publish.run,/--latest=false/);assert.match(publish.run,/--target "\$SOURCE_SHA"/);assert.match(publish.run,/windows-preview-\$GITHUB_RUN_ID-\$GITHUB_RUN_ATTEMPT/);
  assert.equal(publish.env.GH_TOKEN,'${{ github.token }}');
- for(const job of Object.values(workflow().jobs))for(const s of job.steps){assert.equal(s['continue-on-error'],undefined);if(!s.run?.includes('gh release create')&&s.env)assert.equal(s.env.GH_TOKEN,undefined);}
+ for(const [name,job] of Object.entries(workflow().jobs))for(const s of job.steps){
+  if(name!=='build'||s.id!=='managed-admission')assert.equal(s['continue-on-error'],undefined);
+  if(!s.run?.includes('gh release create')&&s.env)assert.equal(s.env.GH_TOKEN,undefined);
+ }
+});
+
+test('managed admission adds inert contracts and runs only after all required producer uploads',()=>{
+ const {contracts,build}=workflow().jobs;
+ assert.equal(contracts.steps.find(s=>s.run?.includes('scripts/windows/test/managed-admission.test.mjs'))?.run,
+  'node --test scripts/windows/test/managed-admission.test.mjs');
+ const diagnostic=build.steps.find(s=>s.id==='managed-admission');
+ assert.ok(diagnostic);
+ assert.equal(diagnostic.if,undefined);
+ assert.equal(diagnostic['continue-on-error'],true);
+ assert.equal(diagnostic['timeout-minutes'],15);
+ assert.equal(diagnostic.run,'./scripts/windows/test/run-managed-admission.ps1');
+ const previous=build.steps.slice(0,build.steps.indexOf(diagnostic));
+ assert.deepEqual(previous.filter(s=>s.uses==='actions/upload-artifact@v4').map(s=>s.with.name),
+  ['windows-installer-preview','windows-preview-runtime','windows-preview-desktop']);
+ assert.deepEqual(previous.find(s=>s.uses==='actions/setup-node@v4').with,{'node-version':'24.14.1',architecture:'x64'});
+ const summary=build.steps.at(-1);
+ assert.equal(summary.if,"${{ !cancelled() && steps.managed-admission.outcome != 'skipped' }}");
+ assert.equal(summary.env.ADMISSION_RESULT,'${{ steps.managed-admission.outputs.result }}');
+ assert.match(summary.run,/GITHUB_STEP_SUMMARY/);
+ assert.match(summary.run,/'not-completed'/);
+});
+
+test('managed admission suppresses raw output and refuses to treat zero tests or a missing marker as success',()=>{
+ const runner=readFileSync('scripts/windows/test/run-managed-admission.ps1','utf8');
+ const command='cargo test --offline --locked --release --target x86_64-pc-windows-msvc --features tauri/custom-protocol --lib daemon::windows::native::admission_fixture::production_managed_admission -- --exact --ignored --nocapture';
+ assert.ok(runner.includes(`$output = @(& ${command} 2>$null)`));
+ for(const name of ['NODE_CHANNEL_FD','NODE_CHANNEL_SERIALIZATION_MODE','NODE_OPTIONS','NODE_PATH','NODE_V8_COVERAGE','NODE_REDIRECT_WARNINGS','NODE_COMPILE_CACHE']) assert.ok(runner.includes(`'${name}'`));
+ assert.match(runner,/\[Environment\]::SetEnvironmentVariable\(\$name, \[NullString\]::Value, 'Process'\)/);
+ assert.match(runner,/packages\/ui\/dist\/app\/index\.html/);
+ assert.match(runner,/packages\/daemon\/native\/windows-stop\.node/);
+ assert.match(runner,/\$exitCode -eq 0[\s\S]*\$onePassed[\s\S]*\$output -ccontains 'admission-result:orderly'/);
+ assert.match(runner,/1 passed; 0 failed; 0 ignored; 0 measured;/);
+ assert.match(runner,/\^running 0 tests\$/);
+ assert.match(runner,/'zero-tests'/);
+ assert.match(runner,/if \(\$result -cne 'orderly'\) \{ exit 1 \}/);
+ assert.doesNotMatch(runner,/Write-(Host|Error|Output|Warning).*\$(output|_|Error)|Invoke-WebRequest|rustup|SHERPA_ONNX_(LIB|ARCHIVE)_DIR/);
+ const producer=readFileSync('scripts/windows/package.ps1','utf8');
+ assert.match(producer,/x86_64-pc-windows-msvc/);
+ assert.match(producer,/tauri build --config \$config --bundles nsis @targetArgs/);
+ const tauri=JSON.parse(readFileSync('apps/desktop/src-tauri/tauri.conf.json','utf8'));
+ assert.deepEqual([tauri.build.frontendDist,tauri.build.beforeBuildCommand],
+  ['../../../packages/ui/dist/app','pnpm --filter @gentle-dot/ui build']);
+ const windows=readFileSync('.github/workflows/windows.yml','utf8');
+ assert.match(windows,/cargo test --locked --lib/);
+ assert.match(windows,/could not find native static\s*\n\s*# library sherpa-onnx-c-api/);
 });

@@ -129,6 +129,52 @@ assignment and whole-job teardown use the existing CI adapter.
 This proves startup only, not agent idle, graceful Stop, or installed readiness.
 The independent NSIS lifecycle job is unchanged; both jobs must pass to publish.
 
+#### Checkout-only managed admission diagnostic
+
+Run the portable contracts from the repository root:
+
+```powershell
+node --test scripts/windows/test/managed-admission.test.mjs
+```
+
+For native proof, use a Windows x64 runner with MSVC Rust/SDK and the desktop
+library-test prerequisites from the Windows Rust job: `packages/ui/dist/app`
+exists and the sherpa-onnx static libraries are available (do not reuse a partial
+restored prebuilt tree). Run the preview producer's **Build required Windows
+native addon** step first: x64 MSVC, Node 24.14.1, and checksum-verified headers
+and `node.lib` for that exact version. With that runner's Node on PATH, run:
+
+```powershell
+$env:GENTLE_ADMISSION_NODE = (Get-Command node.exe -CommandType Application).Source
+Push-Location apps/desktop/src-tauri
+try {
+  cargo test --locked --lib daemon::windows::native::admission_fixture::production_managed_admission -- --ignored --exact --nocapture
+  if ($LASTEXITCODE -ne 0) { throw 'Managed admission diagnostic failed' }
+} finally {
+  Pop-Location
+}
+```
+
+Use a local fixed-drive temp directory with no reparse ancestors or ambient Node
+IPC. The diagnostic uses a native suspended Job launch and actual stop records,
+but only in a fresh synthetic temp directory. It suppresses child output and
+reports a fixed phase **before** cleanup. ACK confirms that the real listener
+was installed and the real exclusive FD3 callback exchanged bytes. A passing
+test additionally requires authenticated orderly drain, clean root exit, empty
+Job, and exact stop-record retirement. A deadline or pre-ACK exit is evidence to
+investigate admission, not HTTP. An ACK points to investigating the next
+pre-bind boundary separately; it does not certify readiness or qualify a release.
+
+The child imports the checkout TypeScript and resolves
+`packages/daemon/native/windows-stop.node` through the production loader. Even
+if the staged `node.exe` is selected explicitly, this does **not** verify the
+bundled CLI or that the package selected the same addon bytes. This ignored test
+is separate from the existing FD3 descendant-drain fixture and both installer
+acceptance gates. The Windows preview producer runs it after uploading all
+three build artifacts and reports its result separately. The diagnostic cannot
+replace either acceptance check; it can add up to 15 minutes before those jobs
+start.
+
 ### Packaged daemon launch contract (legacy Windows x64 CI entry point)
 
 After build and before installer smoke, CI invokes:

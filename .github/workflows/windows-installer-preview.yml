@@ -36,6 +36,8 @@ jobs:
           New-Item -ItemType Directory -Path $env:GENTLE_DOT_CI_TEST_ROOT | Out-Null
           $env:GENTLE_DOT_TEST_PWSH = (Get-Command pwsh.exe).Source
           node --test scripts/windows/test/daemon-startup.test.mjs scripts/windows/test/staged-desktop-startup.test.mjs scripts/windows/test/smoke-diagnostics.test.mjs
+      - name: Inert managed admission contracts
+        run: node --test scripts/windows/test/managed-admission.test.mjs
   build:
     outputs:
       runtime-sha256: ${{ steps.archive.outputs.sha256 }}
@@ -142,6 +144,18 @@ jobs:
           path: apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/gentle-dot.exe
           if-no-files-found: error
           retention-days: 14
+      - name: Diagnose checkout Windows managed admission (non-gating)
+        id: managed-admission
+        timeout-minutes: 15
+        continue-on-error: true
+        run: ./scripts/windows/test/run-managed-admission.ps1
+      - name: Summarize managed admission diagnostic
+        if: ${{ !cancelled() && steps.managed-admission.outcome != 'skipped' }}
+        env:
+          ADMISSION_RESULT: ${{ steps.managed-admission.outputs.result }}
+        run: |
+          $result = if ($env:ADMISSION_RESULT) { $env:ADMISSION_RESULT } else { 'not-completed' }
+          "Windows managed admission diagnostic: **$result** (not an acceptance gate)." >> $env:GITHUB_STEP_SUMMARY
   checks:
     name: Check ${{ matrix.kind }}
     needs: [contracts, build]
