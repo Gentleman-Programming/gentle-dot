@@ -167,11 +167,13 @@ test('packaged storage is a bounded startup-only diagnostic after verified resto
  const position=checks.steps.indexOf(step);
  assert.ok(position>checks.steps.findIndex(s=>s.run?.includes('runtime-integrity.mjs verify')));
  assert.ok(position<checks.steps.findIndex(s=>s.run?.includes('test-staged-desktop-startup.ps1')));
- assert.match(step.run,/build\/windows\/runtime/);
- assert.match(step.run,/node\/node\.exe/);
- assert.match(step.run,/bin\/private-storage\.exe/);
- assert.match(step.run,/ReparsePoint/);
- assert.match(step.run,/GITHUB_STEP_SUMMARY/);
+ assert.equal(step.run,'./scripts/windows/test/run-packaged-storage-admission.ps1');
+ const wrapper=readFileSync('scripts/windows/test/run-packaged-storage-admission.ps1','utf8');
+ assert.match(wrapper,/build\/windows\/runtime/);
+ assert.match(wrapper,/node\/node\.exe/);
+ assert.match(wrapper,/bin\/private-storage\.exe/);
+ assert.match(wrapper,/ReparsePoint/);
+ assert.match(wrapper,/GITHUB_STEP_SUMMARY/);
 });
 
 test('managed admission adds inert contracts and runs only after all required producer uploads',()=>{

@@ -141,12 +141,23 @@ passing spelling (preferring verbatim) to test `ensure-dir` and one atomic
 use the production `execFileSync` options, including a 15-second timeout each.
 
 The job summary reports only fixed results for ordinary, verbatim, ensure and
-write/readback, or `prerequisite-failed`; no paths, raw output or probe artifacts
-are uploaded. A spelling difference narrows investigation to the invocation
-route; a helper exit is distinct from a launch or timeout failure. A passing
-result proves only the synthetic storage route on that runner, not installed
-startup or readiness. Neither native acceptance check nor publication uses the
-result. Inert local contracts: `node --test scripts/windows/test/packaged-storage-admission.test.mjs scripts/package/test/windows-preview-release.test.mjs`.
+write/readback, or a fixed refusal. `wrapper-{host,paths,image,launch,parse}-failed`
+identifies the first failed wrapper stage; `entry-{host,paths,image,probe}-failed`
+means Node returned a fixed refusal instead of a four-phase tuple. No paths,
+raw output or probe artifacts are uploaded. A spelling difference narrows
+investigation to the invocation route; a helper exit is distinct from a launch
+or timeout failure. A passing tuple proves only the synthetic storage route on
+that runner, not installed startup or readiness. Neither native acceptance check
+nor publication uses the result.
+
+The temporary read-only workflow runs only on a push to
+`qa/windows-storage-diagnostic-44794993333` in the official repository (T21/S8,
+`odd/tasks/windows-installer-preview-release.md` L53). It authenticates both
+original archives from completed run `44794993333` before unpacking, then checks
+the original source-bound QA payload and restored inventory before the same
+probe. The installer is verified as bytes, never executed. Missing, expired or
+mismatched inputs fail closed without rebuilding. Inert local contracts:
+`node --test scripts/windows/test/packaged-storage-admission.test.mjs scripts/package/test/windows-storage-diagnostic.test.mjs scripts/package/test/windows-preview-release.test.mjs`.
 
 #### Checkout-only managed admission diagnostic
 

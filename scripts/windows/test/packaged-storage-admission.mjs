@@ -62,23 +62,52 @@ export function probeStorage(runtime, scratch, { exec, stat, read }) {
   return `${ordinary} ${extended} ${ensure} ${write}`;
 }
 
-function main() {
-  const { CI, GITHUB_ACTIONS, GITHUB_JOB, RUNNER_TEMP } = process.env;
+export function inspectStorageEntry(host, runtimePath, { cwd, realpath, isFile }) {
+  const { CI, GITHUB_ACTIONS, GITHUB_JOB, RUNNER_TEMP: temp } = host.env;
   if (CI !== 'true' || GITHUB_ACTIONS !== 'true' || GITHUB_JOB !== 'checks' ||
-      process.platform !== 'win32' || process.arch !== 'x64' || process.version !== 'v24.14.1' ||
-      process.argv.length !== 2 || !ordinaryDrivePath.test(RUNNER_TEMP ?? '')) return 'prerequisite-failed';
-  const runtime = realpathSync.native(fileURLToPath(new URL('../../../build/windows/runtime', import.meta.url)));
-  const expectedNode = win32.join(runtime, 'node', 'node.exe');
-  const executable = win32.join(runtime, 'bin', 'private-storage.exe');
-  if (!ordinaryDrivePath.test(runtime) || realpathSync.native(process.cwd()) !== runtime ||
-      realpathSync.native(process.execPath) !== expectedNode || !lstatSync(executable).isFile() ||
-      realpathSync.native(executable) !== executable) return 'prerequisite-failed';
-  const scratch = mkdtempSync(win32.join(RUNNER_TEMP, 'dot-storage-'));
-  return probeStorage(runtime, scratch, { exec: execFileSync, stat: lstatSync, read: readFileSync });
+      host.platform !== 'win32' || host.arch !== 'x64' || host.version !== 'v24.14.1' ||
+      host.argc !== 2) return 'entry-host-failed';
+  let runtime;
+  try {
+    if (!ordinaryDrivePath.test(temp ?? '')) return 'entry-paths-failed';
+    runtime = realpath(runtimePath());
+    if (!ordinaryDrivePath.test(runtime) || realpath(cwd()) !== runtime) return 'entry-paths-failed';
+  } catch { return 'entry-paths-failed'; }
+  try {
+    const expectedNode = win32.join(runtime, 'node', 'node.exe');
+    const executable = win32.join(runtime, 'bin', 'private-storage.exe');
+    if (realpath(host.execPath) !== expectedNode || !isFile(executable) ||
+        realpath(executable) !== executable) return 'entry-image-failed';
+  } catch { return 'entry-image-failed'; }
+  return { runtime, temp };
+}
+
+function hostedWorkflow(env) {
+  if (env.CI !== 'true' || env.GITHUB_ACTIONS !== 'true' || env.GITHUB_JOB !== 'checks' ||
+      env.RUNNER_ENVIRONMENT !== 'github-hosted' || env.GITHUB_REPOSITORY !== 'Gentleman-Programming/gentle-dot') return null;
+  if (env.GITHUB_WORKFLOW === 'Windows installer prerelease') return 'preview';
+  if (env.GITHUB_WORKFLOW === 'Windows storage diagnostic 44794993333' && env.GITHUB_EVENT_NAME === 'push' &&
+      env.GITHUB_REF === 'refs/heads/qa/windows-storage-diagnostic-44794993333') return 'diagnostic';
+  return null;
+}
+
+function main() {
+  const { env, platform, arch, version, execPath, argv } = process;
+  const workflow = hostedWorkflow(env);
+  if (workflow === null) return 'prerequisite-failed';
+  const entry = inspectStorageEntry({ env, platform, arch, version, execPath, argc: argv.length },
+    () => workflow === 'diagnostic'
+      ? win32.join(env.RUNNER_TEMP, 'windows-storage-diagnostic-44794993333', 'runtime')
+      : fileURLToPath(new URL('../../../build/windows/runtime', import.meta.url)),
+    { cwd: process.cwd, realpath: realpathSync.native, isFile: path => lstatSync(path).isFile() });
+  if (typeof entry === 'string') return entry;
+  let scratch;
+  try { scratch = mkdtempSync(win32.join(entry.temp, 'dot-storage-')); } catch { return 'entry-paths-failed'; }
+  return probeStorage(entry.runtime, scratch, { exec: execFileSync, stat: lstatSync, read: readFileSync });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  let result = 'prerequisite-failed';
+  let result = 'entry-probe-failed';
   try { result = main(); } catch { /* do not project paths or raw errors */ }
   console.log(result);
   if (result !== 'ok ok ok ok') process.exitCode = 1;
