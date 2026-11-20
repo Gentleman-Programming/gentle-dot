@@ -107,7 +107,13 @@ it must see valid HTTP health bracketed by the same loopback listener PID,
 verified against both the packaged Node image and the owned Windows job. Desktop
 stdio goes to `NUL`; private product logs are not read or uploaded. Only a fixed
 `staged-desktop-startup-*` outcome and optional projected diagnostics leave the
-check. Suspended assignment and whole-job teardown use the existing CI adapter.
+check. When diagnostics are enabled and the launched desktop fails startup, one
+bounded loopback snapshot before cleanup replaces any earlier probe result. It
+can describe a responding socket or a refusal, but does not establish ownership
+or affect acceptance. The `stagedListenerState` enum separately records whether
+readiness polling attributed a listener before the deadline. A successful startup
+decision keeps its readiness probe, even if cleanup later fails. Suspended
+assignment and whole-job teardown use the existing CI adapter.
 This proves startup only, not agent idle, graceful Stop, or installed readiness.
 The independent NSIS lifecycle job is unchanged; both jobs must pass to publish.
 
@@ -184,6 +190,7 @@ personal/local profile, credential file or log is read for diagnostics.
 | `probe.healthShape`, `probe.healthState` | missing/array/object/other; notattempted/valid/invalidshape/other |
 | Optional `startupPhase` (hosted Windows preview lifecycle only) | nomarkers/logonly/recordpresent/unknown |
 | Optional `installedNodeState` (same opt-in, record present) | live-owned-node/absent/unknown |
+| Optional `stagedListenerState` (staged desktop readiness polling only) | observed/notobserved/unknown |
 
 Legacy fields describe the existing readiness loop: successful REST requests
 establish reachability but their status is unavailable from that helper; failed

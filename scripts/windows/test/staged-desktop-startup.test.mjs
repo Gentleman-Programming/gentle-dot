@@ -96,9 +96,15 @@ test('staged Node version check receives the exact isolated environment at the t
 });
 
 test('health is accepted only with stable owned listener and successful job cleanup', {skip:!ps}, () => {
- const {root,desktop,runtime,digest} = fixture();
+ const {root,desktop,runtime,files,digest} = fixture();
+ const before = files.map(file=>readFileSync(file));
+ const diagnosticPath = mode => join(root, `${mode}.json`);
  const body = `
- $ErrorActionPreference='Stop'; . ${q(script)}; $env:CI='true'
+ $ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; . ${q(script)}; $env:CI='true'
+ if ($PSVersionTable.PSVersion.Major -eq 5) {
+   $script:arguments = [Collections.Generic.List[string]]::new()
+   Update-TypeData -TypeName System.Diagnostics.ProcessStartInfo -MemberType ScriptProperty -MemberName ArgumentList -Value { ,$script:arguments }
+ }
  function New-DaemonStartupScratch { ${q(root)} }
  function Get-DaemonStartupPort { return (12345+$script:ports++) }
  function New-DaemonStartupClock { $script:clock=[pscustomobject]@{ElapsedMilliseconds=0}; $script:clock }
@@ -110,20 +116,48 @@ test('health is accepted only with stable owned listener and successful job clea
        $Info.Environment['GENTLE_DOT_RUNTIME_DIR'] -cne ${q(runtime)} -or $Info.Environment.ContainsKey('NODE_OPTIONS')) { throw 'wrong launch' }
    @{HasExited=$false}
  }
- function Get-StagedListenerPid { $script:checks++; if ($mode -ne 'foreign') { if ($mode -eq 'changed') { 10+$script:checks } else { 10 } } }
- function Get-DaemonStartupDiagnosticProbe { $script:polls++; if ($mode -eq 'late') { $script:clock.ElapsedMilliseconds=30000 }; @{tcpState='connected';httpState='response';httpStatus=200;jsonState='valid';healthState='valid'} }
+ function Get-StagedListenerPid { $script:checks++; if ($mode -notin @('foreign','refused')) { if ($mode -eq 'changed') { 10+$script:checks } else { 10 } } }
+ function Get-DaemonStartupDiagnosticProbe([int]$Port) {
+   $script:polls++
+   if ($Port -ne 12345 -or $script:stops) { $script:badProbe++; throw 'wrong snapshot boundary' }
+   if ($mode -eq 'changed' -and $script:clock.ElapsedMilliseconds -ge 30000) { throw 'snapshot unavailable' }
+   if ($mode -eq 'late') { $script:clock.ElapsedMilliseconds=30000 }
+   if ($mode -eq 'refused') { return @{tcpState='refused';httpState='notattempted';jsonState='notattempted';healthShape='missing';healthState='notattempted';private='never export'} }
+   @{tcpState='connected';httpState='response';httpStatus=200;jsonState='valid';healthShape='object';healthState='valid';private='never export'}
+ }
  function Stop-DaemonStartupProcess { $script:stops++; $mode -ne 'cleanup' }
  $env:NODE_OPTIONS='not forwarded'
- foreach ($mode in @('success','foreign','changed','late','cleanup','version')) {
-   $script:starts=0; $script:checks=0; $script:polls=0; $script:stops=0; $script:ports=0
-   $r=Invoke-StagedDesktopStartup -Runtime ${q(runtime)} -Desktop ${q(desktop)} -DesktopSha256 ${q(digest)}
-   "$r,$starts,$checks,$polls,$stops"
+ foreach ($diagnostics in @($false,$true)) {
+   foreach ($mode in @('success','foreign','refused','changed','late','cleanup','version')) {
+     $script:starts=0; $script:checks=0; $script:polls=0; $script:stops=0; $script:ports=0; $script:badProbe=0
+     $path = if ($diagnostics) { Join-Path ${q(root)} "$mode.json" } else { '' }
+     $r=Invoke-StagedDesktopStartup -Runtime ${q(runtime)} -Desktop ${q(desktop)} -DesktopSha256 ${q(digest)} -DiagnosticsPath $path
+     "$r,$starts,$checks,$polls,$stops,$badProbe"
+   }
  }`;
  const r=spawnSync(ps,[...flags,'-EncodedCommand',Buffer.from(body,'utf16le').toString('base64')],{env:isolated(root),encoding:'utf8'});
  assert.equal(r.status,0,r.stderr); assert.equal(r.stderr,'');
  assert.deepEqual(r.stdout.trim().split(/\r?\n/),[
-  'staged-desktop-startup-passed,1,2,1,1','staged-desktop-startup-timeout,1,1,0,1',
-  'staged-desktop-startup-timeout,1,2,1,1','staged-desktop-startup-timeout,1,2,1,1',
-  'staged-desktop-startup-cleanup-failed,1,2,1,1','staged-desktop-startup-node-version,0,0,0,0',
+  'staged-desktop-startup-passed,1,2,1,1,0','staged-desktop-startup-timeout,1,1,0,1,0',
+  'staged-desktop-startup-timeout,1,1,0,1,0','staged-desktop-startup-timeout,1,2,1,1,0','staged-desktop-startup-timeout,1,2,1,1,0',
+  'staged-desktop-startup-cleanup-failed,1,2,1,1,0','staged-desktop-startup-node-version,0,0,0,0,0',
+  'staged-desktop-startup-passed,1,2,1,1,0','staged-desktop-startup-timeout,1,1,1,1,0',
+  'staged-desktop-startup-timeout,1,1,1,1,0','staged-desktop-startup-timeout,1,2,2,1,0','staged-desktop-startup-timeout,1,2,2,1,0',
+  'staged-desktop-startup-cleanup-failed,1,2,1,1,0','staged-desktop-startup-node-version,0,0,0,0,0',
  ]);
+ const connected = {tcpState:'connected',httpState:'response',httpStatus:200,jsonState:'valid',healthShape:'object',healthState:'valid'};
+ const refused = {tcpState:'refused',httpState:'notattempted',httpStatus:null,jsonState:'notattempted',healthShape:'missing',healthState:'notattempted'};
+ for (const [mode,outcome,stagedListenerState,probe,pollCount] of [
+  ['success','success','observed',connected,1], ['foreign','timeout','notobserved',connected,1],
+  ['refused','timeout','notobserved',refused,1], ['changed','timeout','observed',undefined,1],
+  ['late','timeout','observed',connected,1], ['cleanup','other','observed',connected,1],
+  ['version','other',undefined,undefined,0],
+ ]) {
+  const expected = {schema:1,outcome,processAlive:mode==='version'?null:true,exitCode:null,pollCount,
+   listenerReachable:null,httpStatus:null,healthShape:'missing',healthOk:null,agentState:'unknown',errorKind:'none'};
+  if (stagedListenerState) expected.stagedListenerState = stagedListenerState;
+  if (probe) expected.probe = probe;
+  assert.deepEqual(JSON.parse(readFileSync(diagnosticPath(mode),'utf8')),expected);
+ }
+ assert.deepEqual(files.map(file=>readFileSync(file)),before);
 });

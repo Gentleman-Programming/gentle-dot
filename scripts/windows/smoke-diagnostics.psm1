@@ -147,7 +147,7 @@ function Get-SmokeInstalledNodeState([Diagnostics.Process]$App, [string]$NodeIma
 }
 
 function New-SmokeDiagnostic {
-    param($Outcome, $Alive, $ExitCode, $PollCount, $Reachable, $HttpStatus, $Health, $ErrorKind, $Probe, $StartupPhase, $InstalledNodeState)
+    param($Outcome, $Alive, $ExitCode, $PollCount, $Reachable, $HttpStatus, $Health, $ErrorKind, $Probe, $StartupPhase, $InstalledNodeState, $StagedListenerState)
     $shape = 'other'; $ok = $null; $state = 'unknown'
     if ($null -eq $Health) { $shape = 'missing' }
     elseif ($Health -is [array]) { $shape = 'array' }
@@ -186,13 +186,16 @@ function New-SmokeDiagnostic {
     if ($null -ne $InstalledNodeState) {
         $diagnostic['installedNodeState'] = Select-SmokeEnum $InstalledNodeState @('live-owned-node','absent') 'unknown'
     }
+    if ($null -ne $StagedListenerState) {
+        $diagnostic['stagedListenerState'] = Select-SmokeEnum $StagedListenerState @('observed','notobserved') 'unknown'
+    }
     return $diagnostic
 }
 
 function Write-SmokeDiagnostic {
     param([string]$Path, [System.Collections.IDictionary]$Diagnostic)
     # Re-project, never serialize arbitrary caller properties or nested content.
-    $safe = New-SmokeDiagnostic -Outcome $Diagnostic.outcome -Alive $Diagnostic.processAlive -ExitCode $Diagnostic.exitCode -PollCount $Diagnostic.pollCount -Reachable $Diagnostic.listenerReachable -HttpStatus $Diagnostic.httpStatus -ErrorKind $Diagnostic.errorKind -StartupPhase $Diagnostic['startupPhase'] -InstalledNodeState $Diagnostic['installedNodeState']
+    $safe = New-SmokeDiagnostic -Outcome $Diagnostic.outcome -Alive $Diagnostic.processAlive -ExitCode $Diagnostic.exitCode -PollCount $Diagnostic.pollCount -Reachable $Diagnostic.listenerReachable -HttpStatus $Diagnostic.httpStatus -ErrorKind $Diagnostic.errorKind -StartupPhase $Diagnostic['startupPhase'] -InstalledNodeState $Diagnostic['installedNodeState'] -StagedListenerState $Diagnostic['stagedListenerState']
     $safe.healthShape = Select-SmokeEnum $Diagnostic.healthShape @('missing','array','object') 'other'
     if ($Diagnostic.healthOk -is [bool]) { $safe.healthOk = $Diagnostic.healthOk }
     $safe.agentState = Select-SmokeEnum $Diagnostic.agentState @('starting','idle','thinking','working','needs_you','restarting','error') 'unknown'

@@ -9,6 +9,7 @@ Exact desktop executable transferred separately from the same producer.
 Lowercase SHA-256 from the producer, checked before execution.
 .PARAMETER DiagnosticsPath
 Optional new .json file for allowlisted outcome, exit code and probe metadata only.
+After a failed startup decision, the final loopback sample does not require an owned listener.
 #>
 param([string]$Runtime = '', [string]$Desktop = '', [string]$DesktopSha256 = '', [string]$DiagnosticsPath = '')
 
@@ -64,7 +65,7 @@ function Invoke-StagedDesktopStartup {
     }
 
     $owner = $null; $probe = $null; $alive = $null; $exitCode = $null; $pollCount = 0
-    $kind = 'other'; $outcome = 'failed'
+    $kind = 'other'; $outcome = 'failed'; $listenerState = $null
     try {
         Import-Module "$PSScriptRoot/smoke-diagnostics.psm1" -Force
         $scratch = New-DaemonStartupScratch
@@ -89,12 +90,13 @@ function Invoke-StagedDesktopStartup {
             $info.ArgumentList.Clear() # Genuine desktop manager; no raw Node CLI arguments.
             $owner = New-DaemonStartupOwner $info
             $clock = New-DaemonStartupClock
-            $outcome = 'timeout'; $kind = 'timeout'
+            $outcome = 'timeout'; $kind = 'timeout'; $listenerState = 'notobserved'
             while ($clock.ElapsedMilliseconds -lt 30000) {
                 if (Test-DaemonStartupExited $owner) { $outcome = 'earlyexit'; $kind = 'earlyexit'; break }
                 $pollCount++
                 $listener = Get-StagedListenerPid $owner $port $nodePath
                 if ($null -ne $listener -and $clock.ElapsedMilliseconds -lt 30000) {
+                    $listenerState = 'observed'
                     $probe = Get-DaemonStartupDiagnosticProbe -Port $port
                     if ($probe.tcpState -eq 'connected' -and $probe.httpState -eq 'response' -and
                         $probe.httpStatus -eq 200 -and $probe.jsonState -eq 'valid' -and $probe.healthState -eq 'valid' -and
@@ -114,6 +116,10 @@ function Invoke-StagedDesktopStartup {
                     $alive = -not (Test-DaemonStartupExited $owner)
                     if (-not $alive -and $null -ne $owner.ExitCode) { $exitCode = [int]$owner.ExitCode }
                 } catch { $alive = $null; $exitCode = $null }
+                if ($outcome -ne 'passed') {
+                    # The decision is final. This snapshot does not establish ownership.
+                    try { $probe = Get-DaemonStartupDiagnosticProbe -Port $port } catch { $probe = $null }
+                }
             }
             try { if (-not (Stop-DaemonStartupProcess $owner)) { $outcome = 'cleanup-failed'; $kind = 'other' } }
             catch { $outcome = 'cleanup-failed'; $kind = 'other' }
@@ -121,7 +127,7 @@ function Invoke-StagedDesktopStartup {
         $image.Dispose()
         if ($DiagnosticsPath) {
             try {
-                $diagnostic = New-SmokeDiagnostic -Outcome $kind -Alive $alive -ExitCode $exitCode -PollCount $pollCount -ErrorKind 'none' -Probe $probe
+                $diagnostic = New-SmokeDiagnostic -Outcome $kind -Alive $alive -ExitCode $exitCode -PollCount $pollCount -ErrorKind 'none' -Probe $probe -StagedListenerState $listenerState
                 Write-SmokeDiagnostic -Path $DiagnosticsPath -Diagnostic $diagnostic
             } catch { }
         }
