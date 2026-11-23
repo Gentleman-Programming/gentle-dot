@@ -6,38 +6,63 @@ const help = {
  macos:'Open the downloaded DMG, then follow its installation instructions. Check the release notes for signing and notarization information.',
  linux:'Open the Debian package with your package manager and review its prompts. These downloads are for Debian/Ubuntu-compatible systems.',
 };
+function detectPlatform(userAgent) {
+ if (/Android|iPhone|iPad|iPod/i.test(userAgent)) return null;
+ if (/Windows/i.test(userAgent)) return 'windows';
+ if (/Macintosh|Mac OS/i.test(userAgent)) return 'macos';
+ if (/Linux/i.test(userAgent)) return 'linux';
+ return null;
+}
+function detectArchitecture(userAgent, platform) {
+ if (!platform || platform === 'macos') return '';
+ if (/\b(?:aarch64|arm64)\b/i.test(userAgent)) return 'arm64';
+ if (/\b(?:x64|x86_64|amd64)\b/i.test(userAgent)) return 'x64';
+ return '';
+}
 const userAgent = navigator.userAgent;
-let platform = /Windows/i.test(userAgent) ? 'windows' : /Macintosh|Mac OS/i.test(userAgent) ? 'macos' : /Linux/i.test(userAgent) ? 'linux' : 'windows';
-let architecture = /aarch64|arm64/i.test(userAgent) ? 'arm64' : 'x64';
+let platform = detectPlatform(userAgent);
+const processor = $('architecture');
+processor.value = detectArchitecture(userAgent, platform);
+const installHelp = $('install-help');
+const defaultHelp = installHelp.textContent;
+const releaseLink = $('release-link');
+const officialReleases = releaseLink.href;
+const status = $('status');
 let catalog = { state:'loading', downloads:{} };
 let pending = false;
-$('architecture').value = architecture;
+function statusText(item, architecture) {
+ if (catalog.state === 'loading') return 'Checking the latest public release…';
+ if (catalog.state === 'error') return 'We couldn’t check for installers. Try again or visit the official releases page.';
+ if (!platform || !architecture) return 'Choose your system and processor to see the installer.';
+ if (catalog.state !== 'ready') return 'No installer has been published yet. Check the official releases page for updates.';
+ if (!item) return `This release has no installer for ${labels[platform]} ${architecture}. Try another build or read the release notes.`;
+ return 'Available from the official release. Read the release notes before installing.';
+}
 function render() {
  document.querySelectorAll('[data-platform]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.platform === platform)));
- const item = catalog.downloads[`${platform}-${architecture}`];
- $('downloads').setAttribute('aria-busy', String(pending));
+ const architecture = processor.value;
+ const item = catalog.state === 'ready' && platform && architecture && catalog.downloads[`${platform}-${architecture}`];
+ processor.querySelector('[value="x64"]').textContent = platform === 'macos' ? 'Intel Mac · x64' : 'Intel / AMD · x64';
+ processor.querySelector('[value="arm64"]').textContent = platform === 'macos' ? 'Apple silicon · arm64' : 'ARM · arm64';
  $('downloads').dataset.state = catalog.state;
  $('version').textContent = catalog.version || 'Public releases';
- $('retry').disabled = pending;
- $('install-help').textContent = help[platform];
- $('download').hidden = !item;
- $('unavailable').hidden = Boolean(item);
- $('download').removeAttribute('href');
+ $('retry').setAttribute('aria-disabled', String(pending));
+ installHelp.textContent = help[platform] || defaultHelp;
+ const download = $('download');
+ const assetDetail = $('asset-detail');
+ download.hidden = assetDetail.hidden = !item;
  if (item) {
-  $('download').href = item.url;
-  $('download').textContent = `Download for ${labels[platform]} ↓`;
-  $('download').setAttribute('aria-label', `Download Gentle Dot for ${labels[platform]} ${architecture}`);
-  $('asset-detail').textContent = `${item.name} · ${(item.sizeBytes / 1024 / 1024).toFixed(1)} MB`;
-  $('status').textContent = 'Available from the official public release. Review the release notes before installing.';
+  download.href = item.url;
+  download.textContent = `Download for ${labels[platform]} ↓`;
+  download.setAttribute('aria-label', `Download Gentle Dot for ${labels[platform]} ${architecture}`);
+  assetDetail.textContent = `${item.name} · ${(item.sizeBytes / 1024 / 1024).toFixed(1)} MB`;
  } else {
-  $('asset-detail').textContent = '';
-  $('unavailable').textContent = pending ? 'Checking release availability…' : 'Installer not available';
-  $('status').textContent = catalog.state === 'error' ? 'We could not check releases. Your selection is saved. Check again or view official releases below.'
-   : pending ? 'Checking the latest public release…'
-   : catalog.state === 'ready' ? `This release has no unambiguous installer for ${labels[platform]} ${architecture}. Choose another build or view the release notes.`
-   : 'No stable installer release is published yet. Downloads will appear automatically when native CI outputs are published as release assets.';
+  download.removeAttribute('href');
+  assetDetail.textContent = '';
  }
- $('release-link').href = catalog.releaseUrl || 'https://github.com/Gentleman-Programming/gentle-dot/releases';
+ const message = statusText(item, architecture);
+ if (status.textContent !== message) status.textContent = message;
+ releaseLink.href = catalog.releaseUrl || officialReleases;
 }
 async function refresh() {
  if (pending) return;
@@ -45,7 +70,6 @@ async function refresh() {
  catalog = await loadRelease(); pending = false; render();
 }
 document.querySelectorAll('[data-platform]').forEach(button => button.addEventListener('click', () => { platform = button.dataset.platform; render(); }));
-$('architecture').addEventListener('change', event => { architecture = event.target.value; render(); });
+processor.addEventListener('change', render);
 $('retry').addEventListener('click', refresh);
-render();
 refresh();
