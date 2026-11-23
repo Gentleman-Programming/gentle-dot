@@ -94,7 +94,15 @@ If Gentle Dot is running, the installer says **Gentle Dot is running! Click OK t
 
 ### First open
 
-Open **Gentle Dot** from the Start menu. The first open needs the network once: the engine installs its companion packages. The computer-control emergency stop is **Alt+Shift+Esc**. Voice input is not available on Windows yet.
+Open **Gentle Dot** from the Start menu. The installed app turns off the engine's first-run setup, so unlike on Linux the first open does not install companion packages. The shortcut that opens the chat is **Ctrl+Alt+Space**, because Windows keeps Alt+Space for each window's menu; change it in the panel's **Settings**. The computer-control emergency stop is **Alt+Shift+Esc**.
+
+Without an OpenAI API key, voice input needs the local voice model. Open **Connectors → Voice** and click **Download local voice model** once; your voice then never leaves your PC. Windows does not ask each desktop app for the microphone. If it is blocked, Gentle Dot says **Microphone access is off for desktop apps**: in **Settings → Privacy & security → Microphone**, turn on both **Microphone access** and **Let desktop apps access your microphone**.
+
+The Discord connector needs one extra step on Windows. The first time you set it up, Gentle Dot downloads its server (`@pasympa/discord-mcp` 2.2.0) from npm, which needs the internet and can take a few minutes; the setup shows **Preparing Discord…**. If preparing fails, the setup says **Could not prepare Discord. Try connecting again.** Until it has finished once, the assistant says Discord needs preparation: open **Connectors** and choose **Prepare** for Discord; its token is kept.
+
+### GlazeWM
+
+Gentle Dot places its own windows. The GlazeWM tiling window manager would move, resize and refocus them: the rose, the panel, the computer-control glow and the dialogs. To make it leave them alone, paste the rule in `scripts/windows/glazewm/gentle-dot.yaml` under `window_rules:` in `%USERPROFILE%\.glzr\glazewm\config.yaml`, then reload GlazeWM's configuration.
 
 ### Where data lives
 
@@ -102,8 +110,10 @@ Open **Gentle Dot** from the Start menu. The first open needs the network once: 
 |---|---|
 | The app and its bundled runtime | the install folder, with the runtime in `runtime\` |
 | Settings, conversations, logs (`daemon.log`), the engine's own files | `%USERPROFILE%\.gentle-dot\` |
+| The Discord connector's server, once prepared | `%USERPROFILE%\.gentle-dot\connector-packages\` |
 | Connector secrets, encrypted for your Windows user (DPAPI) | `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\` |
 | The window's own data (WebView2) | `%LOCALAPPDATA%\dev.gentleman.gentle-dot\` and `%APPDATA%\dev.gentleman.gentle-dot\` |
+| The local voice model, when downloaded | `%APPDATA%\dev.gentleman.gentle-dot\models\` |
 | Memory (Engram, project `gentle-dot`) | `%USERPROFILE%\.engram\`, shared with any other Engram user on this PC |
 | Launch at login (when turned on) | a `Gentle Dot` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` |
 
@@ -119,14 +129,14 @@ Gentle Dot never repairs, replaces or deletes such a file, and it never keeps th
 
 1. Quit Gentle Dot from its tray icon (**Quit**), so it does not use the folder while you delete it.
 2. Delete `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\`. Only your Windows user (or an administrator) can.
-3. Open Gentle Dot again. This removes every connector secret, including the key that checks your connectors. On this start Gentle Dot makes a new key, so it moves `connectors.json` aside as `connectors.rejected-<time>.json` in `%USERPROFILE%\.gentle-dot\`, starts with no connectors, and says connectors were changed while it was closed. This happens even if you had no connectors, because Gentle Dot signs `connectors.json` from its first start.
+3. Open Gentle Dot again. This removes every connector secret, including the key that checks your connectors. On this start Gentle Dot makes a new key, so it moves `connectors.json` aside as `connectors.rejected-<time>.json` in `%USERPROFILE%\.gentle-dot\`, starts with no connectors, and says connectors were changed while it was closed. This happens even if you had no connectors, because Gentle Dot signs `connectors.json` on the first start of a daemon the desktop app launched, even when it is empty. On Windows the app never attaches to a daemon it did not start.
 4. Add your connectors again in **Connectors** and sign in again.
 
 ### Uninstall
 
 1. Quit Gentle Dot from its tray icon (**Quit**), so the assistant and its processes stop in order.
 2. Open **Settings → Apps → Installed apps**, find **Gentle Dot**, and choose **Uninstall**, or run `uninstall.exe` in the install folder. It removes the app, its Start menu and desktop shortcuts, its launch at login, and its registry entries. Like the installer, it asks to close Gentle Dot if it is still running.
-3. Optional: tick **Delete the application data** in the uninstaller to remove the window's data (`%APPDATA%\dev.gentleman.gentle-dot\` and `%LOCALAPPDATA%\dev.gentleman.gentle-dot\`).
+3. Optional: tick **Delete the application data** in the uninstaller to remove the window's data and the local voice model (`%APPDATA%\dev.gentleman.gentle-dot\` and `%LOCALAPPDATA%\dev.gentleman.gentle-dot\`).
 4. Optional: remove `%USERPROFILE%\.gentle-dot\` to delete settings and conversations, and `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\` to delete connector secrets. The uninstaller never touches these.
 
 `%USERPROFILE%\.gentle-dot\daemon.owner` stays behind after a normal quit. It records the last launch without any authority over it. Stale records are not replaced today ([#216](https://github.com/Gentleman-Programming/gentle-dot/issues/216)), so if Gentle Dot refuses to start after a crash or a forced stop, quit it, then rename `daemon.owner`, `daemon.pid` and `.gentle-dot-daemon.lock` in `%USERPROFILE%\.gentle-dot\` aside and start it again.
@@ -146,7 +156,7 @@ Keep the `./` with `apt`. The package manager adds WebKitGTK and tray support. T
 
 - The app is `/usr/bin/gentle-dot`; its bundled runtime is in `/usr/lib/Gentle Dot/runtime`. Your data lives in `~/.gentle-dot`.
 - First launch needs the network once: the engine installs its companion packages (about 20 seconds).
-- Computer control is macOS only.
+- Computer control is not available on Linux.
 - Connector secrets (tokens and sign-ins) are kept in your desktop keyring through the Secret Service (GNOME Keyring or KWallet), encrypted on disk, never in `~/.gentle-dot`. In Passwords and Keys (Seahorse) they show as "Gentle Dot connector: …" in the login keyring. Connector approvals and connector changes go through the app's own dialogs, which the assistant cannot answer.
 - **Limit on Linux:** while the keyring is unlocked (usually your whole session), any program running as your user can read those items, including commands the assistant runs in its shell (for example `secret-tool lookup service dev.gentleman.gentle-dot.connectors account <id>`). The Secret Service has no way to restrict which program reads an item. On macOS the Keychain lets only the signed app read them without asking; on Linux, protect the secrets by keeping the keyring locked when you are away and by connecting only the accounts you want the assistant to use.
 - Without a keyring (no Secret Service in the session, common on minimal window-manager setups), connectors that need a secret do not run, and nothing is written to disk instead. `~/.gentle-dot/daemon.log` then says `no Secret Service in this desktop session (…); install and unlock a keyring such as GNOME Keyring or KWallet`. Install `gnome-keyring` (or KWallet), make sure it runs and is unlocked in your session, then quit Gentle Dot from the tray and open it again. Gentle Dot checks its connectors with a key kept in the keyring when it starts, so a keyring that was missing then keeps those connectors locked, and the assistant says to restart, until the next start. If the keyring goes away while Gentle Dot runs, the assistant says the keyring is missing. A locked keyring shows its unlock prompt when Gentle Dot starts or a connector needs a secret; dismissing it, or no answer within two minutes, refuses (dismissed at start, connectors that need a secret stay locked until Gentle Dot restarts).
@@ -158,7 +168,7 @@ Keep the `./` with `apt`. The package manager adds WebKitGTK and tray support. T
 
 ## Windows
 
-Gentle Dot targets Windows 10 and Windows 11, x86_64 (aarch64 is planned later); the runs so far are on Windows 11. There is **no packaged installer yet**: the port is in progress and several units are still pending, so today you build and run it from source. This section says how, where your data and secrets live, what does not work yet, and how to remove it. It is not a claim of parity with macOS or Linux.
+Gentle Dot targets Windows 10 and Windows 11, x86_64 (aarch64 is planned later); the runs so far are on Windows 11. To install the packaged app, see [Windows](#windows) above; this section is for building and running it from source. It says how, where your data and secrets live, what does not work yet, and how to remove it. It is not a claim of parity with macOS or Linux.
 
 Measured on Windows 11 x86_64: the app provisions `%USERPROFILE%\.gentle-dot`, starts its own daemon over the private named-pipe channel, and `GET http://127.0.0.1:4317/` answers HTTP 200; quitting exits with code 0 and takes its daemon with it. `cargo test --lib` reports 399 passed / 0 failed / 4 ignored. Everything else below is the intended behaviour a tester checks, or is marked "not yet".
 
@@ -235,7 +245,6 @@ On Windows, connector secrets (tokens, client secrets, imported header and envir
 The port is incomplete on purpose. Each item names the unit that carries it.
 
 - **Connectors that need a secret or an approval work over the private channel** (W7). The app hands the daemon its end of the private channel as fd 3 through a native handle-inheritance launch (stop record and owner record written before the child executes), so a daemon the app did not start is refused rather than answered. A connector that needs a secret asks for it in the app and the value reaches the daemon over that channel; a connector whose secret is missing fails closed rather than falling back to a file.
-- **Voice** (W12) and **computer control** (W13, macOS-only today) are not available.
 - **The panel's blur is gated and unverified** (W8d): the app asks for `Mica` only on Windows 11 (build ≥ 22000) with transparency effects on, a local session, and DWM composition on; otherwise the panel is opaque. Tauri gives no readback, so the blur can still silently fail even when those facts hold — the gate is the mitigation, and confirming it is the tester's visual check in [docs/windows-testing.md](windows-testing.md).
 
 Nothing else in the Windows install path is missing: the self-contained installer is built by `pnpm package:windows` (W11), its payload is verified, and the engine it carries is the project's own Go SumDB source build of the pinned Gentle AI module — unsigned, hash-pinned in `integrity.json`, and not an upstream release asset, because upstream stopped publishing unsigned Windows builds.

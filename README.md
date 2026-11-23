@@ -38,7 +38,7 @@ Assistants live in a browser tab you have to go find, forget you between chats, 
 <br/>
 
 > [!WARNING]
-> **Early preview.** Gentle Dot can see your screen and control your Mac when you allow it, and it runs an AI agent with a shell. Its safety checks are real, but some still live within the agent's reach (see [Security status](#security-status)). Use it on a machine and accounts you are comfortable letting an assistant act on.
+> **Early preview.** Gentle Dot can see your screen and control your computer when you allow it, and it runs an AI agent with a shell. Its safety checks are real, but some still live within the agent's reach (see [Security status](#security-status)). Use it on a machine and accounts you are comfortable letting an assistant act on.
 
 <br/>
 
@@ -50,7 +50,7 @@ Assistants live in a browser tab you have to go find, forget you between chats, 
 
 ### Always one key away
 
-A glowing rose sits on your desktop. Click it, press your shortcut (**`⌥ Space`** on macOS and Linux, **`Ctrl+Alt+Space`** on Windows, unless you pick another), or use the menu bar, and the chat opens over whatever you are doing. Hide the rose if you prefer, or open the chat full screen with **`⌘⇧F`**. The same chat runs in the browser, on your machine or on your own server.
+A glowing rose sits on your desktop. Click it, press your shortcut (**`⌥ Space`** on macOS and Linux, **`Ctrl+Alt+Space`** on Windows, unless you pick another), or use the menu bar, and the chat opens over whatever you are doing. Hide the rose if you prefer, or open the chat full screen with **`⌘⇧F`** (**`Ctrl+Shift+F`** on Windows and Linux). The same chat runs in the browser, on your machine or on your own server.
 
 ---
 
@@ -60,15 +60,15 @@ There is one continuous chat, not a list of threads to manage. When it grows too
 
 ---
 
-### Uses your Mac (macOS)
+### Uses your computer (macOS and Windows)
 
-With your permission, Gentle Dot sees the screen and operates your apps: clicks, typing, shortcuts, and opening apps, batched into quick sequences. A pink glow shows where it acts. Every control session needs your approval in a native dialog, risky actions (send, pay, delete, submit) ask first, password managers and System Settings are off limits, and **`⌥⇧Esc`** stops everything instantly. Yolo mode skips the per-action questions for up to an hour, and only you can turn it on.
+With your permission, Gentle Dot sees the screen and operates your apps: clicks, typing, shortcuts, and opening apps, batched into quick sequences. A pink glow shows where it acts. Every control session needs your approval in a native dialog, risky actions (send, pay, delete, submit) ask first, password managers and the system settings are off limits, and **`⌥⇧Esc`** (**`Alt+Shift+Esc`** on Windows) stops everything instantly. Yolo mode skips the per-action questions for up to an hour, and only you can turn it on.
 
 ---
 
 ### Talk to it
 
-Press the mic and speak: the transcript lands in the input for you to review, or goes out as soon as you stop if you prefer. Replies to what you said are read aloud. Speech runs on your Mac by default; download the optional local model (NVIDIA Parakeet, 25 languages including Spanish) to keep your voice fully offline, or connect an OpenAI API key.
+Press the mic and speak: the transcript lands in the input for you to review, or goes out as soon as you stop if you prefer. Replies to what you said are read aloud. A Mac uses Apple's recognizer until you download the optional local model (NVIDIA Parakeet, 25 languages including Spanish), which keeps your voice fully offline; on Windows and Linux it is the only built-in recognizer. Or connect an OpenAI API key, which is used instead when it is set.
 
 ---
 
@@ -123,7 +123,7 @@ pnpm package:linux --arch amd64
 pnpm package:windows            # add --check to verify both payloads, which needs 7-Zip
 ```
 
-Then follow **[docs/install.md](docs/install.md)**: opening an unsigned app on macOS 15 and later goes through **System Settings → Privacy & Security → Open Anyway**, the Windows installers are unsigned too so Windows shows its own warning, and the guide covers permissions, where your data lives, and uninstalling. Windows support is in progress: it builds and runs, but connectors that need a secret or an approval, voice, and computer control are not there yet. See **[docs/install.md](docs/install.md)** for the Windows section and **[docs/windows-testing.md](docs/windows-testing.md)** for the tester checklist.
+Then follow **[docs/install.md](docs/install.md)**: opening an unsigned app on macOS 15 and later goes through **System Settings → Privacy & Security → Open Anyway**, the Windows installers are unsigned too so Windows shows its own warning, and the guide covers permissions, where your data lives, and uninstalling. On Windows, connectors, voice, and computer control work; what is still limited is listed in the guide. See **[docs/install.md](docs/install.md)** for the Windows section and **[docs/windows-testing.md](docs/windows-testing.md)** for the tester checklist.
 
 Prefer to run it from the source?
 
@@ -144,7 +144,7 @@ A small Node daemon starts the agent engine (Gentle Shell, `gentle-shell --mode 
 
 - **Your data:** `~/.gentle-dot` (mode 0700): sessions, settings, the access key (`token`), and the engine's own home and workspace. Point the assistant at a folder of yours with `GENTLE_DOT_WORKSPACE` or `"workspace"` in `~/.gentle-dot/config.json`.
 - **Memory:** your global Engram (`~/.engram`, port 7437), project `gentle-dot`; `GENTLE_DOT_ENGRAM=private` gives the assistant a memory of its own.
-- **Connectors:** the daemon alone writes `~/.gentle-dot/connectors.json` and the engine's `mcp.json`, and puts them back if anything else changes them. `connectors.json` is signed with a key kept in the Keychain; if it was changed while Gentle Dot was closed, it is set aside and you are told.
+- **Connectors:** the daemon alone writes `~/.gentle-dot/connectors.json` and the engine's `mcp.json`, and puts them back if anything else changes them. `connectors.json` is signed with a key kept in the platform's secure store (the Keychain on macOS); if it was changed while Gentle Dot was closed, it is set aside and you are told.
 - **Screenshots:** each model call carries only the latest one; earlier ones become one-line log entries, which keeps long control sessions fast. On Windows, computer control needs Windows 10 version 2004 (build 19041) or newer to exclude Gentle Dot's windows from screenshots.
 
 <div align="right"><a href="#top">Back to top</a></div>
@@ -178,6 +178,8 @@ What does not yet: the agent has a shell, and its shell commands (and its subage
 pnpm typecheck && pnpm lint && pnpm test   # unit and integration tests, with a fake agent
 pnpm e2e                                   # Playwright against the daemon
 ```
+
+The Windows workflow (`.github/workflows/windows.yml`) builds the Windows native addon, runs the desktop shell's Rust check and library tests, and runs an explicit subset of the Vitest files on Windows.
 
 <div align="right"><a href="#top">Back to top</a></div>
 
