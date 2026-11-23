@@ -161,17 +161,23 @@ cargo test --lib
 
 **Expected** (measured on Windows 11): the suite passes, 399 passed / 0 failed / 4 ignored. A connector secret is written as its own DPAPI-protected `<64 hex digits>.bin` file (the name is a hash of the secret's id) in a hashed-name subfolder of `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\`; you do not need to create one for this check. To clear every connector secret after testing, quit Gentle Dot and delete that whole folder.
 
-### 15. Voice — not yet on Windows
+### 15. Voice
 
-Voice capture is W12 and not done.
+Voice captures through WASAPI (W12) and, without an OpenAI API key, recognizes with the local model.
 
-**Expected today:** the mic button reports voice as unavailable. Write **N/A**.
+**Expected:**
+1. Without the local model and without an OpenAI API key, the mic reports "Download the local voice model to use voice input."
+2. Open **Connectors → Voice**, click **Download local voice model**, wait for it to finish, then press the mic, speak, and stop: the transcript lands in the input.
+3. With **Let desktop apps access your microphone** turned off under **Settings → Privacy & security → Microphone**, the mic reports "Microphone access is off for desktop apps".
 
-### 16. Computer control — not yet on Windows
+### 16. Computer control
 
-Computer control is macOS-only today (W13).
+Computer control works on Windows (W13); leaving Gentle Dot's windows out of screenshots needs Windows 10 version 2004 (build 19041) or newer.
 
-**Expected today:** the feature is unavailable. Write **N/A**.
+**Expected:**
+1. Ask the assistant to open Notepad and type a line: a native dialog asks to approve the session, the pink glow shows where it acts, and the text lands in Notepad.
+2. Ask it to open Settings or a password manager: it refuses.
+3. During a session, press **Alt+Shift+Esc**: the session ends and queued actions are dropped.
 
 ### 17. Launch at login
 
@@ -194,7 +200,7 @@ Autostart uses `tauri-plugin-autostart`, whose Windows backend registers the app
 | A connector that needs a secret or an approval never runs | Expected: the daemon and the app are not connected. The app answers secret requests and approvals over the private channel it creates before it spawns the daemon (W7); a daemon started outside the app has no channel and refuses both. |
 | `Ctrl+Alt+Space` does not toggle the panel | Check that another app does not hold that combination; pick another shortcut in the panel's Settings. `Alt+Space` opening the Windows window menu is expected: it is Windows' window-menu key, not this app's default. |
 | The webview console reports `tray icon is missing` | Note your build. An early build had an ordering bug that is fixed. |
-| `%USERPROFILE%\.gentle-dot\daemon.log` says the connector cannot get its secrets | Expected until W7 lands. |
+| `%USERPROFILE%\.gentle-dot\daemon.log` says the connector cannot get its secrets | The daemon was not started by the app, so it has no private channel. Quit it and open Gentle Dot from the Start menu. |
 
 ## Report template
 

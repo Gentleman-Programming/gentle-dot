@@ -96,9 +96,9 @@ If Gentle Dot is running, the installer says **Gentle Dot is running! Click OK t
 
 Open **Gentle Dot** from the Start menu. The installed app turns off the engine's first-run setup, so unlike on Linux the first open does not install companion packages. The shortcut that opens the chat is **Ctrl+Alt+Space**, because Windows keeps Alt+Space for each window's menu; change it in the panel's **Settings**. The computer-control emergency stop is **Alt+Shift+Esc**.
 
-Without an OpenAI API key, voice input needs the local voice model. Open **Connectors → Voice** and click **Download local voice model** once; your voice then never leaves your PC. Windows does not ask each desktop app for the microphone. If it is blocked, Gentle Dot says so: turn on **Settings → Privacy & security → Microphone → Let desktop apps access your microphone**.
+Without an OpenAI API key, voice input needs the local voice model. Open **Connectors → Voice** and click **Download local voice model** once; your voice then never leaves your PC. Windows does not ask each desktop app for the microphone. If it is blocked, Gentle Dot says **Microphone access is off for desktop apps**: in **Settings → Privacy & security → Microphone**, turn on both **Microphone access** and **Let desktop apps access your microphone**.
 
-The Discord connector needs one extra step on Windows. The first time you set it up, Gentle Dot downloads its server (`@pasympa/discord-mcp` 2.2.0) from npm, which needs the internet and can take a few minutes; the setup shows **Preparing Discord…**. If preparing fails, the setup says **Could not prepare Discord. Try connecting again.** Until it has finished once, the assistant says Discord needs preparation: open **Connectors** and set up Discord again.
+The Discord connector needs one extra step on Windows. The first time you set it up, Gentle Dot downloads its server (`@pasympa/discord-mcp` 2.2.0) from npm, which needs the internet and can take a few minutes; the setup shows **Preparing Discord…**. If preparing fails, the setup says **Could not prepare Discord. Try connecting again.** Until it has finished once, the assistant says Discord needs preparation: open **Connectors** and choose **Prepare** for Discord; its token is kept.
 
 ### GlazeWM
 
@@ -129,7 +129,7 @@ Gentle Dot never repairs, replaces or deletes such a file, and it never keeps th
 
 1. Quit Gentle Dot from its tray icon (**Quit**), so it does not use the folder while you delete it.
 2. Delete `%LOCALAPPDATA%\dev.gentleman.gentle-dot.connectors\`. Only your Windows user (or an administrator) can.
-3. Open Gentle Dot again. This removes every connector secret, including the key that checks your connectors. On this start Gentle Dot makes a new key, so it moves `connectors.json` aside as `connectors.rejected-<time>.json` in `%USERPROFILE%\.gentle-dot\`, starts with no connectors, and says connectors were changed while it was closed. This happens even if you had no connectors, because Gentle Dot signs `connectors.json` from its first start with the desktop app, which on Windows always starts it.
+3. Open Gentle Dot again. This removes every connector secret, including the key that checks your connectors. On this start Gentle Dot makes a new key, so it moves `connectors.json` aside as `connectors.rejected-<time>.json` in `%USERPROFILE%\.gentle-dot\`, starts with no connectors, and says connectors were changed while it was closed. This happens even if you had no connectors, because Gentle Dot signs `connectors.json` on the first start of a daemon the desktop app launched, even when it is empty. On Windows the app never attaches to a daemon it did not start.
 4. Add your connectors again in **Connectors** and sign in again.
 
 ### Uninstall
@@ -168,7 +168,7 @@ Keep the `./` with `apt`. The package manager adds WebKitGTK and tray support. T
 
 ## Windows
 
-Gentle Dot targets Windows 10 and Windows 11, x86_64 (aarch64 is planned later); the runs so far are on Windows 11. There is **no packaged installer yet**: the port is in progress and several units are still pending, so today you build and run it from source. This section says how, where your data and secrets live, what does not work yet, and how to remove it. It is not a claim of parity with macOS or Linux.
+Gentle Dot targets Windows 10 and Windows 11, x86_64 (aarch64 is planned later); the runs so far are on Windows 11. To install the packaged app, see [Windows](#windows) above; this section is for building and running it from source. It says how, where your data and secrets live, what does not work yet, and how to remove it. It is not a claim of parity with macOS or Linux.
 
 Measured on Windows 11 x86_64: the app provisions `%USERPROFILE%\.gentle-dot`, starts its own daemon over the private named-pipe channel, and `GET http://127.0.0.1:4317/` answers HTTP 200; quitting exits with code 0 and takes its daemon with it. `cargo test --lib` reports 399 passed / 0 failed / 4 ignored. Everything else below is the intended behaviour a tester checks, or is marked "not yet".
 
@@ -245,7 +245,6 @@ On Windows, connector secrets (tokens, client secrets, imported header and envir
 The port is incomplete on purpose. Each item names the unit that carries it.
 
 - **Connectors that need a secret or an approval work over the private channel** (W7). The app hands the daemon its end of the private channel as fd 3 through a native handle-inheritance launch (stop record and owner record written before the child executes), so a daemon the app did not start is refused rather than answered. A connector that needs a secret asks for it in the app and the value reaches the daemon over that channel; a connector whose secret is missing fails closed rather than falling back to a file.
-- **Voice** (W12) and **computer control** (W13, macOS-only today) are not available.
 - **The panel's blur is gated and unverified** (W8d): the app asks for `Mica` only on Windows 11 (build ≥ 22000) with transparency effects on, a local session, and DWM composition on; otherwise the panel is opaque. Tauri gives no readback, so the blur can still silently fail even when those facts hold — the gate is the mitigation, and confirming it is the tester's visual check in [docs/windows-testing.md](windows-testing.md).
 
 Nothing else in the Windows install path is missing: the self-contained installer is built by `pnpm package:windows` (W11), its payload is verified, and the engine it carries is the project's own Go SumDB source build of the pinned Gentle AI module — unsigned, hash-pinned in `integrity.json`, and not an upstream release asset, because upstream stopped publishing unsigned Windows builds.

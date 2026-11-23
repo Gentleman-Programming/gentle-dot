@@ -7,4 +7,6 @@
 
   - commands: [ignore]
     match:
+      # The installed app runs as `Gentle Dot.exe`; a source build runs as `gentle-dot.exe`.
+      - window_process: { equals: 'Gentle Dot' }
       - window_process: { equals: gentle-dot }

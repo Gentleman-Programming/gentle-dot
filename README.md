@@ -68,7 +68,7 @@ With your permission, Gentle Dot sees the screen and operates your apps: clicks,
 
 ### Talk to it
 
-Press the mic and speak: the transcript lands in the input for you to review, or goes out as soon as you stop if you prefer. Replies to what you said are read aloud. A Mac uses Apple's recognizer until you download the optional local model (NVIDIA Parakeet, 25 languages including Spanish), which keeps your voice fully offline; Windows and Linux use only that model. Or connect an OpenAI API key.
+Press the mic and speak: the transcript lands in the input for you to review, or goes out as soon as you stop if you prefer. Replies to what you said are read aloud. A Mac uses Apple's recognizer until you download the optional local model (NVIDIA Parakeet, 25 languages including Spanish), which keeps your voice fully offline; on Windows and Linux it is the only built-in recognizer. Or connect an OpenAI API key, which is used instead when it is set.
 
 ---
 
@@ -123,7 +123,7 @@ pnpm package:linux --arch amd64
 pnpm package:windows            # add --check to verify both payloads, which needs 7-Zip
 ```
 
-Then follow **[docs/install.md](docs/install.md)**: opening an unsigned app on macOS 15 and later goes through **System Settings → Privacy & Security → Open Anyway**, the Windows installers are unsigned too so Windows shows its own warning, and the guide covers permissions, where your data lives, and uninstalling. Windows support is in progress: it builds and runs, but connectors that need a secret or an approval, voice, and computer control are not there yet. See **[docs/install.md](docs/install.md)** for the Windows section and **[docs/windows-testing.md](docs/windows-testing.md)** for the tester checklist.
+Then follow **[docs/install.md](docs/install.md)**: opening an unsigned app on macOS 15 and later goes through **System Settings → Privacy & Security → Open Anyway**, the Windows installers are unsigned too so Windows shows its own warning, and the guide covers permissions, where your data lives, and uninstalling. On Windows, connectors, voice, and computer control work; what is still limited is listed in the guide. See **[docs/install.md](docs/install.md)** for the Windows section and **[docs/windows-testing.md](docs/windows-testing.md)** for the tester checklist.
 
 Prefer to run it from the source?
 
@@ -144,7 +144,7 @@ A small Node daemon starts the agent engine (Gentle Shell, `gentle-shell --mode 
 
 - **Your data:** `~/.gentle-dot` (mode 0700): sessions, settings, the access key (`token`), and the engine's own home and workspace. Point the assistant at a folder of yours with `GENTLE_DOT_WORKSPACE` or `"workspace"` in `~/.gentle-dot/config.json`.
 - **Memory:** your global Engram (`~/.engram`, port 7437), project `gentle-dot`; `GENTLE_DOT_ENGRAM=private` gives the assistant a memory of its own.
-- **Connectors:** the daemon alone writes `~/.gentle-dot/connectors.json` and the engine's `mcp.json`, and puts them back if anything else changes them. `connectors.json` is signed with a key kept in the Keychain; if it was changed while Gentle Dot was closed, it is set aside and you are told.
+- **Connectors:** the daemon alone writes `~/.gentle-dot/connectors.json` and the engine's `mcp.json`, and puts them back if anything else changes them. `connectors.json` is signed with a key kept in the platform's secure store (the Keychain on macOS); if it was changed while Gentle Dot was closed, it is set aside and you are told.
 - **Screenshots:** each model call carries only the latest one; earlier ones become one-line log entries, which keeps long control sessions fast. On Windows, computer control needs Windows 10 version 2004 (build 19041) or newer to exclude Gentle Dot's windows from screenshots.
 
 <div align="right"><a href="#top">Back to top</a></div>
@@ -179,7 +179,7 @@ pnpm typecheck && pnpm lint && pnpm test   # unit and integration tests, with a 
 pnpm e2e                                   # Playwright against the daemon
 ```
 
-The Windows workflow (`.github/workflows/windows.yml`) runs the same typecheck, lint, and test suite on Windows. Tests that need server mode, the stand-in app channel, or other POSIX-only behavior are skipped there, and the log names each reason.
+The Windows workflow (`.github/workflows/windows.yml`) builds the Windows native addon, runs the desktop shell's Rust check and library tests, and runs an explicit subset of the Vitest files on Windows.
 
 <div align="right"><a href="#top">Back to top</a></div>
 
