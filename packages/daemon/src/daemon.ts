@@ -17,7 +17,7 @@ import { AppChannel } from "./app-channel.ts";
 import { AuthManager, type AuthRuntime, createModelAuthRuntime, resolveAgentHome } from "./auth.ts";
 import { AuthHelper } from "./auth-helper.ts";
 import { type BridgeClient, DotBridge } from "./bridge.ts";
-import { type MemoryMode, memoryMode } from "./config.ts";
+import { memoryMode } from "./config.ts";
 import {
 	APPROVAL_GUARD,
 	ConnectorManager,
@@ -37,6 +37,8 @@ import {
 } from "./computer-providers.ts";
 import { approvalRequest } from "./extensions/approval-guard.ts";
 import {
+	admitPreviewMemory,
+	applyMemoryMode,
 	claimEngineHome,
 	ensureMemoryProject,
 	ensurePrivateDir,
@@ -49,7 +51,7 @@ import { defaultImportPath, ProfileStore } from "./profiles.ts";
 import { type RotationLimits, rotationLimits } from "./rotation.ts";
 import { FileSecretSource, SECRETS_FILE, SECRETS_KEY_VAR } from "./secret-file.ts";
 import { AppSecretSource } from "./secret-source.ts";
-import type { StartupStageObserver } from "./startup-stage-observer.ts";
+import type { PrivateMemoryFailure, StartupStageObserver } from "./startup-stage-observer.ts";
 import { AgentSupervisor } from "./supervisor.ts";
 import { UploadStore } from "./uploads.ts";
 import { UserSettings } from "./user-settings.ts";
@@ -173,21 +175,7 @@ export function startupMessage(url: string, dataDir: string, interactive: boolea
 	return `Gentle Dot is running at ${url.split("#")[0]} (the access key is in ${join(dataDir, "token")})`;
 }
 
-/**
- * Applies the memory mode (SW9, W26) to the environment the engine starts with. The mode is
- * written back as `GENTLE_DOT_ENGRAM` — the documented override, and what `isolatedAgentEnv` and
- * `privateMemory` read — so `config.json`'s `memory` behaves exactly like exporting the variable
- * does. `shared` leaves the environment as it is: only `private` selects private mode.
- */
-export function applyMemoryMode(base: NodeJS.ProcessEnv, memory: MemoryMode): NodeJS.ProcessEnv {
-	if (memory !== "private") return base;
-	return { ...base, GENTLE_DOT_ENGRAM: "private" };
-}
-
-type PreviewMemoryAdmission = {
-	env: NodeJS.ProcessEnv;
-	memory: Awaited<ReturnType<typeof privateMemory>>;
-};
+export { applyMemoryMode } from "./isolation.ts";
 
 export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	// A generic Duplex or fd number is not Windows descendant-exclusion admission.
@@ -200,19 +188,18 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	)
 		throw new Error("Windows app channel requires validated production ownership before startup");
 	const log = options.log ?? (() => {});
-	let preview: PreviewMemoryAdmission | undefined;
+	let preview: Awaited<ReturnType<typeof admitPreviewMemory>> | undefined;
 	const base = options.agentEnv ?? process.env;
 	// Only the compile-time preview shell emits this marker. Private mode alone is
 	// not preview; keep all unmarked preparation and memory bootstrap in their old order.
 	if (base.GENTLE_DOT_PREVIEW_MEMORY_ADMISSION === "1") {
+		let reason: PrivateMemoryFailure | undefined;
 		try {
-			const env = applyMemoryMode({ ...base }, memoryMode(base, options.dataDir));
-			if (!options.agentHome || env.GENTLE_DOT_ENGRAM !== "private")
-				throw new Error("Cannot start preview memory: private mode and engine home are required");
-			const access = options.vps ? (options.vps.access ?? engineAccess(options.vps.engine)) : directAccess;
-			preview = { env, memory: await privateMemory(env, options.dataDir, log, access) };
+			preview = await admitPreviewMemory(base, options.dataDir, options.agentHome, log,
+				() => options.vps ? (options.vps.access ?? engineAccess(options.vps.engine)) : directAccess,
+				options.observeStartup ? { onFailure: value => { reason = value; } } : undefined);
 		} catch (error) {
-			options.observeStartup?.(4, false);
+			options.observeStartup?.(4, false, reason);
 			throw error;
 		}
 		options.observeStartup?.(4, true);

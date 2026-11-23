@@ -59,6 +59,22 @@ foreach ($stage in @('configuration','managed-stop','fd3','private-memory')) {
     Assert-Projection $prior "$stage-completed"
 }
 
+$prefix = @('1+', '2+', '3+')
+$reason = @('config-reread','preview-prerequisites','invalid-port','query-spawn','query-timeout','query-nonzero',
+    'query-stderr','query-parse','multiple-listeners','identity-missing','identity-mismatch','recheck-changed','recheck-unverified')
+for ($j = 0; $j -lt $reason.Count; $j++) {
+    $frame = '4' + 'ABCDEFGHIJKLM'[$j]
+    Assert-Projection ($prefix + $frame) "private-memory-failed-$($reason[$j])"
+}
+Assert-Projection $prefix 'fd3-completed'
+Assert-Projection @('4A') 'inconclusive'
+Assert-Projection @('1A') 'inconclusive'
+foreach ($bad in @('4a', '4N', '4AA', '4+A', '4-A', '4')) {
+    Assert-Projection ($prefix + $bad) 'inconclusive'
+}
+Assert-Projection ($prefix + @('4A', '4A')) 'inconclusive'
+Assert-Projection ($prefix + @('4A', '4+')) 'inconclusive'
+
 # Never run a desktop or Node: preflight, owner, and termination are all inert replacements.
 $env:CI = 'true'
 function Test-StagedDaemonPhaseHost { $true }
@@ -78,13 +94,14 @@ function Invoke-StagedPackagedPreflight($Info) { Assert-NoPhase $Info; 'passed' 
 function New-DaemonStartupOwner($Info) {
     if ($Info.Environment['GENTLE_DOT_CI_DAEMON_PHASE_ID'] -cne $id -or
         $Info.Environment['GENTLE_DOT_CI_DAEMON_PHASE_PORT'] -cne '43194') { throw 'selector not isolated to desktop' }
-    Send-TestPhase $tx $rx $id '1+'
+    foreach ($event in @('1+', '2+', '3+')) { Send-TestPhase $tx $rx $id $event }
+    if ($beforeCleanup) { Send-TestPhase $tx $rx $id '4C' }
     return @{ Stub = $true }
 }
 function Test-DaemonStartupExited { $true }
 function Stop-DaemonStartupProcess($Owner) {
     $script:stops++
-    Send-TestPhase $tx $rx $id '2-'
+    Send-TestPhase $tx $rx $id '4E'
     return $clean
 }
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ('daemon-phases-' + [guid]::NewGuid().ToString('N'))
@@ -95,7 +112,9 @@ try {
         [IO.File]::WriteAllText($file, 'inert; never executed')
     }
     $digest = (Get-FileHash -LiteralPath $desktop -Algorithm SHA256).Hash.ToLowerInvariant()
-    foreach ($clean in @($true, $false)) {
+    foreach ($case in @('before', 'during', 'unclean')) {
+        $clean = $case -cne 'unclean'
+        $beforeCleanup = $case -cne 'during'
         $rx = New-StagedDaemonPhaseReceiver
         $tx = [Net.Sockets.UdpClient]::new([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, 0))
         try {
@@ -107,7 +126,11 @@ try {
             $result = Invoke-StagedDesktopStartup -Runtime $fixture -Desktop $desktop -DesktopSha256 $digest `
                 -PhasePort '43194' -PhaseId $id -PhaseReceiver $rx -PhaseEvidence ([ref]$phase)
             $expected = if ($clean) { 'staged-desktop-startup-earlyexit' } else { 'staged-desktop-startup-cleanup-failed' }
-            $expectedPhase = if ($clean) { 'configuration-completed' } else { 'inconclusive' }
+            $expectedPhase = switch ($case) {
+                'before' { 'private-memory-failed-invalid-port' }
+                'during' { 'fd3-completed' }
+                'unclean' { 'inconclusive' }
+            }
             if ($script:stops -ne 1 -or $result -cne $expected -or $phase -cne $expectedPhase) { throw 'cutoff or cleanup contract failed' }
         } finally { $tx.Dispose(); $rx.Dispose() }
     }

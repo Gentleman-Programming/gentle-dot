@@ -43,6 +43,12 @@ function New-StagedDaemonPhaseReceiver {
     } catch { $socket.Dispose(); throw }
 }
 
+# In A-M wire order; only the terminal status byte of stage 4 can use these reasons.
+function Get-StagedDaemonPrivateMemoryReasons {
+    'config-reread','preview-prerequisites','invalid-port','query-spawn','query-timeout','query-nonzero',
+    'query-stderr','query-parse','multiple-listeners','identity-missing','identity-mismatch','recheck-changed','recheck-unverified'
+}
+
 function Read-StagedDaemonPhaseReceiver($Socket, [string]$Id) {
     if ($Socket.Blocking -or -not $Socket.ExclusiveAddressUse -or
         $Socket.SocketType -ne [Net.Sockets.SocketType]::Dgram -or $Socket.LocalEndPoint.Port -ne 43194 -or
@@ -67,7 +73,12 @@ function Read-StagedDaemonPhaseReceiver($Socket, [string]$Id) {
             switch -CaseSensitive ($text[34]) {
                 '+' { $projection = "$($stages[$i])-completed" }
                 '-' { $projection = "$($stages[$i])-failed"; $terminal = $true }
-                default { return 'inconclusive' }
+                default {
+                    $index = 'ABCDEFGHIJKLM'.IndexOf([char]$text[34])
+                    if ($i -ne 3 -or $index -lt 0) { return 'inconclusive' }
+                    $projection = "private-memory-failed-$((Get-StagedDaemonPrivateMemoryReasons)[$index])"
+                    $terminal = $true
+                }
             }
         }
     } catch { } # WouldBlock, truncation or receiver failure cannot project a partial prefix.
@@ -107,7 +118,8 @@ if ($MyInvocation.InvocationName -ne '.') {
         $failure = 'daemon-phases-staged-failed'
         $startup = Invoke-StagedDesktopStartup -Runtime $runtime -Desktop $desktop -DesktopSha256 $digest @selectors 2>$null 3>$null 4>$null 5>$null 6>$null
         if ($startup -isnot [string] -or $startup -cnotmatch '\Astaged-desktop-startup-(?:passed|timeout|earlyexit|failed|cleanup-failed|node-version|preflight-(?:syntax|self-check|addon)(?:-cleanup-failed)?|desktop-identity|invalid-runtime|phases-refused|not-ci)\z') { throw 'startup' }
-        if ($phase -cnotmatch '\A(?:inconclusive|(?:configuration|managed-stop|fd3|private-memory)-(?:completed|failed))\z') { throw 'phase' }
+        if ($phase -cnotmatch '\A(?:inconclusive|(?:configuration|managed-stop|fd3|private-memory)-(?:completed|failed))\z' -and
+            @(Get-StagedDaemonPrivateMemoryReasons | ForEach-Object { "private-memory-failed-$_" }) -cnotcontains $phase) { throw 'phase' }
         "daemon-phases-$phase"
         $startup
         if ($startup -ceq 'staged-desktop-startup-passed') { exit 0 }

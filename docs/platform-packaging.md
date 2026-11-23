@@ -168,8 +168,19 @@ before descendants start. The check reports the unchanged staged startup result
 and one `daemon-phases-*` value: the first explicit `-failed` or last `-completed`
 checkpoint from a consistent sequence of `configuration`, `managed-stop`, `fd3`,
 and `private-memory`. The last stage records strict memory admission, not a
-running memory service. A checkpoint alone does not identify the cause of
-a later failure. Silence, conflicting frames, a failed cutoff, or failed Job
+running memory service. An explicit private-memory rejection may refine the
+result to `daemon-phases-private-memory-failed-<reason>` with one of:
+`config-reread`, `preview-prerequisites`, `invalid-port`, `query-spawn`,
+`query-timeout`, `query-nonzero`, `query-stderr`, `query-parse`,
+`multiple-listeners`, `identity-missing`, `identity-mismatch`, `recheck-changed`,
+or `recheck-unverified`. `query-timeout` requires Node's timeout kill signature;
+`query-spawn` also covers other command execution failures without a numeric
+exit, such as output buffer exhaustion. A nonzero exit takes precedence over
+stderr; the recheck distinguishes a confirmed change from an unverified result.
+An unexpected rejection retains the generic `private-memory-failed`. Only the
+final status byte can encode a reason; frame size and the other stages are
+unchanged. A checkpoint alone does not identify the cause of a later failure.
+Silence, conflicting frames, a failed cutoff, or failed Job
 cleanup are `inconclusive`. Evidence is frozen before cleanup, not derived from
 process exit, and contains no raw logs, path, PID, error, or nonce. This is not
 readiness or installer acceptance. Do not run the job locally or retry it.

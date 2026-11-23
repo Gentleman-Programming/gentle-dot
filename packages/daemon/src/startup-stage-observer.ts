@@ -1,7 +1,30 @@
 import { createRequire } from "node:module";
 
 export type StartupStage = 1 | 2 | 3 | 4;
-export type StartupStageObserver = (stage: StartupStage, completed: boolean) => void;
+// Stage 4 alone can use a reason code in place of the failure marker. Every frame is still 35 bytes.
+const MEMORY_FAILURE_CODES = {
+	"config-reread": "A",
+	"preview-prerequisites": "B",
+	"invalid-port": "C",
+	"query-spawn": "D",
+	"query-timeout": "E",
+	"query-nonzero": "F",
+	"query-stderr": "G",
+	"query-parse": "H",
+	"multiple-listeners": "I",
+	"identity-missing": "J",
+	"identity-mismatch": "K",
+	"recheck-changed": "L",
+	"recheck-unverified": "M",
+} as const;
+export type PrivateMemoryFailure = keyof typeof MEMORY_FAILURE_CODES;
+export type StartupStageObserver = (stage: StartupStage, completed: boolean, reason?: PrivateMemoryFailure) => void;
+
+export function startupStageMarker(stage: StartupStage, completed: boolean, reason?: PrivateMemoryFailure): string {
+	if (completed) return "+";
+	return stage === 4 && typeof reason === "string" && Object.hasOwn(MEMORY_FAILURE_CODES, reason)
+		? MEMORY_FAILURE_CODES[reason] : "-";
+}
 const PORT = 43194;
 const PORT_KEY = "GENTLE_DOT_CI_DAEMON_PHASE_PORT";
 const ID_KEY = "GENTLE_DOT_CI_DAEMON_PHASE_ID";
@@ -32,12 +55,12 @@ export function openStartupStageObserver(): StartupStageObserver | undefined {
 		socket.unref();
 		// Bind only to loopback. The send queue is bounded by the four ordered checkpoints.
 		socket.bind(0, "127.0.0.1", () => socket.unref());
-		return (stage, completed) => {
+		return (stage, completed, reason) => {
 			if (stage !== next) return;
 			const terminal = !completed || stage === 4;
 			next = terminal ? 5 : next + 1;
 			try {
-				socket.send(`${id} ${stage}${completed ? "+" : "-"}`, PORT, "127.0.0.1", (error) => {
+				socket.send(`${id} ${stage}${startupStageMarker(stage, completed, reason)}`, PORT, "127.0.0.1", (error) => {
 					if (error || terminal) stop();
 				});
 			} catch { stop(); }
