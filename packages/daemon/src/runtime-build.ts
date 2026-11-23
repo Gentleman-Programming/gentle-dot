@@ -10,6 +10,29 @@ const LOCKFILE = join(PACKAGE, "..", "..", "pnpm-lock.yaml");
 const IMPORTER = "packages/daemon";
 const PRIVATE_STORAGE_SOURCE = join(REPOSITORY, "scripts", "windows", "private-storage", "main.go");
 
+const PHASE_REF = "refs/heads/qa/windows-staged-daemon-phases-44794993333";
+const PHASE_BUILD_CONTEXT = {
+	GENTLE_DOT_CI_DAEMON_PHASE_BUILD: "1",
+	CI: "true",
+	GITHUB_ACTIONS: "true",
+	RUNNER_ENVIRONMENT: "github-hosted",
+	RUNNER_OS: "Windows",
+	RUNNER_ARCH: "X64",
+	GITHUB_RUN_ATTEMPT: "1",
+	GITHUB_JOB: "observe",
+	GITHUB_REPOSITORY: "Gentleman-Programming/gentle-dot",
+	GITHUB_EVENT_NAME: "push",
+	GITHUB_REF: PHASE_REF,
+	GITHUB_WORKFLOW: "Windows staged daemon phases 44794993333",
+	GITHUB_WORKFLOW_REF: `Gentleman-Programming/gentle-dot/.github/workflows/windows-staged-daemon-phases-44794993333.yml@${PHASE_REF}`,
+};
+
+export function startupStageDefines(platform: NodeJS.Platform | undefined, arch: string, env: NodeJS.ProcessEnv): Record<string, string> {
+	const enabled = platform === "win32" && arch === "x64" &&
+		Object.entries(PHASE_BUILD_CONTEXT).every(([name, value]) => env[name] === value);
+	return { __GENTLE_DOT_DAEMON_PHASES__: String(enabled) };
+}
+
 /** The explicit local-source helper output; installed runtimes never consult it. */
 export const SOURCE_PRIVATE_STORAGE_HELPER = join(
 	REPOSITORY,
@@ -171,6 +194,7 @@ export async function buildRuntime(
 	mkdirSync(join(daemon, "extensions"), { recursive: true });
 	mkdirSync(join(outDir, "bin"), { recursive: true });
 	const dependencies = lockedDependencies();
+	const phaseDefines = startupStageDefines(platform === process.platform ? platform : undefined, process.arch, process.env);
 	await build({
 		entryPoints: [join(PACKAGE, "src", "cli.ts")],
 		outfile: join(daemon, "cli.mjs"),
@@ -178,6 +202,10 @@ export async function buildRuntime(
 		platform: "node",
 		format: "esm",
 		target: "node24",
+		define: phaseDefines,
+		// The job verifies this opt-in receipt in the already-sealed, normal output.
+		...(phaseDefines.__GENTLE_DOT_DAEMON_PHASES__ === "true"
+			? { banner: { js: "/* staged-daemon-phases: enabled */" } } : {}),
 		external: Object.keys(dependencies),
 		logLevel: "error",
 	});

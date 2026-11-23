@@ -1,0 +1,153 @@
+name: Windows staged daemon phases 44794993333
+on:
+  push:
+    branches:
+      - 'qa/windows-staged-daemon-phases-44794993333'
+permissions:
+  actions: read
+  contents: read
+jobs:
+  observe:
+    if: github.repository == 'Gentleman-Programming/gentle-dot' && github.ref == 'refs/heads/qa/windows-staged-daemon-phases-44794993333' && github.event_name == 'push' && github.run_attempt == '1'
+    runs-on: windows-2022
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Authenticate and acquire only the original desktop
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $failure = 'desktop-artifact-host-refused'
+          try {
+            . ./scripts/windows/test/run-staged-daemon-phases.ps1
+            if (-not (Test-StagedDaemonPhaseHost) -or $PSVersionTable.PSVersion -lt [version]'7.4') { throw 'host' }
+            $failure = 'desktop-artifact-identity-failed'
+            $root = Join-Path $env:RUNNER_TEMP 'windows-staged-daemon-phases-44794993333'
+            New-Item -ItemType Directory -Path $root | Out-Null
+            $origin = '/repos/Gentleman-Programming/gentle-dot/actions'
+            $runId = 44794993333
+            $source = '266ad28490e6dfeb5503400beea9dc2c565b333f'
+            $archiveHash = '0ebd7f24240a85bccc6077b23fa50a413a87da901968ce74923301f1ae499e92'
+            function Get-GitHubMetadata([string]$endpoint) {
+              $response = gh api --hostname github.com $endpoint 2>$null
+              if ($LASTEXITCODE -ne 0) { throw 'metadata' }
+              return ($response | ConvertFrom-Json)
+            }
+            $run = Get-GitHubMetadata "$origin/runs/$runId"
+            if ($run.id -ne $runId -or $run.head_sha -cne $source -or $run.status -cne 'completed' -or
+                $run.event -cne 'push' -or $run.path -cne '.github/workflows/windows-installer-preview.yml' -or
+                $run.repository.full_name -cne 'Gentleman-Programming/gentle-dot' -or $run.repository.private -ne $false -or
+                $run.repository.id -le 0 -or $run.head_repository.id -ne $run.repository.id -or $run.run_attempt -lt 1) { throw 'run' }
+            $jobs = Get-GitHubMetadata "$origin/runs/$runId/attempts/$($run.run_attempt)/jobs"
+            $build = @($jobs.jobs | Where-Object { $_.name -ceq 'build' })
+            if ($build.Count -ne 1 -or $build[0].run_id -ne $runId -or $build[0].head_sha -cne $source -or
+                $build[0].status -cne 'completed' -or $build[0].conclusion -cne 'success') { throw 'build' }
+            foreach ($name in @('Build existing guarded Windows producer', 'Collect exact QA payload before acceptance checks', 'Archive only the staged product runtime for isolated checks', 'Hash the exact desktop built with this runtime')) {
+              $step = @($build[0].steps | Where-Object { $_.name -ceq $name -and $_.conclusion -ceq 'success' })
+              if ($step.Count -ne 1) { throw 'build-step' }
+            }
+            $endpoint = "$origin/artifacts/14660115322"
+            $metadata = Get-GitHubMetadata $endpoint
+            if ($metadata.id -ne 14660115322 -or $metadata.name -cne 'windows-preview-desktop' -or
+                $metadata.expired -ne $false -or [datetimeoffset]$metadata.expires_at -le [datetimeoffset]::UtcNow -or
+                $metadata.workflow_run.id -ne $runId -or $metadata.workflow_run.head_sha -cne $source -or
+                $metadata.workflow_run.head_branch -cne $run.head_branch -or
+                $metadata.workflow_run.repository_id -ne $run.repository.id -or $metadata.workflow_run.head_repository_id -ne $run.repository.id -or
+                $metadata.digest -cne "sha256:$archiveHash") { throw 'artifact' }
+            $failure = 'desktop-artifact-download-failed'
+            $zip = Join-Path $root 'desktop.zip'
+            gh api --hostname github.com "$endpoint/zip" > $zip 2>$null
+            if ($LASTEXITCODE -ne 0) { throw 'download' }
+            $failure = 'desktop-artifact-digest-failed'
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant() -cne $archiveHash) { throw 'archive' }
+            Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $root 'desktop')
+            $desktop = Join-Path $root 'desktop/gentle-dot.exe'
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $desktop).Hash.ToLowerInvariant() -cne '122f315f652cebc8d9a5d5e21658fac8e8253fa27c1bcfcbec59938e35adf4f4') { throw 'desktop' }
+          } catch { throw $failure }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.1'
+          architecture: x64
+      # package.json pins pnpm@11.5.0; verify before using it.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.10'
+          architecture: x64
+          cache: false
+      - uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+      - name: Native x64 toolchain and frozen workspace
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD) -cne $env:GITHUB_SHA) { throw 'checkout-identity-failed' }
+          if ((pnpm.cmd --version) -cne '11.5.0') { throw 'pnpm-version-failed' }
+          node scripts/package/ci-native.mjs plan --target windows-x64 --source $env:GITHUB_SHA >$null 2>$null
+          if ($LASTEXITCODE -ne 0) { throw 'native-plan-failed' }
+          pnpm install --frozen-lockfile >$null 2>$null
+          if ($LASTEXITCODE -ne 0) { throw 'workspace-dependencies-failed' }
+      - name: Build the required Windows addon with verified Node inputs
+        run: |
+          $ErrorActionPreference = 'Stop'
+          try {
+            $version = node -p process.version
+            if ($LASTEXITCODE -ne 0 -or $version -cne 'v24.14.1') { throw 'version' }
+            $inputs = Join-Path $env:RUNNER_TEMP 'node-addon-inputs'
+            New-Item -ItemType Directory -Path $inputs | Out-Null
+            $release = "https://nodejs.org/download/release/$version"
+            Invoke-WebRequest "$release/node-$version-headers.tar.gz" -OutFile "$inputs/headers.tar.gz"
+            Invoke-WebRequest "$release/win-x64/node.lib" -OutFile "$inputs/node.lib"
+            $sums = (Invoke-WebRequest "$release/SHASUMS256.txt").Content -split '\r?\n'
+            foreach ($pair in @(@("node-$version-headers.tar.gz", 'headers.tar.gz'), @('win-x64/node.lib', 'node.lib'))) {
+              $lines = @($sums | Where-Object { $_ -match "^[0-9a-f]{64}\s+$([regex]::Escape($pair[0]))$" })
+              if ($lines.Count -ne 1) { throw 'checksum-count' }
+              $actual = (Get-FileHash -Algorithm SHA256 (Join-Path $inputs $pair[1])).Hash.ToLowerInvariant()
+              if ($actual -ne ($lines[0] -split '\s+')[0]) { throw 'checksum' }
+            }
+            tar -xf "$inputs/headers.tar.gz" -C $inputs >$null 2>$null
+            if ($LASTEXITCODE -ne 0) { throw 'extract' }
+            $compiler = (Get-Command cl.exe).Source
+            pnpm --filter @gentle-dot/daemon run build:windows-stop -- --compiler "$compiler" --headers "$inputs/node-$version/include/node" --node-lib "$inputs/node.lib" >$null 2>$null
+            if ($LASTEXITCODE -ne 0) { throw 'compile' }
+            node -e "require('./packages/daemon/native/windows-stop.node')" >$null 2>$null
+            if ($LASTEXITCODE -ne 0) { throw 'load' }
+          } catch { throw 'windows-addon-failed' }
+      - name: Stage the runtime normally with the exact compile-only selector
+        id: stage
+        run: |
+          $ErrorActionPreference = 'Stop'
+          try {
+            . ./scripts/windows/test/run-staged-daemon-phases.ps1
+            if (-not (Test-StagedDaemonPhaseHost)) { throw 'host' }
+            $info = New-StagedDaemonPhaseBuildInfo (Join-Path $PSHOME 'pwsh.exe')
+            foreach ($arg in @('-NoProfile','-NonInteractive','-File',(Join-Path $PWD 'scripts/windows/stage.ps1'),'-Target','windows-x64')) {
+              $info.ArgumentList.Add($arg)
+            }
+            $child = [Diagnostics.Process]::Start($info)
+            try {
+              $stdout = $child.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null)
+              $stderr = $child.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
+              $child.WaitForExit()
+              $stdout.GetAwaiter().GetResult()
+              $stderr.GetAwaiter().GetResult()
+              if ($child.ExitCode -ne 0) { throw 'stage' }
+            } finally { $child.Dispose() }
+            $manifest = 'build/windows/runtime/WINDOWS-INTEGRITY.json'
+            node scripts/windows/runtime-integrity.mjs verify build/windows/runtime $manifest windows-x64 >$null 2>$null
+            if ($LASTEXITCODE -ne 0) { throw 'inventory' }
+            if (-not [IO.File]::ReadAllText((Join-Path $PWD 'build/windows/runtime/daemon/cli.mjs')).Contains('/* staged-daemon-phases: enabled */')) { throw 'compile-selector' }
+            "sha256=$((Get-FileHash -Algorithm SHA256 -LiteralPath $manifest).Hash.ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          } catch { throw 'staged-runtime-failed' }
+      - name: Observe the exact desktop with the sealed staged runtime once
+        env:
+          STAGED_PHASE_RUNTIME_SHA256: ${{ steps.stage.outputs.sha256 }}
+        run: ./scripts/windows/test/run-staged-daemon-phases.ps1

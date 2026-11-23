@@ -5,6 +5,7 @@ on:
   push:
     branches-ignore:
       - 'qa/windows-staged-owner-44794993333'
+      - 'qa/windows-staged-daemon-phases-44794993333'
     tags: ['**']
   pull_request:
   workflow_dispatch:

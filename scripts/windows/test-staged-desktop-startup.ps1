@@ -95,7 +95,8 @@ function Test-StagedOwnerObservationHost {
 function Invoke-StagedDesktopStartup {
     param([string]$Runtime, [string]$Desktop, [string]$DesktopSha256, [string]$DiagnosticsPath = '',
         [int]$TracePort, [string]$TraceId, [string]$OwnerPort, [string]$OwnerId,
-        [Net.Sockets.Socket]$OwnerReceiver, [ref]$OwnerEvidence)
+        [Net.Sockets.Socket]$OwnerReceiver, [ref]$OwnerEvidence,
+        [string]$PhasePort, [string]$PhaseId, [Net.Sockets.Socket]$PhaseReceiver, [ref]$PhaseEvidence)
     $ErrorActionPreference = 'Stop'
     if ($env:CI -cne 'true') { return 'staged-desktop-startup-not-ci' }
     # Internal opt-in only: the preview CLI exposes neither field.
@@ -109,6 +110,14 @@ function Invoke-StagedDesktopStartup {
             $OwnerId -cnotmatch '\A[a-f0-9]{32}\z' -or $DiagnosticsPath -or $trace -or
             $null -eq $OwnerReceiver -or $null -eq $OwnerEvidence) { return 'staged-desktop-startup-owner-refused' }
         $OwnerEvidence.Value = 'inconclusive'
+    }
+    $phaseTrace = $PSBoundParameters.ContainsKey('PhasePort') -or $PSBoundParameters.ContainsKey('PhaseId') -or
+        $PSBoundParameters.ContainsKey('PhaseReceiver') -or $PSBoundParameters.ContainsKey('PhaseEvidence')
+    if ($phaseTrace) {
+        if (-not (Test-StagedDaemonPhaseHost) -or $PhasePort -cne '43194' -or
+            $PhaseId -cnotmatch '\A[a-f0-9]{32}\z' -or $DiagnosticsPath -or $trace -or $ownerTrace -or
+            $null -eq $PhaseReceiver -or $null -eq $PhaseEvidence) { return 'staged-desktop-startup-phases-refused' }
+        $PhaseEvidence.Value = 'inconclusive'
     }
     try {
         if (-not $Runtime) { return 'staged-desktop-startup-invalid-runtime' }
@@ -172,6 +181,10 @@ function Invoke-StagedDesktopStartup {
                 $info.Environment['GENTLE_DOT_CI_OWNER_PORT'] = $OwnerPort
                 $info.Environment['GENTLE_DOT_CI_OWNER_ID'] = $OwnerId
             }
+            if ($phaseTrace) {
+                $info.Environment['GENTLE_DOT_CI_DAEMON_PHASE_PORT'] = $PhasePort
+                $info.Environment['GENTLE_DOT_CI_DAEMON_PHASE_ID'] = $PhaseId
+            }
             $owner = New-DaemonStartupOwner $info
             $clock = New-DaemonStartupClock
             $outcome = 'timeout'; $kind = 'timeout'; $listenerState = 'notobserved'
@@ -210,9 +223,14 @@ function Invoke-StagedDesktopStartup {
                 $frozenOwnerEvidence = 'inconclusive'
                 try { $frozenOwnerEvidence = Read-StagedOwnerReceiver $OwnerReceiver $OwnerId } catch { }
             }
+            if ($phaseTrace) {
+                $frozenPhaseEvidence = 'inconclusive'
+                try { $frozenPhaseEvidence = Read-StagedDaemonPhaseReceiver $PhaseReceiver $PhaseId } catch { }
+            }
             try { if (-not (Stop-DaemonStartupProcess $owner)) { $outcome = 'cleanup-failed'; $kind = 'other' } }
             catch { $outcome = 'cleanup-failed'; $kind = 'other' }
             if ($ownerTrace -and $outcome -cne 'cleanup-failed') { $OwnerEvidence.Value = $frozenOwnerEvidence }
+            if ($phaseTrace -and $outcome -cne 'cleanup-failed') { $PhaseEvidence.Value = $frozenPhaseEvidence }
         }
         $image.Dispose()
         if ($DiagnosticsPath) {

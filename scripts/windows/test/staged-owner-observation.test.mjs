@@ -23,7 +23,7 @@ test('one SHA-bound Windows x64 build and one staged observation, without bundli
   assert.equal((workflow.match(/tauri build --no-bundle --target x86_64-pc-windows-msvc/g) ?? []).length, 1);
   assert.equal((workflow.match(/run-staged-owner-observation\.ps1/g) ?? []).length, 1);
   assert.doesNotMatch(workflow, /workflow_dispatch|upload-artifact|package\.ps1|secrets\.|GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED/);
-  assert.match(read('.github/workflows/macos.yml'), new RegExp(`branches-ignore:\\s+- '${branch}'\\s+tags: \\['\\*\\*'\\]\\s+pull_request:\\s+workflow_dispatch:`));
+  assert.match(read('.github/workflows/macos.yml'), new RegExp(`branches-ignore:\\s+- '${branch}'\\s+- 'qa/windows-staged-daemon-phases-44794993333'\\s+tags: \\['\\*\\*'\\]\\s+pull_request:\\s+workflow_dispatch:`));
 });
 
 test('opt-in is compile-only and selectors are not inherited by Node', () => {

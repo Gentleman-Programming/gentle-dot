@@ -10,11 +10,13 @@ import { APPROVAL_GUARD, bundledMcpCli } from "./connectors.ts";
 import { startDaemon, startupMessage } from "./daemon.ts";
 import { resolveEngramBin, runtimeDir } from "./runtime.ts";
 import { SECRETS_KEY_VAR } from "./secret-file.ts";
+import { openStartupStageObserver } from "./startup-stage-observer.ts";
 import { loadVpsOptions } from "./vps.ts";
 import { IDENTITY_SOURCE } from "./white-label.ts";
 import type { WindowsAppChannel } from "./windows-app-channel.ts";
 import { finishWindowsShutdown, startWithWindowsAppChannel } from "./windows-stop.ts";
 
+declare const __GENTLE_DOT_DAEMON_PHASES__: boolean;
 /** This file (or the bundled `cli.mjs`), which the sign-in helper runs again. */
 const ENTRY = fileURLToPath(import.meta.url);
 const log = (line: string) => process.stderr.write(`${new Date().toISOString()} ${line}\n`);
@@ -42,7 +44,16 @@ function selfCheck(): void {
 }
 
 async function main(): Promise<void> {
-	const config = loadConfig();
+	const observeStartup = typeof __GENTLE_DOT_DAEMON_PHASES__ !== "undefined" && __GENTLE_DOT_DAEMON_PHASES__
+		? openStartupStageObserver() : undefined;
+	let config: ReturnType<typeof loadConfig>;
+	try {
+		config = loadConfig();
+	} catch (error) {
+		observeStartup?.(1, false);
+		throw error;
+	}
+	observeStartup?.(1, true);
 	// The desktop app that launched the daemon hands over its private channel on fd 3 (S25.1); it is
 	// opened before anything is spawned, and refused if children would inherit it.
 	const appChannel = process.platform === "win32" ? undefined : inheritedAppSocket({ log });
@@ -63,6 +74,7 @@ async function main(): Promise<void> {
 			...(config.agentHome ? { agentHome: config.agentHome } : {}),
 			allowedOrigins: config.allowedOrigins,
 			...(channel ? { appChannel: channel } : {}),
+			...(observeStartup ? { observeStartup } : {}),
 			// Sign-in runs in this same entry point as the engine's user (`--auth-helper`, B1).
 			...(vps
 				? { vps: { ...vps, authHelper: { command: process.execPath, args: [ENTRY, "--auth-helper"] } } }
@@ -76,6 +88,7 @@ async function main(): Promise<void> {
 			? await startWithWindowsAppChannel<Awaited<ReturnType<typeof start>>, WindowsAppChannel>(
 					join(config.dataDir, "daemon.pid"),
 					start,
+					observeStartup ? { observeStartup } : undefined,
 				)
 			: undefined;
 	const daemon = windows?.daemon ?? (await start());

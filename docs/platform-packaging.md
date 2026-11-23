@@ -151,6 +151,29 @@ separately. The isolated, bounded IPv4 loopback channel transfers neither a PID
 nor a raw error or exit code, and its selectors are stripped before Node starts.
 This is not installer or lifecycle acceptance. Do not run it locally or retry it.
 
+#### Staged Windows daemon startup stages
+
+The exact `qa/windows-staged-daemon-phases-44794993333` push in the canonical
+repository allows one GitHub-hosted Windows x64 attempt. The job authenticates
+and pins only the original desktop from run `44794993333`, then uses the normal
+Windows producer to build and seal the runtime from this checkout. The original
+native launcher uses the explicit staged runtime override; its managed stop
+record, fd3, and app protocols are unchanged. Missing, expired, or mismatched
+inputs fail closed. There is no desktop rebuild, CLI substitution, installer,
+artifact upload, or release.
+
+Only this exact hosted build bakes in the observer. Quiet preflights have no
+runtime selectors, and the managed Node process consumes the loopback selectors
+before descendants start. The check reports the unchanged staged startup result
+and one `daemon-phases-*` value: the first explicit `-failed` or last `-completed`
+checkpoint from a consistent sequence of `configuration`, `managed-stop`, `fd3`,
+and `private-memory`. The last stage records strict memory admission, not a
+running memory service. A checkpoint alone does not identify the cause of
+a later failure. Silence, conflicting frames, a failed cutoff, or failed Job
+cleanup are `inconclusive`. Evidence is frozen before cleanup, not derived from
+process exit, and contains no raw logs, path, PID, error, or nonce. This is not
+readiness or installer acceptance. Do not run the job locally or retry it.
+
 #### Packaged Windows storage diagnostic
 
 After archive and runtime verification, a separate non-gating startup step uses

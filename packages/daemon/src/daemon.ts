@@ -49,6 +49,7 @@ import { defaultImportPath, ProfileStore } from "./profiles.ts";
 import { type RotationLimits, rotationLimits } from "./rotation.ts";
 import { FileSecretSource, SECRETS_FILE, SECRETS_KEY_VAR } from "./secret-file.ts";
 import { AppSecretSource } from "./secret-source.ts";
+import type { StartupStageObserver } from "./startup-stage-observer.ts";
 import { AgentSupervisor } from "./supervisor.ts";
 import { UploadStore } from "./uploads.ts";
 import { UserSettings } from "./user-settings.ts";
@@ -59,6 +60,7 @@ import { identityArgs } from "./white-label.ts";
 import { isProductionWindowsAppChannel } from "./windows-app-channel.ts";
 
 export interface DaemonOptions {
+	observeStartup?: StartupStageObserver;
 	/** Trusted host-acquired local files only; never read from env, engine or app messages.
 	 * When absent, discover the verified cache; explicit records (even {}) never fall back.
 	 * Preparation does not activate providers or grant a desktop session.
@@ -203,11 +205,17 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	// Only the compile-time preview shell emits this marker. Private mode alone is
 	// not preview; keep all unmarked preparation and memory bootstrap in their old order.
 	if (base.GENTLE_DOT_PREVIEW_MEMORY_ADMISSION === "1") {
-		const env = applyMemoryMode({ ...base }, memoryMode(base, options.dataDir));
-		if (!options.agentHome || env.GENTLE_DOT_ENGRAM !== "private")
-			throw new Error("Cannot start preview memory: private mode and engine home are required");
-		const access = options.vps ? (options.vps.access ?? engineAccess(options.vps.engine)) : directAccess;
-		preview = { env, memory: await privateMemory(env, options.dataDir, log, access) };
+		try {
+			const env = applyMemoryMode({ ...base }, memoryMode(base, options.dataDir));
+			if (!options.agentHome || env.GENTLE_DOT_ENGRAM !== "private")
+				throw new Error("Cannot start preview memory: private mode and engine home are required");
+			const access = options.vps ? (options.vps.access ?? engineAccess(options.vps.engine)) : directAccess;
+			preview = { env, memory: await privateMemory(env, options.dataDir, log, access) };
+		} catch (error) {
+			options.observeStartup?.(4, false);
+			throw error;
+		}
+		options.observeStartup?.(4, true);
 	}
 	// One daemon per data folder (W24): the port bind only stops a second daemon on the same port, so
 	// the folders the daemon owns are claimed here, before anything is written into them.
