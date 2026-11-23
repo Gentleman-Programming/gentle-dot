@@ -84,6 +84,8 @@ pub(super) use native::{create_private_preview_config, create_private_preview_di
 mod native {
     use super::{command_line, fd3_bootstrap};
     use super::super::{ChildEndpoint, ChildProcess, LaunchSpec};
+    #[cfg(windows_owner_observation)]
+    use super::super::windows_owner_trace::{self, Event, Trace};
     use std::ffi::OsString;
     use std::fs::File;
     use std::io;
@@ -203,9 +205,14 @@ mod native {
         }
     }
     fn environment(spec: &LaunchSpec) -> io::Result<Vec<u16>> {
-        let mut entries: Vec<(Vec<u16>, Vec<u16>)> = std::env::vars_os()
+        let inherited = std::env::vars_os();
+        #[cfg(windows_owner_observation)]
+        let inherited = inherited.filter(|(key, _)| !key.to_str().is_some_and(windows_owner_trace::is_selector));
+        let mut entries: Vec<(Vec<u16>, Vec<u16>)> = inherited
             .map(|(key, value)| (key.encode_wide().collect(), value.encode_wide().collect())).collect();
         for (key, value) in &spec.envs {
+            #[cfg(windows_owner_observation)]
+            if windows_owner_trace::is_selector(key) { continue; }
             if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0') {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid launch environment"));
             }
@@ -299,6 +306,8 @@ mod native {
         force_requested: bool,
         // Completion survives record/channel-close failures and checked retries.
         completed: bool,
+        #[cfg(windows_owner_observation)]
+        trace: Option<Trace>,
         #[cfg(test)]
         faults: Faults,
     }
@@ -389,7 +398,10 @@ mod native {
         fn retain_failure(&mut self) { self.failed = true; }
         fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
             if self.launch_failed() { return Err(io::Error::other("retained failed launch requires checked shutdown")); }
-            self.status()
+            let result = self.status();
+            #[cfg(windows_owner_observation)]
+            if let Some(trace) = self.trace.as_mut() { trace.status(&result); }
+            result
         }
         fn kill(&mut self) -> io::Result<()> { self.terminate() }
         fn wait(&mut self) -> io::Result<ExitStatus> {
@@ -509,6 +521,8 @@ mod native {
         spawn_inner(spec, log, channel, Path::new(""), faults)
     }
     fn spawn_inner(spec: &LaunchSpec, log: File, channel: &ChildEndpoint, data_dir: &Path, #[cfg(test)] faults: Faults) -> Result<WindowsChild, SpawnFailure> {
+        #[cfg(windows_owner_observation)]
+        let mut trace = Trace::open();
         let application = application(spec)?;
         let mut command = command_line(&spec.program, &spec.args)?;
         // The CLI must read this exact record directory, not infer another profile.
@@ -535,11 +549,16 @@ mod native {
         let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
         // SAFETY: all UTF-16, packed descriptor, exact handle-list and attribute buffers
         // remain stable through this call. Null cwd preserves the existing inherited cwd.
-        unsafe {
+        let creation = unsafe {
             checked(CreateProcessW(application.as_ptr(), command.as_mut_ptr(), null(), null(), 1,
                 DAEMON_CREATION_FLAGS,
-                env.as_mut_ptr().cast(), null(), &startup.StartupInfo, &mut process))?;
+                env.as_mut_ptr().cast(), null(), &startup.StartupInfo, &mut process))
+        };
+        #[cfg(windows_owner_observation)]
+        if let Some(trace) = trace.as_mut() {
+            trace.preparation_failure = creation.as_ref().err().map(|_| Event::CreateFailed);
         }
+        creation?;
         // CreateProcessW success guarantees these two handles. Acquire both immediately:
         // no fallible operation may strand the created process before its owner exists.
         let mut child = WindowsChild {
@@ -547,13 +566,18 @@ mod native {
             thread: Some(unsafe { OwnedHandle::from_raw_handle(process.hThread) }), job,
             pid: process.dwProcessId, assigned: false, failed: false, established: false, record: None, stop: None, stopping: false,
             force_requested: false, completed: false,
+            #[cfg(windows_owner_observation)] trace,
             #[cfg(test)] faults,
         };
+        #[cfg(windows_owner_observation)]
+        let mut failure_event = Event::AssignFailed;
         let setup = (|| -> io::Result<()> {
             #[cfg(test)]
             if child.faults.assignment { return Err(io::Error::other("injected assignment failure")); }
             unsafe { checked(AssignProcessToJobObject(child.job.as_raw_handle(), child.process.as_raw_handle()))?; }
             child.assigned = true;
+            #[cfg(windows_owner_observation)]
+            { failure_event = Event::VerifyFailed; }
             #[cfg(test)]
             if child.faults.verification { return Err(io::Error::other("injected verification failure")); }
             let mut belongs = 0;
@@ -563,9 +587,15 @@ mod native {
             }
             // No execution until the exact suspended launch has a protected v1 record.
             // The publication helper installs ownership immediately after CREATE_NEW.
+            #[cfg(windows_owner_observation)]
+            { failure_event = Event::RecordFailed; }
             child.publish_record(data_dir)?;
             // Name this app as the Job's only handle holder before the daemon can run.
+            #[cfg(windows_owner_observation)]
+            { failure_event = Event::PublishFailed; }
             publish_owner(data_dir, &child.record.as_ref().unwrap().expected)?;
+            #[cfg(windows_owner_observation)]
+            { failure_event = Event::ResumeFailed; }
             let previous = unsafe { ResumeThread(child.thread.as_ref().unwrap().as_raw_handle()) };
             if previous == u32::MAX { return Err(io::Error::last_os_error()); }
             if previous != 1 { return Err(io::Error::other("unexpected daemon suspension state")); }
@@ -573,6 +603,10 @@ mod native {
             drop(child.thread.take());
             Ok(())
         })();
+        #[cfg(windows_owner_observation)]
+        if let Some(trace) = child.trace.as_ref() {
+            trace.launch(if setup.is_ok() { Event::Resumed } else { failure_event });
+        }
         if let Err(primary) = setup {
             child.failed = true;
             return match child.shutdown_owned(Duration::ZERO) {

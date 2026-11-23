@@ -1,0 +1,105 @@
+name: Windows staged owner 44794993333
+on:
+  push:
+    branches:
+      - 'qa/windows-staged-owner-44794993333'
+permissions:
+  contents: read
+jobs:
+  observe:
+    if: github.repository == 'Gentleman-Programming/gentle-dot' && github.ref == 'refs/heads/qa/windows-staged-owner-44794993333' && github.run_attempt == '1'
+    runs-on: windows-2022
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.14.1'
+          architecture: x64
+      # package.json pins pnpm@11.5.0; verify before using it.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.10'
+          architecture: x64
+          cache: false
+      - uses: ilammy/msvc-dev-cmd@v1.13.0
+        with:
+          arch: x64
+      - name: Native x64 toolchain and frozen workspace
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD) -cne $env:GITHUB_SHA) { throw 'checkout-identity-failed' }
+          rustup set default-host x86_64-pc-windows-msvc >$null 2>$null
+          if ($LASTEXITCODE -ne 0) { throw 'rust-host-failed' }
+          rustup toolchain install stable --profile minimal >$null 2>$null
+          if ($LASTEXITCODE -ne 0) { throw 'rust-toolchain-failed' }
+          rustup default stable >$null 2>$null
+          if ($LASTEXITCODE -ne 0) { throw 'rust-default-failed' }
+          $hostInfo = rustc -vV
+          if ($LASTEXITCODE -ne 0 -or $hostInfo -notcontains 'host: x86_64-pc-windows-msvc') { throw 'rust-x64-required' }
+          if ((pnpm.cmd --version) -cne '11.5.0') { throw 'pnpm-version-failed' }
+          node scripts/package/ci-native.mjs plan --target windows-x64 --source $env:GITHUB_SHA >$null 2>$null
+          if ($LASTEXITCODE -ne 0) { throw 'native-plan-failed' }
+          pnpm install --frozen-lockfile >$null 2>$null
+          if ($LASTEXITCODE -ne 0) { throw 'workspace-dependencies-failed' }
+      - name: Build the required Windows addon with verified Node inputs
+        run: |
+          $ErrorActionPreference = 'Stop'
+          try {
+            $version = node -p process.version
+            if ($LASTEXITCODE -ne 0 -or $version -cne 'v24.14.1') { throw 'version' }
+            $inputs = Join-Path $env:RUNNER_TEMP 'node-addon-inputs'
+            New-Item -ItemType Directory -Path $inputs | Out-Null
+            $release = "https://nodejs.org/download/release/$version"
+            Invoke-WebRequest "$release/node-$version-headers.tar.gz" -OutFile "$inputs/headers.tar.gz"
+            Invoke-WebRequest "$release/win-x64/node.lib" -OutFile "$inputs/node.lib"
+            $sums = (Invoke-WebRequest "$release/SHASUMS256.txt").Content -split '\r?\n'
+            foreach ($pair in @(@("node-$version-headers.tar.gz", 'headers.tar.gz'), @('win-x64/node.lib', 'node.lib'))) {
+              $lines = @($sums | Where-Object { $_ -match "^[0-9a-f]{64}\s+$([regex]::Escape($pair[0]))$" })
+              if ($lines.Count -ne 1) { throw 'checksum-count' }
+              $actual = (Get-FileHash -Algorithm SHA256 (Join-Path $inputs $pair[1])).Hash.ToLowerInvariant()
+              if ($actual -ne ($lines[0] -split '\s+')[0]) { throw 'checksum' }
+            }
+            tar -xf "$inputs/headers.tar.gz" -C $inputs >$null 2>$null
+            if ($LASTEXITCODE -ne 0) { throw 'extract' }
+            $compiler = (Get-Command cl.exe).Source
+            pnpm --filter @gentle-dot/daemon run build:windows-stop -- --compiler "$compiler" --headers "$inputs/node-$version/include/node" --node-lib "$inputs/node.lib" >$null 2>$null
+            if ($LASTEXITCODE -ne 0) { throw 'compile' }
+            node -e "require('./packages/daemon/native/windows-stop.node')" >$null 2>$null
+            if ($LASTEXITCODE -ne 0) { throw 'load' }
+          } catch { throw 'windows-addon-failed' }
+      - name: Stage and retain the sealed runtime identity
+        id: stage
+        run: |
+          try {
+            ./scripts/windows/stage.ps1 -Target windows-x64 *> $null
+            if ($LASTEXITCODE -ne 0) { throw 'stage' }
+            $manifest = 'build/windows/runtime/WINDOWS-INTEGRITY.json'
+            node scripts/windows/runtime-integrity.mjs verify build/windows/runtime $manifest windows-x64 >$null 2>$null
+            if ($LASTEXITCODE -ne 0) { throw 'inventory' }
+            "sha256=$((Get-FileHash -Algorithm SHA256 -LiteralPath $manifest).Hash.ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          } catch { throw 'staged-runtime-failed' }
+      - name: Build the release-mode desktop without bundling
+        id: desktop
+        env:
+          GENTLE_DOT_CI_OWNER_BUILD: '1'
+        run: |
+          try {
+            # Tauri build defaults to release mode. Use checked-in frontend, icons and static dependencies.
+            pnpm.cmd --filter '@gentle-dot/desktop' exec tauri build --no-bundle --target x86_64-pc-windows-msvc >$null 2>$null
+            if ($LASTEXITCODE -ne 0) { throw 'compile' }
+            $desktop = 'apps/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/gentle-dot.exe'
+            "sha256=$((Get-FileHash -Algorithm SHA256 -LiteralPath $desktop).Hash.ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          } catch { throw 'diagnostic-desktop-build-failed' }
+      - name: Observe the same-build staged startup once (not installer acceptance)
+        env:
+          STAGED_OWNER_RUNTIME_SHA256: ${{ steps.stage.outputs.sha256 }}
+          STAGED_OWNER_DESKTOP_SHA256: ${{ steps.desktop.outputs.sha256 }}
+        run: ./scripts/windows/test/run-staged-owner-observation.ps1

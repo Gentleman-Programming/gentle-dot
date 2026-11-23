@@ -80,15 +80,36 @@ function Test-StagedStartupTraceHost {
         $env:GITHUB_EVENT_NAME -ceq 'push' -and $env:GITHUB_REF -ceq 'refs/heads/qa/windows-storage-diagnostic-44794993333')
 }
 
+function Test-StagedOwnerObservationHost {
+    return ($env:OS -ceq 'Windows_NT' -and
+        [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() -ceq 'X64' -and
+        $env:CI -ceq 'true' -and $env:GITHUB_ACTIONS -ceq 'true' -and
+        $env:RUNNER_ENVIRONMENT -ceq 'github-hosted' -and $env:RUNNER_OS -ceq 'Windows' -and
+        $env:RUNNER_ARCH -ceq 'X64' -and $env:GITHUB_RUN_ATTEMPT -ceq '1' -and
+        $env:GITHUB_JOB -ceq 'observe' -and $env:GITHUB_REPOSITORY -ceq 'Gentleman-Programming/gentle-dot' -and
+        $env:GITHUB_WORKFLOW -ceq 'Windows staged owner 44794993333' -and $env:GITHUB_EVENT_NAME -ceq 'push' -and
+        $env:GITHUB_REF -ceq 'refs/heads/qa/windows-staged-owner-44794993333' -and
+        $env:GITHUB_WORKFLOW_REF -ceq 'Gentleman-Programming/gentle-dot/.github/workflows/windows-staged-owner-44794993333.yml@refs/heads/qa/windows-staged-owner-44794993333')
+}
+
 function Invoke-StagedDesktopStartup {
     param([string]$Runtime, [string]$Desktop, [string]$DesktopSha256, [string]$DiagnosticsPath = '',
-        [int]$TracePort, [string]$TraceId)
+        [int]$TracePort, [string]$TraceId, [string]$OwnerPort, [string]$OwnerId,
+        [Net.Sockets.Socket]$OwnerReceiver, [ref]$OwnerEvidence)
     $ErrorActionPreference = 'Stop'
     if ($env:CI -cne 'true') { return 'staged-desktop-startup-not-ci' }
     # Internal opt-in only: the preview CLI exposes neither field.
     $trace = $PSBoundParameters.ContainsKey('TracePort') -or $PSBoundParameters.ContainsKey('TraceId')
     if ($trace -and (-not (Test-StagedStartupTraceHost) -or $TracePort -lt 1 -or $TracePort -gt 65535 -or
         $TraceId -cnotmatch '\A[a-f0-9]{32}\z' -or $DiagnosticsPath)) { return 'staged-desktop-startup-trace-refused' }
+    $ownerTrace = $PSBoundParameters.ContainsKey('OwnerPort') -or $PSBoundParameters.ContainsKey('OwnerId') -or
+        $PSBoundParameters.ContainsKey('OwnerReceiver') -or $PSBoundParameters.ContainsKey('OwnerEvidence')
+    if ($ownerTrace) {
+        if (-not (Test-StagedOwnerObservationHost) -or $OwnerPort -cne '43193' -or
+            $OwnerId -cnotmatch '\A[a-f0-9]{32}\z' -or $DiagnosticsPath -or $trace -or
+            $null -eq $OwnerReceiver -or $null -eq $OwnerEvidence) { return 'staged-desktop-startup-owner-refused' }
+        $OwnerEvidence.Value = 'inconclusive'
+    }
     try {
         if (-not $Runtime) { return 'staged-desktop-startup-invalid-runtime' }
         $Runtime = [IO.Path]::GetFullPath($Runtime)
@@ -147,6 +168,10 @@ function Invoke-StagedDesktopStartup {
                 $info.Environment['GENTLE_DOT_CI_TRACE_PORT'] = [string]$TracePort
                 $info.Environment['GENTLE_DOT_CI_TRACE_ID'] = $TraceId
             }
+            if ($ownerTrace) {
+                $info.Environment['GENTLE_DOT_CI_OWNER_PORT'] = $OwnerPort
+                $info.Environment['GENTLE_DOT_CI_OWNER_ID'] = $OwnerId
+            }
             $owner = New-DaemonStartupOwner $info
             $clock = New-DaemonStartupClock
             $outcome = 'timeout'; $kind = 'timeout'; $listenerState = 'notobserved'
@@ -180,8 +205,14 @@ function Invoke-StagedDesktopStartup {
                     try { $probe = Get-DaemonStartupDiagnosticProbe -Port $port } catch { $probe = $null }
                 }
             }
+            if ($ownerTrace) {
+                # Freeze the bounded evidence synchronously, before starting whole-Job cleanup.
+                $frozenOwnerEvidence = 'inconclusive'
+                try { $frozenOwnerEvidence = Read-StagedOwnerReceiver $OwnerReceiver $OwnerId } catch { }
+            }
             try { if (-not (Stop-DaemonStartupProcess $owner)) { $outcome = 'cleanup-failed'; $kind = 'other' } }
             catch { $outcome = 'cleanup-failed'; $kind = 'other' }
+            if ($ownerTrace -and $outcome -cne 'cleanup-failed') { $OwnerEvidence.Value = $frozenOwnerEvidence }
         }
         $image.Dispose()
         if ($DiagnosticsPath) {

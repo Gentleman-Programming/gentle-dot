@@ -39,7 +39,35 @@ fn find_in_path(program: &str, path: &str) -> Option<PathBuf> {
     env::split_paths(path).map(|dir| dir.join(program)).find(|candidate| candidate.is_file())
 }
 
+const OWNER_CONTEXT: &[(&str, &str)] = &[
+    ("CARGO_CFG_TARGET_OS", "windows"),
+    ("CARGO_CFG_TARGET_ARCH", "x86_64"),
+    ("GENTLE_DOT_CI_OWNER_BUILD", "1"),
+    ("CI", "true"),
+    ("GITHUB_ACTIONS", "true"),
+    ("RUNNER_ENVIRONMENT", "github-hosted"),
+    ("RUNNER_OS", "Windows"),
+    ("RUNNER_ARCH", "X64"),
+    ("GITHUB_REPOSITORY", "Gentleman-Programming/gentle-dot"),
+    ("GITHUB_EVENT_NAME", "push"),
+    ("GITHUB_REF", "refs/heads/qa/windows-staged-owner-44794993333"),
+    ("GITHUB_WORKFLOW", "Windows staged owner 44794993333"),
+    ("GITHUB_JOB", "observe"),
+    ("GITHUB_WORKFLOW_REF", "Gentleman-Programming/gentle-dot/.github/workflows/windows-staged-owner-44794993333.yml@refs/heads/qa/windows-staged-owner-44794993333"),
+    ("GITHUB_RUN_ATTEMPT", "1"),
+];
+
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(windows_owner_observation)");
+    for &(key, _) in OWNER_CONTEXT {
+        println!("cargo:rerun-if-env-changed={key}");
+    }
+    if cfg!(all(windows, target_arch = "x86_64"))
+        && OWNER_CONTEXT.iter().all(|&(key, value)| env::var(key).as_deref() == Ok(value))
+    {
+        println!("cargo:rustc-cfg=windows_owner_observation");
+    }
+
     // Apps launched from Finder get a minimal PATH, so record what the build saw:
     // the absolute `node`, the daemon entry point, and PATH itself (the daemon
     // needs it to find `gentle-shell`). Runtime env vars override the first two.

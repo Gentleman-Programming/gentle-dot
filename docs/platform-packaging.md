@@ -129,6 +129,28 @@ assignment and whole-job teardown use the existing CI adapter.
 This proves startup only, not agent idle, graceful Stop, or installed readiness.
 The independent NSIS lifecycle job is unchanged; both jobs must pass to publish.
 
+#### Staged Windows native-owner diagnostic
+
+The canonical repository's `qa/windows-staged-owner-44794993333` push is for one
+GitHub-hosted Windows x64 diagnostic: stage and seal the existing runtime, build
+one release-mode Tauri desktop without bundling, and run the staged startup check
+once. The runner pins the checkout SHA and verifies the sealed inventory and same-build
+desktop digest. It does not build or run NSIS, upload artifacts, or publish a release.
+Ordinary binaries cannot enable the diagnostic at runtime; the custom compile
+configuration is off unless the exact Windows x64 build flag and hosted context match.
+
+The existing desktop owner projects a fixed launch failure category (`prepare`,
+`create`, `assign`, `verify`, `record`, `publish`, or `resume`, with `-failed`) or,
+after successful resume, `exit-zero`, `exit-nonzero`, or `status-failed` from an
+existing native status check. `resumed-status-inconclusive` proves resume but not
+lifetime. The harness freezes evidence before whole-Job cleanup starts and
+publishes it only if cleanup succeeds. Missing launch evidence, invalid or ambiguous
+data, or a failed cutoff or cleanup are `inconclusive`. No absence is treated as an exit. Output prefixes these
+categories with `owner-observation-` and reports the unchanged staged outcome
+separately. The isolated, bounded IPv4 loopback channel transfers neither a PID
+nor a raw error or exit code, and its selectors are stripped before Node starts.
+This is not installer or lifecycle acceptance. Do not run it locally or retry it.
+
 #### Packaged Windows storage diagnostic
 
 After archive and runtime verification, a separate non-gating startup step uses

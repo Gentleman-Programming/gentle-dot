@@ -3,6 +3,9 @@ name: macOS
 
 on:
   push:
+    branches-ignore:
+      - 'qa/windows-staged-owner-44794993333'
+    tags: ['**']
   pull_request:
   workflow_dispatch:
 

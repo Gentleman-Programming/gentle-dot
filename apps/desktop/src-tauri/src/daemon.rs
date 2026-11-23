@@ -16,6 +16,8 @@ mod launch;
 pub use launch::*;
 #[cfg(any(windows, test))]
 mod windows;
+#[cfg(all(windows, windows_owner_observation))]
+mod windows_owner_trace;
 
 pub use crate::app_channel::APP_FD;
 use crate::app_channel::{AppChannel, Handler};
