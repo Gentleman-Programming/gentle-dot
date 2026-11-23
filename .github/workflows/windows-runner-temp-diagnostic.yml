@@ -1,0 +1,19 @@
+name: Windows runner temp diagnostic 44810128936
+on:
+  push:
+    branches: ['qa/windows-runner-temp-44810128936']
+permissions:
+  contents: read
+jobs:
+  checks:
+    if: github.repository == 'Gentleman-Programming/gentle-dot' && github.ref == 'refs/heads/qa/windows-runner-temp-44810128936'
+    runs-on: windows-2022
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Observe runner temp admission only
+        shell: pwsh
+        run: ./scripts/windows/test/runner-temp-diagnostic.ps1

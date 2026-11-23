@@ -209,6 +209,37 @@ exact error. `entry` is after static imports; `*-refused` identifies a bounded
 failure site, `startup-failed` is otherwise generic, and `http-listening` is not
 attributed readiness. Neither acceptance nor publishing uses this bundle.
 
+#### Hosted runner temp admission diagnostic
+
+A push to `qa/windows-runner-temp-44810128936` in the official repository runs
+one Windows job. It compares PowerShell's runner-temp checks with Node's
+metadata checks and restricted PowerShell drive child. From the hosted tool
+cache's immediate stable Node 24.x versions, it prefers a regular x64 24.14.1
+entry; otherwise it selects the highest regular x64 24.x entry by numeric
+version. It does not follow reparse entries, use PATH, download a runtime, or
+fall back to another major version. The selected executable must report x64 and
+match its version directory before reading runner temp. An absent or mismatched
+candidate produces `node-runtime-refused`. There is no argument, installer,
+artifact, trace launch, or probe scratch output.
+
+The script emits only fixed `wrapper-*` and `node-*` results, including
+`node-runtime-exact` or `node-runtime-alternate-24` before the Node stage result.
+An alternate runtime is useful for diagnosis but is not equivalent to the original
+24.14.1 check. Any unexpected Node stderr is suppressed and reported as
+`node-unexpected-stderr`. Each stage reports its first refusal (or success);
+when the wrapper refuses, Node checks the original runner temp rather than a
+normalized value. `node-drive-spawn-error`
+means the spawn API reported an error (including a possible timeout),
+`node-drive-nonfixed` means a clean exit 1 with no output, `node-drive-malformed`
+means another unexpected response, and `node-drive-fixed` is the exact expected
+success response. A stage refusal is evidence, not acceptance; host, runtime,
+invocation and unexpected-stderr refusals exit 1, and a completed comparison exits 0. A local call is
+not a substitute for hosted evidence. The installer and web preview remain gated
+by the original checks.
+
+Inert local tests: `node --test scripts/windows/test/runner-temp-diagnostic.test.mjs`
+and `powershell.exe -NoLogo -NoProfile -NonInteractive -File scripts/windows/test/runner-temp-diagnostic.test.ps1`.
+
 #### Checkout-only managed admission diagnostic
 
 Run the portable contracts from the repository root:

@@ -3,6 +3,8 @@ name: macOS
 
 on:
   push:
+    branches-ignore: ['qa/windows-runner-temp-44810128936']
+    tags: ['**']
   pull_request:
   workflow_dispatch:
 
