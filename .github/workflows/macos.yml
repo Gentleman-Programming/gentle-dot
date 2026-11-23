@@ -6,6 +6,7 @@ on:
     branches-ignore:
       - 'qa/windows-staged-owner-44794993333'
       - 'qa/windows-staged-daemon-phases-44794993333'
+      - 'qa/windows-private-memory-reasons-45201908966'
     tags: ['**']
   pull_request:
   workflow_dispatch:

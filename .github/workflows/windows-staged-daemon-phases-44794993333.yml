@@ -2,13 +2,13 @@ name: Windows staged daemon phases 44794993333
 on:
   push:
     branches:
-      - 'qa/windows-staged-daemon-phases-44794993333'
+      - 'qa/windows-private-memory-reasons-45201908966'
 permissions:
   actions: read
   contents: read
 jobs:
   observe:
-    if: github.repository == 'Gentleman-Programming/gentle-dot' && github.ref == 'refs/heads/qa/windows-staged-daemon-phases-44794993333' && github.event_name == 'push' && github.run_attempt == '1'
+    if: github.repository == 'Gentleman-Programming/gentle-dot' && github.ref == 'refs/heads/qa/windows-private-memory-reasons-45201908966' && github.event_name == 'push' && github.run_attempt == '1'
     runs-on: windows-2022
     timeout-minutes: 120
     defaults:

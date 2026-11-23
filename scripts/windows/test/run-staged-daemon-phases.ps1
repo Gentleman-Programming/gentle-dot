@@ -7,8 +7,8 @@ function Test-StagedDaemonPhaseHost {
         $env:RUNNER_ARCH -ceq 'X64' -and $env:GITHUB_RUN_ATTEMPT -ceq '1' -and
         $env:GITHUB_JOB -ceq 'observe' -and $env:GITHUB_REPOSITORY -ceq 'Gentleman-Programming/gentle-dot' -and
         $env:GITHUB_WORKFLOW -ceq 'Windows staged daemon phases 44794993333' -and $env:GITHUB_EVENT_NAME -ceq 'push' -and
-        $env:GITHUB_REF -ceq 'refs/heads/qa/windows-staged-daemon-phases-44794993333' -and
-        $env:GITHUB_WORKFLOW_REF -ceq 'Gentleman-Programming/gentle-dot/.github/workflows/windows-staged-daemon-phases-44794993333.yml@refs/heads/qa/windows-staged-daemon-phases-44794993333')
+        $env:GITHUB_REF -ceq 'refs/heads/qa/windows-private-memory-reasons-45201908966' -and
+        $env:GITHUB_WORKFLOW_REF -ceq 'Gentleman-Programming/gentle-dot/.github/workflows/windows-staged-daemon-phases-44794993333.yml@refs/heads/qa/windows-private-memory-reasons-45201908966')
 }
 
 function New-StagedDaemonPhaseBuildInfo([string]$Shell) {

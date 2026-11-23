@@ -10,7 +10,7 @@ const LOCKFILE = join(PACKAGE, "..", "..", "pnpm-lock.yaml");
 const IMPORTER = "packages/daemon";
 const PRIVATE_STORAGE_SOURCE = join(REPOSITORY, "scripts", "windows", "private-storage", "main.go");
 
-const PHASE_REF = "refs/heads/qa/windows-staged-daemon-phases-44794993333";
+const PHASE_REF = "refs/heads/qa/windows-private-memory-reasons-45201908966";
 const PHASE_BUILD_CONTEXT = {
 	GENTLE_DOT_CI_DAEMON_PHASE_BUILD: "1",
 	CI: "true",

@@ -188,18 +188,31 @@ test('runtime selector is consumed even if invalid; no partial endpoint', () => 
 	}
 });
 
-test('default esbuild configuration is literal false unless exact hosted compile context matches', () => {
-	const branch = 'refs/heads/qa/windows-staged-daemon-phases-44794993333';
-	const context = {
-		GENTLE_DOT_CI_DAEMON_PHASE_BUILD: '1', CI: 'true', GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted',
-		RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64', GITHUB_RUN_ATTEMPT: '1', GITHUB_JOB: 'observe',
-		GITHUB_REPOSITORY: 'Gentleman-Programming/gentle-dot', GITHUB_EVENT_NAME: 'push', GITHUB_REF: branch,
-		GITHUB_WORKFLOW: 'Windows staged daemon phases 44794993333',
-		GITHUB_WORKFLOW_REF: `Gentleman-Programming/gentle-dot/.github/workflows/windows-staged-daemon-phases-44794993333.yml@${branch}`,
-	};
-	const off = { __GENTLE_DOT_DAEMON_PHASES__: 'false' };
+const phaseBranch = 'refs/heads/qa/windows-private-memory-reasons-45201908966';
+const phaseWorkflowRef = (ref: string) => `Gentleman-Programming/gentle-dot/.github/workflows/windows-staged-daemon-phases-44794993333.yml@${ref}`;
+const phaseCompileContext = (branch: string) => ({
+	GENTLE_DOT_CI_DAEMON_PHASE_BUILD: '1', CI: 'true', GITHUB_ACTIONS: 'true', RUNNER_ENVIRONMENT: 'github-hosted',
+	RUNNER_OS: 'Windows', RUNNER_ARCH: 'X64', GITHUB_RUN_ATTEMPT: '1', GITHUB_JOB: 'observe',
+	GITHUB_REPOSITORY: 'Gentleman-Programming/gentle-dot', GITHUB_EVENT_NAME: 'push', GITHUB_REF: branch,
+	GITHUB_WORKFLOW: 'Windows staged daemon phases 44794993333', GITHUB_WORKFLOW_REF: phaseWorkflowRef(branch),
+});
+
+const phaseOff = { __GENTLE_DOT_DAEMON_PHASES__: 'false' };
+
+test('esbuild enables phases for the fresh exact hosted ref', () => {
+	assert.deepEqual(startupStageDefines('win32', 'x64', phaseCompileContext(phaseBranch)), { __GENTLE_DOT_DAEMON_PHASES__: 'true' });
+});
+
+for (const ref of ['refs/heads/qa/windows-staged-daemon-phases-44794993333', 'refs/heads/main']) {
+	test(`esbuild refuses phase compilation for ${ref}`, () => {
+		assert.deepEqual(startupStageDefines('win32', 'x64', phaseCompileContext(ref)), phaseOff);
+	});
+}
+
+test('esbuild retains the default-off platform and hosted identity checks', () => {
+	const context = phaseCompileContext(phaseBranch);
+	const off = phaseOff;
 	assert.deepEqual(startupStageDefines('win32', 'x64', selector), off);
-	assert.deepEqual(startupStageDefines('win32', 'x64', context), { __GENTLE_DOT_DAEMON_PHASES__: 'true' });
 	assert.deepEqual(startupStageDefines('win32', 'arm64', context), off);
 	assert.deepEqual(startupStageDefines('linux', 'x64', context), off);
 	for (const key of Object.keys(context)) assert.deepEqual(startupStageDefines('win32', 'x64', { ...context, [key]: 'wrong' }), off);

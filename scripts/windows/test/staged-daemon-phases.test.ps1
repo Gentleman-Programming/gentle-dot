@@ -19,6 +19,15 @@ foreach ($block in $blocks) {
 . $wrapper
 $env:CI = 'true'; $env:RUNNER_ENVIRONMENT = 'self-hosted'
 if ((Invoke-StagedDesktopStartup -PhasePort '43194') -cne 'staged-desktop-startup-phases-refused') { throw 'wrong host admitted' }
+$env:OS = 'Windows_NT'; $env:GITHUB_ACTIONS = 'true'; $env:RUNNER_ENVIRONMENT = 'github-hosted'
+$env:RUNNER_OS = 'Windows'; $env:RUNNER_ARCH = 'X64'; $env:GITHUB_RUN_ATTEMPT = '1'; $env:GITHUB_JOB = 'observe'
+$env:GITHUB_REPOSITORY = 'Gentleman-Programming/gentle-dot'; $env:GITHUB_EVENT_NAME = 'push'
+$env:GITHUB_WORKFLOW = 'Windows staged daemon phases 44794993333'
+$env:GITHUB_REF = 'refs/heads/qa/windows-private-memory-reasons-45201908966'
+$env:GITHUB_WORKFLOW_REF = "Gentleman-Programming/gentle-dot/.github/workflows/windows-staged-daemon-phases-44794993333.yml@$env:GITHUB_REF"
+if ((Test-StagedDaemonPhaseHost) -ne ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString() -ceq 'X64')) {
+    throw 'fresh exact host ref did not match architecture gate'
+}
 $env:GH_TOKEN = 'inert'; $env:AMBIENT_SENTINEL = 'inert'; $env:NODE_OPTIONS = 'inert'
 $stageInfo = New-StagedDaemonPhaseBuildInfo 'inert'
 foreach ($key in @('GH_TOKEN','AMBIENT_SENTINEL','NODE_OPTIONS','GENTLE_DOT_CI_DAEMON_PHASE_ID')) {

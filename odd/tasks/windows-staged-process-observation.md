@@ -9,6 +9,8 @@ Reuse the exact Windows x64 artifacts from run 44794993333 in a single isolated 
 
 - S5: «revisa y corrige».
 
+- S6: «arregla y pueba de nuevo».
+
 ## Tasks
 - T1 | S2 | implement and independently verify one exact-image/owned-process-lifetime observer, tests/docs and a runner-only QA workflow | partial; external-debugger route stopped, no candidate | n/a
 - T2 | S2 | push exact QA ref once, observe exact attempt, and interpret the projected result | dropped; no safe candidate, no hosted run spent | n/a
@@ -20,7 +22,9 @@ Reuse the exact Windows x64 artifacts from run 44794993333 in a single isolated 
 - T7 | S4 | implement and verify source-built categorical startup checkpoint observation in isolated QA | done: parent and independent focused contracts 11/11 | 6f07e6f1cf8ca89b86198d4b0f40243585393880
 - T8 | S4 | observe the exact hosted attempt once | done: exact attempt 1 observed; explicit private-memory stage failure and staged timeout | 6f07e6f1cf8ca89b86198d4b0f40243585393880
 
-- T9 | S5 | reproduce the relevant Windows listener lookup in isolation, then correct categorical diagnostics if no production failure reproduces | done: diagnostic only; no hosted cause established | diagnostic source commit
+- T9 | S5 | reproduce the relevant Windows listener lookup in isolation, then correct categorical diagnostics if no production failure reproduces | done: diagnostic only; no hosted cause established | 159dd14ae1aba9fb9fe5066422b8cfa95fefff0d
+
+- T10 | S6 | bind the granular diagnostic to one fresh isolated QA ref; verify and observe attempt 1 | in progress | uncommitted
 
 ## Log
 - L1: «entonces terminalo y probemos las web»
@@ -42,3 +46,6 @@ Reuse the exact Windows x64 artifacts from run 44794993333 in a single isolated 
 - L17: Read-only explorer mwtenrqy-g-ncmc found the stage includes config reread, private/profile requirements, and strict private memory lookup (invalid port, system Windows PowerShell query failure or ambiguity, listener identity, or reconfirmation). Neither absence of PSModulePath nor successful earlier preflight establishes the cause; a confirmed empty port is accepted. No deterministic product fix or transfer to installed lifecycle. Preserve all admission checks; a categorical inert discriminant could refine the next observation but cannot explain this run retrospectively. Installer and local download remain unverified.
 - L18: «revisa y corrige». Parent job-5 executed the exact Windows PowerShell lookup command and timeout with clean representative staged environment, using only a test-owned IPv4 loopback listener. Exit 0; `exact-owned-listener` while open and `confirmed-empty` after release. Only enums printed; not hosted equivalence or validation of config/identity. OS-temp isolated retained root `gentle-dot-memory-query-0cakOr`. No legitimate lookup/prod correction identified. New local-only `diag/windows-private-memory-reasons` from 6f07e6f retains old journals in this registered worktree. Correct the diagnostic classification only: distinguish private-memory config reread/prerequisites/invalid port, query rejection/timeout/nonzero/stderr/invalid data/ambiguity, listener identity and PID recheck; no new raw data, change to admission, cleanup, public errors or default logs. Test in inert seams and preserve old behavior. Risk item 2 and 3; independent verifier. S4 attempt spent; no push, new workflow/ref, or CI run authorized by S5.
 - L19: T9 worker mwtf10bk-i-pk0r added 13 closed opt-in reason labels without changing admission, public errors or cleanup. Focused RED exit 1 (10/28 passed, 17 missing reasons and one rejected new frame) → GREEN 31/31. Fourteen baseline/current inert differential fixtures matched exact streams, exit status and ownership/cleanup effects; original fixture-escape attempt failed before meaningful comparison. Independent mwtfac7k-j-k9bk ran 31/31 and checked source/wire cutoff; parent 31/31 and diff check. No broader Vitest, native acceptance, installation, CI or publication. Prior hosted cause remains unproven.
+- L20: T9 local slice 6f07e6f1cf8ca89b86198d4b0f40243585393880 → 159dd14ae1aba9fb9fe5066422b8cfa95fefff0d, 8 paths, 339 additions / 54 deletions. Prior branch history is not part of this slice. No push or hosted attempt. Keep the diagnostic distinct from a product fix.
+- L21: «arregla y pueba de nuevo» authorizes a single distinct hosted verification of the new granular categories, not a repeat of S4 or a product-policy change without proof. Exact new branch `qa/windows-private-memory-reasons-45201908966` from 159dd14ae1aba9fb9fe5066422b8cfa95fefff0d. Parent job-6 verified original desktop artifact pin available. T10 changes branch binding and its contracts only, keeps all production/default behavior and artifact pins; do not push previous refs, release, bundle, run installer, publish web or repeat a failed attempt. Independently verify Risk 5 (CI) and 2 (host gates).
+- L22: Worker mwtg3u1e-k-7ddx exact-ref RED 31/37 → GREEN 37/37; preserved 7 source comparisons, 8 macOS decisions and 9 compile decisions. Independent mwtg814x-l-u8yr confirmed focused 37/37, no blockers, original artifact pins and permissions preserved; parent focused 37/37 and diff check. This proves readiness for one hosted diagnostic only, not that the installer has been repaired.

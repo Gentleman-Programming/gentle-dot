@@ -13,7 +13,8 @@ const flags = ['-NoProfile', '-NonInteractive', '-File'];
 
 test('one SHA-bound Windows x64 build and one staged observation, without bundling or publishing', () => {
   const workflow = read('.github/workflows/windows-staged-owner-44794993333.yml');
-  assert.match(workflow, new RegExp(`push:\\s+branches:\\s+- '${branch}'`));
+  assert.ok(workflow.replaceAll('\r\n', '\n').includes(`on:\n  push:\n    branches:\n      - '${branch}'\npermissions:`));
+  assert.match(workflow, /github\.ref == 'refs\/heads\/qa\/windows-staged-owner-44794993333' && github\.run_attempt == '1'/);
   assert.match(workflow, /runs-on: windows-2022/);
   assert.match(workflow, /actions\/checkout@[0-9a-f]{40}\s+with:\s+ref: \$\{\{ github.sha \}\}\s+persist-credentials: false/);
   assert.match(workflow, /node-version: '24\.14\.1'/);
@@ -23,7 +24,7 @@ test('one SHA-bound Windows x64 build and one staged observation, without bundli
   assert.equal((workflow.match(/tauri build --no-bundle --target x86_64-pc-windows-msvc/g) ?? []).length, 1);
   assert.equal((workflow.match(/run-staged-owner-observation\.ps1/g) ?? []).length, 1);
   assert.doesNotMatch(workflow, /workflow_dispatch|upload-artifact|package\.ps1|secrets\.|GENTLE_DOT_WINDOWS_PACKAGED_REQUIRED/);
-  assert.match(read('.github/workflows/macos.yml'), new RegExp(`branches-ignore:\\s+- '${branch}'\\s+- 'qa/windows-staged-daemon-phases-44794993333'\\s+tags: \\['\\*\\*'\\]\\s+pull_request:\\s+workflow_dispatch:`));
+  assert.match(read('.github/workflows/macos.yml'), new RegExp(`branches-ignore:\\s+- '${branch}'(?:\\r?\\n|$)`));
 });
 
 test('opt-in is compile-only and selectors are not inherited by Node', () => {
