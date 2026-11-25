@@ -226,7 +226,9 @@ async function main() {
 	// Tauri copies the signed runtime into the app, signs the app, and builds the DMG from it.
 	// Unless asked, the DMG's Finder window is not scripted (CI): that needs Finder automation.
 	const config = tauriReleaseConfig({ runtime, identity: options.identity });
-	say(`tauri build --bundles app,dmg (release, signing ${identityName(options.identity)})`);
+	const headlessQa = process.env.GITHUB_ACTIONS === "true" && options.identity === AD_HOC && !options.finderLayout;
+	const bundles = headlessQa ? "app" : "app,dmg";
+	say(`tauri build --bundles ${bundles} (release, signing ${identityName(options.identity)})`);
 	const env = { ...process.env, APPLE_SIGNING_IDENTITY: options.identity };
 	if (options.finderLayout) delete env.CI;
 	else env.CI = "true";
@@ -240,7 +242,7 @@ async function main() {
 			"build",
 			...targetArgs,
 			"--bundles",
-			"app,dmg",
+			bundles,
 			"--config",
 			JSON.stringify(config),
 		],
@@ -251,8 +253,16 @@ async function main() {
 	const bundle = join(TAURI, "target", ...(targetArgs.length ? [rustTarget] : []), "release", "bundle");
 	const app = join(bundle, "macos", `${productName}.app`);
 	const dmg = join(bundle, "dmg", dmgFileName(productName, version, TARGET.slice("darwin-".length)));
-	if (!existsSync(dmg)) throw new Error(`Tauri left no ${dmg}.`);
 	await verifyApp(app, runtime, nested);
+	if (headlessQa) {
+		const source = join(bundle, "macos");
+		const entries = readdirSync(source);
+		if (entries.length !== 1 || entries[0] !== `${productName}.app`)
+			throw new Error("Expected only the verified app in the macOS bundle directory");
+		mkdirSync(join(bundle, "dmg"), { recursive: true });
+		run("hdiutil", ["create", "-ov", "-format", "UDZO", "-volname", productName, "-srcfolder", source, dmg]);
+	}
+	if (!existsSync(dmg)) throw new Error(`Expected disk image at ${dmg}.`);
 	report("hdiutil", ["verify", dmg]);
 	const size = statSync(dmg).size;
 	say(`App: ${app}`);

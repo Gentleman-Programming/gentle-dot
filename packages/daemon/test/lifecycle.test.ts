@@ -7,6 +7,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppChannel } from "../src/app-channel.ts";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { ensurePrivateDir } from "../src/isolation.ts";
+import { writePrivateFile } from "../src/private-file.ts";
 import { fakeApp } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
@@ -265,9 +267,9 @@ describe("the engine's own home (S35.3)", () => {
 		// What #13 left behind: the daemon's files in the home, and no marker.
 		const dataDir = tempDir();
 		const home = join(dataDir, "agent");
-		mkdirSync(home, { recursive: true, mode: 0o700 });
-		writeFileSync(join(home, "auth.json"), "{}\n");
-		writeFileSync(join(home, "mcp.json"), `${JSON.stringify({ mcpServers: {} })}\n`);
+		ensurePrivateDir(home);
+		writePrivateFile(join(home, "auth.json"), "{}\n");
+		writePrivateFile(join(home, "mcp.json"), `${JSON.stringify({ mcpServers: {} })}\n`);
 		const { markedAtSpawn } = await start({ dataDir });
 		expect(markedAtSpawn()).toBe(true);
 		expect(readFileSync(join(home, "auth.json"), "utf8")).toBe("{}\n");
