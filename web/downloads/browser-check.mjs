@@ -185,6 +185,10 @@ try {
  assert.ok(wide['.text-link'].top>=wide['.product'].bottom,'Desktop: steps link sits below the screenshot');
  assert.ok(wide['.text-link'].right<=wide['.download-panel'].left,'Desktop: steps link stays in the left column');
  assert.ok(wide['.product'].left<wide['.download-panel'].left && wide['.product'].right<=wide['.download-panel'].left,'Desktop: screenshot stays in the left column');
+ await page.setViewportSize({width:1440,height:900});
+ const fold=await boxes();
+ assert.ok(fold['.product'].top-fold['.pitch'].bottom<=40,'Desktop: screenshot sits close to the pitch');
+ assert.ok(await product.evaluate(image=>image.getBoundingClientRect().bottom)<=900,'Desktop: screenshot fits the first 1440x900 viewport');
  await page.setViewportSize({width:320,height:1000});
  const narrow=await boxes();
  assert.ok(narrow['.download-panel'].bottom<=narrow['.product'].top,'Mobile: download panel comes before the screenshot');
