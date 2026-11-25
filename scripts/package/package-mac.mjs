@@ -97,7 +97,7 @@ const identityName = (identity) => (identity === AD_HOC ? "ad hoc" : `"${identit
  * them into the app and signs the app around them. Hardened runtime stays off: Node
  * needs JIT, and the N-API addons are signed by others (library validation).
  */
-function signRuntime(runtime, identity) {
+async function signRuntime(runtime, identity, target) {
 	const binaries = machOFiles(runtime);
 	const kept = binaries.filter(keepsOwnSignature);
 	const signed = insideOut(binaries.filter((relative) => !keepsOwnSignature(relative)));
@@ -106,11 +106,28 @@ function signRuntime(runtime, identity) {
 		run("codesign", ["--force", "--sign", identity, "--timestamp=none", join(runtime, relative)]);
 		say(`  signed ${relative}`);
 	}
+	const detached = new Map();
 	for (const relative of kept) {
-		run("codesign", ["--verify", "--strict", join(runtime, relative)]);
+		const path = join(runtime, relative);
+		// The pinned Intel 5.0.0 upstream binary is unsigned. For ad-hoc QA only,
+		// sign it separately so the engine can still authenticate its original bytes.
+		if (identity === AD_HOC && target === "darwin-x64" &&
+			relative === "daemon/node_modules/gentle-pi/.gentle-ai/v5.0.0/gentle-ai") {
+			const digest = await sha256File(path);
+			// binarySha256 from gentle-pi@5.0.0's darwin/amd64 release recipe.
+			if (digest !== "63c9833b8d6986ecc8aa6427f3d6e4375662bcdedca7d3b281502f941f0928fb")
+				throw new Error("Gentle AI Intel binary differs from the upstream release pin");
+			const signature = join(runtime, "gentle-ai-intel-qa.sig");
+			run("codesign", ["--sign", identity, "--timestamp=none", "--detached", signature, path]);
+			run("codesign", ["--verify", "--strict", "--detached", signature, path]);
+			detached.set(relative, "gentle-ai-intel-qa.sig");
+			say(`  unsigned upstream Intel binary preserved; detached ad-hoc QA signature verified: ${relative}`);
+			continue;
+		}
+		run("codesign", ["--verify", "--strict", path]);
 		say(`  kept its own signature (pinned digest): ${relative}`);
 	}
-	return { signed, kept };
+	return { signed, kept, detached };
 }
 
 /** Checks the built app: its signature, its nested code, and that the runtime kept every file and mode. */
@@ -130,6 +147,8 @@ async function verifyApp(app, runtime, nested) {
 			sha256File(join(runtime, relative)),
 			sha256File(join(bundled, relative)),
 		]);
+		const signature = nested.detached.get(relative);
+		if (signature) run("codesign", ["--verify", "--strict", "--detached", join(bundled, signature), join(bundled, relative)]);
 		if (staged !== copied) throw new Error(`${relative} changed on its way into the app.`);
 		say(`  unchanged bytes (sha256 ${copied.slice(0, 12)}…): ${relative}`);
 	}
@@ -202,7 +221,7 @@ async function main() {
 		say(`Using the staged runtime in ${runtime}`);
 	} else run(process.execPath, [join(HERE, "stage-runtime.mjs"), "--target", TARGET, "--out", runtime]);
 
-	const nested = signRuntime(runtime, options.identity);
+	const nested = await signRuntime(runtime, options.identity, TARGET);
 
 	// Tauri copies the signed runtime into the app, signs the app, and builds the DMG from it.
 	// Unless asked, the DMG's Finder window is not scripted (CI): that needs Finder automation.
