@@ -7,7 +7,7 @@ name: Windows
 on:
   push:
     # `ci/**` branches try workflow changes before they reach `main`.
-    branches: [main, 'ci/**', integration/native-runtime-ci]
+    branches: [main, 'ci/**', integration/native-runtime-ci, qa/native-preview]
   pull_request:
   workflow_dispatch:
 
@@ -114,6 +114,7 @@ jobs:
           retention-days: 14
 
   app-channel:
+    needs: rust
     name: Native app channel
     runs-on: windows-latest
     env:
@@ -168,3 +169,37 @@ jobs:
       - name: Daemon tests
         run: pnpm exec vitest run packages/daemon/test/windows-provider-file-owner.test.ts packages/daemon/test/private-storage.windows.test.ts packages/daemon/test/windows-stop.test.ts packages/daemon/test/windows-app-channel.test.ts packages/daemon/test/app-channel-platform.test.ts packages/daemon/test/app-channel.test.ts packages/daemon/test/app-channel-fd.test.ts packages/daemon/test/windows-app-channel-addon.test.ts packages/daemon/test/windows-stop-addon.test.ts packages/daemon/test/process-tree.test.ts packages/daemon/test/supervisor.test.ts packages/daemon/test/runtime.test.ts packages/daemon/test/config.test.ts packages/daemon/test/isolation.test.ts packages/daemon/test/private-memory.test.ts packages/daemon/test/lifecycle.test.ts packages/daemon/test/cli.test.ts packages/daemon/test/runtime-build.test.ts scripts/package/test/lib.test.ts scripts/package/test/package-windows.test.ts
 
+
+      - name: Build isolated QA preview
+        if: github.ref == 'refs/heads/qa/native-preview'
+        shell: pwsh
+        run: |
+          node --test scripts/windows/test/preview-frontend.test.mjs scripts/windows/test/preview-isolation.test.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./scripts/windows/stage.ps1 -Target windows-x64
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Push-Location apps/desktop/src-tauri
+          try {
+            $env:TAURI_CONFIG = Get-Content tauri.preview.conf.json -Raw
+            cargo build --release --locked --features local-preview,custom-protocol --bin gentle-dot
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          } finally { Pop-Location }
+          $dir = 'build/windows/preview'
+          New-Item -ItemType Directory $dir | Out-Null
+          Move-Item build/windows/runtime "$dir/runtime"
+          Copy-Item apps/desktop/src-tauri/target/release/gentle-dot.exe "$dir/Gentle Dot Preview.exe"
+          Copy-Item scripts/windows/preview/Start-Preview.ps1 $dir
+          Set-Content "$dir/REVISION.txt" $env:GITHUB_SHA
+          tar.exe -acf build/windows/Gentle-Dot-Preview-x64.zip -C $dir .
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $hash = (Get-FileHash build/windows/Gentle-Dot-Preview-x64.zip).Hash.ToLowerInvariant()
+          Set-Content build/windows/SHA256SUMS.txt "$hash  Gentle-Dot-Preview-x64.zip"
+
+      - uses: actions/upload-artifact@v7
+        if: github.ref == 'refs/heads/qa/native-preview'
+        with:
+          name: Gentle-Dot-Preview-Windows-x64
+          path: |
+            build/windows/Gentle-Dot-Preview-x64.zip
+            build/windows/SHA256SUMS.txt
+          if-no-files-found: error
