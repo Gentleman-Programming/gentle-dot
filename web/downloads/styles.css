@@ -89,3 +89,12 @@ footer { border-top:1px solid var(--line); display:flex; flex-wrap:wrap; gap:16p
  button:focus-visible,a:focus-visible,select:focus-visible { outline-color:Highlight; }
 }
 @media(prefers-reduced-motion:reduce) { html { scroll-behavior:auto; } }
+.hero { grid-template-areas:"pitch panel" "product panel" "link panel"; align-items:start; row-gap:48px; }
+.hero > .text-link { grid-area:link; justify-self:start; margin-top:-24px; padding:10px 0; }
+.hero .pitch { grid-area:pitch; align-self:end; }
+.hero .download-panel { grid-area:panel; align-self:center; }
+.product { grid-area:product; margin:0; min-width:0; }
+.product img { display:block; width:100%; height:auto; border:1px solid var(--line); border-radius:var(--radius); background:var(--surface); }
+.product figcaption { margin-top:12px; color:var(--muted); font-size:14px; }
+@media(forced-colors:active) { .product img { border-color:CanvasText; } }
+@media(max-width:820px) { .hero { grid-template-areas:"pitch" "panel" "product" "link"; row-gap:32px; } .hero > .text-link { margin-top:0; } .hero .download-panel { align-self:stretch; } }
