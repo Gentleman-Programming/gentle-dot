@@ -189,6 +189,14 @@ try {
  const fold=await boxes();
  assert.ok(fold['.product'].top-fold['.pitch'].bottom<=40,'Desktop: screenshot sits close to the pitch');
  assert.ok(await product.evaluate(image=>image.getBoundingClientRect().bottom)<=900,'Desktop: screenshot fits the first 1440x900 viewport');
+ await page.setViewportSize({width:390,height:900});
+ const phone=await product.evaluate(image=>({src:image.currentSrc,mask:getComputedStyle(image).maskImage||getComputedStyle(image).webkitMaskImage||'none',width:image.getBoundingClientRect().width,right:image.getBoundingClientRect().right,ratio:image.getBoundingClientRect().width/image.getBoundingClientRect().height}));
+ assert.ok(Math.abs(phone.ratio-1082/666)<0.02,`Phone screenshot keeps its natural proportions, not a square: ${phone.ratio}`);
+ assert.ok(phone.src.endsWith('/hero.webp'),'Phone shows the full screenshot, never a crop');
+ assert.equal(phone.mask,'none','Phone screenshot has no fade or mask');
+ assert.ok(phone.right<=390,'Phone screenshot fits the viewport width');
+ assert.equal((await page.request.get(`${url}/hero-mobile.webp`)).status(),404,'No separate phone crop is served');
+ await page.setViewportSize({width:1440,height:1000});
  await page.setViewportSize({width:320,height:1000});
  const narrow=await boxes();
  assert.ok(narrow['.download-panel'].bottom<=narrow['.product'].top,'Mobile: download panel comes before the screenshot');
@@ -196,6 +204,7 @@ try {
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'No overflow at 320 with the hero screenshot');
  await page.setViewportSize({width:1440,height:1000});
  await page.screenshot({path:join(run,'hero-1440.png')});await page.setViewportSize({width:320,height:1000});await page.screenshot({path:join(run,'hero-320.png'),fullPage:true});await page.setViewportSize({width:1440,height:1000});
+ await page.waitForFunction(()=>{const image=document.querySelector('.hero .product img');return image.currentSrc.endsWith('/hero.webp')&&image.complete;});
  assert.equal(await product.getAttribute('src'),'./hero.webp');
  assert.match(await product.getAttribute('alt'),/Gentle Stream/);
  assert.deepEqual(await product.evaluate(image=>[image.complete,image.naturalWidth,image.naturalHeight,image.getAttribute('width'),image.getAttribute('height')]),[true,1082,666,'1082','666'],'Screenshot loads with intrinsic size to avoid layout shift');
