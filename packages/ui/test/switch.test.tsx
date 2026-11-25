@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ChatSurface } from "../src/components/ChatSurface.tsx";
 import { type DotState, initialState, reduce } from "../src/store.ts";
+import { openPanelMenu } from "./panel-menu.ts";
 
 function apply(state: DotState, ...payloads: ServerPayload[]): DotState {
 	return payloads.reduce(
@@ -66,6 +67,7 @@ describe("switching while the assistant answers", () => {
 		const send = vi.fn();
 		const busy = { ...open, agentState: "thinking" as const, conversationId: "b.jsonl", conversations };
 		render(<ChatSurface variant="web" state={busy} send={send} dismiss={vi.fn()} />);
+		await openPanelMenu();
 		await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
 		const dialog = screen.getByRole("alertdialog", { name: "Stop and switch?" });
 		expect(dialog).toHaveTextContent(QUESTION);
@@ -79,6 +81,7 @@ describe("switching while the assistant answers", () => {
 		const send = vi.fn();
 		const busy = { ...open, agentState: "working" as const, conversationId: "b.jsonl", conversations };
 		render(<ChatSurface variant="web" state={busy} send={send} dismiss={vi.fn()} />);
+		await openPanelMenu();
 		await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
 		await userEvent.click(screen.getByRole("button", { name: "Stop and switch" }));
 		expect(send.mock.calls).toEqual([[{ type: "new_conversation" }]]);
@@ -89,6 +92,7 @@ describe("switching while the assistant answers", () => {
 		const send = vi.fn();
 		const busy = { ...open, agentState: "needs_you" as const, conversationId: "b.jsonl", conversations };
 		render(<ChatSurface variant="web" state={busy} send={send} dismiss={vi.fn()} />);
+		await openPanelMenu();
 		await userEvent.click(screen.getByRole("button", { name: "Conversations" }));
 		send.mockClear();
 		await userEvent.click(screen.getByRole("button", { name: /Trip plan/ }));
@@ -102,6 +106,7 @@ describe("switching while the assistant answers", () => {
 	it("switches right away when the assistant is idle", async () => {
 		const send = vi.fn();
 		render(<ChatSurface variant="web" state={{ ...open, conversations }} send={send} dismiss={vi.fn()} />);
+		await openPanelMenu();
 		await userEvent.click(screen.getByRole("button", { name: "New conversation" }));
 		expect(send).toHaveBeenCalledWith({ type: "new_conversation" });
 		expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();

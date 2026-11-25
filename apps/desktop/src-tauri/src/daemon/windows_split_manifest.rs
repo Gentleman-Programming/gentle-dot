@@ -9,7 +9,7 @@ use std::marker::PhantomData;
 
 const MAX_MANIFEST: usize = 16 * 1024 * 1024;
 const MAX_SAFE_SIZE: u64 = (1 << 53) - 1;
-// Keep in sync with scripts/windows/split-runtime-files.mjs (REQUIRED).
+// Keep in sync with scripts/windows/runtime-integrity.mjs (REQUIRED).
 const REQUIRED: [&str; 7] = [
     "node/node.exe",
     "bin/engram.exe",

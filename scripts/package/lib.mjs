@@ -19,6 +19,7 @@ import { join, posix, win32 } from "node:path";
  */
 export const TARGETS = Object.freeze({
 	"darwin-arm64": { platform: "darwin", arch: "arm64", node: "darwin-arm64", engram: "darwin_arm64" },
+	"darwin-x64": { platform: "darwin", arch: "x64", node: "darwin-x64", engram: "darwin_amd64" },
 	"linux-arm64": { platform: "linux", arch: "arm64", node: "linux-arm64", engram: "linux_arm64" },
 	"linux-x64": { platform: "linux", arch: "x64", node: "linux-x64", engram: "linux_amd64" },
 	"win-x64": { platform: "win32", arch: "x64", node: "win-x64", engram: "windows_amd64" },
@@ -40,7 +41,7 @@ function archiveExtension(target) {
 export const PINNED_NODE_VERSION = "24.14.1";
 
 export const USAGE =
-	"usage: stage-runtime --target <darwin-arm64|linux-arm64|linux-x64|win-x64|win-arm64> [--out <dir>] " +
+	"usage: stage-runtime --target <darwin-arm64|darwin-x64|linux-arm64|linux-x64|win-x64|win-arm64> [--out <dir>] " +
 	"[--engram-version <x.y.z>]";
 
 /** Parses the command line; throws with the usage on anything unexpected. */
@@ -53,6 +54,8 @@ export function parseArgs(argv) {
 		const value = args[i + 1];
 		if (!name || value === undefined || value.startsWith("--"))
 			throw new Error(`Unexpected argument ${args[i]}.\n${USAGE}`);
+		if (name === "target" && Object.hasOwn(options, name))
+			throw new Error("--target may be specified only once.");
 		options[name] = value;
 	}
 	if (!options.target) throw new Error(`Missing --target.\n${USAGE}`);
@@ -166,7 +169,7 @@ export function installerEnv(out, cache, target, source = process.env, goExecuta
 			SystemRoot: root,
 			ComSpec: path(root, "System32", "cmd.exe"),
 			PATH: [
-				path(out, "node", "bin"),
+				path(out, "node"),
 				path(root, "System32"),
 				root,
 				...(goExecutable ? [win32.dirname(goExecutable)] : []),
@@ -197,35 +200,36 @@ export function pnpmInvocation(
 /**
  * The files a staged Windows runtime must hold, relative to its root: what `launch.rs`
  * `validate_packaged_runtime` requires of the installed copy, and what `windows-layout.test.ts`
- * keeps in step with it. `node/bin/node.exe` is where the app launches Node (`launch.rs`).
+ * keeps in step with it. Windows retains the Go launcher's `node/node.exe` layout.
  */
 export const WINDOWS_RUNTIME_FILES = Object.freeze([
-	"node/bin/node.exe",
+	"node/node.exe",
 	"daemon/cli.mjs",
 	"daemon/package.json",
 	"daemon/native/windows-stop.node",
 	"daemon/node_modules/gentle-pi/package.json",
 	"bin/engram.exe",
-	"bin/pi.cmd",
+	"bin/pi.exe",
+	"bin/private-storage.exe",
 	"ui/index.html",
 ]);
 
 /**
  * Lays Node's extracted Windows zip (`extracted` holds node.exe, the cmd shims and `node_modules/npm`)
- * out like the other targets under `node`: `bin/node.exe`, `bin/npm.cmd` and `bin/npx.cmd` that run
- * the staged Node's own npm, and `lib/node_modules/npm`. The zip's own shims look for npm beside
- * node.exe, so they are rewritten rather than copied.
+ * under `node`: `node.exe`, `npm.cmd`, `npx.cmd`, and `lib/node_modules/npm`.
+ * The native Go launcher requires Node at this root. Rewrite npm's shims to use
+ * that Node and the private npm library, never an ambient installation.
  */
 export function layoutWindowsNode(extracted, node) {
-	mkdirSync(join(node, "bin"), { recursive: true });
+	mkdirSync(node, { recursive: true });
 	mkdirSync(join(node, "lib", "node_modules"), { recursive: true });
-	copyFileSync(join(extracted, "node.exe"), join(node, "bin", "node.exe"));
+	copyFileSync(join(extracted, "node.exe"), join(node, "node.exe"));
 	copyFileSync(join(extracted, "LICENSE"), join(node, "LICENSE"));
 	cpSync(join(extracted, "node_modules", "npm"), join(node, "lib", "node_modules", "npm"), {
 		recursive: true,
 	});
 	for (const name of ["npm", "npx"])
-		writeFileSync(join(node, "bin", `${name}.cmd`), npmWrapper(`${name}-cli.js`, "win32"));
+		writeFileSync(join(node, `${name}.cmd`), npmWrapper(`${name}-cli.js`, "win32"));
 }
 
 /** The SHA-256 a `SHASUMS256.txt` / `checksums.txt` listing gives `fileName`; throws when it is absent. */
@@ -336,7 +340,7 @@ export function buildManifest({ target, versions, daemonCommit, sizeBytes, stage
 /** A `bin/npm` or `bin/npx` that runs the staged Node's own npm, wherever the folder is copied. */
 export function npmWrapper(cli, platform = "unix") {
 	if (platform === "win32")
-		return `@echo off\r\n"%~dp0node.exe" "%~dp0..\\lib\\node_modules\\npm\\bin\\${cli}" %*\r\n`;
+		return `@echo off\r\n"%~dp0node.exe" "%~dp0lib\\node_modules\\npm\\bin\\${cli}" %*\r\n`;
 	return `#!/bin/sh
 # Runs the npm bundled with this Node; a script rather than Node's symlink, so copies that follow links work.
 self=$0
@@ -355,7 +359,7 @@ exec "$bin/node" "$bin/../lib/node_modules/npm/bin/${cli}" "$@"
 // macOS installer (`package-mac.mjs`).
 
 export const MAC_USAGE =
-	"usage: package-mac [--sign <identity>] [--skip-stage] [--check] [--check-dmg <dmg>] [--finder-layout]";
+	"usage: package-mac [--target <darwin-arm64|darwin-x64>] [--sign <identity>] [--skip-stage] [--check] [--check-dmg <dmg>] [--finder-layout]";
 
 /** The ad hoc signing identity: no certificate, and no identity that survives a rebuild. */
 export const AD_HOC = "-";
@@ -368,7 +372,7 @@ export function parseMacArgs(argv, env = process.env) {
 	const args = argv.filter((arg) => arg !== "--");
 	const options = { skipStage: false, check: false, finderLayout: false };
 	const switches = { "--skip-stage": "skipStage", "--check": "check", "--finder-layout": "finderLayout" };
-	const values = { "--sign": "sign", "--check-dmg": "checkDmg" };
+	const values = { "--target": "target", "--sign": "sign", "--check-dmg": "checkDmg" };
 	for (let i = 0; i < args.length; i++) {
 		if (switches[args[i]]) {
 			options[switches[args[i]]] = true;
@@ -378,12 +382,17 @@ export function parseMacArgs(argv, env = process.env) {
 		const value = args[i + 1];
 		if (!name || value === undefined || value === "" || value.startsWith("--"))
 			throw new Error(`Unexpected argument ${args[i]}.\n${MAC_USAGE}`);
+		if (name === "target" && Object.hasOwn(options, name))
+			throw new Error("--target may be specified only once.");
 		options[name] = value;
 		i++;
 	}
+	const target = options.target ?? "darwin-arm64";
+	if (!["darwin-arm64", "darwin-x64"].includes(target))
+		throw new Error(`Unknown macOS target ${target}; expected darwin-arm64 or darwin-x64.`);
 	const identity = options.sign ?? (env.GENTLE_DOT_SIGN_IDENTITY || AD_HOC);
 	delete options.sign;
-	return { ...options, identity };
+	return { ...options, target, identity };
 }
 
 /**
@@ -520,8 +529,10 @@ export function payloadDifferences(staged, extracted) {
  */
 export const RUNTIME_HASH_SAMPLE = Object.freeze([
 	"MANIFEST.json",
-	"node/bin/node.exe",
-	"bin/pi.cmd",
+	"node/node.exe",
+	"bin/pi.exe",
+	"bin/private-storage.exe",
+	"daemon/native/windows-stop.node",
 	"bin/engram.exe",
 	"daemon/cli.mjs",
 ]);

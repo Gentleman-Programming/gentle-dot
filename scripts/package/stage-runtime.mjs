@@ -157,8 +157,8 @@ async function stageNode(out, target) {
 		const found = findFile(extracted, "node.exe");
 		const root = found ? dirname(found) : undefined;
 		if (!root) throw new Error(`${archiveName} has no node.exe.`);
-		// The Windows zip has node.exe at its root, npm one folder down and the cmd shims beside it;
-		// the staged layout matches the other targets and `launch.rs`: `node/bin/node.exe`.
+		// Retain node/node.exe for the selected native Go launcher; the helper
+		// rewrites npm's private-library shims consistently with that layout.
 		layoutWindowsNode(root, node);
 		rmSync(extracted, { recursive: true });
 		return version;
@@ -215,7 +215,7 @@ function installDaemonModules(out, target, goExecutable) {
 		for (const path of [env.LOCALAPPDATA, env.APPDATA, env.TEMP, env.TMP])
 			mkdirSync(path, { recursive: true });
 	const result = spawnSync(
-		join(out, "node", "bin", windows ? "node.exe" : "node"),
+		windows ? join(out, "node", "node.exe") : join(out, "node", "bin", "node"),
 		[
 			join(out, "node", "lib", "node_modules", "npm", "bin", "npm-cli.js"),
 			"install",

@@ -26,6 +26,8 @@ pub struct LaunchSpec {
 /// A spawned process the app polls, stops, and reaps: a `std::process::Child`, or on macOS a
 /// daemon spawned with its TCC responsibility disclaimed (`disclaimed`).
 pub trait ChildProcess: Send {
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    fn readiness_alive(&self) -> bool { false }
     fn id(&self) -> u32;
     /// The exit status once the process ended (reaping it), `None` while it runs.
     fn try_wait(&mut self) -> io::Result<Option<ExitStatus>>;
@@ -68,6 +70,13 @@ impl ChildProcess for Child {
     }
 }
 
+pub(super) const PACKAGED_RUNTIME_FILES: &[&str] = &[
+    "node/node.exe", "daemon/cli.mjs", "daemon/package.json",
+    "daemon/native/windows-stop.node", "daemon/node_modules/gentle-pi/package.json",
+    "bin/engram.exe", "bin/pi.exe", "bin/private-storage.exe", "ui/index.html",
+];
+pub(super) const PACKAGED_RUNTIME_HARNESS: &str = "daemon/node_modules/gentle-pi/.gentle-ai";
+
 /// Admit a package-required launch before selecting any build-machine fallback. Ordinary
 /// checkout builds retain the old contract. A complete explicit Node/script override is
 /// an intentional external runtime, not an accidental fallback; one override alone is not.
@@ -90,36 +99,42 @@ pub fn validate_packaged_runtime(
          this package will not silently use build-machine checkout paths."
     );
     let dir = runtime.ok_or_else(|| fail("runtime resource directory unavailable".into()))?;
-    for relative in [
-        "node/bin/node.exe", "daemon/cli.mjs", "daemon/package.json",
-        "daemon/native/windows-stop.node", "daemon/node_modules/gentle-pi/package.json",
-        "bin/engram.exe", "bin/pi.cmd", "ui/index.html",
-    ] {
+    for relative in PACKAGED_RUNTIME_FILES {
         if !dir.join(relative).is_file() {
             return Err(fail(dir.join(relative).display().to_string()));
         }
     }
-    if !dir.join("daemon/node_modules/gentle-pi/.gentle-ai").is_dir() {
-        return Err(fail(dir.join("daemon/node_modules/gentle-pi/.gentle-ai").display().to_string()));
+    if !dir.join(PACKAGED_RUNTIME_HARNESS).is_dir() {
+        return Err(fail(dir.join(PACKAGED_RUNTIME_HARNESS).display().to_string()));
     }
     Ok(())
 }
 
 #[cfg(windows)]
-fn node_runtime_path(dir: &Path) -> PathBuf {
-    // Node's entry resolver rejects verbatim drive paths. Only use the ordinary
-    // spelling if Windows resolves it to the same canonical directory; special
-    // namespace paths and names with different Win32 semantics stay untouched.
-    if let Some(rest) = dir.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
-        let bytes = rest.as_bytes();
-        if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\' {
-            let ordinary = PathBuf::from(rest);
-            if let (Ok(original), Ok(candidate)) = (fs::canonicalize(dir), fs::canonicalize(&ordinary)) {
-                if original == candidate { return ordinary; }
-            }
-        }
+fn node_entry_path(script: &Path) -> PathBuf {
+    use std::path::{Component, Prefix};
+    if !matches!(
+        script.components().next(),
+        Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::VerbatimDisk(_) | Prefix::VerbatimUNC(_, _))
+    ) {
+        return script.to_path_buf();
     }
-    dir.to_path_buf()
+    // Convert only the entry spelling, and only after proving the same file.
+    // Runtime identity and PATH retain their native namespace and entry boundaries.
+    let equivalent = || {
+        let candidate = tauri::Url::from_file_path(script).ok()?.to_file_path().ok()?;
+        let intended = fs::canonicalize(script).ok()?;
+        (fs::canonicalize(&candidate).ok()? == intended).then_some(candidate)
+    };
+    equivalent().unwrap_or_else(|| script.to_path_buf())
+}
+
+#[cfg(windows)]
+pub(super) fn windows_node_directory(runtime: &Path) -> PathBuf {
+    // Preserve the feature producer's node/node.exe layout. The inherited producer
+    // uses node/bin/node.exe; select it only when no legacy runtime executable exists.
+    let legacy = runtime.join("node");
+    if legacy.join("node.exe").is_file() { legacy } else { runtime.join("node/bin") }
 }
 
 /// `git.exe` is not in `System32`, so the packaged `PATH` never reached it and an installed copy
@@ -204,27 +219,132 @@ fn where_git() -> Vec<String> {
         .collect()
 }
 
-/// The Windows `PATH` for a bundled runtime: its own folders first so the packaged Node keeps
-/// winning, then the machine's Git, and the system folders last.
+#[cfg(windows)]
+const PROGRAM_FILES_FOLDERS: [windows_sys::core::GUID; 2] = [
+    #[cfg(target_pointer_width = "64")]
+    windows_sys::Win32::UI::Shell::FOLDERID_ProgramFiles,
+    // The generic ID can resolve to the x86 directory under WOW64.
+    #[cfg(target_pointer_width = "32")]
+    windows_sys::Win32::UI::Shell::FOLDERID_ProgramFilesX64,
+    windows_sys::Win32::UI::Shell::FOLDERID_ProgramFilesX86,
+];
+
+#[cfg(windows)]
+fn known_program_files(folder: &windows_sys::core::GUID) -> Option<String> {
+    use std::ptr::{null_mut, NonNull};
+    use windows_sys::Win32::{System::Com::CoTaskMemFree, UI::Shell::SHGetKnownFolderPath};
+
+    let mut path = null_mut();
+    // Query the system Known Folder, not the similarly named inherited variable.
+    // No creation or redirection flags are requested.
+    let result = unsafe { SHGetKnownFolderPath(folder, 0, null_mut(), &mut path) };
+    let path = NonNull::new(path)?;
+    // A successful result is a NUL-terminated UTF-16 buffer owned by the caller.
+    let root = (result >= 0).then(|| unsafe {
+        let mut len = 0;
+        while *path.as_ptr().add(len) != 0 { len += 1; }
+        String::from_utf16(std::slice::from_raw_parts(path.as_ptr(), len)).ok()
+    }).flatten();
+    unsafe { CoTaskMemFree(path.as_ptr().cast()); }
+    root
+}
+
+#[cfg(windows)]
+fn standard_git_cmd(root: &str) -> Option<PathBuf> {
+    // Accept only ordinary drive-root Program Files locations. Do not normalize away
+    // aliases, navigation components, or paths outside the standard layout.
+    let bytes = root.as_bytes();
+    if !(bytes.first()?.is_ascii_alphabetic() && bytes.get(1) == Some(&b':')
+        && matches!(bytes.get(2), Some(b'\\' | b'/'))) {
+        return None;
+    }
+    let name = root[3..].trim_end_matches(['\\', '/']);
+    if !["Program Files", "Program Files (x86)"].iter().any(|standard| name.eq_ignore_ascii_case(standard)) {
+        return None;
+    }
+    Some(PathBuf::from(format!("{}\\{name}\\Git\\cmd", &root[..2])))
+}
+
+#[cfg(windows)]
+fn standard_git_exists(dir: &Path) -> bool {
+    use std::os::windows::{ffi::OsStrExt, fs::MetadataExt};
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, QueryDosDeviceW, FILE_ATTRIBUTE_REPARSE_POINT};
+
+    let exe = dir.join("git.exe");
+    let Some(root) = dir.ancestors().last() else {
+        return false;
+    };
+    let drive: Vec<_> = root.as_os_str().encode_wide().collect();
+    let [letter, colon, slash] = drive[..] else { return false };
+    // DRIVE_FIXED = 3. Also reject SUBST drive aliases, which can report as fixed.
+    let mut target = [0u16; 256];
+    if unsafe { GetDriveTypeW([letter, colon, slash, 0].as_ptr()) } != 3
+        || unsafe { QueryDosDeviceW([letter, colon, 0].as_ptr(), target.as_mut_ptr(), target.len() as u32) } == 0
+        || !target.iter().copied().take(8).eq("\\Device\\".encode_utf16())
+    {
+        return false;
+    }
+    // Walk from the drive root down so a reparse directory is rejected before
+    // inspecting anything below it. Check the executable itself last.
+    let ancestors: Vec<_> = dir.ancestors().collect();
+    ancestors.into_iter().rev().all(|path| fs::symlink_metadata(path).is_ok_and(|meta| {
+        meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+    })) && fs::symlink_metadata(exe).is_ok_and(|meta| {
+        meta.is_file() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+    })
+}
+
+/// The Windows `PATH` for a bundled runtime: its own folders first, system folders
+/// next, then at most one Git directory. Git cannot shadow system tools.
 #[cfg(windows)]
 fn windows_bundled_path(runtime: &Path, git_dirs: Vec<PathBuf>, system: &Path) -> Vec<PathBuf> {
-    [runtime.join("bin"), runtime.join("node/bin")]
+    [runtime.join("bin"), windows_node_directory(runtime)]
         .into_iter()
-        .chain(git_dirs)
         .chain([system.join("System32"), system.to_path_buf()])
+        .chain(git_dirs)
         .collect()
 }
 
 /// `<node> <daemon script>` (S29.5). With a bundled runtime (`<runtime>/daemon/cli.mjs`
-/// exists) that is the runtime's own Node and daemon, a PATH of the runtime plus the
-/// system folders, and `GENTLE_DOT_RUNTIME`; otherwise the build-time paths and PATH.
+/// exists) that is the runtime's own Node and daemon and `GENTLE_DOT_RUNTIME`.
+/// Bundled Windows keeps runtime/system folders and at most one Git directory.
+/// Prefer the first absolute inherited Git directory; non-dev default bundled launches
+/// may fall back to a standard local Program Files Git command directory.
+/// Otherwise the platform's existing runtime or build-time paths and PATH stay unchanged.
 /// `GENTLE_DOT_NODE` and `GENTLE_DOT_DAEMON_SCRIPT` override the program and script in both.
 pub fn launch_spec(env: impl Fn(&str) -> Option<String>, dev: bool, runtime: Option<&Path>) -> LaunchSpec {
-    // Git is resolved once, here, and only a Windows bundled runtime puts it on PATH.
     #[cfg(windows)]
-    let git_dirs = || windows_git_dirs(&env, where_git, holds_git);
+    return windows_launch_spec(env, dev, runtime, known_program_files, standard_git_exists);
     #[cfg(not(windows))]
-    let git_dirs = Vec::new;
+    launch_spec_with(&env, dev, runtime, Vec::new)
+}
+
+#[cfg(windows)]
+fn windows_launch_spec(
+    env: impl Fn(&str) -> Option<String>,
+    dev: bool,
+    runtime: Option<&Path>,
+    known_folder: impl Fn(&windows_sys::core::GUID) -> Option<String>,
+    default_git_exists: impl Fn(&Path) -> bool,
+) -> LaunchSpec {
+    let git_dirs = || {
+        // Preserve the previous inherited route exactly; its helper gets no ambient
+        // environment or subprocess and receives at most one verified answer.
+        let inherited = windows_git_dirs(|_| None, || {
+            env("PATH").and_then(|path| std::env::split_paths(&path)
+                .find(|dir| dir.is_absolute() && holds_git(dir)))
+                .map(|dir| vec![dir.join("git.exe").display().to_string()])
+                .unwrap_or_default()
+        }, holds_git);
+        if !inherited.is_empty() || dev || ["GENTLE_DOT_NODE", "GENTLE_DOT_DAEMON_SCRIPT"]
+            .iter().any(|key| env(key).is_some_and(|value| !value.is_empty())) {
+            return inherited;
+        }
+        PROGRAM_FILES_FOLDERS.iter()
+            .filter_map(|folder| standard_git_cmd(&known_folder(folder)?))
+            .find(|dir| default_git_exists(dir))
+            .into_iter().collect()
+    };
     launch_spec_with(&env, dev, runtime, git_dirs)
 }
 
@@ -241,10 +361,6 @@ fn launch_spec_with(
     let bundled = runtime.filter(|dir| dir.join("daemon/cli.mjs").is_file());
     let (node, script, mut envs) = match bundled {
         Some(dir) => {
-            #[cfg(windows)]
-            let compatible = node_runtime_path(dir);
-            #[cfg(windows)]
-            let dir = compatible.as_path();
             let root = dir.display().to_string();
             #[cfg(unix)]
             let (node, script, path) = (
@@ -258,9 +374,11 @@ fn launch_spec_with(
                     .unwrap_or_else(|| r"C:\Windows".into()));
                 let entries = windows_bundled_path(dir, git_dirs(), &system);
                 (
-                    dir.join("node/bin/node.exe").display().to_string(),
-                    dir.join("daemon/cli.mjs").display().to_string(),
-                    entries.iter().map(|entry| entry.display().to_string()).collect::<Vec<_>>().join(";"),
+                    windows_node_directory(dir).join("node.exe").display().to_string(),
+                    node_entry_path(&dir.join("daemon/cli.mjs")).display().to_string(),
+                    entries.into_iter()
+                        .filter_map(|entry| std::env::join_paths([entry]).ok()?.into_string().ok())
+                        .collect::<Vec<_>>().join(";"),
                 )
             };
             (
@@ -353,14 +471,13 @@ mod packaged_runtime_tests {
         assert!(checked.status.success(), "Node rejected bundled entry: {}", String::from_utf8_lossy(&checked.stderr));
         assert!(checked.stdout.is_empty());
         assert!(checked.stderr.is_empty());
-        // Use the canonical long spelling even when the temp folder was given as an 8.3 path.
+        // Bridge the script only; retain the caller's native runtime identity.
         let plain = PathBuf::from(&extended.to_str().unwrap()[r"\\?\".len()..]);
-        assert_eq!(spec, launch_spec(|_| None, false, Some(&plain)));
-        assert!(!spec.program.starts_with(r"\\?\"));
+        let ordinary = launch_spec(|_| None, false, Some(&plain));
+        assert_eq!(fs::canonicalize(&spec.args[0]).unwrap(), fs::canonicalize(&ordinary.args[0]).unwrap());
+        assert_eq!(spec.program, extended.join("node/bin/node.exe").display().to_string());
         assert!(!spec.args[0].starts_with(r"\\?\"));
-        for (name, value) in &spec.envs {
-            if name == "PATH" || name == "GENTLE_DOT_RUNTIME" { assert!(!value.contains(r"\\?\")); }
-        }
+        assert_eq!(spec.envs[1], ("GENTLE_DOT_RUNTIME".into(), extended.display().to_string()));
         let overridden = launch_spec(|key| match key {
             "GENTLE_DOT_NODE" => Some("explicit-node".into()),
             "GENTLE_DOT_DAEMON_SCRIPT" => Some("explicit-entry".into()),
@@ -429,22 +546,21 @@ mod packaged_runtime_tests {
         assert!(holds_git(&folder), "a folder with git.exe must count");
     }
 
-    /// The property that matters is precedence: the runtime's own Node keeps winning and the
-    /// machine's Git comes after it, before the system folders.
+    /// Runtime Node wins, and the system folders stay ahead of imported Git tools.
     #[cfg(windows)]
     #[test]
-    fn a_bundled_windows_path_keeps_the_runtime_first_and_puts_git_before_the_system_folders() {
+    fn a_bundled_windows_path_keeps_runtime_and_system_before_git() {
         let runtime = fixture("runtime-git-path");
         let git = Path::new(r"C:\Program Files").join("Git").join("cmd");
         let system = Path::new(r"D:\Windows");
         let entries = windows_bundled_path(&runtime, vec![git.clone()], system);
         assert_eq!(entries, vec![
-            runtime.join("bin"), runtime.join("node/bin"), git, system.join("System32"), system.to_path_buf(),
+            runtime.join("bin"), runtime.join("node/bin"), system.join("System32"), system.to_path_buf(), git,
         ]);
     }
 
     /// The installed spec carries Git on the `PATH` the engine inherits (W41): after the runtime's
-    /// folders, before the system ones, and nothing extra when Git is absent.
+    /// and system folders, and nothing extra when Git is absent.
     #[cfg(windows)]
     #[test]
     fn bundled_windows_launch_spec_puts_git_on_the_engine_path() {
@@ -453,7 +569,7 @@ mod packaged_runtime_tests {
         let env = |key: &str| (key == "SystemRoot").then(|| r"D:\Windows".to_string());
         let spec = launch_spec_with(env, false, Some(&runtime), || vec![git.clone()]);
         assert_eq!(spec.envs[0], ("PATH".into(), format!(
-            "{};{};{};D:\\Windows\\System32;D:\\Windows",
+            "{};{};D:\\Windows\\System32;D:\\Windows;{}",
             runtime.join("bin").display(), runtime.join("node/bin").display(), git.display(),
         )));
         let without = launch_spec_with(env, false, Some(&runtime), Vec::new);
@@ -461,6 +577,191 @@ mod packaged_runtime_tests {
             "{};{};D:\\Windows\\System32;D:\\Windows",
             runtime.join("bin").display(), runtime.join("node/bin").display(),
         )));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundled_windows_launch_spec_rejects_unverified_inherited_path_entries() {
+        let runtime = fixture("inherited-path");
+        let git = PathBuf::from(r"C:\Git\cmd");
+        let prefix = format!("{};{};D:\\Windows\\System32;D:\\Windows;{}",
+            runtime.join("bin").display(), runtime.join("node/bin").display(), git.display());
+        for inherited in [
+            r"C:\Users\example\scoop\apps\git\current\cmd;D:\Tools With Spaces\bin",
+            r";c:\MixedCase\Bin;;D:\not-created\tools;c:\MixedCase\Bin;",
+            r".;relative;C:drive-relative;\root-relative",
+        ] {
+            let spec = launch_spec_with(|key| match key {
+                "SystemRoot" => Some(r"D:\Windows".into()),
+                "PATH" => Some(inherited.into()),
+                _ => None,
+            }, false, Some(&runtime), || vec![git.clone()]);
+            assert_eq!(spec.envs[0], ("PATH".into(), prefix.clone()));
+            assert_eq!(spec.program, runtime.join("node/bin/node.exe").display().to_string());
+            assert_eq!(spec.args, vec![runtime.join("daemon/cli.mjs").display().to_string()]);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundled_windows_empty_inherited_path_keeps_the_prefix_and_explicit_launches() {
+        let runtime = fixture("empty-inherited-path");
+        for inherited in [None, Some(""), Some(";;")] {
+            let spec = launch_spec_with(|key| match key {
+                "SystemRoot" => Some(r"D:\Windows".into()),
+                "PATH" => inherited.map(str::to_string),
+                "GENTLE_DOT_NODE" => Some(r"E:\custom\node.exe".into()),
+                "GENTLE_DOT_DAEMON_SCRIPT" => Some(r"E:\custom\cli.mjs".into()),
+                _ => None,
+            }, false, Some(&runtime), Vec::new);
+            assert_eq!(spec.envs[0], ("PATH".into(), format!("{};{};D:\\Windows\\System32;D:\\Windows",
+                runtime.join("bin").display(), runtime.join("node/bin").display())));
+            assert_eq!(spec.program, r"E:\custom\node.exe");
+            assert_eq!(spec.args, vec![r"E:\custom\cli.mjs"]);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundled_windows_inherited_git_requires_verified_absolute_selection() {
+        let runtime = fixture("inherited-git-lookup");
+        let git_dir = runtime.join("external Git").join("cmd");
+        fs::create_dir_all(&git_dir).unwrap();
+        // where.exe only discovers this synthetic fixture; Git itself is never executed.
+        let executable = git_dir.join("git.exe");
+        fs::write(&executable, b"").unwrap();
+        let second_git = runtime.join("second Git");
+        fs::create_dir_all(&second_git).unwrap();
+        fs::write(second_git.join("git.exe"), b"").unwrap();
+        let inherited = format!(";.;relative;{};{};", git_dir.display(), second_git.display());
+        let spec = launch_spec(|key| (key == "PATH").then(|| inherited.clone()),
+            false, Some(&runtime));
+        let entries: Vec<_> = std::env::split_paths(&spec.envs[0].1).collect();
+        assert_eq!(entries.last(), Some(&git_dir));
+        assert!(!entries.contains(&second_git));
+        assert!(!entries.contains(&PathBuf::from("relative")));
+        let without_selection = launch_spec_with(|key| (key == "PATH").then(|| inherited.clone()),
+            false, Some(&runtime), Vec::new);
+        assert!(!std::env::split_paths(&without_selection.envs[0].1).any(|entry| entry == git_dir));
+        let system = std::env::var_os("SystemRoot").map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        let output = std::process::Command::new(system.join("System32/where.exe"))
+            .arg("git.exe").env("PATH", &spec.envs[0].1).current_dir(&runtime).output().unwrap();
+        assert!(output.status.success(), "inherited Git disappeared: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.stderr.is_empty());
+        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), executable.display().to_string());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn packaged_windows_git_fallback_is_bounded() {
+        use std::cell::RefCell;
+
+        let runtime = fixture("bounded-git");
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        let _cleanup = Cleanup(runtime.clone());
+        let first = PathBuf::from(r"C:\Program Files\Git\cmd");
+        let second = PathBuf::from(r"D:\Program Files (x86)\Git\cmd");
+        let known_folder = |folder: &windows_sys::core::GUID| {
+            if folder.data1 == PROGRAM_FILES_FOLDERS[0].data1 {
+                Some(r"C:\Program Files".into())
+            } else {
+                assert_eq!(folder.data1, PROGRAM_FILES_FOLDERS[1].data1);
+                Some(r"D:\Program Files (x86)".into())
+            }
+        };
+        let baseline = launch_spec_with(env_of(&[("SystemRoot", r"D:\Windows")]),
+            false, Some(&runtime), Vec::new);
+        for (available, expected, probes) in [
+            (vec![&first, &second], Some(&first), vec![&first]),
+            (vec![&second], Some(&second), vec![&first, &second]),
+            (vec![], None, vec![&first, &second]),
+        ] {
+            let seen = RefCell::new(Vec::new());
+            let spec = windows_launch_spec(env_of(&[
+                ("SystemRoot", r"D:\Windows"), ("PATH", ";.;relative"),
+                ("ProgramFiles", r"E:\Program Files"),
+                ("ProgramFiles(x86)", r"F:\Program Files (x86)"),
+                ("LOCALAPPDATA", r"C:\Users\example\AppData\Local"),
+            ]), false, Some(&runtime), known_folder, |dir| {
+                seen.borrow_mut().push(dir.to_path_buf());
+                available.iter().any(|item| item.as_path() == dir)
+            });
+            let mut expected_spec = baseline.clone();
+            if let Some(dir) = expected {
+                expected_spec.envs[0].1.push_str(&format!(";{}", dir.display()));
+            }
+            assert_eq!(spec, expected_spec);
+            assert_eq!(seen.into_inner(), probes.into_iter().cloned().collect::<Vec<_>>());
+        }
+
+        // The inherited roots look standard and the metadata fixture would accept
+        // them; without an OS-provided root neither may enter the child PATH.
+        let forged_env = |key: &str| match key {
+            "SystemRoot" => Some(r"D:\Windows".into()),
+            "ProgramFiles" => Some(r"E:\Program Files".into()),
+            "ProgramFiles(x86)" => Some(r"F:\Program Files (x86)".into()),
+            _ => None,
+        };
+        let forged = windows_launch_spec(forged_env, false, Some(&runtime), |_| None, |dir| {
+            panic!("probed forged inherited root: {}", dir.display());
+        });
+        assert_eq!(forged, baseline);
+
+        for root in [r"\\server\share\Program Files", r"\\?\C:\Program Files", r"C:Program Files",
+            r"\Program Files", r"C:\Users\example\Program Files", r"C:\.\Program Files",
+            r"C:\Program Files.", r"%SystemDrive%\Program Files"] {
+            let spec = windows_launch_spec(env_of(&[("SystemRoot", r"D:\Windows")]),
+                false, Some(&runtime), |_| Some(root.into()), |_| panic!("probed invalid root: {root}"));
+            assert_eq!(spec, baseline);
+        }
+
+        let ambient = runtime.join("custom tools");
+        fs::create_dir(&ambient).unwrap();
+        fs::write(ambient.join("git.exe"), b"").unwrap();
+        let later = runtime.join("later Git");
+        fs::create_dir(&later).unwrap();
+        fs::write(later.join("git.exe"), b"").unwrap();
+        let inherited = format!(";relative;{};{}", ambient.display(), later.display());
+        let with_ambient = [("SystemRoot", r"D:\Windows"), ("ProgramFiles", r"C:\Program Files"),
+            ("PATH", inherited.as_str())];
+        let spec = windows_launch_spec(env_of(&with_ambient), false, Some(&runtime),
+            |_| panic!("resolved fallback despite inherited Git"), |_| unreachable!());
+        let mut expected = baseline.clone();
+        expected.envs[0].1.push_str(&format!(";{}", ambient.display()));
+        assert_eq!(spec, expected);
+
+        let default_root = [("SystemRoot", r"D:\Windows"), ("ProgramFiles", r"C:\Program Files")];
+        for (dev, dir) in [(false, None), (true, Some(runtime.as_path()))] {
+            let spec = windows_launch_spec(env_of(&default_root), dev, dir,
+                |_| panic!("resolved fallback for source or dev launch"), |_| unreachable!());
+            assert_eq!(spec, launch_spec_with(env_of(&default_root), dev, dir, Vec::new));
+        }
+        for key in ["GENTLE_DOT_NODE", "GENTLE_DOT_DAEMON_SCRIPT"] {
+            let overrides = [default_root[0], default_root[1], (key, "explicit")];
+            let spec = windows_launch_spec(env_of(&overrides), false, Some(&runtime),
+                |_| panic!("resolved fallback for a custom launch"), |_| unreachable!());
+            assert_eq!(spec, launch_spec_with(env_of(&overrides), false, Some(&runtime), Vec::new));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundled_windows_legacy_node_layout_wins_over_inherited_layout() {
+        let runtime = fixture("legacy-node");
+        fs::create_dir_all(runtime.join("node/bin")).unwrap();
+        fs::write(runtime.join("node/node.exe"), b"").unwrap();
+        fs::write(runtime.join("node/bin/node.exe"), b"").unwrap();
+        let spec = launch_spec(|_| None, false, Some(&runtime));
+        assert_eq!(spec.program, runtime.join("node/node.exe").display().to_string());
+        let entries: Vec<_> = std::env::split_paths(&spec.envs[0].1).collect();
+        assert_eq!(entries[1], runtime.join("node"));
+        assert!(!entries.contains(&runtime.join("node/bin")));
     }
 
     fn fixture(name: &str) -> PathBuf {
@@ -478,8 +779,9 @@ mod packaged_runtime_tests {
     fn packaged_runtime_requires_every_artifact_and_the_harness_directory() {
         let runtime = fixture("required-runtime");
         let artifacts = [
-            "node/bin/node.exe", "daemon/package.json", "daemon/native/windows-stop.node",
-            "daemon/node_modules/gentle-pi/package.json", "bin/engram.exe", "bin/pi.cmd", "ui/index.html",
+            "node/node.exe", "daemon/package.json", "daemon/native/windows-stop.node",
+            "daemon/node_modules/gentle-pi/package.json", "bin/engram.exe", "bin/pi.exe",
+            "bin/private-storage.exe", "ui/index.html",
         ];
         for artifact in artifacts {
             let error = validate_packaged_runtime(env_of(&[]), true, Some(&runtime)).unwrap_err();

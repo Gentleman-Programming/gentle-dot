@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AccountsPanel } from "../src/components/AccountsPanel.tsx";
 import { ChatSurface } from "../src/components/ChatSurface.tsx";
 import { type DotState, initialState, reduce } from "../src/store.ts";
+import { openPanelMenu } from "./panel-menu.ts";
 
 const providers = [
 	{
@@ -273,6 +274,7 @@ describe("ChatSurface onboarding", () => {
 		const dispatch = vi.fn();
 		const send = vi.fn();
 		render(<ChatSurface variant="web" state={base()} send={send} dismiss={vi.fn()} dispatch={dispatch} />);
+		await openPanelMenu();
 		await userEvent.click(screen.getByRole("button", { name: "Accounts" }));
 		expect(dispatch).toHaveBeenCalledWith({ type: "accounts", open: true });
 		expect(send).toHaveBeenCalledWith({ type: "auth_list" });

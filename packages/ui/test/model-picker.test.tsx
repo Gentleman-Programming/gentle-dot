@@ -134,13 +134,12 @@ describe("model picker (S32)", () => {
 
 	it("shows the thinking level only when the current model supports it", async () => {
 		const { send } = await openPicker();
-		const thinking = screen.getByRole("combobox", { name: "Thinking" });
-		expect(
-			within(thinking)
-				.getAllByRole("option")
-				.map((o) => o.textContent),
-		).toEqual([...levels]);
-		await userEvent.selectOptions(thinking, "high");
+		const thinking = screen.getByRole("button", { name: "Thinking" });
+		await userEvent.click(thinking);
+		const list = screen.getByRole("listbox", { name: "Thinking" });
+		const options = within(list).getAllByRole("option");
+		expect(options.map((o) => o.textContent)).toEqual([...levels]);
+		await userEvent.click(within(list).getByRole("option", { name: "high" }));
 		expect(send).toHaveBeenLastCalledWith({
 			type: "model_set",
 			provider: "openai",
@@ -148,7 +147,7 @@ describe("model picker (S32)", () => {
 			thinking: "high",
 		});
 		dispatchServer({ ...models, current: { provider: "openai", id: "gpt-4o-mini", name: "GPT-4o mini" } });
-		expect(screen.queryByRole("combobox", { name: "Thinking" })).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Thinking" })).not.toBeInTheDocument();
 	});
 
 	it("follows the chosen model, says when it waits for the next message, and shows errors inline", async () => {

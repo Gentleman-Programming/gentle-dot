@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createReadStream, lstatSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, parse, resolve, sep } from 'node:path';
-import { REQUIRED } from './split-runtime-files.mjs';
+import { REQUIRED } from './runtime-integrity.mjs';
 
 const USAGE = 'Usage: node scripts/windows/split-runtime-inventory.mjs emit ROOT PLAN EXPECTED_PLAN_SHA256';
 const MAX_JSON = 16 * 1024 * 1024;

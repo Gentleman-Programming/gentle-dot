@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createReadStream, lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, parse, resolve, sep } from 'node:path';
-import { REQUIRED } from './split-runtime-files.mjs';
+import { REQUIRED } from './runtime-integrity.mjs';
 
 const USAGE = 'Usage: node scripts/windows/split-runtime-verify.mjs verify ROOT MANIFEST EXPECTED_SHA256';
 const MAX_MANIFEST = 16 * 1024 * 1024;

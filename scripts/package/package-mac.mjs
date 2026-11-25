@@ -38,7 +38,6 @@ import {
 } from "./lib.mjs";
 
 const REPO = fileURLToPath(new URL("../..", import.meta.url));
-const TARGET = "darwin-arm64";
 const TAURI = join(REPO, "apps", "desktop", "src-tauri");
 const HERE = join(REPO, "scripts", "package");
 
@@ -177,6 +176,7 @@ function checkDmg(dmg) {
 
 async function main() {
 	const options = parseMacArgs(process.argv.slice(2));
+	const TARGET = options.target;
 	assertHostTarget(TARGET);
 	if (options.checkDmg) {
 		checkDmg(resolve(process.env.INIT_CWD ?? process.cwd(), options.checkDmg));
@@ -184,11 +184,17 @@ async function main() {
 	}
 
 	// The Tauri CLI asks rustc for its version itself; a cargo wrapper that finds rustc on its own is not enough.
-	if (spawnSync("rustc", ["--version"]).status !== 0)
+	const rust = spawnSync("rustc", ["-vV"], { encoding: "utf8" });
+	if (rust.status !== 0)
 		throw new Error(
 			"rustc is not on PATH; the Tauri CLI needs it (install Rust with rustup, or add it to PATH).",
 		);
 
+	const rustTarget = TARGET === "darwin-x64" ? "x86_64-apple-darwin" : "aarch64-apple-darwin";
+	if (!rust.stdout.split(/\r?\n/).includes(`host: ${rustTarget}`))
+		throw new Error(`Use a native ${rustTarget} Rust toolchain for ${TARGET}.`);
+	// Keep the existing ARM output path; Intel builds select their target explicitly.
+	const targetArgs = TARGET === "darwin-x64" ? ["--target", rustTarget] : [];
 	const runtime = join(REPO, "build", "runtime", TARGET);
 	if (options.skipStage) {
 		if (!existsSync(join(runtime, "MANIFEST.json")))
@@ -213,6 +219,7 @@ async function main() {
 			"exec",
 			"tauri",
 			"build",
+			...targetArgs,
 			"--bundles",
 			"app,dmg",
 			"--config",
@@ -222,9 +229,9 @@ async function main() {
 	);
 
 	const { productName, version } = JSON.parse(readFileSync(join(TAURI, "tauri.conf.json"), "utf8"));
-	const bundle = join(TAURI, "target", "release", "bundle");
+	const bundle = join(TAURI, "target", ...(targetArgs.length ? [rustTarget] : []), "release", "bundle");
 	const app = join(bundle, "macos", `${productName}.app`);
-	const dmg = join(bundle, "dmg", dmgFileName(productName, version, "arm64"));
+	const dmg = join(bundle, "dmg", dmgFileName(productName, version, TARGET.slice("darwin-".length)));
 	if (!existsSync(dmg)) throw new Error(`Tauri left no ${dmg}.`);
 	await verifyApp(app, runtime, nested);
 	report("hdiutil", ["verify", dmg]);

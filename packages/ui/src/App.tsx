@@ -5,6 +5,7 @@ import { ChatSurface } from "./components/ChatSurface.tsx";
 import type { ComputerControls } from "./components/Computer.tsx";
 import { DotSurface } from "./components/DotSurface.tsx";
 import { GlowSurface } from "./components/GlowSurface.tsx";
+import { StartupChecklist } from "./components/StartupChecklist.tsx";
 import { computerPermissions, requestComputerPermission, setComputerYolo, stopComputer } from "./computer.ts";
 import {
 	connectionInfo,
@@ -16,6 +17,7 @@ import {
 	startDragging,
 	togglePanel,
 } from "./desktop.ts";
+import { isWindows } from "./shortcut.ts";
 import { createUploader } from "./uploads.ts";
 import { useComputerAvailable, useComputerState } from "./useComputer.ts";
 import { useDot } from "./useDot.ts";
@@ -73,6 +75,7 @@ function Assistant({ surface }: { surface: Surface }) {
 	conversations.current = state.features.conversations;
 	// Computer control lives in the desktop app only (S24.7); the panel registers the helper.
 	const desktop = inDesktop();
+	const windowsPanel = desktop && surface === "panel" && isWindows();
 	const { session: computerSession, yolo } = useComputerState(desktop && surface !== "web");
 	const computerAvailable = useComputerAvailable(desktop && surface === "panel", state.connection === "open");
 	// Connector changes go through the app, on behalf of this window (S25.2); the web page has none.
@@ -106,10 +109,14 @@ function Assistant({ surface }: { surface: Surface }) {
 	useEffect(() => {
 		if (inDesktop()) {
 			let live = true;
-			const connect = () =>
-				connectionInfo().then(
+			// A newer ready event can win while the Windows startup request is still pending.
+			let generation = 0;
+			const connect = () => {
+				const attempt = ++generation;
+				const currentAttempt = () => live && (!windowsPanel || attempt === generation);
+				return connectionInfo().then(
 					(next) => {
-						if (!live) return;
+						if (!currentAttempt()) return;
 						// The same assistant keeps its connection; only a new one replaces it.
 						setInfo((current) =>
 							current?.url === next.url && current.token === next.token ? current : next,
@@ -118,12 +125,13 @@ function Assistant({ surface }: { surface: Surface }) {
 						setMissingToken(false);
 					},
 					(error: unknown) => {
-						if (!live) return;
+						if (!currentAttempt()) return;
 						const reason = typeof error === "string" ? error : error instanceof Error ? error.message : "";
 						if (reason) setUnreachable(reason);
 						else setMissingToken(true);
 					},
 				);
+			};
 			// A refused or timed-out window recovers without a reopen: the app reports its assistant
 			// ready after Restart assistant, or after a start slower than `connection_info` waits (S35.2).
 			const ready = onDesktopEvent("dot://assistant-ready", () => void connect());
@@ -136,11 +144,12 @@ function Assistant({ surface }: { surface: Surface }) {
 		const found = browserConnection();
 		if (found) setInfo(found);
 		else setMissingToken(true);
-	}, []);
+	}, [windowsPanel]);
 
 	useEffect(() => {
-		if (surface === "dot") setDotState(state.agentState);
-	}, [surface, state.agentState]);
+		if (surface === "dot")
+			setDotState(state.agentState, state.connection === "open" && state.features.conversations);
+	}, [surface, state.agentState, state.connection, state.features.conversations]);
 
 	useEffect(() => {
 		if (surface !== "panel") return;
@@ -189,17 +198,15 @@ function Assistant({ surface }: { surface: Surface }) {
 			/>
 		);
 	}
-	if (unreachable !== undefined || missingToken) {
-		return (
-			<div className="chat chat-web">
-				<div className="status" role="status">
-					{unreachable ??
-						"This page needs your access key. On your computer, open it from the Gentle Dot menu (Open in browser); on a server, open the link with #token=<your access key>."}
-				</div>
+	const failed = unreachable !== undefined || missingToken;
+	const content = failed ? (
+		<div className="chat chat-web">
+			<div className="status" role="status">
+				{unreachable ??
+					"This page needs your access key. On your computer, open it from the Gentle Dot menu (Open in browser); on a server, open the link with #token=<your access key>."}
 			</div>
-		);
-	}
-	return (
+		</div>
+	) : (
 		<ChatSurface
 			variant={surface === "panel" ? "panel" : "web"}
 			state={state}
@@ -216,4 +223,7 @@ function Assistant({ surface }: { surface: Surface }) {
 			{...(upload ? { upload } : {})}
 		/>
 	);
+	return windowsPanel && (!info || failed) ? (
+		<StartupChecklist connectionFailed={failed}>{content}</StartupChecklist>
+	) : content;
 }

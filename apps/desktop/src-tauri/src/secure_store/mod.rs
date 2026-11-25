@@ -8,30 +8,30 @@
 //!   the items' access list follows the app's code signature.
 //! - Linux (`SecretServiceStore`): the Secret Service over D-Bus (GNOME Keyring, KWallet).
 //!   Items are encrypted at rest, but any same-user process can read unlocked items (S25.7).
-//! - Windows (`WindowsDpapiStore`): current-user DPAPI ciphertext in a private,
-//!   user-wide Local AppData namespace on local NTFS. Same-user processes are trusted.
+//! - Windows (`CredentialStore`): the existing current-logon Credential Manager namespace.
+//!   The inherited `WindowsDpapiStore` remains available but is not selected or migrated to.
 //! - `MemoryStore`: an in-memory store for tests and unsupported platforms.
 //!
 //! Secrets are never logged: [`Secret`] and every store redact themselves in `Debug`, have no
 //! `Display`, and errors never carry a secret.
 
-mod memory;
 #[cfg(any(windows, test))]
 mod windows_codec;
-#[cfg(windows)]
-mod windows;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
-
-pub use memory::MemoryStore;
+mod memory;
 #[cfg(windows)]
-pub use windows::WindowsDpapiStore;
+mod windows;
+
+#[cfg(windows)]
+pub use windows::dpapi::WindowsDpapiStore;
 #[cfg(target_os = "linux")]
 pub use linux::SecretServiceStore;
 #[cfg(target_os = "macos")]
 pub use macos::Keychain;
+pub use memory::MemoryStore;
 
 /// The keychain service (macOS) or `service` attribute (Linux) of every connector secret.
 pub const SERVICE: &str = "dev.gentleman.gentle-dot.connectors";
@@ -116,14 +116,14 @@ pub trait SecretStore: Send + Sync {
 }
 
 /// The store the app serves connector secrets from: the login keychain on macOS, the Secret
-/// Service on Linux, and current-user DPAPI on Windows. Nothing is touched until the first request.
+/// Service on Linux, and Credential Manager on Windows. Nothing is touched until the first request.
 pub fn connector_store() -> Box<dyn SecretStore> {
     #[cfg(target_os = "macos")]
     return Box::new(Keychain::new());
     #[cfg(target_os = "linux")]
     return Box::new(SecretServiceStore::new());
     #[cfg(windows)]
-    return Box::new(WindowsDpapiStore::new());
+    return Box::new(windows::CredentialStore);
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     return Box::new(MemoryStore::new());
 }

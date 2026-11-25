@@ -13,17 +13,17 @@ import {
 const LAUNCH = new URL("../../../apps/desktop/src-tauri/src/daemon/launch.rs", import.meta.url);
 const launch = readFileSync(LAUNCH, "utf8");
 
-/** The relative paths `validate_packaged_runtime` requires, read from its `for relative in [...]` list. */
+/** The relative paths `validate_packaged_runtime` requires, read from its PACKAGED_RUNTIME_FILES list. */
 function requiredRuntimeFiles(): string[] {
-	const list = /for relative in \[([^\]]+)\]/.exec(launch)?.[1];
-	if (!list) throw new Error("launch.rs has no `for relative in [...]` required-file list.");
+	const list = /const PACKAGED_RUNTIME_FILES: &\[&str\] = &\[([^\]]+)\]/.exec(launch)?.[1];
+	if (!list) throw new Error("launch.rs has no PACKAGED_RUNTIME_FILES required-file list.");
 	return [...list.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
 }
 
 /** The Node path the Windows launch spec runs, read from its `#[cfg(windows)]` block. */
 function launchNodePath(): string {
-	const path = /dir\.join\("([^"]+node\.exe)"\)\.display\(\)\.to_string\(\)/.exec(launch)?.[1];
-	if (!path) throw new Error("launch.rs has no Windows node.exe launch path.");
+	const path = requiredRuntimeFiles().find((path) => path.endsWith("/node.exe"));
+	if (!path) throw new Error("launch.rs has no required Windows node.exe path.");
 	return path;
 }
 
@@ -31,7 +31,13 @@ function launchNodePath(): string {
 function launchPathDirs(source: string): string[] {
 	const block = /fn windows_bundled_path\([^)]*\)[^{]*\{\s*\[([^\]]*)\]/.exec(source)?.[1];
 	if (!block) throw new Error("launch.rs has no windows_bundled_path runtime folders.");
-	return [...block.matchAll(/runtime\.join\("([^"]+)"\)/g)].map((match) => match[1]);
+	const paths = [...block.matchAll(/runtime\.join\("([^"]+)"\)/g)].map((match) => match[1]);
+	if (block.includes("windows_node_directory(runtime)")) {
+		const legacy = /let legacy = runtime\.join\("([^"]+)"\)/.exec(source)?.[1];
+		if (!legacy) throw new Error("native Node directory selection missing");
+		paths.push(legacy);
+	}
+	return paths;
 }
 
 describe("Windows runtime layout against launch.rs", () => {
@@ -39,14 +45,14 @@ describe("Windows runtime layout against launch.rs", () => {
 		const nodeDir = launchNodePath().replace(/\/node\.exe$/, "");
 		expect(launchPathDirs(launch)).toContain(nodeDir);
 		// A PATH entry that drifts from the Node path is caught, not only a moved node.exe.
-		const drifted = launch.replace('runtime.join("node/bin")', 'runtime.join("node")');
+		const drifted = launch.replace('windows_node_directory(runtime)]', 'runtime.join("wrong")]');
 		expect(drifted).not.toBe(launch);
 		expect(launchPathDirs(drifted)).not.toContain(nodeDir);
 	});
 
 	it("reads a non-trivial required-file list and a Node path from launch.rs", () => {
 		expect(requiredRuntimeFiles().length).toBeGreaterThan(5);
-		expect(launchNodePath()).toBe("node/bin/node.exe");
+		expect(launchNodePath()).toBe("node/node.exe");
 		expect(requiredRuntimeFiles()).toContain(launchNodePath());
 	});
 
@@ -75,11 +81,11 @@ describe("Windows runtime layout against launch.rs", () => {
 			const runtime = join(scratch, "runtime");
 			expect(existsSync(join(runtime, launchNodePath()))).toBe(true);
 			expect(readFileSync(join(runtime, launchNodePath()), "utf8")).toBe("node.exe");
-			expect(existsSync(join(node, "bin", "npm.cmd"))).toBe(true);
-			expect(existsSync(join(node, "bin", "npx.cmd"))).toBe(true);
-			expect(readFileSync(join(node, "bin", "npm.cmd"), "utf8")).toBe(npmWrapper("npm-cli.js", "win32"));
+			expect(existsSync(join(node, "npm.cmd"))).toBe(true);
+			expect(existsSync(join(node, "npx.cmd"))).toBe(true);
+			expect(readFileSync(join(node, "npm.cmd"), "utf8")).toBe(npmWrapper("npm-cli.js", "win32"));
 			expect(existsSync(join(node, "lib", "node_modules", "npm", "bin", "npm-cli.js"))).toBe(true);
-			expect(existsSync(join(node, "node.exe"))).toBe(false);
+			expect(existsSync(join(node, "bin", "node.exe"))).toBe(false);
 		} finally {
 			rmSync(scratch, { recursive: true, force: true });
 		}

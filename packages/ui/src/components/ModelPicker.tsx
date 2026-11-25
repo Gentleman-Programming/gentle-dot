@@ -1,6 +1,7 @@
 import type { ModelChoice, ProfilePick, ThinkingLevel } from "@gentle-dot/protocol";
 import { type KeyboardEvent, useEffect, useId, useRef, useState } from "react";
 import type { DotAction, ModelsState } from "../store.ts";
+import { SelectMenu } from "./SelectMenu.tsx";
 import type { Send } from "./types.ts";
 
 interface ModelPickerProps {
@@ -210,27 +211,23 @@ export function ModelPicker({ model, models, send, dispatch, disabled }: ModelPi
 						{profiles.length > 0 ? renderGroup("Profiles", profiles) : null}
 					</div>
 					{current && thinking ? (
-						<label className="model-thinking">
+						<div className="model-thinking">
 							<span>Thinking</span>
-							<select
-								aria-label="Thinking"
+							<SelectMenu
+								label="Thinking"
+								compact
 								value={current.thinking ?? ""}
-								onChange={(event) =>
+								onChange={(value) =>
 									send({
 										type: "model_set",
 										provider: current.provider,
 										id: current.id,
-										thinking: event.target.value as ThinkingLevel,
+										thinking: value as ThinkingLevel,
 									})
 								}
-							>
-								{thinking.map((level) => (
-									<option key={level} value={level}>
-										{level}
-									</option>
-								))}
-							</select>
-						</label>
+								options={thinking.map((level) => ({ value: level, label: level }))}
+							/>
+						</div>
 					) : null}
 				</div>
 			) : null}

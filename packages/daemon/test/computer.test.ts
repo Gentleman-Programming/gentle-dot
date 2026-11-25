@@ -8,7 +8,7 @@ import { fakeApp, sendLikeThePanel } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { oauthOptions } from "./fake-oauth.ts";
 import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
-import { expectPosixMode } from "./support/posix-modes.ts";
+import { expectPrivateFilePermissions } from "./private-file-permissions.ts";
 
 const HELPER = "http://127.0.0.1:51234/mcp";
 const KEY = "s3cr3t-Computer-Key-0123456789abcdef";
@@ -185,7 +185,7 @@ describe("computer control registration (S24.7)", () => {
 			exposure: "direct",
 			timeout: 300,
 		});
-		expectPosixMode(mcpFile, 0o600);
+		expectPrivateFilePermissions(mcpFile);
 		// The engine restarts to read it, and its guard lets the computer's tools run without cards.
 		await restarted(d, pid);
 		await waitFor(() => policy().builtin?.includes("computer"));

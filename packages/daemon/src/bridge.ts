@@ -47,6 +47,7 @@ import {
 import { DEFAULT_ROTATION, type RotationLimits, SessionRotator } from "./rotation.ts";
 import type { AgentRecord, AgentSupervisor, SupervisorEvent } from "./supervisor.ts";
 import { composePrompt, type StoredFile, splitAttachments, type UploadStore } from "./uploads.ts";
+import { UserSettings } from "./user-settings.ts";
 import type { VoiceService } from "./voice.ts";
 import type { PinGate } from "./web-pin.ts";
 import { isBlockedInput, presentText, shouldShowToast } from "./white-label.ts";
@@ -86,6 +87,7 @@ export interface BridgeOptions {
 	stopTimeoutMs?: number;
 	/** Optional parts of the app; by default one continuous chat. */
 	features?: Features;
+	userSettings?: UserSettings;
 	/** When the open session is replaced by a fresh one (docs/design.md §7). */
 	rotation?: RotationLimits;
 	/** How many messages `history` and each `get_earlier` page carry. Default 100. */
@@ -161,7 +163,9 @@ export class DotBridge {
 	private sending = 0;
 	/** A run settled while a message was still on its way; check for rotation once it arrived. */
 	private rotationDeferred = false;
-	private readonly features: Features;
+	private features: Features;
+	/** Serialize explicit switches and preferences only, never prompts or auto rotation. */
+	private settingsTail: Promise<void> = Promise.resolve();
 	private readonly rotator: SessionRotator;
 	private readonly liveSwitch: LiveModelSwitch;
 
@@ -467,33 +471,42 @@ export class DotBridge {
 				this.resolveAsk(requestId);
 				return;
 			}
+			case "settings_conversations_set":
+				await this.settingsOperation(async () => {
+					(this.options.userSettings ?? new UserSettings(this.options.dataDir)).setConversations(
+						message.enabled,
+					);
+					this.features = { ...this.features, conversations: message.enabled };
+					this.broadcast({ type: "features", features: this.features });
+				});
+				return;
 			case "new_conversation":
-				if (!this.conversationsOn(client)) return;
-				await this.changeConversation(async () => {
+				await this.settingsOperation(async () => {
+					if (!this.conversationsOn(client)) return;
 					await this.switchAfterStop(() => this.supervisor.request({ type: "new_session" }));
 					this.afterConversationChange();
-				});
+				}, true);
 				return;
 			case "list_conversations":
 				this.deliver(client, this.conversationsPayload());
 				return;
 			case "open_conversation": {
-				if (!this.conversationsOn(client)) return;
-				const path = this.engine(() => resolveConversation(this.sessionDir, message.conversationId));
-				if (!path) {
-					this.deliver(client, {
-						type: "error",
-						code: "conversation_not_found",
-						message: "That conversation does not exist.",
-					});
-					return;
-				}
-				await this.changeConversation(async () => {
+				await this.settingsOperation(async () => {
+					if (!this.conversationsOn(client)) return;
+					const path = this.engine(() => resolveConversation(this.sessionDir, message.conversationId));
+					if (!path) {
+						this.deliver(client, {
+							type: "error",
+							code: "conversation_not_found",
+							message: "That conversation does not exist.",
+						});
+						return;
+					}
 					await this.switchAfterStop(() =>
 						this.supervisor.request({ type: "switch_session", sessionPath: path }),
 					);
 					this.afterConversationChange(await this.currentHistory());
-				});
+				}, true);
 				return;
 			}
 			case "auth_list":
@@ -683,6 +696,13 @@ export class DotBridge {
 			message: "This assistant keeps one continuous chat.",
 		});
 		return false;
+	}
+
+	private settingsOperation(operation: () => Promise<void>, switches = false): Promise<void> {
+		const run = this.settingsTail.then(operation);
+		this.settingsTail = run.catch(() => {});
+		if (switches) this.switching = this.settingsTail;
+		return run;
 	}
 
 	/** Runs a conversation switch; a message sent meanwhile goes to the new conversation, after its history. */

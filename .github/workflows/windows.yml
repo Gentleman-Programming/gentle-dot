@@ -91,6 +91,14 @@ jobs:
           }
           Set-Location apps/desktop/src-tauri
           cargo test --locked --features windows-split-runtime --bin gentle-dot -- --include-ignored
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $env:DOT_SPLIT_BRIDGE_QA_ROOT = Join-Path $env:GITHUB_WORKSPACE 'build/split-bridge'
+          New-Item -ItemType Directory -Force $env:DOT_SPLIT_BRIDGE_QA_ROOT | Out-Null
+          rustc --edition 2021 tests/fixtures/split_bridge_child.rs -o tests/fixtures/split_bridge_child.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $env:RUSTFLAGS = '--cfg windows_split_bridge_fixture'
+          cargo test --locked --lib split_bridge_tests -- --ignored --test-threads=1
+
 
       # A dump is only readable next to the binary and symbols that produced it.
       - name: Upload crash dumps
@@ -110,7 +118,7 @@ jobs:
     runs-on: windows-latest
     env:
       # Match pnpm-workspace.yaml and the macOS job's exact-version exception.
-      PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: '["gentle-pi@4.7.0"]'
+      PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: '["gentle-pi@5.0.0"]'
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v4
@@ -156,6 +164,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Native addon build failed' }
 
       # The daemon test files that run on Windows (the runtime build uses the addon built above).
+      - run: node --test packages/daemon/test/startup-stage-observer.node-test.ts
       - name: Daemon tests
-        run: pnpm exec vitest run packages/daemon/test/windows-stop.test.ts packages/daemon/test/windows-app-channel.test.ts packages/daemon/test/app-channel-platform.test.ts packages/daemon/test/app-channel.test.ts packages/daemon/test/app-channel-fd.test.ts packages/daemon/test/windows-app-channel-addon.test.ts packages/daemon/test/windows-stop-addon.test.ts packages/daemon/test/process-tree.test.ts packages/daemon/test/supervisor.test.ts packages/daemon/test/runtime.test.ts packages/daemon/test/config.test.ts packages/daemon/test/isolation.test.ts packages/daemon/test/private-memory.test.ts packages/daemon/test/lifecycle.test.ts packages/daemon/test/cli.test.ts packages/daemon/test/runtime-build.test.ts scripts/package/test/lib.test.ts scripts/package/test/package-windows.test.ts
+        run: pnpm exec vitest run packages/daemon/test/windows-provider-file-owner.test.ts packages/daemon/test/private-storage.windows.test.ts packages/daemon/test/windows-stop.test.ts packages/daemon/test/windows-app-channel.test.ts packages/daemon/test/app-channel-platform.test.ts packages/daemon/test/app-channel.test.ts packages/daemon/test/app-channel-fd.test.ts packages/daemon/test/windows-app-channel-addon.test.ts packages/daemon/test/windows-stop-addon.test.ts packages/daemon/test/process-tree.test.ts packages/daemon/test/supervisor.test.ts packages/daemon/test/runtime.test.ts packages/daemon/test/config.test.ts packages/daemon/test/isolation.test.ts packages/daemon/test/private-memory.test.ts packages/daemon/test/lifecycle.test.ts packages/daemon/test/cli.test.ts packages/daemon/test/runtime-build.test.ts scripts/package/test/lib.test.ts scripts/package/test/package-windows.test.ts
 

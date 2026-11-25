@@ -20,7 +20,7 @@ export const DISTROS = Object.freeze({
 export const PKGREL = 1;
 
 export const PACKAGE_USAGE =
-	"usage: package-linux --arch <arm64|amd64> [--out <dir>] [--engram-version <x.y.z>] [--no-arch-package]";
+	"usage: package-linux (--arch <arm64|amd64> | --target <linux-arm64|linux-x64>) [--out <dir>] [--engram-version <x.y.z>] [--no-arch-package]";
 export const CHECK_USAGE =
 	"usage: linux-check --arch <arm64|amd64> [--distro <debian|ubuntu|arch>[,…]] [--out <dir>]";
 export const CARGO_CHECK_USAGE = "usage: linux-cargo-check --arch <arm64|amd64>";
@@ -38,6 +38,8 @@ function readFlags(argv, valued, switches, usage) {
 		const value = args[i + 1];
 		if (!name || value === undefined || value.startsWith("--"))
 			throw new Error(`Unexpected argument ${args[i]}.\n${usage}`);
+		if (name === "target" && Object.hasOwn(options, name))
+			throw new Error("--target may be specified only once.");
 		options[name] = value;
 		i++;
 	}
@@ -54,10 +56,18 @@ function checkArch(arch, usage) {
 export function parsePackageArgs(argv) {
 	const options = readFlags(
 		argv,
-		{ "--arch": "arch", "--out": "out", "--engram-version": "engramVersion" },
+		{ "--arch": "arch", "--target": "target", "--out": "out", "--engram-version": "engramVersion" },
 		{ "--no-arch-package": "noArchPackage" },
 		PACKAGE_USAGE,
 	);
+	if (options.target !== undefined) {
+		if (options.arch !== undefined) throw new Error("Use either --target or --arch, not both.");
+		const arch = Object.keys(ARCHES).find((key) => ARCHES[key].runtime === options.target);
+		if (!arch)
+			throw new Error(`Unknown Linux target ${options.target}; expected linux-arm64 or linux-x64.`);
+		options.arch = arch;
+		delete options.target;
+	}
 	checkArch(options.arch, PACKAGE_USAGE);
 	if (options.engramVersion !== undefined && !/^\d+\.\d+\.\d+$/.test(options.engramVersion))
 		throw new Error(`--engram-version must be x.y.z, got ${options.engramVersion}.`);

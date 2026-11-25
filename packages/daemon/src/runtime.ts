@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { resolveWindowsEngram } from "./windows-runtime.ts";
 
 /**
  * A root Win32 canonicalized keeps its verbatim prefix (`\\?\C:\…`, or `\\?\UNC\server\share`).
@@ -9,19 +10,16 @@ import { isAbsolute, join, resolve } from "node:path";
  * by Node's module resolver as a bare drive (`C:`) and fails with `EISDIR`, which is exactly what an
  * installed copy did (W30): the app's `resource_dir()` is canonicalized, so the root arrives that way.
  */
-function withoutVerbatim(root: string): string {
-	if (root.startsWith("\\\\?\\UNC\\")) return `\\\\${root.slice(8)}`;
-	if (root.startsWith("\\\\?\\")) return root.slice(4);
-	return root;
-}
+// Preserve native runtime identity here. config.ts bridges only an equivalent
+// Node entry, after proving file identity; stripping the root could select an alias.
 
 /**
  * The installed app's runtime folder (`GENTLE_DOT_RUNTIME`), or undefined in a
- * source checkout. It holds `node/`, `bin/` (`engram`, `pi`),
+ * source checkout. It holds `node/`, `bin/` (`engram`, `pi`, and Windows private storage),
  * `daemon/` (this bundle and its `node_modules/`) and `ui/`.
  */
 export function runtimeDir(env: NodeJS.ProcessEnv = process.env): string | undefined {
-	return env.GENTLE_DOT_RUNTIME ? resolve(withoutVerbatim(env.GENTLE_DOT_RUNTIME)) : undefined;
+	return env.GENTLE_DOT_RUNTIME ? resolve(env.GENTLE_DOT_RUNTIME) : undefined;
 }
 
 /** The runtime's flat install of the daemon's external dependencies. */
@@ -161,8 +159,12 @@ export function resolveEngramBin(
 	runtime: string,
 	options: { home?: string; knownDirs?: string[]; platform?: NodeJS.Platform } = {},
 ): string {
-	if (env.ENGRAM_BIN) return env.ENGRAM_BIN;
 	const platform = options.platform ?? process.platform;
+	// Native Windows discovery keeps strict .exe admission; injected POSIX
+	// orchestration still exercises the portable API without invoking a login shell on Windows.
+	if (process.platform === "win32" && platform === "win32")
+		return resolveWindowsEngram(env, runtime, { home: options.home, knownDirs: options.knownDirs });
+	if (env.ENGRAM_BIN) return env.ENGRAM_BIN;
 	const binary = engramBinaryName(platform);
 	const home = options.home ?? (env.HOME || (platform === "win32" && env.USERPROFILE) || homedir());
 	const fromLogin = loginShellEngram(env, home, platform);

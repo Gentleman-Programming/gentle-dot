@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import type { StartupStageObserver } from "./startup-stage-observer.ts";
 import { WindowsAppChannel, type WindowsAppChannelCloseResult } from "./windows-app-channel.ts";
 
 interface StopListener {
@@ -20,6 +21,7 @@ interface HandlerReference {
 }
 interface StopOptions {
 	platform?: NodeJS.Platform;
+	observeStartup?: StartupStageObserver;
 	/** Injection seams for deterministic portable tests. */
 	loadNative?: () => unknown;
 	handlerReference?: (handler: RequestHandler) => HandlerReference;
@@ -74,9 +76,16 @@ export async function startWithWindowsAppChannel<
 	const managed = await startWithWindowsStop(
 		recordPath,
 		async () => {
-			const channel = options.createAppChannel
-				? options.createAppChannel()
-				: (new WindowsAppChannel({ exclusiveFd3Startup: true }) as unknown as C);
+			let channel: C;
+			try {
+				channel = options.createAppChannel
+					? options.createAppChannel()
+					: (new WindowsAppChannel({ exclusiveFd3Startup: true }) as unknown as C);
+			} catch (error) {
+				options.observeStartup?.(3, false);
+				throw error;
+			}
+			options.observeStartup?.(3, true);
 			let daemon: T;
 			try {
 				daemon = await start(channel);
@@ -251,6 +260,7 @@ export async function startWithWindowsStop<T extends Stoppable>(
 		}
 		capability = Buffer.from(listener.capability);
 	} catch (error) {
+		options.observeStartup?.(2, false);
 		if (typeof listener?.close === "function") {
 			try {
 				await listener.close();
@@ -268,6 +278,7 @@ export async function startWithWindowsStop<T extends Stoppable>(
 	}
 	for (const frame of preinitFrames) handler.onRequest(frame);
 	preinitFrames.length = 0;
+	options.observeStartup?.(2, true);
 
 	let daemon: T;
 	try {

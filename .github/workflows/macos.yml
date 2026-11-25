@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 30
     env:
       # Match pnpm-workspace.yaml's exact exception for automatic dependency checks.
-      PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: '["gentle-pi@4.7.0"]'
+      PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: '["gentle-pi@5.0.0"]'
     defaults:
       run:
         shell: bash

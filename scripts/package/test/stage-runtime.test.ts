@@ -29,7 +29,7 @@ describe("Windows staging install", () => {
 		}
 		const env = installerEnv("C:\\stage", "C:\\cache", "win-x64", source, source.GENTLE_DOT_BUILD_GO);
 		expect(env.PATH).toBe(
-			"C:\\stage\\node\\bin;C:\\Windows\\System32;C:\\Windows;C:\\Program Files\\Go\\bin",
+			"C:\\stage\\node;C:\\Windows\\System32;C:\\Windows;C:\\Program Files\\Go\\bin",
 		);
 		expect(env.SECRET).toBeUndefined();
 		expect(env.GENTLE_DOT_BUILD_GO).toBeUndefined();
@@ -48,7 +48,7 @@ describe("Windows staging install", () => {
 		const before = { ...source };
 		for (const target of ["win-x64", "win-arm64"]) {
 			const env = installerEnv("C:\\stage & space", "C:\\cache", target, source);
-			expect(env.PATH).toBe("C:\\stage & space\\node\\bin;C:\\Windows\\System32;C:\\Windows");
+			expect(env.PATH).toBe("C:\\stage & space\\node;C:\\Windows\\System32;C:\\Windows");
 			expect(env).toMatchObject({
 				HOME: "C:\\cache\\npm-home",
 				USERPROFILE: "C:\\cache\\npm-home",
@@ -219,9 +219,9 @@ describe("Windows runtime files against the stages that build them", () => {
 
 	/** A stage function, and the statement in it that puts the file in the runtime. */
 	const PRODUCERS: Record<string, [Source, string, string][]> = {
-		"node/bin/node.exe": [
+		"node/node.exe": [
 			["stager", "stageNode", "layoutWindowsNode("],
-			["lib", "layoutWindowsNode", 'join(node, "bin", "node.exe")'],
+			["lib", "layoutWindowsNode", 'join(node, "node.exe")'],
 		],
 		"daemon/cli.mjs": [
 			["stager", "main", '"build:runtime"'],
@@ -239,7 +239,8 @@ describe("Windows runtime files against the stages that build them", () => {
 			["stager", "main", "stageEngram("],
 			["stager", "stageEngram", 'join(out, "bin", binaryName)'],
 		],
-		"bin/pi.cmd": [["daemonBuild", "buildRuntime", 'join(outDir, "bin", "pi.cmd")']],
+		"bin/pi.exe": [["daemonBuild", "buildRuntime", 'join(outDir, "bin", "pi.exe")']],
+		"bin/private-storage.exe": [["daemonBuild", "buildRuntime", 'buildWindowsPrivateStorageHelper(join(outDir, "bin", "private-storage.exe"))']],
 		"ui/index.html": [["stager", "main", 'join(out, "ui")']],
 	};
 
@@ -262,8 +263,8 @@ describe("Windows runtime files against the stages that build them", () => {
 	it("notices a listed file no stage produces, and a stage that stopped producing one", () => {
 		expect(unproduced(["bin/new-tool.exe"])).toEqual(["bin/new-tool.exe: no stage function is named for it"]);
 		expect(
-			unproduced(["bin/pi.cmd"], { "bin/pi.cmd": [["daemonBuild", "buildRuntime", "not-written.cmd"]] }),
-		).toEqual(["bin/pi.cmd: buildRuntime no longer has not-written.cmd"]);
+			unproduced(["bin/pi.exe"], { "bin/pi.exe": [["daemonBuild", "buildRuntime", "not-written.exe"]] }),
+		).toEqual(["bin/pi.exe: buildRuntime no longer has not-written.exe"]);
 	});
 
 	it("builds the daemon's gentle-pi dependency and the web UI's index.html into the places staged", () => {

@@ -1,6 +1,5 @@
-// The app's end of the channel reaches the daemon on fd 3 and goes no further (S25.1): children
-// the daemon spawns (the engine, stdio servers, sign-in commands) never hold it, and a platform
-// where they would gets no channel at all (fail closed).
+// The POSIX fd-3 channel never reaches descendants. Windows uses branded native
+// adoption instead; the retired anonymous-stdio selector must grant no privilege.
 import { spawn } from "node:child_process";
 import { createServer, type Socket, connect as unixConnect } from "node:net";
 import { join } from "node:path";
@@ -10,13 +9,12 @@ import { tempDir } from "./helpers.ts";
 import { hasInheritedAppChannel } from "./support/platform-absence.ts";
 
 const CHILD = fileURLToPath(new URL("./fixtures/app-channel-child.ts", import.meta.url));
-
 const cleanups: (() => void)[] = [];
 afterEach(() => {
 	for (const cleanup of cleanups.splice(0)) cleanup();
 });
 
-/** A connected pair of Unix sockets (Node has no socketpair): the app's end and the daemon's. */
+/** A connected pair of Unix sockets (Node has no socketpair). */
 async function socketPair(): Promise<{ app: Socket; daemon: Socket }> {
 	const path = join(tempDir(), "pair.sock");
 	const server = createServer();
@@ -30,19 +28,14 @@ async function socketPair(): Promise<{ app: Socket; daemon: Socket }> {
 	return { app, daemon };
 }
 
-/** Runs the stand-in with the daemon's end on fd 3, then drops the test's copy of it. */
 async function runChild(mode: "normal" | "leak") {
 	const { app, daemon } = await socketPair();
 	const child = spawn(process.execPath, [CHILD, mode], { stdio: ["ignore", "pipe", "pipe", daemon] });
 	daemon.destroy();
 	let stdout = "";
 	let stderr = "";
-	child.stdout?.on("data", (chunk: Buffer) => {
-		stdout += chunk.toString();
-	});
-	child.stderr?.on("data", (chunk: Buffer) => {
-		stderr += chunk.toString();
-	});
+	child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+	child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
 	const lines: Record<string, unknown>[] = [];
 	let buffer = "";
 	app.setEncoding("utf8");
@@ -61,7 +54,6 @@ async function runChild(mode: "normal" | "leak") {
 }
 
 describe.skipIf(
-	// The fd-3 descendant rule (W6) has no Windows arm: the platform inherits no such descriptor.
 	!hasInheritedAppChannel("the app channel on fd 3 (S25.1)"),
 )("the app channel on fd 3 (S25.1)", () => {
 	it("is opened by the daemon and never reaches the children it spawns", async () => {
@@ -70,11 +62,9 @@ describe.skipIf(
 		const report = lines.find((frame) => frame.method === "report")?.params as Record<string, unknown>;
 		expect(report, stderr).toBeDefined();
 		expect(report.identity).toMatch(/^-?\d+:\d+$/);
-		// A child that inherited it would print the same socket identity.
 		expect(report.fromSpawn).not.toBe(report.identity);
 		expect(report.fromSpawnSync).not.toBe(report.identity);
 		expect(report.fromShell).toBe("none");
-		// The probe the daemon runs at startup does see a leak when there is one.
 		expect(report.detectsALeak).toBe(true);
 	});
 
@@ -85,4 +75,37 @@ describe.skipIf(
 		expect(lines).toEqual([]);
 		expect(stderr).toMatch(/children would inherit/);
 	});
+});
+
+const WINDOWS_CHILD = fileURLToPath(new URL("./fixtures/app-channel-windows-child.ts", import.meta.url));
+
+describe.skipIf(process.platform !== "win32")("the retired Windows anonymous app pipes", () => {
+	// Native adoption/drain/descendant exclusion belongs to windows-app-channel*.test.ts.
+	// This fixture now proves that even real stdio pipes and the old selector cannot
+	// acquire an unbranded privileged channel. It never reaches its descendant spawns.
+	for (const invalid of [undefined, "stdin", "stdout"] as const) {
+		it(`refuses the legacy selector with ${invalid ?? "valid"} stdio`, async () => {
+			const child = spawn(process.execPath, [WINDOWS_CHILD], {
+				env: { ...process.env, GENTLE_DOT_APP_STDIO: "v1" },
+				stdio: [invalid === "stdin" ? "ignore" : "pipe", invalid === "stdout" ? "ignore" : "pipe", "pipe"],
+				timeout: 5000,
+			});
+			let stdout = "";
+			let stderr = "";
+			let failure: Error | undefined;
+			child.stdout?.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+			child.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+			const closed = new Promise<number | null>((resolve) => {
+				child.once("error", (error) => { failure = error; });
+				child.once("close", resolve);
+			});
+			child.stdin?.on("error", () => {});
+			child.stdin?.end();
+			const code = await closed;
+			expect(failure).toBeUndefined();
+			expect(code).toBe(2);
+			expect(stdout).toBe("");
+			expect(stderr).toBe("Expected the Windows app channel.\nselector=v1\n");
+		}, 10_000);
+	}
 });
