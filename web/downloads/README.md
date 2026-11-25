@@ -38,7 +38,7 @@ No browser is installed by the check. It starts an owned browser with a NEW prof
 
 ## Hosting
 
-Deploy only `index.html`, `styles.css`, `app.mjs`, `releases.mjs` and `hero.png` together on an HTTPS static host. No build step, app dependencies, credentials or backend are required. Keep relative file paths intact; the canonical public repository is in `releases.mjs`. A restrictive CSP is included in the HTML. The current implementation does not create a GitHub release, change repository Pages settings, turn QA artifacts into stable assets, or install anything.
+Deploy only `index.html`, `styles.css`, `app.mjs`, `releases.mjs` and `hero.webp` together on an HTTPS static host. No build step, app dependencies, credentials or backend are required. Keep relative file paths intact; the canonical public repository is in `releases.mjs`. A restrictive CSP is included in the HTML. The current implementation does not create a GitHub release, change repository Pages settings, turn QA artifacts into stable assets, or install anything.
 
 The page suggests an operating system only for recognized Windows, macOS or Linux browsers. Android, iOS and unknown systems start with neither selection filled in. A processor is suggested only when a recognized non-Mac browser explicitly names a supported architecture; Mac users choose between Intel and Apple silicon themselves. Linux installers, when available, are Debian/Ubuntu packages (`.deb`).
 

@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 const files = new Map([
  ['/', ['index.html','text/html']], ['/index.html',['index.html','text/html']],
  ['/styles.css',['styles.css','text/css']], ['/app.mjs',['app.mjs','text/javascript']],
- ['/releases.mjs',['releases.mjs','text/javascript']], ['/hero.png',['hero.png','image/png']],
+ ['/releases.mjs',['releases.mjs','text/javascript']], ['/hero.webp',['hero.webp','image/webp']],
 ]);
 const server = createServer(async (request, response) => {
  const file = files.get(request.url);

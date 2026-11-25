@@ -192,11 +192,13 @@ try {
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'No overflow at 320 with the hero screenshot');
  await page.setViewportSize({width:1440,height:1000});
  await page.screenshot({path:join(run,'hero-1440.png')});await page.setViewportSize({width:320,height:1000});await page.screenshot({path:join(run,'hero-320.png'),fullPage:true});await page.setViewportSize({width:1440,height:1000});
- assert.equal(await product.getAttribute('src'),'./hero.png');
+ assert.equal(await product.getAttribute('src'),'./hero.webp');
  assert.match(await product.getAttribute('alt'),/Gentle Stream/);
  assert.deepEqual(await product.evaluate(image=>[image.complete,image.naturalWidth,image.naturalHeight,image.getAttribute('width'),image.getAttribute('height')]),[true,1082,666,'1082','666'],'Screenshot loads with intrinsic size to avoid layout shift');
- const heroImage=await page.request.get(`${url}/hero.png`);
- assert.equal(heroImage.status(),200);assert.equal(heroImage.headers()['content-type'],'image/png');
+ const heroImage=await page.request.get(`${url}/hero.webp`);
+ assert.equal(heroImage.status(),200);assert.equal(heroImage.headers()['content-type'],'image/webp');
+ assert.ok((await heroImage.body()).length<20_000,'Hero screenshot stays under 20 KB');
+ assert.equal((await page.request.get(`${url}/hero.png`)).status(),404,'Replaced PNG is no longer served');
  assert.deepEqual(errors,[]);assert.ok(calls>=6);
  assert.equal((await page.request.get(`${url}/not-an-asset`)).status(),404);
  assert.equal((await page.request.get(`${url}/releases.test.mjs`)).status(),404);
