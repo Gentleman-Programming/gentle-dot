@@ -111,6 +111,8 @@ Attach files with the paperclip, drag and drop, or paste. Images go straight to 
 
 ### QA preview
 
+Download **Gentle-Dot-QA.cmd** from the newest **qa-preview** prerelease in [Releases](https://github.com/Maicololiveras/gentle-dot/releases). On Windows x64, double-click it to check for updates, approve a download and open the verified preview. Each prerelease also includes the macOS and Linux packages.
+
 These downloads are from QA build `7e5074e`. Sign in to GitHub to download an Actions artifact, extract it, and check the package against the included SHA-256 file.
 
 | Platform | QA download |

@@ -1,0 +1,58 @@
+name: Publish QA preview
+on:
+  push:
+    branches: [qa/native-preview]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/qa/native-preview'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    outputs:
+      windows: ${{ steps.gate.outputs.windows }}
+      packages: ${{ steps.gate.outputs.packages }}
+    steps:
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for workflow in windows macos native-packages; do
+            while true; do
+              run=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow.yml/runs" -f branch=qa/native-preview -f head_sha="$GITHUB_SHA" -f event=push --jq '.workflow_runs[0] | [.id,.conclusion] | @tsv')
+              if [[ "$run" == *$'\t'success ]]; then break; fi
+              sleep 45
+            done
+            case "$workflow" in
+              windows) echo "windows=${run%%$'\t'*}" >> "$GITHUB_OUTPUT" ;;
+              native-packages) echo "packages=${run%%$'\t'*}" >> "$GITHUB_OUTPUT" ;;
+            esac
+          done
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          WIN: ${{ needs.verify.outputs.windows }}
+          PKG: ${{ needs.verify.outputs.packages }}
+        run: |
+          set -euo pipefail
+          mkdir assets
+          gh run download "$WIN" -n Gentle-Dot-Preview-Windows-x64 -D windows
+          (cd windows && sha256sum -c SHA256SUMS.txt)
+          cp windows/Gentle-Dot-Preview-x64.zip scripts/windows/preview/Gentle-Dot-QA.cmd assets/
+          for name in linux-amd64 linux-arm64 darwin-arm64 darwin-x64; do
+            gh run download "$PKG" -n "$name-qa" -D "$name"
+            (cd "$name" && sha256sum -c SHA256SUMS)
+            (cd "$name" && zip -qr "../assets/$name.zip" .)
+          done
+          (cd assets && sha256sum * > SHA256SUMS.txt)
+          tag="qa-preview-${GITHUB_SHA:0:12}"
+          gh release create "$tag" assets/* --target "$GITHUB_SHA" --prerelease --latest=false --title "Gentle Dot QA ${GITHUB_SHA:0:12}" --notes "Portable Windows x64 preview with update launcher, macOS Intel and Apple Silicon, and Linux x64 and ARM64. QA commit $GITHUB_SHA."
