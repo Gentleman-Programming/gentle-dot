@@ -435,6 +435,23 @@ describe("gateway", () => {
 		expect(client.messages.filter((m) => m.type === "toast")).toEqual([]);
 	});
 
+	it("says when the provider refused the conversation's content, and points at /new", async () => {
+		const d = await daemon();
+		const client = await authed(d);
+		send(client, { type: "send", text: "refuse" });
+		const done = await find(client, "message_done");
+		expect(done.error).toBe(
+			"The AI provider's content filter refused this conversation, so the assistant cannot answer here. Trying again usually fails the same way. Send /new to start a fresh conversation.",
+		);
+		expect(done.stopped).toBeUndefined();
+		const shown = JSON.stringify(client.messages);
+		expect(shown).not.toContain("1301");
+		expect(shown).not.toContain("unsafe");
+		for (const name of HIDDEN_NAMES) expect(shown).not.toMatch(name);
+		await find(client, "agent_state", (m) => m.state === "idle");
+		expect(client.messages.filter((m) => m.type === "toast")).toEqual([]);
+	});
+
 	it("answers a history request made while the agent restarts once it is back", async () => {
 		const d = await daemon({ ...process.env, FAKE_AGENT_START_DELAY_MS: "400" });
 		const client = await authed(d);
