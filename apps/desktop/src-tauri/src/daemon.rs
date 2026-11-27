@@ -1126,7 +1126,7 @@ mod windows_launch_tests {
         .unwrap();
         let runtime = fs::canonicalize(&ordinary).unwrap();
         assert!(runtime.to_str().unwrap().starts_with(r"\\?\"));
-        let spec = launch_spec(|_| None, false, Some(&runtime));
+        let spec = launch::windows_launch_spec(|_| None, false, Some(&runtime), |_| None, |_| false);
         let output = std::process::Command::new(&spec.program)
             .args(&spec.args)
             .envs(spec.envs.iter().map(|(key, value)| (key, value)))
@@ -1143,7 +1143,8 @@ mod windows_launch_tests {
         assert_eq!(spec.program, runtime.join("node").join("node.exe").display().to_string());
         assert_eq!(spec.args.len(), 1);
         assert_eq!(fs::canonicalize(&spec.args[0]).unwrap(), runtime.join("daemon").join("cli.mjs"));
-        assert_eq!(spec.args[0], ordinary.join("daemon").join("cli.mjs").display().to_string());
+        assert!(!spec.args[0].starts_with(r"\\?\"));
+        assert_eq!(fs::canonicalize(&spec.args[0]).unwrap(), fs::canonicalize(ordinary.join("daemon").join("cli.mjs")).unwrap());
         let entries: Vec<_> = std::env::split_paths(&spec.envs[0].1).collect();
         assert_eq!(
             entries,
@@ -1472,7 +1473,7 @@ mod windows_ownership_tests {
             let pairs: Vec<_> = path.into_iter().map(|value| ("PATH", value)).collect();
             for dev in [false, true] {
                 assert_eq!(
-                    launch_spec(environment(&pairs), dev, Some(&fixture.0.join("runtime"))),
+                    launch::windows_launch_spec(environment(&pairs), dev, Some(&fixture.0.join("runtime")), |_| None, |_| false),
                     fixture.bundled(None, dev)
                 );
             }

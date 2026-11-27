@@ -107,7 +107,7 @@ test("merged Windows launch retains restricted PATH, native layout and verified 
 	assert.ok(bundled.indexOf('system.join("System32")') < bundled.indexOf(".chain(git_dirs)"));
 	assert.match(launch, /dir\.is_absolute\(\) && holds_git\(dir\)/);
 	assert.match(launch, /windows_node_directory\(dir\)\.join\("node.exe"\)/);
-	assert.match(launch, /node_entry_path\(&dir\.join\("daemon\/cli.mjs"\)\)/);
+	assert.match(launch, /node_entry_path\(&dir\.join\("daemon"\)\.join\("cli\.mjs"\)\)/);
 	assert.match(launch, /std::env::join_paths\(\[entry\]\)/);
 	assert.doesNotMatch(launch, /inherited\.split/);
 	assert.doesNotMatch(launch, /for entry in inherited|path\.push_str\(entry\)/);

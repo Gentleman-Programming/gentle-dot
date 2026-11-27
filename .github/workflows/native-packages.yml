@@ -1,7 +1,7 @@
 name: Native package QA
 on:
   push:
-    branches: [integration/native-runtime-ci]
+    branches: [integration/native-runtime-ci, qa/native-preview]
   workflow_dispatch:
 permissions:
   contents: read

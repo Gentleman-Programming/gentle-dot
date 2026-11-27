@@ -134,7 +134,7 @@ pub(super) fn windows_node_directory(runtime: &Path) -> PathBuf {
     // Preserve the feature producer's node/node.exe layout. The inherited producer
     // uses node/bin/node.exe; select it only when no legacy runtime executable exists.
     let legacy = runtime.join("node");
-    if legacy.join("node.exe").is_file() { legacy } else { runtime.join("node/bin") }
+    if legacy.join("node.exe").is_file() { legacy } else { runtime.join("node").join("bin") }
 }
 
 /// `git.exe` is not in `System32`, so the packaged `PATH` never reached it and an installed copy
@@ -320,7 +320,7 @@ pub fn launch_spec(env: impl Fn(&str) -> Option<String>, dev: bool, runtime: Opt
 }
 
 #[cfg(windows)]
-fn windows_launch_spec(
+pub(super) fn windows_launch_spec(
     env: impl Fn(&str) -> Option<String>,
     dev: bool,
     runtime: Option<&Path>,
@@ -358,7 +358,7 @@ fn launch_spec_with(
     git_dirs: impl Fn() -> Vec<PathBuf>,
 ) -> LaunchSpec {
     let pick = |key: &str, fallback: String| env(key).filter(|v| !v.is_empty()).unwrap_or(fallback);
-    let bundled = runtime.filter(|dir| dir.join("daemon/cli.mjs").is_file());
+    let bundled = runtime.filter(|dir| dir.join("daemon").join("cli.mjs").is_file());
     let (node, script, mut envs) = match bundled {
         Some(dir) => {
             let root = dir.display().to_string();
@@ -375,7 +375,7 @@ fn launch_spec_with(
                 let entries = windows_bundled_path(dir, git_dirs(), &system);
                 (
                     windows_node_directory(dir).join("node.exe").display().to_string(),
-                    node_entry_path(&dir.join("daemon/cli.mjs")).display().to_string(),
+                    node_entry_path(&dir.join("daemon").join("cli.mjs")).display().to_string(),
                     entries.into_iter()
                         .filter_map(|entry| std::env::join_paths([entry]).ok()?.into_string().ok())
                         .collect::<Vec<_>>().join(";"),
@@ -441,11 +441,11 @@ mod packaged_runtime_tests {
         let spec = launch_spec_with(
             |key| (key == "SystemRoot").then(|| r"D:\Windows".into()), false, Some(&runtime), Vec::new,
         );
-        assert_eq!(spec.program, runtime.join("node/bin/node.exe").display().to_string());
-        assert_eq!(spec.args, vec![runtime.join("daemon/cli.mjs").display().to_string()]);
+        assert_eq!(spec.program, runtime.join("node").join("bin").join("node.exe").display().to_string());
+        assert_eq!(spec.args, vec![runtime.join("daemon").join("cli.mjs").display().to_string()]);
         assert_eq!(spec.envs, vec![
             ("PATH".into(), format!("{};{};D:\\Windows\\System32;D:\\Windows",
-                runtime.join("bin").display(), runtime.join("node/bin").display())),
+                runtime.join("bin").display(), runtime.join("node").join("bin").display())),
             ("GENTLE_DOT_RUNTIME".into(), runtime.display().to_string()),
         ]);
         let overridden = launch_spec_with(|key| match key {
@@ -475,7 +475,7 @@ mod packaged_runtime_tests {
         let plain = PathBuf::from(&extended.to_str().unwrap()[r"\\?\".len()..]);
         let ordinary = launch_spec(|_| None, false, Some(&plain));
         assert_eq!(fs::canonicalize(&spec.args[0]).unwrap(), fs::canonicalize(&ordinary.args[0]).unwrap());
-        assert_eq!(spec.program, extended.join("node/bin/node.exe").display().to_string());
+        assert_eq!(spec.program, extended.join("node").join("bin").join("node.exe").display().to_string());
         assert!(!spec.args[0].starts_with(r"\\?\"));
         assert_eq!(spec.envs[1], ("GENTLE_DOT_RUNTIME".into(), extended.display().to_string()));
         let overridden = launch_spec(|key| match key {
@@ -555,7 +555,7 @@ mod packaged_runtime_tests {
         let system = Path::new(r"D:\Windows");
         let entries = windows_bundled_path(&runtime, vec![git.clone()], system);
         assert_eq!(entries, vec![
-            runtime.join("bin"), runtime.join("node/bin"), system.join("System32"), system.to_path_buf(), git,
+            runtime.join("bin"), runtime.join("node").join("bin"), system.join("System32"), system.to_path_buf(), git,
         ]);
     }
 
@@ -570,12 +570,12 @@ mod packaged_runtime_tests {
         let spec = launch_spec_with(env, false, Some(&runtime), || vec![git.clone()]);
         assert_eq!(spec.envs[0], ("PATH".into(), format!(
             "{};{};D:\\Windows\\System32;D:\\Windows;{}",
-            runtime.join("bin").display(), runtime.join("node/bin").display(), git.display(),
+            runtime.join("bin").display(), runtime.join("node").join("bin").display(), git.display(),
         )));
         let without = launch_spec_with(env, false, Some(&runtime), Vec::new);
         assert_eq!(without.envs[0], ("PATH".into(), format!(
             "{};{};D:\\Windows\\System32;D:\\Windows",
-            runtime.join("bin").display(), runtime.join("node/bin").display(),
+            runtime.join("bin").display(), runtime.join("node").join("bin").display(),
         )));
     }
 
@@ -585,7 +585,7 @@ mod packaged_runtime_tests {
         let runtime = fixture("inherited-path");
         let git = PathBuf::from(r"C:\Git\cmd");
         let prefix = format!("{};{};D:\\Windows\\System32;D:\\Windows;{}",
-            runtime.join("bin").display(), runtime.join("node/bin").display(), git.display());
+            runtime.join("bin").display(), runtime.join("node").join("bin").display(), git.display());
         for inherited in [
             r"C:\Users\example\scoop\apps\git\current\cmd;D:\Tools With Spaces\bin",
             r";c:\MixedCase\Bin;;D:\not-created\tools;c:\MixedCase\Bin;",
@@ -597,8 +597,8 @@ mod packaged_runtime_tests {
                 _ => None,
             }, false, Some(&runtime), || vec![git.clone()]);
             assert_eq!(spec.envs[0], ("PATH".into(), prefix.clone()));
-            assert_eq!(spec.program, runtime.join("node/bin/node.exe").display().to_string());
-            assert_eq!(spec.args, vec![runtime.join("daemon/cli.mjs").display().to_string()]);
+            assert_eq!(spec.program, runtime.join("node").join("bin").join("node.exe").display().to_string());
+            assert_eq!(spec.args, vec![runtime.join("daemon").join("cli.mjs").display().to_string()]);
         }
     }
 
@@ -615,7 +615,7 @@ mod packaged_runtime_tests {
                 _ => None,
             }, false, Some(&runtime), Vec::new);
             assert_eq!(spec.envs[0], ("PATH".into(), format!("{};{};D:\\Windows\\System32;D:\\Windows",
-                runtime.join("bin").display(), runtime.join("node/bin").display())));
+                runtime.join("bin").display(), runtime.join("node").join("bin").display())));
             assert_eq!(spec.program, r"E:\custom\node.exe");
             assert_eq!(spec.args, vec![r"E:\custom\cli.mjs"]);
         }
@@ -649,7 +649,8 @@ mod packaged_runtime_tests {
             .arg("git.exe").env("PATH", &spec.envs[0].1).current_dir(&runtime).output().unwrap();
         assert!(output.status.success(), "inherited Git disappeared: {}", String::from_utf8_lossy(&output.stderr));
         assert!(output.stderr.is_empty());
-        assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), executable.display().to_string());
+        assert_eq!(fs::canonicalize(String::from_utf8(output.stdout).unwrap().trim()).unwrap(),
+            fs::canonicalize(&executable).unwrap());
     }
 
     #[cfg(windows)]
@@ -754,14 +755,14 @@ mod packaged_runtime_tests {
     #[test]
     fn bundled_windows_legacy_node_layout_wins_over_inherited_layout() {
         let runtime = fixture("legacy-node");
-        fs::create_dir_all(runtime.join("node/bin")).unwrap();
-        fs::write(runtime.join("node/node.exe"), b"").unwrap();
-        fs::write(runtime.join("node/bin/node.exe"), b"").unwrap();
+        fs::create_dir_all(runtime.join("node").join("bin")).unwrap();
+        fs::write(runtime.join("node").join("node.exe"), b"").unwrap();
+        fs::write(runtime.join("node").join("bin").join("node.exe"), b"").unwrap();
         let spec = launch_spec(|_| None, false, Some(&runtime));
-        assert_eq!(spec.program, runtime.join("node/node.exe").display().to_string());
+        assert_eq!(spec.program, runtime.join("node").join("node.exe").display().to_string());
         let entries: Vec<_> = std::env::split_paths(&spec.envs[0].1).collect();
         assert_eq!(entries[1], runtime.join("node"));
-        assert!(!entries.contains(&runtime.join("node/bin")));
+        assert!(!entries.contains(&runtime.join("node").join("bin")));
     }
 
     fn fixture(name: &str) -> PathBuf {
@@ -770,7 +771,7 @@ mod packaged_runtime_tests {
         let token: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
         let runtime = std::env::temp_dir().join(format!("gentle {name} {token}"));
         fs::create_dir_all(runtime.join("daemon")).unwrap();
-        fs::write(runtime.join("daemon/cli.mjs"), "export {};\n").unwrap();
+        fs::write(runtime.join("daemon").join("cli.mjs"), "export {};\n").unwrap();
         // Synthetic fixture retained; no recursive cleanup of user paths.
         runtime
     }

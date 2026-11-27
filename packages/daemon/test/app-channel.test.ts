@@ -7,6 +7,7 @@ import { APP_REQUIRED, type ServerMessage } from "@gentle-dot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
+import { writePrivateFile } from "../src/private-file.ts";
 import { fakeApp } from "./fake-app.ts";
 import { fakeAuthRuntime } from "./fake-auth-runtime.ts";
 import { oauthOptions } from "./fake-oauth.ts";
@@ -49,7 +50,7 @@ async function setup(options: { channel?: boolean } = {}) {
 	const dataDir = tempDir();
 	const agentHome = join(dataDir, "agent");
 	const importHome = join(dataDir, "import-home");
-	writeFileSync(join(dataDir, "connectors.json"), JSON.stringify(SAVED));
+	writePrivateFile(join(dataDir, "connectors.json"), JSON.stringify(SAVED));
 	for (const [path, content] of Object.entries(IMPORTABLE)) {
 		mkdirSync(dirname(join(importHome, path)), { recursive: true });
 		writeFileSync(join(importHome, path), JSON.stringify(content));
