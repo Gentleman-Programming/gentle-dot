@@ -107,23 +107,22 @@ Attach files with the paperclip, drag and drop, or paste. Images go straight to 
 
 ## Downloads
 
-**Stable releases.** Open the [release list](https://github.com/Maicololiveras/gentle-dot/releases) to see published versions. Once a stable release is available, the [latest stable release](https://github.com/Maicololiveras/gentle-dot/releases/latest) link follows the version marked latest on GitHub. Choose your platform under **Assets**.
+**Stable releases.** Open the [official release list](https://github.com/Gentleman-Programming/gentle-dot/releases) to see published versions. Once a stable release is available, the [latest stable release](https://github.com/Gentleman-Programming/gentle-dot/releases/latest) link follows the version marked latest on GitHub. Choose your platform under **Assets**.
 
 ### QA preview
 
-Download **Gentle-Dot-QA.cmd** from the newest **qa-preview** prerelease in [Releases](https://github.com/Maicololiveras/gentle-dot/releases). On Windows x64, double-click it to check for updates, approve a download and open the verified preview. Each prerelease also includes the macOS and Linux packages.
+On Windows x64, download the portable launcher, **Gentle-Dot-QA.cmd**, from the newest **qa-preview** prerelease in [official Releases](https://github.com/Gentleman-Programming/gentle-dot/releases). Double-click it to check for official QA updates, approve the download, and launch the verified preview. To use a local ZIP instead, download `Gentle-Dot-Preview-x64.zip` from the same prerelease as the launcher and pass its path as the first argument to `Gentle-Dot-QA.cmd`.
 
-These downloads are from QA build `7e5074e`. Sign in to GitHub to download an Actions artifact, extract it, and check the package against the included SHA-256 file.
+Under **Assets** on the same prerelease, look for the packages below. Verify downloads against that release's `SHA256SUMS.txt`.
 
-| Platform | QA download |
+| Platform | Release asset |
 | --- | --- |
-| Windows x64 | [Portable ZIP with Gentle Dot Preview.exe](https://github.com/Maicololiveras/gentle-dot/actions/runs/45682613624/artifacts/15056615137) |
-| macOS Intel x64 | [DMG](https://github.com/Maicololiveras/gentle-dot/actions/runs/45682613563/artifacts/15056197792) |
-| macOS Apple Silicon (ARM64) | [Check the build for the darwin-arm64-qa artifact](https://github.com/Maicololiveras/gentle-dot/actions/runs/45682613563) |
-| Debian / Ubuntu x64 and Arch Linux x64 | [.deb and Arch package](https://github.com/Maicololiveras/gentle-dot/actions/runs/45682613563/artifacts/15054509518) |
-| Debian / Ubuntu ARM64 | [.deb](https://github.com/Maicololiveras/gentle-dot/actions/runs/45682613563/artifacts/15054434718) |
+| macOS Intel x64 | `darwin-x64.zip` (DMG) |
+| macOS Apple Silicon (ARM64) | `darwin-arm64.zip` (DMG) |
+| Debian / Ubuntu x64 and Arch Linux x64 | `linux-amd64.zip` (`.deb` and Arch package) |
+| Debian / Ubuntu ARM64 | `linux-arm64.zip` (`.deb`) |
 
-Actions artifacts expire. For newer QA builds, open a successful [Windows run](https://github.com/Maicololiveras/gentle-dot/actions/workflows/windows.yml?query=branch%3Aqa%2Fnative-preview) or [macOS and Linux packaging run](https://github.com/Maicololiveras/gentle-dot/actions/workflows/native-packages.yml?query=branch%3Aqa%2Fnative-preview) and select your platform under **Artifacts**.
+**For maintainers.** Once the **Publish QA preview** workflow exists on the default branch, push the approved commit to `qa/native-preview` to build it without publishing. Only after official CI passes and acceptance is confirmed for that exact commit, manually run **Publish QA preview** on `refs/heads/qa/native-preview` while it points to that commit. This publishes a prerelease without marking it as latest.
 
 ## Get started
 

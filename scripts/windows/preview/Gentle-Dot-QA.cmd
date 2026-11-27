@@ -16,7 +16,7 @@ try {
     if ($zip -and !(Test-Path -LiteralPath $zip)) { throw 'Selected ZIP does not exist.' }
     if (!$zip) {
         Write-Host '[1/4] Checking for Windows QA updates...'
-        $repo = 'Maicololiveras/gentle-dot'
+        $repo = '__QA_REPOSITORY__'
         $releases = Invoke-RestMethod "https://api.github.com/repos/$repo/releases?per_page=100"
         $release = $releases | Where-Object { $_.prerelease -and !$_.draft -and $_.tag_name -match '^qa-preview-[0-9a-f]{12}$' } | Sort-Object published_at -Descending | Select-Object -First 1
         $asset = @($release.assets | Where-Object { $_.name -eq $name })
@@ -35,16 +35,10 @@ try {
             Copy-Item -LiteralPath $partial -Destination $zip -Force
         }
     } else {
-        $expected = '58d85e18cba7ee2901e3bea4f0b03bf16048757c2215364700b2e290c47b26d3'
+        $expected = '__QA_WINDOWS_SHA256__'
     }
     Write-Host '[2/4] Verifying SHA-256...'
     $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
-    if ($hash -eq 'dbc705f98020981034e205affea19e6f00539f2025474c2cebb19b798c834f63') {
-        & tar.exe -xf $zip -C $work $name
-        if ($LASTEXITCODE) { throw 'Could not unpack the GitHub artifact.' }
-        $zip = Join-Path $work $name
-        $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
-    }
     if ($hash -ne $expected) { throw 'Unexpected QA ZIP checksum.' }
     Write-Host '[3/4] Extracting the verified preview and its runtime...'
     & tar.exe -xf $zip -C $work
