@@ -5,6 +5,9 @@ description = "Gentle Dot desktop shell"
 edition = "2021"
 publish = false
 
+[features]
+windows-split-runtime = []
+
 [lib]
 name = "gentle_dot_lib"
 crate-type = ["rlib"]

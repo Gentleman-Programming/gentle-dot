@@ -1,0 +1,55 @@
+name: Native package QA
+on:
+  push:
+    branches: [integration/native-runtime-ci]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            distributions: debian,ubuntu,arch
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            distributions: debian,ubuntu
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: node scripts/package/package-linux.mjs --arch "${{ matrix.arch }}"
+      - run: node scripts/package/linux-check.mjs --arch "${{ matrix.arch }}" --distro "${{ matrix.distributions }}"
+      - working-directory: build/linux
+        run: sha256sum * > SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-${{ matrix.arch }}-qa
+          path: build/linux/
+          if-no-files-found: error
+  macos:
+    runs-on: macos-15
+    env:
+      PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: '["gentle-pi@4.7.0"]'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - run: node scripts/package/package-mac.mjs --check
+      - working-directory: apps/desktop/src-tauri/target/release/bundle/dmg
+        run: shasum -a 256 *.dmg > SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-arm64-qa
+          path: |
+            apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
+            apps/desktop/src-tauri/target/release/bundle/dmg/SHA256SUMS
+          if-no-files-found: error

@@ -7,7 +7,7 @@ name: Windows
 on:
   push:
     # `ci/**` branches try workflow changes before they reach `main`.
-    branches: [main, 'ci/**']
+    branches: [main, 'ci/**', integration/native-runtime-ci]
   pull_request:
   workflow_dispatch:
 
@@ -73,6 +73,24 @@ jobs:
       - name: cargo test
         working-directory: apps/desktop/src-tauri
         run: cargo test --locked --lib
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Windows x64 inventory and split-runtime admission
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_ARCH -ne 'X64') { throw 'Windows x64 runner required' }
+          node --test scripts/windows/test/split-runtime-inventory.test.mjs scripts/windows/test/split-runtime-verify.test.mjs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          foreach ($key in 'DOT_SPLIT_STARTUP_TEST_SCRATCH','DOT_PINNED_FILE_TEST_SCRATCH','DOT_SPLIT_TREE_TEST_SCRATCH') {
+            $dir = Join-Path $env:GITHUB_WORKSPACE "build/$key"
+            New-Item -ItemType Directory -Force $dir | Out-Null
+            [Environment]::SetEnvironmentVariable($key, $dir)
+          }
+          Set-Location apps/desktop/src-tauri
+          cargo test --locked --features windows-split-runtime --bin gentle-dot -- --include-ignored
 
       # A dump is only readable next to the binary and symbols that produced it.
       - name: Upload crash dumps
