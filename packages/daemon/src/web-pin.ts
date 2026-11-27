@@ -9,9 +9,9 @@
  * to a log. Forgotten PIN: remove the file on the server (docs/deploy-vps.md), then set a new one.
  */
 import { randomBytes, type ScryptOptions, scrypt, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { PIN_PATTERN, type PinStatus } from "@gentle-dot/protocol";
-import { writePrivateFile } from "./private-file.ts";
+import { PrivateFileProtectionError, readPrivateFileSync, writePrivateFile } from "./private-file.ts";
 
 export const PIN_FILE = "web-pin.json";
 /** Wrong tries in a row before the PIN locks. */
@@ -155,7 +155,7 @@ export class PinGate {
 	private load(): Saved | undefined | "damaged" {
 		if (!existsSync(this.file)) return undefined;
 		try {
-			const saved = JSON.parse(readFileSync(this.file, "utf8")) as Partial<Saved>;
+			const saved = JSON.parse(readPrivateFileSync(this.file)) as Partial<Saved>;
 			const numbers = [saved.N, saved.r, saved.p, saved.failures, saved.lockedUntil];
 			if (
 				saved.version === 1 &&
@@ -166,7 +166,9 @@ export class PinGate {
 				Buffer.from(saved.hash, "base64").length === HASH_BYTES
 			)
 				return saved as Saved;
-		} catch {}
+		} catch (error) {
+			if (error instanceof PrivateFileProtectionError) throw error;
+		}
 		return "damaged";
 	}
 

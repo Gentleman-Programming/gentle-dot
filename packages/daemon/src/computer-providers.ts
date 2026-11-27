@@ -1,0 +1,98 @@
+import { createHash } from "node:crypto";
+import { lstatSync, readFileSync } from "node:fs";
+import { basename, isAbsolute } from "node:path";
+
+export interface ArtifactPin {
+	kind: "eyes" | "hands";
+	version: string;
+	entry: string;
+	archiveSize: number;
+	archiveSha256: string;
+	entrySha256: string;
+}
+export interface AcquiredComponent {
+	archivePath: string;
+	executablePath: string;
+}
+export interface ComputerProviderOptions {
+	platform?: NodeJS.Platform;
+	arch?: string;
+	components?: Partial<Record<"eyes" | "hands", AcquiredComponent>>;
+}
+
+// Archive pins: build/windows/computer-factory-research/arise-distribution-0.2.1/manifests.json
+// and build/windows/inputcontrol-dot-build-0.2.1-dot.2/out/manifest.json, independently
+// statically audited. Build-record limits: docs/windows-computer-providers.md. No upstream hands fallback.
+// Eyes entry hash was derived statically from the unique screenview-mcp.exe entry
+// in the SHA256-verified archive (Python zipfile/hashlib; no extraction/execution).
+export const COMPUTER_ARTIFACTS: readonly Readonly<ArtifactPin>[] = Object.freeze([
+	Object.freeze({
+		kind: "eyes",
+		version: "0.2.1",
+		entry: "screenview-mcp.exe",
+		archiveSize: 38900095,
+		archiveSha256: "5903547b9cdec9463ed848cf4e2a2fc6928af47fa4d166eba240776ec410e17d",
+		entrySha256: "1c879efe55bdc543eec68b464a4fcaf879da95e6b660752a2b76bd66c21e10dd",
+	}),
+	Object.freeze({
+		kind: "hands",
+		version: "0.2.1-dot.2",
+		entry: "gentle-dot-inputcontrol.exe",
+		archiveSize: 22421353,
+		archiveSha256: "3117d925cd397fd79bfbb786723a294cfdc1bcc775790bbd4e2e10c78aedca0a",
+		entrySha256: "ea581fe8a586daa3c3e0ae7521453ec60440f5af966c4ee40776b048c0a4703f",
+	}),
+]);
+
+export type ComputerProviderKind = "windows-managed" | "native-macos" | "none";
+export interface ComputerProviderStatus {
+	status: "ready" | "unavailable";
+	kind: ComputerProviderKind;
+}
+export type ComputerProviderResult =
+	| { status: "unavailable"; kind: ComputerProviderKind }
+	| {
+			status: "ready";
+			kind: "windows-managed";
+			providers: { kind: "eyes" | "hands"; version: string; executablePath: string }[];
+		};
+
+function matches(path: string, sha256: string, size?: number): boolean {
+	if (!isAbsolute(path)) return false;
+	const stat = lstatSync(path);
+	if (!stat.isFile() || (size !== undefined && stat.size !== size)) return false;
+	return createHash("sha256").update(readFileSync(path)).digest("hex") === sha256;
+}
+
+/** Preparation only, never a session grant. Expected records are a deterministic test seam;
+ * daemon composition always uses fixed production pins. Host paths are never model inputs.
+ * Later activation must revalidate files and bind ownership before using the existing McpProxy.
+ */
+export async function resolveComputerProviders(
+	options: ComputerProviderOptions = {},
+	pins: readonly ArtifactPin[] = COMPUTER_ARTIFACTS,
+): Promise<ComputerProviderResult> {
+	const platform = options.platform ?? process.platform;
+	if (platform === "darwin") return { status: "unavailable", kind: "native-macos" };
+	if (platform !== "win32" || (options.arch ?? process.arch) !== "x64")
+		return { status: "unavailable", kind: "none" };
+	const unavailable = { status: "unavailable", kind: "windows-managed" } as const;
+	try {
+		if (pins.length !== 2 || pins[0]?.kind !== "eyes" || pins[1]?.kind !== "hands") return unavailable;
+		const providers = [];
+		for (const pin of pins) {
+			const component = options.components?.[pin.kind];
+			if (
+				!component ||
+				basename(component.executablePath) !== pin.entry ||
+				!matches(component.archivePath, pin.archiveSha256, pin.archiveSize) ||
+				!matches(component.executablePath, pin.entrySha256)
+			) return unavailable;
+			providers.push({ kind: pin.kind, version: pin.version, executablePath: component.executablePath });
+		}
+		return { status: "ready", kind: "windows-managed", providers };
+	} catch {
+		// No local paths or filesystem errors cross the status boundary.
+		return unavailable;
+	}
+}

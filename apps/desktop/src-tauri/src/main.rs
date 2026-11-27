@@ -4,6 +4,8 @@
 #[cfg(all(feature = "windows-split-runtime", not(all(windows, target_arch = "x86_64"))))]
 compile_error!("windows-split-runtime requires a Windows x64 target");
 
+#[cfg(all(feature = "windows-split-runtime", feature = "local-preview"))]
+compile_error!("windows-split-runtime is incompatible with local-preview");
 
 #[cfg(all(feature = "windows-split-runtime", windows, target_arch = "x86_64"))]
 mod windows_split_startup;

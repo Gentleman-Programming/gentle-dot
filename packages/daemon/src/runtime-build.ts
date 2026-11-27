@@ -1,12 +1,60 @@
+import { execFileSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { build } from "esbuild";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
+const REPOSITORY = fileURLToPath(new URL("../../../", import.meta.url));
 const LOCKFILE = join(PACKAGE, "..", "..", "pnpm-lock.yaml");
 const IMPORTER = "packages/daemon";
+const PRIVATE_STORAGE_SOURCE = join(REPOSITORY, "scripts", "windows", "private-storage", "main.go");
+
+const PHASE_REF = "refs/heads/qa/windows-private-memory-reasons-45201908966";
+const PHASE_BUILD_CONTEXT = {
+	GENTLE_DOT_CI_DAEMON_PHASE_BUILD: "1",
+	CI: "true",
+	GITHUB_ACTIONS: "true",
+	RUNNER_ENVIRONMENT: "github-hosted",
+	RUNNER_OS: "Windows",
+	RUNNER_ARCH: "X64",
+	GITHUB_RUN_ATTEMPT: "1",
+	GITHUB_JOB: "observe",
+	GITHUB_REPOSITORY: "Gentleman-Programming/gentle-dot",
+	GITHUB_EVENT_NAME: "push",
+	GITHUB_REF: PHASE_REF,
+	GITHUB_WORKFLOW: "Windows staged daemon phases 44794993333",
+	GITHUB_WORKFLOW_REF: `Gentleman-Programming/gentle-dot/.github/workflows/windows-staged-daemon-phases-44794993333.yml@${PHASE_REF}`,
+};
+
+export function startupStageDefines(platform: NodeJS.Platform | undefined, arch: string, env: NodeJS.ProcessEnv): Record<string, string> {
+	const enabled = platform === "win32" && arch === "x64" &&
+		Object.entries(PHASE_BUILD_CONTEXT).every(([name, value]) => env[name] === value);
+	return { __GENTLE_DOT_DAEMON_PHASES__: String(enabled) };
+}
+
+/** The explicit local-source helper output; installed runtimes never consult it. */
+export const SOURCE_PRIVATE_STORAGE_HELPER = join(
+	REPOSITORY,
+	"build",
+	"windows",
+	"local-tools",
+	"bin",
+	"private-storage.exe",
+);
+
+/** Compile the standalone helper at the same runtime/bin layout used by packaging. */
+export function buildWindowsPrivateStorageHelper(outputPath: string): void {
+	mkdirSync(dirname(outputPath), { recursive: true });
+	execFileSync("go", ["build", "-o", outputPath, PRIVATE_STORAGE_SOURCE], { cwd: REPOSITORY });
+}
+
+/** Explicit developer/test preparation; never called automatically by app startup. */
+export function prepareWindowsPrivateStorageForSource(): void {
+	if (process.platform !== "win32")
+		throw new Error("Windows private-storage preparation is available only on Windows.");
+	buildWindowsPrivateStorageHelper(SOURCE_PRIVATE_STORAGE_HELPER);
+}
 
 /**
  * The exact versions pnpm installed for the daemon's own dependencies, read from
@@ -100,8 +148,9 @@ exec "$runtime/node/bin/node" "$runtime/daemon/node_modules/${engineEntry}" "$@"
 }
 
 /**
- * The Windows twin of {@link piWrapper}, as a batch file: `bin/pi.cmd`. Windows has no shebang
- * and no execute bit; the runtime's Node sits at `node/bin/node.exe` like on the other targets.
+ * Legacy batch-wrapper API retained for inherited callers. The selected Windows producer
+ * emits the native Go `bin/pi.exe` instead; this wrapper is not its staged launcher.
+ * A caller using this helper must supply the inherited `node/bin/node.exe` layout.
  * Delayed expansion stays off so a `!` in an argument reaches the engine literally.
  */
 export function piCmdWrapper(engineEntry: string): string {
@@ -132,18 +181,20 @@ function engineEntry(): string {
  * Builds the daemon part of the installed runtime into `outDir`: `daemon/cli.mjs`
  * (the daemon and the protocol bundled; the engine and `ws` external), the files it
  * finds next to itself, a `package.json` for a flat install of the external
- * dependencies, and `bin/pi` (`bin/pi.cmd` on Windows, where the stop addon also goes to
- * `daemon/native`). Nothing is installed.
+ * dependencies, and platform-native executables. Windows retains the Go launcher and
+ * private-storage helper and also carries the native fd3/stop addon. Nothing is installed.
  */
 export async function buildRuntime(
 	outDir: string,
 	platform: NodeJS.Platform = process.platform,
 ): Promise<void> {
 	const nativeArtifact = runtimeWindowsStopArtifact(platform);
+	const { build } = await import("esbuild");
 	const daemon = join(outDir, "daemon");
 	mkdirSync(join(daemon, "extensions"), { recursive: true });
 	mkdirSync(join(outDir, "bin"), { recursive: true });
 	const dependencies = lockedDependencies();
+	const phaseDefines = startupStageDefines(platform === process.platform ? platform : undefined, process.arch, process.env);
 	await build({
 		entryPoints: [join(PACKAGE, "src", "cli.ts")],
 		outfile: join(daemon, "cli.mjs"),
@@ -151,6 +202,10 @@ export async function buildRuntime(
 		platform: "node",
 		format: "esm",
 		target: "node24",
+		define: phaseDefines,
+		// The job verifies this opt-in receipt in the already-sealed, normal output.
+		...(phaseDefines.__GENTLE_DOT_DAEMON_PHASES__ === "true"
+			? { banner: { js: "/* staged-daemon-phases: enabled */" } } : {}),
 		external: Object.keys(dependencies),
 		logLevel: "error",
 	});
@@ -165,15 +220,31 @@ export async function buildRuntime(
 		mkdirSync(join(daemon, "native"), { recursive: true });
 		copyFileSync(nativeArtifact, join(daemon, "native", "windows-stop.node"));
 	}
-	const manifest = {
-		name: "gentle-dot-runtime",
-		private: true,
-		type: "module",
-		dependencies,
-		overrides: lockedEnginePackages(dependencies),
-	};
+	// Preserve exact SDK sibling compatibility across the inherited engine upgrade.
+	const manifest = { name: "gentle-dot-runtime", private: true, type: "module", dependencies,
+		overrides: lockedEnginePackages(dependencies) };
 	writeFileSync(join(daemon, "package.json"), `${JSON.stringify(manifest, null, "\t")}\n`);
 	const entry = engineEntry();
-	if (platform === "win32") writeFileSync(join(outDir, "bin", "pi.cmd"), piCmdWrapper(entry));
-	else writeFileSync(join(outDir, "bin", "pi"), piWrapper(entry), { mode: 0o755 });
+	if (platform === "win32") {
+		const packagePath = "@earendil-works/pi-coding-agent/";
+		const relativeEntry = entry.startsWith(packagePath) ? entry.slice(packagePath.length) : "";
+		if (!/^[a-zA-Z0-9_./-]+$/.test(relativeEntry) || relativeEntry.includes("..")) {
+			throw new Error("Unsafe engine entry path for the Windows launcher.");
+		}
+		execFileSync(
+			"go",
+			[
+				"build",
+				"-o",
+				join(outDir, "bin", "pi.exe"),
+				"-ldflags",
+				`-X main.engineEntry=${entry}`,
+				join(PACKAGE, "..", "..", "scripts", "windows", "launcher", "main.go"),
+			],
+			{ cwd: PACKAGE },
+		);
+		buildWindowsPrivateStorageHelper(join(outDir, "bin", "private-storage.exe"));
+	} else {
+		writeFileSync(join(outDir, "bin", "pi"), piWrapper(entry), { mode: 0o755 });
+	}
 }

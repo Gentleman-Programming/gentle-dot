@@ -8,6 +8,7 @@ import { voiceLanguage } from "./voice-language.ts";
 import {
 	cancelNativeVoice,
 	type NativeVoiceStatus,
+	nativeVoiceOutput,
 	nativeVoiceStatus,
 	onNativeVoice,
 	onVoiceModel,
@@ -15,6 +16,8 @@ import {
 	startRefusal,
 	stopNativeVoice,
 } from "./voice-native.ts";
+import { createVoiceOutput, type VoiceOutput } from "./voice-output.ts";
+import { VoiceSilence } from "./voice-silence.ts";
 
 export type VoicePhase = "idle" | "recording" | "transcribing";
 
@@ -41,9 +44,9 @@ export interface VoiceControls {
 	cancel(): void;
 	stopSpeaking(): void;
 	setMuted(muted: boolean): void;
-	/** The user sent a typed message: its reply is not read aloud. */
+	/** User editing retires output and disarms an old spoken turn, without discarding dictation. */
 	typed(): void;
-	/** Whether a dictation is sent when recording stops, or left in the input for review. */
+	/** Auto-stop after a speech pause and send, or stop manually and leave text for review. */
 	sendOnStop: boolean;
 	setSendOnStop(send: boolean): void;
 	/** A dictation waiting in the input for review; `id` changes with each one. */
@@ -57,7 +60,7 @@ export interface VoiceControls {
 /** Recordings stop on their own so they fit the daemon's WebSocket limit (S30.2). */
 const MAX_RECORDING_MS = 60_000;
 const MUTED_KEY = "gentle-dot-voice-muted";
-/** Set when a dictation is sent on stop; otherwise it stays in the input for review. */
+/** Opt in to send after a two-second speech pause; otherwise stop manually to review. */
 const SEND_KEY = "gentle-dot-voice-send";
 const RECORDING_TYPES = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
 const REASONS = {
@@ -91,6 +94,7 @@ function chooseSource(desktop: boolean, transcribe: boolean, native: NativeVoice
 interface Recording {
 	kind: "daemon" | "native";
 	cancelled: boolean;
+	silence: VoiceSilence;
 	recorder?: MediaRecorder;
 	ticker?: ReturnType<typeof setInterval>;
 	limit?: ReturnType<typeof setTimeout>;
@@ -99,6 +103,7 @@ interface Recording {
 
 /** Stops the elapsed-time ticker, the length limit, and the level meter. */
 function stopTimers(entry: Recording): void {
+	entry.silence.reset();
 	clearInterval(entry.ticker);
 	clearTimeout(entry.limit);
 	entry.stopMeter?.();
@@ -121,6 +126,9 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 	const pendingTranscript = useRef<string | undefined>(undefined);
 	const pendingSpeech = useRef<{ requestId: string; text: string } | undefined>(undefined);
 	const audio = useRef<HTMLAudioElement | undefined>(undefined);
+	const output = useRef<VoiceOutput | undefined>(undefined);
+	const outputLive = useRef(false);
+	const outputGeneration = useRef(0);
 	/** A reply to a spoken message is awaited: the ids of the messages shown before it. */
 	const voiceTurn = useRef<Set<string> | undefined>(undefined);
 	const latest = useRef(state);
@@ -150,39 +158,92 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 	);
 
 	const stopSpeaking = useCallback(() => {
+		++outputGeneration.current;
 		pendingSpeech.current = undefined;
-		audio.current?.pause();
+		voiceTurn.current = undefined;
+		const player = audio.current;
 		audio.current = undefined;
-		globalThis.speechSynthesis?.cancel();
-		setSpeaking(false);
+		if (player) {
+			player.onended = null;
+			player.onerror = null;
+			player.pause();
+		}
+		output.current?.stop();
+		if (outputLive.current) setSpeaking(false);
 	}, []);
 
-	const speakWithSystem = useCallback((text: string) => {
-		const synth = globalThis.speechSynthesis;
-		if (!synth || typeof SpeechSynthesisUtterance === "undefined") return;
-		const utterance = new SpeechSynthesisUtterance(text);
-		const language = guessLanguage(text) ?? navigator.language.slice(0, 2).toLowerCase();
-		utterance.lang = language;
-		const voice = pickVoice(synth.getVoices(), language, navigator.language);
-		if (voice) utterance.voice = voice;
-		utterance.onend = () => setSpeaking(false);
-		synth.speak(utterance);
-		setSpeaking(true);
+	// Effect ownership recreates a disposed controller during StrictMode's setup/cleanup replay.
+	useEffect(() => {
+		let live = true;
+		outputLive.current = true;
+		const locale = (text: string) => guessLanguage(text) ?? navigator.language.slice(0, 2).toLowerCase();
+		const synthesis = globalThis.speechSynthesis;
+		const controller = createVoiceOutput({
+			...(desktop ? { native: nativeVoiceOutput } : {}),
+			...(synthesis && typeof SpeechSynthesisUtterance !== "undefined"
+				? {
+						browser: {
+							synthesis,
+							utterance: (text: string, voices: readonly SpeechSynthesisVoice[]) => {
+								const utterance = new SpeechSynthesisUtterance(text);
+								const language = locale(text);
+								utterance.lang = language;
+								const voice = pickVoice([...voices], language, navigator.language);
+								if (voice) utterance.voice = voice;
+								return utterance;
+							},
+						},
+					}
+				: {}),
+			locale,
+			// Platform UUIDs do not restart with controllers, hook mounts, or StrictMode setups.
+			requestId: () => `voice-${crypto.randomUUID()}`,
+			audio: (src) => new Audio(src),
+			wav: (bytes) => new Blob([Uint8Array.from(bytes)], { type: "audio/wav" }),
+			urls: URL,
+			clock: {
+				after: (ms, fn) => {
+					const timer = window.setTimeout(fn, ms);
+					return () => window.clearTimeout(timer);
+				},
+			},
+			onSpeaking: (value) => {
+				if (live) setSpeaking(value);
+			},
+			onError: (message) => {
+				if (live) setNote(message);
+			},
+		});
+		output.current = controller;
+		return () => {
+			live = false;
+			outputLive.current = false;
+			stopSpeaking();
+			controller.dispose();
+			output.current = undefined;
+		};
+	}, [desktop, stopSpeaking]);
+
+	const speakLocally = useCallback((text: string) => {
+		if (outputLive.current && !mutedNow.current) output.current?.sayLocal(text);
 	}, []);
 
 	const speak = useCallback(
 		(reply: string) => {
 			const text = speakableText(reply).slice(0, MAX_VOICE_TEXT);
-			if (!text || mutedNow.current) return;
+			if (!text || mutedNow.current || !outputLive.current) return;
+			stopSpeaking();
+			setNote(undefined);
 			if (!latest.current.voice.speak) {
-				speakWithSystem(text);
+				speakLocally(text);
 				return;
 			}
 			const requestId = newRequestId();
 			pendingSpeech.current = { requestId, text };
+			setSpeaking(true);
 			send({ type: "voice_speak", requestId, text });
 		},
-		[send, speakWithSystem],
+		[send, speakLocally, stopSpeaking],
 	);
 
 	const [sendOnStop, setSendOnStopState] = useState(readFlag(SEND_KEY));
@@ -212,6 +273,8 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 	);
 
 	const setSendOnStop = useCallback((next: boolean) => {
+		sendOnStopNow.current = next;
+		recording.current?.silence.reset();
 		setSendOnStopState(next);
 		try {
 			if (next) localStorage.setItem(SEND_KEY, "1");
@@ -244,9 +307,11 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 	);
 
 	const upload = useCallback(
-		async (blob: Blob, mime: string) => {
+		async (entry: Recording, blob: Blob, mime: string) => {
+			if (entry.cancelled || recording.current !== entry) return;
 			setPhase("transcribing");
 			const data = await toBase64(blob);
+			if (entry.cancelled || recording.current !== entry) return;
 			if (data.length > MAX_VOICE_AUDIO) {
 				finish(REASONS.tooLong);
 				return;
@@ -262,13 +327,30 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 		const current = recording.current;
 		if (!current || phaseNow.current !== "recording") return;
 		stopTimers(current);
+		// MediaRecorder.onstop is asynchronous too: retire recording before requesting either stop.
+		setPhase("transcribing");
 		if (current.kind === "daemon") {
 			current.recorder?.stop();
 			return;
 		}
-		setPhase("transcribing");
-		stopNativeVoice().then(sendTranscript, (error: unknown) => finish(startRefusal(error)));
+		void stopNativeVoice().then(
+			(text) => {
+				if (!current.cancelled && recording.current === current) sendTranscript(text);
+			},
+			(error: unknown) => {
+				if (!current.cancelled && recording.current === current) finish(startRefusal(error));
+			},
+		);
 	}, [finish, sendTranscript, setPhase]);
+
+	const stopNow = useRef(stop);
+	stopNow.current = stop;
+	const observeLevel = useCallback((entry: Recording, value: number) => {
+		if (recording.current !== entry || entry.cancelled || phaseNow.current !== "recording") return;
+		setLevel(value);
+		if (!sendOnStopNow.current) entry.silence.reset();
+		else if (entry.silence.sample(value, Date.now())) stopNow.current();
+	}, []);
 
 	const startDaemon = useCallback(async () => {
 		let stream: MediaStream;
@@ -280,22 +362,27 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 		}
 		const type = RECORDING_TYPES.find((t) => MediaRecorder.isTypeSupported?.(t));
 		const recorder = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
-		const entry: Recording = { kind: "daemon", cancelled: false, recorder };
+		const entry: Recording = {
+			kind: "daemon",
+			cancelled: false,
+			silence: new VoiceSilence("daemon"),
+			recorder,
+		};
 		const chunks: Blob[] = [];
 		recorder.ondataavailable = (event) => {
 			if (event.data.size > 0) chunks.push(event.data);
 		};
 		recorder.onstop = () => {
 			for (const track of stream.getTracks()) track.stop();
-			if (entry.cancelled) return;
+			if (entry.cancelled || recording.current !== entry) return;
 			const mime = recorder.mimeType || type || "audio/webm";
-			void upload(new Blob(chunks, { type: mime }), mime);
+			void upload(entry, new Blob(chunks, { type: mime }), mime);
 		};
 		recorder.start();
-		entry.stopMeter = startMeter(stream, setLevel);
 		begin(entry);
+		entry.stopMeter = startMeter(stream, (value) => observeLevel(entry, value));
 		entry.limit = setTimeout(stop, MAX_RECORDING_MS);
-	}, [begin, finish, stop, upload]);
+	}, [begin, finish, observeLevel, stop, upload]);
 
 	const startNative = useCallback(async () => {
 		try {
@@ -305,7 +392,7 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 			finish(startRefusal(error));
 			return;
 		}
-		begin({ kind: "native", cancelled: false });
+		begin({ kind: "native", cancelled: false, silence: new VoiceSilence("native") });
 	}, [begin, finish]);
 
 	const start = useCallback(() => {
@@ -320,16 +407,19 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 	}, [source.kind, startDaemon, startNative, stopSpeaking]);
 
 	const cancel = useCallback(() => {
+		stopSpeaking();
 		const current = recording.current;
 		if (!current) return;
 		current.cancelled = true;
-		if (current.kind === "daemon") current.recorder?.stop();
-		else void cancelNativeVoice().catch(() => {});
+		if (current.kind === "daemon") {
+			if (current.recorder && current.recorder.state !== "inactive") current.recorder.stop();
+		} else void cancelNativeVoice().catch(() => {});
 		finish();
-	}, [finish]);
+	}, [finish, stopSpeaking]);
 
 	const setMuted = useCallback(
 		(next: boolean) => {
+			mutedNow.current = next;
 			setMutedState(next);
 			try {
 				if (next) localStorage.setItem(MUTED_KEY, "1");
@@ -343,8 +433,8 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 	);
 
 	const typed = useCallback(() => {
-		voiceTurn.current = undefined;
-	}, []);
+		stopSpeaking();
+	}, [stopSpeaking]);
 
 	// The desktop recognizer's status and live events.
 	useEffect(() => {
@@ -358,7 +448,8 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 				if (phaseNow.current === "recording") setPartial(text);
 			},
 			level: (value) => {
-				if (phaseNow.current === "recording") setLevel(value);
+				const current = recording.current;
+				if (current?.kind === "native") observeLevel(current, value);
 			},
 			error: (message) => {
 				if (recording.current?.kind === "native") finish(message);
@@ -368,7 +459,7 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 			live = false;
 			void off.then((stopListening) => stopListening());
 		};
-	}, [desktop, finish]);
+	}, [desktop, finish, observeLevel]);
 
 	// Installing or removing the local model changes what the recognizer can do (#25).
 	useEffect(() => {
@@ -397,18 +488,33 @@ export function useVoice(state: DotState, send: Send): VoiceControls {
 			const speech = pendingSpeech.current;
 			if (speech && reply.requestId === speech.requestId) {
 				pendingSpeech.current = undefined;
+				if (!outputLive.current || mutedNow.current) continue;
 				if (reply.type === "voice_speech") {
+					const generation = outputGeneration.current;
 					const player = new Audio(`data:${reply.mime};base64,${reply.data}`);
 					audio.current = player;
-					player.onended = () => setSpeaking(false);
+					const finishPlayback = (reason?: string) => {
+						if (!outputLive.current || generation !== outputGeneration.current || audio.current !== player)
+							return;
+						audio.current = undefined;
+						player.onended = null;
+						player.onerror = null;
+						setSpeaking(false);
+						if (reason) {
+							player.pause();
+							setNote(reason);
+						}
+					};
+					player.onended = () => finishPlayback();
+					player.onerror = () => finishPlayback("Could not play spoken reply.");
 					setSpeaking(true);
-					void player.play().catch(() => setSpeaking(false));
+					void player.play().catch(() => finishPlayback("Could not play spoken reply."));
 				} else if (reply.type === "voice_unavailable") {
-					speakWithSystem(speech.text);
+					speakLocally(speech.text);
 				}
 			}
 		}
-	}, [state.voiceReplies, sendTranscript, finish, speakWithSystem]);
+	}, [state.voiceReplies, sendTranscript, finish, speakLocally]);
 
 	// Read the reply to a spoken message aloud once the assistant finished it.
 	useEffect(() => {

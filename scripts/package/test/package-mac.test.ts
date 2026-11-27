@@ -16,6 +16,7 @@ describe("parseMacArgs", () => {
 			skipStage: false,
 			check: false,
 			finderLayout: false,
+			target: "darwin-arm64",
 			identity: AD_HOC,
 		});
 		expect(parseMacArgs([], { GENTLE_DOT_SIGN_IDENTITY: "Gentle Dot Local" }).identity).toBe(
@@ -35,6 +36,7 @@ describe("parseMacArgs", () => {
 			check: true,
 			finderLayout: true,
 			checkDmg: "/tmp/a.dmg",
+			target: "darwin-arm64",
 			identity: AD_HOC,
 		});
 	});

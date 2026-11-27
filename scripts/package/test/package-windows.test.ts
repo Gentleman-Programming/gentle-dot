@@ -87,8 +87,10 @@ describe("payloadDifferences", () => {
 describe("the payload hash sample", () => {
 	it("pins the files whose bytes prove the runtime crossed the installer", () => {
 		expect(RUNTIME_HASH_SAMPLE).toContain("MANIFEST.json");
-		expect(RUNTIME_HASH_SAMPLE).toContain("node/bin/node.exe");
-		expect(RUNTIME_HASH_SAMPLE).toContain("bin/pi.cmd");
+		expect(RUNTIME_HASH_SAMPLE).toContain("node/node.exe");
+		expect(RUNTIME_HASH_SAMPLE).toContain("bin/pi.exe");
+		expect(RUNTIME_HASH_SAMPLE).toContain("bin/private-storage.exe");
+		expect(RUNTIME_HASH_SAMPLE).toContain("daemon/native/windows-stop.node");
 		expect(RUNTIME_HASH_SAMPLE).toContain("bin/engram.exe");
 		expect(RUNTIME_HASH_SAMPLE).toContain("daemon/cli.mjs");
 	});
@@ -142,10 +144,11 @@ describe("gentleAiProvenance", () => {
 	});
 });
 
-describe("package:windows", () => {
-	it("is wired to the packaging script", () => {
+describe("Windows producer commands", () => {
+	it("preserves the native producer and names the inherited payload producer separately", () => {
 		const pkg = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8"));
-		expect(pkg.scripts["package:windows"]).toBe("node scripts/package/package-windows.mjs");
+		expect(pkg.scripts["package:windows"]).toBe("powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/windows/package.ps1");
+		expect(pkg.scripts["package:windows:payload"]).toBe("node scripts/package/package-windows.mjs");
 	});
 });
 

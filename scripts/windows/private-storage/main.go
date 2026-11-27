@@ -1,0 +1,830 @@
+//go:build windows
+
+// private-storage provides only the daemon's private-directory and atomic private-file
+// operations. It is bundled with the Windows runtime; it is not a general ACL utility.
+package main
+
+import (
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"unsafe"
+)
+
+const (
+	readControl                = 0x00020000
+	writeDAC                   = 0x00040000
+	fileReadAttributes         = 0x00000080
+	fileListDirectory          = 0x00000001
+	fileShareRead              = 0x00000001
+	fileShareWrite             = 0x00000002
+	fileShareDelete            = 0x00000004
+	createNew                  = 1
+	openExisting               = 3
+	fileFlagOpenReparsePoint   = 0x00200000
+	fileFlagBackupSemantics    = 0x02000000
+	fileAttributeReparsePoint  = 0x00000400
+	fileAttributeDirectory     = 0x00000010
+	driveUnknown               = 0
+	driveNoRoot                = 1
+	driveRemote                = 4
+	seFileObject               = 1
+	ownerSecurityInformation   = 0x00000001
+	daclSecurityInformation    = 0x00000004
+	protectedDACLInformation   = 0x80000000
+	securityDescriptorRevision = 1
+	tokenQuery                 = 0x0008
+	tokenUserInformation       = 1
+	moveFileReplaceExisting    = 0x00000001
+	moveFileWriteThrough       = 0x00000008
+	seDACLProtected            = 0x1000
+	fileAttributeNormal        = 0x00000080
+	deleteAccess               = 0x00010000
+	fileRenameInfo             = 3
+	fileDispositionInfo        = 4
+)
+
+var (
+	advapi32                         = syscall.NewLazyDLL("advapi32.dll")
+	kernel32                         = syscall.NewLazyDLL("kernel32.dll")
+	procConvertSDDL                  = advapi32.NewProc("ConvertStringSecurityDescriptorToSecurityDescriptorW")
+	procConvertSDToSDDL              = advapi32.NewProc("ConvertSecurityDescriptorToStringSecurityDescriptorW")
+	procGetSecurityInfo              = advapi32.NewProc("GetSecurityInfo")
+	procSetSecurityInfo              = advapi32.NewProc("SetSecurityInfo")
+	procGetSecurityDescriptorControl = advapi32.NewProc("GetSecurityDescriptorControl")
+	procEqualSid                     = advapi32.NewProc("EqualSid")
+	procLocalFree                    = kernel32.NewProc("LocalFree")
+	procGetFileInformation           = kernel32.NewProc("GetFileInformationByHandle")
+	procMoveFileEx                   = kernel32.NewProc("MoveFileExW")
+	procDeleteFile                   = kernel32.NewProc("DeleteFileW")
+	procGetDriveType                 = kernel32.NewProc("GetDriveTypeW")
+	procSetFileInformation           = kernel32.NewProc("SetFileInformationByHandle")
+)
+
+type fileInformation struct {
+	FileAttributes uint32
+	CreationTime   syscall.Filetime
+	LastAccessTime syscall.Filetime
+	LastWriteTime  syscall.Filetime
+	VolumeSerial   uint32
+	FileSizeHigh   uint32
+	FileSizeLow    uint32
+	Links          uint32
+	FileIndexHigh  uint32
+	FileIndexLow   uint32
+}
+
+func main() {
+	if len(os.Args) < 3 {
+		fail("usage: private-storage.exe ensure-dir <path> | secure-file <path> | write-file <path> | create-file-if-absent <path>")
+	}
+	var err error
+	switch os.Args[1] {
+	case "ensure-dir":
+		if len(os.Args) != 3 {
+			fail("ensure-dir requires one path")
+		}
+		err = ensurePrivateDir(os.Args[2])
+	case "secure-file":
+		if len(os.Args) != 3 {
+			fail("secure-file requires one path")
+		}
+		err = secureExistingFile(os.Args[2])
+	case "write-file":
+		if len(os.Args) != 3 {
+			fail("write-file requires one path")
+		}
+		var content []byte
+		content, err = io.ReadAll(os.Stdin)
+		if err == nil {
+			err = writePrivateFile(os.Args[2], content)
+		}
+	case "create-file-if-absent":
+		if len(os.Args) != 3 {
+			fail("create-file-if-absent requires one path")
+		}
+		err = createPrivateFileIfAbsent(os.Args[2])
+	default:
+		fail("unsupported private-storage operation")
+	}
+	if err != nil {
+		fail("private storage operation failed: " + err.Error())
+	}
+}
+
+func fail(message string) {
+	fmt.Fprintln(os.Stderr, message)
+	os.Exit(1)
+}
+
+func wide(value string) (*uint16, error) { return syscall.UTF16PtrFromString(value) }
+
+func descriptor(directory bool) (uintptr, error) {
+	user, err := currentSID()
+	if err != nil {
+		return 0, err
+	}
+	userText, err := sidString(user)
+	if err != nil {
+		return 0, err
+	}
+	sddl := "O:" + userText + "D:P(A;;FA;;;" + userText + ")(A;;FA;;;SY)"
+	if directory {
+		sddl = "O:" + userText + "D:P(A;OICI;FA;;;" + userText + ")(A;OICI;FA;;;SY)"
+	}
+	text, err := wide(sddl)
+	if err != nil {
+		return 0, err
+	}
+	var result uintptr
+	var size uint32
+	ok, _, callErr := procConvertSDDL.Call(uintptr(unsafe.Pointer(text)), securityDescriptorRevision, uintptr(unsafe.Pointer(&result)), uintptr(unsafe.Pointer(&size)))
+	if ok == 0 {
+		return 0, callError(callErr)
+	}
+	return result, nil
+}
+
+func callError(callErr error) error {
+	if callErr != nil && callErr != syscall.Errno(0) {
+		return callErr
+	}
+	return syscall.GetLastError()
+}
+
+func currentSID() (*syscall.SID, error) {
+	var token syscall.Token
+	process, err := syscall.GetCurrentProcess()
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.OpenProcessToken(process, tokenQuery, &token); err != nil {
+		return nil, err
+	}
+	defer token.Close()
+	var needed uint32
+	_ = syscall.GetTokenInformation(token, tokenUserInformation, nil, 0, &needed)
+	if needed == 0 {
+		return nil, syscall.GetLastError()
+	}
+	buffer := make([]byte, needed)
+	if err := syscall.GetTokenInformation(token, tokenUserInformation, &buffer[0], needed, &needed); err != nil {
+		return nil, err
+	}
+	return *(**syscall.SID)(unsafe.Pointer(&buffer[0])), nil
+}
+
+func sidString(sid *syscall.SID) (string, error) {
+	var text *uint16
+	if err := syscall.ConvertSidToStringSid(sid, &text); err != nil {
+		return "", err
+	}
+	defer syscall.LocalFree(syscall.Handle(uintptr(unsafe.Pointer(text))))
+	var value []uint16
+	for cursor := text; *cursor != 0; cursor = (*uint16)(unsafe.Add(unsafe.Pointer(cursor), unsafe.Sizeof(*cursor))) {
+		value = append(value, *cursor)
+	}
+	return syscall.UTF16ToString(value), nil
+}
+
+func openPath(path string, directory bool, access uint32) (syscall.Handle, fileInformation, error) {
+	return openPathWithShare(path, directory, access, fileShareRead|fileShareWrite|fileShareDelete)
+}
+
+func openPathWithShare(path string, directory bool, access, share uint32) (syscall.Handle, fileInformation, error) {
+	name, err := wide(path)
+	if err != nil {
+		return syscall.InvalidHandle, fileInformation{}, err
+	}
+	flags := uint32(fileFlagOpenReparsePoint)
+	if directory {
+		flags |= fileFlagBackupSemantics
+	}
+	handle, err := syscall.CreateFile(name, access, share, nil, openExisting, flags, 0)
+	if err != nil {
+		return syscall.InvalidHandle, fileInformation{}, err
+	}
+	var info fileInformation
+	ok, _, callErr := procGetFileInformation.Call(uintptr(handle), uintptr(unsafe.Pointer(&info)))
+	if ok == 0 {
+		syscall.CloseHandle(handle)
+		return syscall.InvalidHandle, fileInformation{}, callError(callErr)
+	}
+	if info.FileAttributes&fileAttributeReparsePoint != 0 {
+		syscall.CloseHandle(handle)
+		return syscall.InvalidHandle, fileInformation{}, errors.New("reparse points are not accepted for private storage")
+	}
+	if directory != (info.FileAttributes&fileAttributeDirectory != 0) {
+		syscall.CloseHandle(handle)
+		return syscall.InvalidHandle, fileInformation{}, errors.New("private-storage path has the wrong file type")
+	}
+	return handle, info, nil
+}
+
+func verifyOwner(handle syscall.Handle) error {
+	user, err := currentSID()
+	if err != nil {
+		return err
+	}
+	var owner, group, dacl, sacl, securityDescriptor uintptr
+	status, _, _ := procGetSecurityInfo.Call(uintptr(handle), seFileObject, ownerSecurityInformation, uintptr(unsafe.Pointer(&owner)), uintptr(unsafe.Pointer(&group)), uintptr(unsafe.Pointer(&dacl)), uintptr(unsafe.Pointer(&sacl)), uintptr(unsafe.Pointer(&securityDescriptor)))
+	if status != 0 {
+		return syscall.Errno(status)
+	}
+	defer procLocalFree.Call(securityDescriptor)
+	if owner == 0 {
+		return errors.New("private-storage object has no owner")
+	}
+	equal, _, _ := procEqualSid.Call(owner, uintptr(unsafe.Pointer(user)))
+	if equal == 0 {
+		ownerSID, err := sidString((*syscall.SID)(unsafe.Pointer(owner)))
+		if err != nil {
+			return fmt.Errorf("private-storage object has a different owner; could not read owner SID: %w", err)
+		}
+		userSID, err := sidString(user)
+		if err != nil {
+			return fmt.Errorf("private-storage object has a different owner; could not read current Windows user SID: %w", err)
+		}
+		return ownerMismatch(ownerSID, userSID)
+	}
+	return nil
+}
+
+func ownerMismatch(ownerSID, userSID string) error {
+	return fmt.Errorf("private-storage object owner SID %s does not match current Windows user SID %s", ownerSID, userSID)
+}
+
+func setProtectedACL(handle syscall.Handle, directory bool) error {
+	sd, err := descriptor(directory)
+	if err != nil {
+		return err
+	}
+	defer procLocalFree.Call(sd)
+	var present, defaulted int32
+	var dacl uintptr
+	getDACL := advapi32.NewProc("GetSecurityDescriptorDacl")
+	ok, _, callErr := getDACL.Call(sd, uintptr(unsafe.Pointer(&present)), uintptr(unsafe.Pointer(&dacl)), uintptr(unsafe.Pointer(&defaulted)))
+	if ok == 0 || present == 0 || dacl == 0 {
+		return callError(callErr)
+	}
+	status, _, _ := procSetSecurityInfo.Call(uintptr(handle), seFileObject, daclSecurityInformation|protectedDACLInformation, 0, 0, dacl, 0)
+	if status != 0 {
+		return syscall.Errno(status)
+	}
+	return verifyACL(handle, directory)
+}
+
+func verifyACL(handle syscall.Handle, directory bool) error {
+	var owner, group, dacl, sacl, sd uintptr
+	status, _, _ := procGetSecurityInfo.Call(uintptr(handle), seFileObject, ownerSecurityInformation|daclSecurityInformation, uintptr(unsafe.Pointer(&owner)), uintptr(unsafe.Pointer(&group)), uintptr(unsafe.Pointer(&dacl)), uintptr(unsafe.Pointer(&sacl)), uintptr(unsafe.Pointer(&sd)))
+	if status != 0 {
+		return syscall.Errno(status)
+	}
+	defer procLocalFree.Call(sd)
+	var control uint16
+	var revision uint32
+	ok, _, callErr := procGetSecurityDescriptorControl.Call(sd, uintptr(unsafe.Pointer(&control)), uintptr(unsafe.Pointer(&revision)))
+	if ok == 0 {
+		return callError(callErr)
+	}
+	if control&seDACLProtected == 0 {
+		return errors.New("private-storage DACL is not protected from inheritance")
+	}
+	sddl, err := descriptorString(sd)
+	if err != nil {
+		return err
+	}
+	user, err := currentSID()
+	if err != nil {
+		return err
+	}
+	userText, err := sidString(user)
+	if err != nil {
+		return err
+	}
+	expected := "D:P(A;;FA;;;" + userText + ")(A;;FA;;;SY)"
+	if directory {
+		expected = "D:P(A;OICI;FA;;;" + userText + ")(A;OICI;FA;;;SY)"
+	}
+	actual, err := extractDACL(sddl)
+	if err != nil {
+		return err
+	}
+	return compareDACLs(actual, expected)
+}
+
+func descriptorString(sd uintptr) (string, error) {
+	return securityDescriptorString(sd, ownerSecurityInformation|daclSecurityInformation)
+}
+
+func securityDescriptorString(sd uintptr, information uint32) (string, error) {
+	var text uintptr
+	var length uint32
+	ok, _, callErr := procConvertSDToSDDL.Call(sd, securityDescriptorRevision, uintptr(information), uintptr(unsafe.Pointer(&text)), uintptr(unsafe.Pointer(&length)))
+	if ok == 0 {
+		return "", callError(callErr)
+	}
+	defer procLocalFree.Call(text)
+	var value []uint16
+	for cursor := (*uint16)(unsafe.Pointer(text)); *cursor != 0; cursor = (*uint16)(unsafe.Add(unsafe.Pointer(cursor), unsafe.Sizeof(*cursor))) {
+		value = append(value, *cursor)
+	}
+	return syscall.UTF16ToString(value), nil
+}
+
+func extractDACL(sddl string) (string, error) {
+	index := strings.Index(sddl, "D:")
+	if index < 0 {
+		return "", errors.New("private-storage DACL is missing")
+	}
+	dacl := sddl[index:]
+	if strings.HasPrefix(dacl, "D:PAI") {
+		dacl = "D:P" + dacl[len("D:PAI"):]
+	}
+	return dacl, nil
+}
+
+func compareDACLs(actual, expected string) error {
+	canonicalActual, err := canonicalDACL(actual)
+	if err != nil {
+		return err
+	}
+	canonicalExpected, err := canonicalDACL(expected)
+	if err != nil {
+		return err
+	}
+	if canonicalActual != canonicalExpected {
+		return fmt.Errorf("private-storage DACL contains unexpected principals or permissions: got %q, want %q", canonicalActual, canonicalExpected)
+	}
+	return nil
+}
+
+func canonicalDACL(value string) (string, error) {
+	dacl, err := extractDACL(value)
+	if err != nil {
+		return "", err
+	}
+	text, err := wide(dacl)
+	if err != nil {
+		return "", err
+	}
+	var sd uintptr
+	var size uint32
+	ok, _, callErr := procConvertSDDL.Call(uintptr(unsafe.Pointer(text)), securityDescriptorRevision, uintptr(unsafe.Pointer(&sd)), uintptr(unsafe.Pointer(&size)))
+	if ok == 0 {
+		return "", callError(callErr)
+	}
+	defer procLocalFree.Call(sd)
+	canonical, err := securityDescriptorString(sd, daclSecurityInformation)
+	if err != nil {
+		return "", err
+	}
+	return extractDACL(canonical)
+}
+
+func secureHandle(handle syscall.Handle, directory bool) error {
+	if err := verifyOwner(handle); err != nil {
+		return err
+	}
+	return setProtectedACL(handle, directory)
+}
+
+func absolutePath(path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		return "", errors.New("private-storage path must be absolute")
+	}
+	clean := filepath.Clean(path)
+	volume := filepath.VolumeName(clean)
+	if volume == "" || clean == volume+string(filepath.Separator) {
+		return "", errors.New("a drive root cannot be used as private storage")
+	}
+	root, err := syscall.UTF16PtrFromString(volume + string(filepath.Separator))
+	if err != nil {
+		return "", fmt.Errorf("resolve private-storage volume: %w", err)
+	}
+	driveType, _, _ := procGetDriveType.Call(uintptr(unsafe.Pointer(root)))
+	if driveType == driveUnknown || driveType == driveNoRoot || driveType == driveRemote {
+		return "", errors.New("private storage requires an available local volume")
+	}
+	return clean, nil
+}
+
+func ensurePrivateDir(path string) error {
+	clean, err := absolutePath(path)
+	if err != nil {
+		return err
+	}
+	root := filepath.VolumeName(clean) + string(filepath.Separator)
+	parts := strings.Split(strings.TrimPrefix(clean, root), string(filepath.Separator))
+	current := root
+	for index, part := range parts {
+		if part == "" {
+			continue
+		}
+		current = filepath.Join(current, part)
+		isTarget := index == len(parts)-1
+		if err := createOrCheckDirectory(current, isTarget); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func verifyNoReparseAncestors(path string) error {
+	clean, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	clean = filepath.Clean(clean)
+	root := filepath.VolumeName(clean) + string(filepath.Separator)
+	if root == string(filepath.Separator) {
+		return errors.New("private-storage path must use a local absolute volume")
+	}
+	current := root
+	for _, part := range strings.Split(strings.TrimPrefix(clean, root), string(filepath.Separator)) {
+		if part == "" {
+			continue
+		}
+		current = filepath.Join(current, part)
+		handle, _, err := openPath(current, true, fileReadAttributes)
+		if err != nil {
+			return err
+		}
+		_ = syscall.CloseHandle(handle)
+	}
+	return nil
+}
+
+func createOrCheckDirectory(path string, target bool) error {
+	access := uint32(fileReadAttributes)
+	if target {
+		access |= readControl | writeDAC
+	}
+	handle, _, err := openPath(path, true, access)
+	if err == nil {
+		defer syscall.CloseHandle(handle)
+		if target {
+			if err := secureHandle(handle, true); err != nil {
+				return fmt.Errorf("secure existing private directory: %w", err)
+			}
+			return nil
+		}
+		return nil
+	}
+	if !errors.Is(err, syscall.ERROR_FILE_NOT_FOUND) && !errors.Is(err, syscall.ERROR_PATH_NOT_FOUND) {
+		return err
+	}
+	sd, err := descriptor(true)
+	if err != nil {
+		return err
+	}
+	defer procLocalFree.Call(sd)
+	sa := syscall.SecurityAttributes{Length: uint32(unsafe.Sizeof(syscall.SecurityAttributes{})), SecurityDescriptor: sd}
+	name, err := wide(path)
+	if err != nil {
+		return err
+	}
+	if err = syscall.CreateDirectory(name, &sa); err != nil {
+		if !errors.Is(err, syscall.ERROR_ALREADY_EXISTS) {
+			return err
+		}
+		handle, _, err = openPath(path, true, access)
+		if err != nil {
+			return err
+		}
+		defer syscall.CloseHandle(handle)
+		if target {
+			if err := secureHandle(handle, true); err != nil {
+				return fmt.Errorf("secure existing private directory: %w", err)
+			}
+			return nil
+		}
+		return nil
+	}
+	handle, _, err = openPath(path, true, readControl|fileReadAttributes)
+	if err != nil {
+		return err
+	}
+	defer syscall.CloseHandle(handle)
+	if err := verifyOwner(handle); err != nil {
+		return err
+	}
+	if err := verifyACL(handle, true); err != nil {
+		return fmt.Errorf("verify newly created private directory: %w", err)
+	}
+	return nil
+}
+
+func secureExistingFile(path string) error {
+	clean, err := absolutePath(path)
+	if err != nil {
+		return err
+	}
+	if err = verifyNoReparseAncestors(filepath.Dir(clean)); err != nil {
+		if errors.Is(err, syscall.ERROR_FILE_NOT_FOUND) || errors.Is(err, syscall.ERROR_PATH_NOT_FOUND) {
+			return nil
+		}
+		return err
+	}
+	parent, _, err := openPath(filepath.Dir(clean), true, readControl|fileReadAttributes)
+	if err != nil {
+		return err
+	}
+	defer syscall.CloseHandle(parent)
+	if err = verifyOwner(parent); err != nil {
+		return fmt.Errorf("file parent owner check failed: %w", err)
+	}
+	if err = verifyACL(parent, true); err != nil {
+		return fmt.Errorf("file parent is not private: %w", err)
+	}
+	file, info, err := openPath(clean, false, readControl|writeDAC|fileReadAttributes)
+	if err != nil {
+		if errors.Is(err, syscall.ERROR_FILE_NOT_FOUND) || errors.Is(err, syscall.ERROR_PATH_NOT_FOUND) {
+			return nil
+		}
+		return err
+	}
+	defer syscall.CloseHandle(file)
+	if info.Links != 1 {
+		return errors.New("hard-linked files are not accepted for private storage")
+	}
+	return secureHandle(file, false)
+}
+
+func writePrivateFile(path string, content []byte) error {
+	clean, err := absolutePath(path)
+	if err != nil {
+		return err
+	}
+	if err = verifyNoReparseAncestors(filepath.Dir(clean)); err != nil {
+		return err
+	}
+	parent, _, err := openPath(filepath.Dir(clean), true, readControl|fileReadAttributes)
+	if err != nil {
+		return err
+	}
+	defer syscall.CloseHandle(parent)
+	if err = verifyOwner(parent); err != nil {
+		return fmt.Errorf("file parent owner check failed: %w", err)
+	}
+	if err = verifyACL(parent, true); err != nil {
+		return fmt.Errorf("file parent is not private: %w", err)
+	}
+	if target, info, openErr := openPath(clean, false, readControl|fileReadAttributes); openErr == nil {
+		if ownerErr := verifyOwner(target); ownerErr != nil {
+			syscall.CloseHandle(target)
+			return ownerErr
+		}
+		syscall.CloseHandle(target)
+		if info.Links != 1 {
+			return errors.New("hard-linked files are not accepted for private storage")
+		}
+	} else if !errors.Is(openErr, syscall.ERROR_FILE_NOT_FOUND) {
+		return openErr
+	}
+
+	var suffix [12]byte
+	if _, err = rand.Read(suffix[:]); err != nil {
+		return err
+	}
+	temp := filepath.Join(filepath.Dir(clean), "."+filepath.Base(clean)+"."+fmt.Sprintf("%x", suffix[:])+".tmp")
+	if err = createPrivateTemp(temp, content); err != nil {
+		return err
+	}
+	tempName, err := wide(temp)
+	if err != nil {
+		_ = deletePath(temp)
+		return err
+	}
+	targetName, err := wide(clean)
+	if err != nil {
+		_ = deletePath(temp)
+		return err
+	}
+	ok, _, callErr := procMoveFileEx.Call(uintptr(unsafe.Pointer(tempName)), uintptr(unsafe.Pointer(targetName)), moveFileReplaceExisting|moveFileWriteThrough)
+	if ok == 0 {
+		_ = deletePath(temp)
+		return callError(callErr)
+	}
+	return nil
+}
+
+func createPrivateTemp(path string, content []byte) error {
+	sd, err := descriptor(false)
+	if err != nil {
+		return err
+	}
+	defer procLocalFree.Call(sd)
+	sa := syscall.SecurityAttributes{Length: uint32(unsafe.Sizeof(syscall.SecurityAttributes{})), SecurityDescriptor: sd}
+	name, err := wide(path)
+	if err != nil {
+		return err
+	}
+	handle, err := syscall.CreateFile(name, syscall.GENERIC_WRITE|readControl|writeDAC, fileShareRead|fileShareWrite|fileShareDelete, &sa, createNew, fileAttributeNormal|fileFlagOpenReparsePoint, 0)
+	if err != nil {
+		return err
+	}
+	defer syscall.CloseHandle(handle)
+	if err = secureHandle(handle, false); err != nil {
+		_ = deletePath(path)
+		return err
+	}
+	for len(content) != 0 {
+		var written uint32
+		writeErr := syscall.WriteFile(handle, content, &written, nil)
+		if writeErr != nil {
+			_ = deletePath(path)
+			return writeErr
+		}
+		if written == 0 {
+			_ = deletePath(path)
+			return errors.New("private file write made no progress")
+		}
+		content = content[written:]
+	}
+	return syscall.FlushFileBuffers(handle)
+}
+
+func createPrivateFileIfAbsent(path string) error {
+	return withProviderParent(path, func(parent, clean string) error {
+		if err := validatePreservedFile(clean); !errors.Is(err, syscall.ERROR_FILE_NOT_FOUND) {
+			return err
+		}
+		return publishEmptyPrivateFile(parent, clean)
+	})
+}
+
+// Hold each directory open without delete sharing so the checked names cannot
+// be moved between validation, temporary creation and handle-based publish.
+func withProviderParent(path string, use func(parent, clean string) error) error {
+	clean, err := absolutePath(path)
+	if err != nil {
+		return err
+	}
+	volume := filepath.VolumeName(clean)
+	if len(volume) != 2 || volume[1] != ':' || strings.Contains(clean[len(volume):], ":") {
+		return errors.New("private-file initialization requires a drive path without alternate streams")
+	}
+	root := volume + string(filepath.Separator)
+	parts := strings.Split(strings.TrimPrefix(clean, root), string(filepath.Separator))
+	if len(parts) < 2 {
+		return errors.New("a drive root cannot be the private-file parent")
+	}
+	for _, part := range parts {
+		if part == "" || strings.HasSuffix(part, ".") || strings.HasSuffix(part, " ") {
+			return errors.New("private-file initialization requires unambiguous path components")
+		}
+	}
+	parent := root
+	for index, part := range parts[:len(parts)-1] {
+		parent = filepath.Join(parent, part)
+		// FILE_LIST_DIRECTORY participates in Windows share-access checks;
+		// FILE_READ_ATTRIBUTES alone does not establish this read share.
+		access := uint32(fileListDirectory | fileReadAttributes)
+		isParent := index == len(parts)-2
+		if isParent {
+			access |= readControl
+		}
+		share := uint32(fileShareRead)
+		if isParent {
+			// Windows opens the destination directory for add-file during rename.
+			share |= fileShareWrite
+		}
+		handle, _, err := openPathWithShare(parent, true, access, share)
+		if err != nil {
+			return err
+		}
+		defer syscall.CloseHandle(handle)
+		if isParent {
+			if err = verifyOwner(handle); err != nil {
+				return fmt.Errorf("file parent owner check failed: %w", err)
+			}
+			if err = verifyACL(handle, true); err != nil {
+				return fmt.Errorf("file parent is not private: %w", err)
+			}
+		}
+	}
+	return use(parent, clean)
+}
+
+func validatePreservedFile(path string) error {
+	// Share delete with the other initializer's still-open publishing handle. No
+	// write access is requested, and no credential contents are inspected.
+	file, info, err := openPathWithShare(path, false, readControl|fileReadAttributes, fileShareRead|fileShareWrite|fileShareDelete)
+	if err != nil {
+		return err
+	}
+	defer syscall.CloseHandle(file)
+	if info.Links != 1 {
+		return errors.New("hard-linked files are not accepted for private storage")
+	}
+	if err := verifyOwner(file); err != nil {
+		return err
+	}
+	return verifyACL(file, false)
+}
+
+func publishEmptyPrivateFile(parent, target string) (err error) {
+	var suffix [12]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return err
+	}
+	temp, err := wide(filepath.Join(parent, fmt.Sprintf(".private-%x.tmp", suffix[:])))
+	if err != nil {
+		return err
+	}
+	sd, err := descriptor(false)
+	if err != nil {
+		return err
+	}
+	defer procLocalFree.Call(sd)
+	sa := syscall.SecurityAttributes{Length: uint32(unsafe.Sizeof(syscall.SecurityAttributes{})), SecurityDescriptor: sd}
+	file, err := syscall.CreateFile(temp, syscall.GENERIC_WRITE|readControl|deleteAccess, fileShareRead, &sa, createNew, fileAttributeNormal|fileFlagOpenReparsePoint, 0)
+	if err != nil {
+		return err
+	}
+	published := false
+	defer func() {
+		if !published {
+			// Delete the object we created, not a path another process could have won.
+			remove := byte(1)
+			err = errors.Join(err, setFileInformation(file, fileDispositionInfo, unsafe.Pointer(&remove), 1))
+		}
+		_ = syscall.CloseHandle(file)
+	}()
+	if err := verifyOwner(file); err != nil {
+		return err
+	}
+	if err := verifyACL(file, false); err != nil {
+		return err
+	}
+	var written uint32
+	if err := syscall.WriteFile(file, []byte("{}"), &written, nil); err != nil {
+		return err
+	}
+	if written != 2 {
+		return io.ErrShortWrite
+	}
+	if err := syscall.FlushFileBuffers(file); err != nil {
+		return err
+	}
+	if err := renameWithoutReplacement(file, target); err != nil {
+		// Windows filesystems can report a collision as access denied. Only a
+		// fully validated existing destination can turn a failed publish into success.
+		if winnerErr := validatePreservedFile(target); !errors.Is(winnerErr, syscall.ERROR_FILE_NOT_FOUND) {
+			return winnerErr
+		}
+		return err
+	}
+	published = true
+	return nil
+}
+
+func renameWithoutReplacement(file syscall.Handle, target string) error {
+	name, err := syscall.UTF16FromString(target)
+	if err != nil {
+		return err
+	}
+	name = name[:len(name)-1]
+	// FILE_RENAME_INFO: zero flags (no replacement), NULL RootDirectory (absolute path).
+	type renameInformation struct {
+		flags uint32
+		root syscall.Handle
+		nameLength uint32
+		name [1]uint16
+	}
+	var layout renameInformation
+	offset := unsafe.Offsetof(layout.name)
+	size := offset + uintptr(len(name))*2
+	// Use aligned backing storage for the variable-length native struct.
+	buffer := make([]uintptr, (size+unsafe.Sizeof(uintptr(0))-1)/unsafe.Sizeof(uintptr(0)))
+	info := (*renameInformation)(unsafe.Pointer(&buffer[0]))
+	info.nameLength = uint32(len(name)*2)
+	copy(unsafe.Slice(&info.name[0], len(name)), name)
+	return setFileInformation(file, fileRenameInfo, unsafe.Pointer(info), size)
+}
+
+func setFileInformation(file syscall.Handle, class uintptr, data unsafe.Pointer, size uintptr) error {
+	ok, _, callErr := procSetFileInformation.Call(uintptr(file), class, uintptr(data), size)
+	if ok == 0 {
+		return callError(callErr)
+	}
+	return nil
+}
+
+func deletePath(path string) error {
+	name, err := wide(path)
+	if err != nil {
+		return err
+	}
+	ok, _, callErr := procDeleteFile.Call(uintptr(unsafe.Pointer(name)))
+	if ok == 0 {
+		return callError(callErr)
+	}
+	return nil
+}

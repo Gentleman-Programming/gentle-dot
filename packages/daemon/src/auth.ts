@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { AuthEvent, AuthMethod, AuthPrompt, AuthProvider, ServerPayload } from "@gentle-dot/protocol";
+import { ensurePrivateDir } from "./isolation.ts";
+import { initializeWindowsProviderFile, securePrivateFile } from "./private-file.ts";
 import { presentText } from "./white-label.ts";
 
 type PromptRequest = {
@@ -75,16 +77,31 @@ async function registerEngineProviders(runtime: {
 	runtime.registerNativeProvider(createNanProviderConfig() as never);
 }
 
+export function providerAuthPath(agentHome: string): string {
+	return join(agentHome, "auth.json");
+}
+
 /** Pi's ModelRuntime on the assistant's home: same auth.json format and file locking as Gentle Shell. */
 export async function createModelAuthRuntime(agentHome: string, cwd: string): Promise<AuthRuntime> {
-	mkdirSync(agentHome, { recursive: true, mode: 0o700 });
+	const authPath = providerAuthPath(agentHome);
+	if (process.platform === "win32") {
+		ensurePrivateDir(agentHome);
+		// Repair legacy credentials before the SDK reads them; unsafe files fail closed.
+		securePrivateFile(authPath);
+		initializeWindowsProviderFile(authPath);
+	} else {
+		mkdirSync(agentHome, { recursive: true, mode: 0o700 });
+	}
 	const { ModelRuntime, SettingsManager } = await import("@earendil-works/pi-coding-agent");
 	const runtime = await ModelRuntime.create({
-		authPath: join(agentHome, "auth.json"),
+		authPath,
 		modelsPath: join(agentHome, "models.json"),
 		// Offline, but refreshed on create so credentials saved by other runtimes are visible.
 		allowModelNetwork: false,
 	});
+	// Keep the existing post-create check before exposing sign-in. SDK in-place writes
+	// retain the file's DACL and locking behavior.
+	securePrivateFile(authPath);
 	await registerEngineProviders(runtime);
 	const settings = SettingsManager.create(cwd, agentHome);
 	return {

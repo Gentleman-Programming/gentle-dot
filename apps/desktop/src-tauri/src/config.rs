@@ -142,12 +142,41 @@ pub fn resolve_data_dir(os: crate::platform::Os, env: impl Fn(&str) -> Option<Os
 }
 
 /// Reads the real environment and `<data dir>/config.json`.
+#[cfg(not(feature = "local-preview"))]
 pub fn load_config() -> Result<DesktopConfig, String> {
     let env = |key: &str| std::env::var(key).ok();
     // OS strings preserve non-UTF-8 Unix HOME paths too.
     let dir = resolve_data_dir(crate::platform::Os::CURRENT, |key| std::env::var_os(key))?;
     let file = std::fs::read_to_string(dir.join("config.json")).ok();
     Ok(parse_config(dir, file.as_deref(), &env))
+}
+
+/// Only an admitted fresh root can reach preview configuration. No home fallback or old file read.
+#[cfg(feature = "local-preview")]
+pub fn load_preview_config(root: &crate::preview::OwnedRoot) -> Result<DesktopConfig, String> {
+    use std::io::Write;
+    let port = crate::preview::port(std::env::var("GENTLE_DOT_PORT").ok().as_deref())?;
+    let mut config = parse_config(root.data_dir().to_path_buf(), None, |_| None);
+    config.port = port;
+    config.memory = Ok(MemoryMode::Private);
+    let text = with_memory(None, MemoryMode::Private)?;
+    let path = root.data_dir().join("config.json");
+    // Fresh preview configuration must not depend on the root's later log ACL update.
+    #[cfg(windows)]
+    let created = crate::daemon::create_private_preview_config(&path);
+    #[cfg(not(windows))]
+    let created = {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        options.open(&path)
+    };
+    created.and_then(|mut out| {
+        out.write_all(text.as_bytes())?;
+        out.sync_all()
+    }).map_err(|error| format!("Gentle Dot cannot save config.json ({error})."))?;
+    Ok(config)
 }
 
 pub const INVALID_CONFIG: &str =
@@ -277,10 +306,11 @@ mod tests {
         );
         // The W22 bug: a Windows GUI launch has no HOME. That is an error, never `.gentle-dot`.
         assert_eq!(windows(&[]), Err(NO_HOME.to_string()));
-        // `HOME` wins on Windows too (Git Bash, MSYS), so their data dir keeps being found.
+        // Preserve native profile precedence; importing the HOME fallback must not
+        // silently move the feature installation's token/config to a shell home.
         assert_eq!(
             windows(&[("HOME", r"C:\Users\me"), ("USERPROFILE", r"D:\profile")]),
-            Ok(Path::new(r"C:\Users\me").join(".gentle-dot"))
+            Ok(Path::new(r"D:\profile").join(".gentle-dot"))
         );
         // An explicit absolute dir needs no home; a `~` value still does.
         assert_eq!(windows(&[("GENTLE_DOT_DATA_DIR", r"D:\dot")]), Ok(PathBuf::from(r"D:\dot")));
@@ -303,7 +333,8 @@ mod tests {
 
     #[test]
     fn reads_port_and_shortcut_from_file() {
-        let config = parse_config(dir(), Some(r#"{ "port": 5000, "shortcut": "Cmd+Shift+K", "workspace": "~" }"#), env_of(&[]));
+        let config =
+            parse_config(dir(), Some(r#"{ "port": 5000, "shortcut": "Cmd+Shift+K", "workspace": "~" }"#), env_of(&[]));
         assert_eq!(config.port, 5000);
         assert_eq!(config.shortcut, "Cmd+Shift+K");
     }
@@ -344,7 +375,8 @@ mod tests {
 
     #[test]
     fn invalid_values_fall_back() {
-        let config = parse_config(dir(), Some(r#"{ "port": 70000, "shortcut": 3 }"#), env_of(&[("GENTLE_DOT_PORT", "abc")]));
+        let config =
+            parse_config(dir(), Some(r#"{ "port": 70000, "shortcut": 3 }"#), env_of(&[("GENTLE_DOT_PORT", "abc")]));
         assert_eq!(config.port, DEFAULT_PORT);
         assert_eq!(config.shortcut, default_shortcut());
         let config = parse_config(dir(), Some(r#"{ "port": "5001", "shortcut": "  " }"#), env_of(&[]));
@@ -362,9 +394,16 @@ mod tests {
 
     #[test]
     fn saving_a_shortcut_keeps_every_other_key() {
-        let text = with_shortcut(Some(r#"{ "port": 5000, "shortcut": "Alt+Space", "workspace": "~", "extra": { "a": [1] } }"#), "Ctrl+Alt+K").unwrap();
+        let text = with_shortcut(
+            Some(r#"{ "port": 5000, "shortcut": "Alt+Space", "workspace": "~", "extra": { "a": [1] } }"#),
+            "Ctrl+Alt+K",
+        )
+        .unwrap();
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(json, serde_json::json!({ "port": 5000, "shortcut": "Ctrl+Alt+K", "workspace": "~", "extra": { "a": [1] } }));
+        assert_eq!(
+            json,
+            serde_json::json!({ "port": 5000, "shortcut": "Ctrl+Alt+K", "workspace": "~", "extra": { "a": [1] } })
+        );
         let json: serde_json::Value = serde_json::from_str(&with_shortcut(None, "F5").unwrap()).unwrap();
         assert_eq!(json, serde_json::json!({ "shortcut": "F5" }));
     }
@@ -442,7 +481,10 @@ mod tests {
         // A missing file is created.
         let fresh = scratch("fresh").join("config.json");
         save_shortcut(&fresh, "F5").unwrap();
-        assert_eq!(parse_config(dir.clone(), std::fs::read_to_string(&fresh).ok().as_deref(), env_of(&[])).shortcut, "F5");
+        assert_eq!(
+            parse_config(dir.clone(), std::fs::read_to_string(&fresh).ok().as_deref(), env_of(&[])).shortcut,
+            "F5"
+        );
     }
 
     #[test]

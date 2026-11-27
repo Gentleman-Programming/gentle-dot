@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	realpathSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
@@ -9,7 +17,7 @@ import {
 	PRIVATE_ENGRAM_PORT,
 } from "../src/isolation.ts";
 import { FAKE_AGENT, tempDir } from "./helpers.ts";
-import { expectPosixMode } from "./support/posix-modes.ts";
+import { inspectWindowsAcl } from "./windows-acl-oracle.ts";
 
 const daemons: DotDaemon[] = [];
 afterEach(async () => {
@@ -18,7 +26,7 @@ afterEach(async () => {
 
 describe("Windows isolation", () => {
 	it("isolates the OS home and Windows temp while preserving the real memory folder", () => {
-		const realHome = tempDir();
+		const realHome = process.platform === "win32" ? tempDir() : String.raw`C:\Users\fixture`;
 		const data = tempDir();
 		const env = isolatedAgentEnv(
 			{ USERPROFILE: realHome, TEMP: "/user/temp", TMP: "/user/tmp" },
@@ -81,14 +89,14 @@ describe("Windows isolation", () => {
 
 describe("isolatedAgentEnv PATH", () => {
 	it("puts the bundled `pi` first so the engine's first-run setup works on a clean machine", () => {
-		// The input PATH is built with the platform's own separator, and read back the same way: a
-		// POSIX-shaped literal is one segment on Windows, and the test then asserts the drive letter of
-		// a path that does start with the bundled folder (W4a's lesson, at the fixture's own input).
-		const env = isolatedAgentEnv({ PATH: ["/usr/bin", "/bin"].join(delimiter), HOME: tempDir() }, tempDir());
+		const env = isolatedAgentEnv(
+			{ PATH: ["first-bin", "second-bin"].join(delimiter), HOME: tempDir() },
+			tempDir(),
+		);
 		const [first, ...rest] = (env.PATH ?? "").split(delimiter);
 		expect(first).toMatch(/node_modules[\\/]\.bin$/);
 		expect(existsSync(join(first ?? "", "pi"))).toBe(true);
-		expect(rest).toEqual(["/usr/bin", "/bin"]);
+		expect(rest).toEqual(["first-bin", "second-bin"]);
 	});
 
 	it("carries a `Path` the daemon was handed, under a single name", () => {
@@ -148,7 +156,7 @@ describe("isolatedAgentEnv PATH", () => {
 describe("isolatedAgentEnv memory", () => {
 	it("points the engine's memory at the user's global Engram data and server", () => {
 		const realHome = tempDir();
-		const env = isolatedAgentEnv({ PATH: "/bin", HOME: realHome }, tempDir());
+		const env = isolatedAgentEnv({ PATH: "", HOME: realHome, USERPROFILE: realHome }, tempDir());
 		expect(env.ENGRAM_DATA_DIR).toBe(join(realHome, ".engram"));
 		// The default server (7437) unless the user configured another one.
 		expect(env.ENGRAM_PORT).toBeUndefined();
@@ -249,7 +257,15 @@ describe("isolatedAgentEnv temporary folder", () => {
 		const dataDir = tempDir();
 		const env = isolatedAgentEnv({ HOME: tempDir() }, dataDir);
 		expect(env.TMPDIR).toBe(join(dataDir, "home", ".cache", "tmp"));
-		expectPosixMode(env.TMPDIR ?? "", 0o700);
+		if (process.platform === "win32") {
+			const acl = inspectWindowsAcl(env.TMPDIR ?? "");
+			expect(acl.owner).toBe(acl.currentSid);
+			expect(acl.protected).toBe(true);
+			expect(acl.rules.map((rule) => rule.sid)).toEqual(expect.arrayContaining([acl.currentSid, "S-1-5-18"]));
+			expect(acl.rules).toHaveLength(2);
+			expect(acl.rules.every((rule) => rule.type === "Allow" && !rule.inherited)).toBe(true);
+		} else expect(statSync(env.TMPDIR ?? "").mode & 0o777).toBe(0o700);
+
 	});
 
 	it("keeps the Unix user's own TMPDIR (Windows always isolates TEMP/TMP)", () => {
@@ -298,6 +314,7 @@ describe("engine memory and folders", () => {
 			agentEnv: {
 				PATH: process.env.PATH,
 				HOME: realHome,
+				USERPROFILE: realHome,
 				...options.env,
 				FAKE_AGENT_ENV_FILE: files.env,
 				FAKE_AGENT_ARGS_FILE: files.args,

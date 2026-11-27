@@ -1,9 +1,9 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { agentSpawnEnv } from "./config.ts";
 import { encodeRecord, JsonlDecoder } from "./jsonl.ts";
-import { writePrivateFile } from "./private-file.ts";
+import { PrivateFileProtectionError, ProviderStorageInitializationError, readPrivateFileSync, writePrivateFile } from "./private-file.ts";
 import { terminateProcessTree, WINDOWS_TASKKILL_TIMEOUT_MS } from "./process-tree.ts";
 import { clearStaleSetupLock, writeSetupLockOwner } from "./setup-lock.ts";
 import type { OsUser } from "./vps.ts";
@@ -112,6 +112,7 @@ export class AgentSupervisor {
 	private spawnedAt = 0;
 	private stopping = false;
 	private restarting = false;
+	private providerStorageBlocked = false;
 	private interrupted = false;
 	private restartTimer: NodeJS.Timeout | undefined;
 	/** The spawn whose engine has not answered yet, while there is one. */
@@ -222,7 +223,12 @@ export class AgentSupervisor {
 
 	private async replace(): Promise<void> {
 		const child = this.child;
-		if (!child || this.stopping) return;
+		if (this.stopping) return;
+		if (!child) {
+			// An explicit restart may recheck storage after its reported problem is resolved.
+			if (this.providerStorageBlocked) await this.start();
+			return;
+		}
 		this.restarting = true;
 		try {
 			await this.closeChild(child);
@@ -320,9 +326,18 @@ export class AgentSupervisor {
 	}
 
 	private initialize(): Promise<void> {
-		const run = this.spawnAndInitialize().finally(() => {
-			if (this.initializing === run) this.initializing = undefined;
-		});
+		this.providerStorageBlocked = false;
+		const run = this.spawnAndInitialize()
+			.catch((error: unknown) => {
+				if (error instanceof ProviderStorageInitializationError) {
+					this.providerStorageBlocked = true;
+					this.setState("stopped");
+				}
+				throw error;
+			})
+			.finally(() => {
+				if (this.initializing === run) this.initializing = undefined;
+			});
 		this.initializing = run;
 		return run;
 	}
@@ -465,7 +480,8 @@ export class AgentSupervisor {
 			this.initialize().catch((error: Error) => {
 				this.log(`agent restart failed: ${error.message}`);
 				// A child that is still alive will close and schedule the next attempt.
-				if (!this.child && !this.stopping) this.scheduleRestart();
+				if (!this.child && !this.stopping && !(error instanceof ProviderStorageInitializationError))
+					this.scheduleRestart();
 			});
 		}, delay);
 	}
@@ -498,7 +514,7 @@ export class AgentSupervisor {
 
 	private readPersistedSession(): string | undefined {
 		try {
-			const saved = JSON.parse(readFileSync(this.stateFile, "utf8")) as {
+			const saved = JSON.parse(readPrivateFileSync(this.stateFile)) as {
 				sessionFile?: string;
 				chains?: unknown;
 			};
@@ -509,7 +525,8 @@ export class AgentSupervisor {
 				}
 			}
 			return typeof saved.sessionFile === "string" ? saved.sessionFile : undefined;
-		} catch {
+		} catch (error) {
+			if (error instanceof PrivateFileProtectionError) throw error;
 			return undefined;
 		}
 	}

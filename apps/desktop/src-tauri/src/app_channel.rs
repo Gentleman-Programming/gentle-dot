@@ -155,7 +155,7 @@ type Reply = mpsc::Sender<Result<Value, String>>;
 
 pub struct AppChannel {
     writer: Mutex<ChannelStream>,
-    #[cfg(windows)]
+    /// Never behind the frame writer lock: shutdown must interrupt backpressure.
     closer: ChannelStream,
     pending: Mutex<HashMap<u64, Reply>>,
     next: AtomicU64,
@@ -166,10 +166,10 @@ impl AppChannel {
     /// Reads `stream` on a thread of its own; each daemon request runs on a worker thread.
     pub fn start(stream: ChannelStream, handler: Arc<dyn Handler>) -> io::Result<Arc<Self>> {
         let reader = stream.try_clone()?;
+        let closer = stream.try_clone()?;
         let channel = Arc::new(AppChannel {
-            #[cfg(windows)]
-            closer: stream.try_clone()?,
             writer: Mutex::new(stream),
+            closer,
             pending: Mutex::new(HashMap::new()),
             next: AtomicU64::new(0),
             open: AtomicBool::new(true),
@@ -229,7 +229,8 @@ impl AppChannel {
     #[cfg(unix)]
     pub fn close(&self) {
         self.open.store(false, Ordering::SeqCst);
-        let _ = self.writer.lock().unwrap_or_else(PoisonError::into_inner).shutdown(Shutdown::Both);
+        // Unix shutdown interrupts an in-flight write through a separate socket handle.
+        let _ = self.closer.shutdown(Shutdown::Both);
         // Dropping the senders wakes every waiting request.
         self.pending().clear();
     }
@@ -358,6 +359,33 @@ impl AppChannel {
     }
 }
 
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn windows_channel_keeps_panel_command_admission_closed() {
+        assert!(is_panel_command(&json!({"type":"connector_connect"})));
+        for kind in ["send", "computer_register", "secret_get", "auth_reply"] {
+            assert!(!is_panel_command(&json!({"type":kind})));
+        }
+        let frame = Frame::Request { id: 1, method: "command".into(), params: json!({}) };
+        assert_eq!(
+            serde_json::to_value(frame).unwrap(),
+            json!({"kind":"request","id":1,"method":"command","params":{}})
+        );
+    }
+
+    #[test]
+    fn windows_secret_requests_preserve_the_store_validation_boundary() {
+        let store = crate::secure_store::MemoryStore::new();
+        assert!(serve_secret(&store, "secret_put", &json!({"id":"invalid id", "secret":"fixture"})).is_err());
+        assert!(serve_secret(&store, "secret_put", &json!({"id":"fixture"})).is_err());
+        serve_secret(&store, "secret_put", &json!({"id":"fixture", "secret":"fixture"})).unwrap();
+        assert_eq!(serve_secret(&store, "secret_get", &json!({"id":"fixture"})).unwrap(), json!({"secret":"fixture"}));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +442,35 @@ mod tests {
         (channel, FakeDaemon { reader, writer: daemon })
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn closing_interrupts_a_saturated_writer_without_waiting_for_its_mutex() {
+        let (channel, daemon) = pair(Arc::new(Recorder::default()));
+        let sending = channel.clone();
+        let (sent, finished) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = sending.request("blocked", json!({"data":"x".repeat(900_000)}), Duration::from_secs(30));
+            let _ = sent.send(result);
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !matches!(channel.writer.try_lock(), Err(std::sync::TryLockError::WouldBlock))
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(matches!(channel.writer.try_lock(), Err(std::sync::TryLockError::WouldBlock)));
+        let (closed, answer) = mpsc::channel();
+        std::thread::spawn(move || {
+            channel.close();
+            let _ = closed.send(());
+        });
+        if answer.recv_timeout(Duration::from_millis(500)).is_err() {
+            let _ = daemon.writer.shutdown(Shutdown::Both);
+            panic!("channel close waited for the saturated writer");
+        }
+        assert!(finished.recv_timeout(Duration::from_secs(3)).unwrap().is_err());
+    }
+
     #[test]
     fn frames_are_tagged_json_lines() {
         let request = Frame::Request { id: 1, method: "command".into(), params: json!({"clientId": "w"}) };
@@ -432,7 +489,8 @@ mod tests {
         for kind in PANEL_COMMANDS {
             assert!(is_panel_command(&json!({"type": kind})), "{kind}");
         }
-        for kind in ["send", "ui_response", "computer_register", "computer_unregister", "connectors_list", "auth_reply"] {
+        for kind in ["send", "ui_response", "computer_register", "computer_unregister", "connectors_list", "auth_reply"]
+        {
             assert!(!is_panel_command(&json!({"type": kind})), "{kind}");
         }
         assert!(!is_panel_command(&json!("connector_mode")));
@@ -467,7 +525,8 @@ mod tests {
     #[test]
     fn a_message_that_is_not_a_connector_change_never_leaves_the_app() {
         let (channel, daemon) = pair(Arc::new(Recorder::default()));
-        let sent = channel.command("w", json!({"type": "computer_register", "url": "http://127.0.0.1:1/mcp", "token": "t"}));
+        let sent =
+            channel.command("w", json!({"type": "computer_register", "url": "http://127.0.0.1:1/mcp", "token": "t"}));
         assert!(sent.is_err());
         assert!(channel.command("w", json!({"type": "send", "text": "hi"})).is_err());
         daemon.writer.set_nonblocking(true).unwrap();
@@ -479,7 +538,8 @@ mod tests {
     fn the_daemon_asks_for_approvals_answered_off_the_main_thread() {
         let recorder = Arc::new(Recorder::default());
         let (_channel, mut daemon) = pair(recorder.clone());
-        let request = json!({"connector": "Notion", "action": "create pages", "preview": [{"name": "title", "value": "Plan"}]});
+        let request =
+            json!({"connector": "Notion", "action": "create pages", "preview": [{"name": "title", "value": "Plan"}]});
         recorder.answer.store(true, Ordering::SeqCst);
         daemon.send(&Frame::Request { id: 7, method: "approve".into(), params: request.clone() });
         assert_eq!(daemon.next(), Frame::Response { id: 7, result: Some(json!({"approved": true})), error: None });
@@ -513,7 +573,8 @@ mod tests {
 
     #[test]
     fn approvals_reach_the_native_dialog_and_its_answer_goes_back() {
-        let prompt = Arc::new(FakePrompt::new([Answer::After(Duration::ZERO, true), Answer::After(Duration::ZERO, false)]));
+        let prompt =
+            Arc::new(FakePrompt::new([Answer::After(Duration::ZERO, true), Answer::After(Duration::ZERO, false)]));
         let native = Native(Approvals::new(prompt.clone(), Duration::from_secs(5)));
         let (_channel, mut daemon) = pair(Arc::new(native));
         let request = json!({"connector": "Slack", "action": "send message", "preview": [{"name": "channel", "value": "#general"}]});
@@ -559,7 +620,10 @@ mod tests {
         assert_eq!(ask(&mut daemon, 4, "secret_delete", json!({"id": id})), ok(4, json!({"deleted": true})));
         assert_eq!(ask(&mut daemon, 5, "secret_delete", json!({"id": id})), ok(5, json!({"deleted": false})));
         // A missing secret is `"result": null` on the wire (which reads back as no result), not an error.
-        assert_eq!(ask(&mut daemon, 6, "secret_get", json!({"id": id})), Frame::Response { id: 6, result: None, error: None });
+        assert_eq!(
+            ask(&mut daemon, 6, "secret_get", json!({"id": id})),
+            Frame::Response { id: 6, result: None, error: None }
+        );
         let line = serde_json::to_string(&Frame::Response { id: 6, result: Some(Value::Null), error: None }).unwrap();
         assert_eq!(line, r#"{"kind":"response","id":6,"result":null}"#);
     }
@@ -658,7 +722,8 @@ mod tests {
         let id = "connector/big/value/token";
         handler.store.put(id, &Secret::new("x".repeat(1024 * 1024).as_str())).unwrap();
         let (channel, mut daemon) = pair(handler);
-        let Frame::Response { id: answered, result, error } = ask(&mut daemon, 7, "secret_get", json!({"id": id})) else {
+        let Frame::Response { id: answered, result, error } = ask(&mut daemon, 7, "secret_get", json!({"id": id}))
+        else {
             panic!("expected a response")
         };
         assert_eq!(answered, 7);

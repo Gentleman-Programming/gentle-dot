@@ -3,9 +3,13 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, win32 } from "node:path";
-import { bundledGentleShell } from "./config.ts";
+import { bundledGentleShell, type MemoryMode, memoryMode } from "./config.ts";
 import { directAccess, type EngineAccess } from "./engine-access.ts";
 import { isStartableProgram, refusalGuard, resolveEngramBin, runtimeDir } from "./runtime.ts";
+import type { PrivateMemoryFailure } from "./startup-stage-observer.ts";
+import { windowsUserHome } from "./windows-runtime.ts";
+import { windowsPrivateStorage } from "./windows-private-storage.ts";
+import { writePrivateFile } from "./private-file.ts";
 
 /**
  * The folder with the `pi` executable bundled with the daemon. The engine's
@@ -32,8 +36,12 @@ function bundledBinDir(base: NodeJS.ProcessEnv, options: IsolationOptions): stri
 	return undefined;
 }
 
-/** Creates `path` with mode 0700, and tightens it to 0700 when it already exists. */
+/** Creates or tightens `path`; Windows uses a verified protected current-user/SYSTEM DACL. */
 export function ensurePrivateDir(path: string): void {
+	if (process.platform === "win32") {
+		windowsPrivateStorage("ensure-dir", path);
+		return;
+	}
 	mkdirSync(path, { recursive: true, mode: 0o700 });
 	chmodSync(path, 0o700);
 }
@@ -115,7 +123,11 @@ export function ensureMemoryProject(workspace: string, access: EngineAccess = di
 	const file = join(workspace, ".engram", "config.json");
 	access(() => {
 		ensurePrivateDir(join(workspace, ".engram"));
-		// Written next to it and renamed over it: a link planted at its place is replaced, never followed.
+		if (process.platform === "win32") {
+			writePrivateFile(file, `${JSON.stringify({ project_name: MEMORY_PROJECT })}\n`);
+			return;
+		}
+		// Written next to it and renamed over it; Windows' native helper refuses reparse-point collisions.
 		const temp = `${file}.${process.pid}.tmp`;
 		writeFileSync(temp, `${JSON.stringify({ project_name: MEMORY_PROJECT })}\n`);
 		renameSync(temp, file);
@@ -156,7 +168,7 @@ export function isolatedAgentEnv(
 	const platform = options.platform ?? process.platform;
 	const home = join(dataDir, "home");
 	access(() => ensurePrivateDir(home));
-	const realHome = base.HOME || (platform === "win32" && base.USERPROFILE) || homedir();
+	const realHome = platform === "win32" ? (windowsUserHome(base) ?? homedir()) : base.HOME || homedir();
 	const env: NodeJS.ProcessEnv = {
 		...base,
 		HOME: home,
@@ -247,7 +259,40 @@ export function isolatedAgentEnv(
 	return env;
 }
 
-type Listener = { kind: "empty" | "failed" | "ambiguous" } | { kind: "one"; pid: number };
+/** Apply private mode from config.json or its documented override (SW9, W26); shared leaves the environment alone. */
+export function applyMemoryMode(base: NodeJS.ProcessEnv, memory: MemoryMode): NodeJS.ProcessEnv {
+	if (memory !== "private") return base;
+	return { ...base, GENTLE_DOT_ENGRAM: "private" };
+}
+
+export async function admitPreviewMemory(
+	base: NodeJS.ProcessEnv,
+	dataDir: string,
+	agentHome: string | undefined,
+	log: (line: string) => void,
+	resolveAccess: () => EngineAccess,
+	options: PrivateMemoryOptions = {},
+): Promise<{ env: NodeJS.ProcessEnv; memory: Awaited<ReturnType<typeof privateMemory>> }> {
+	const copied = { ...base };
+	let mode: MemoryMode;
+	try {
+		mode = memoryMode(base, dataDir);
+	} catch (error) {
+		options.onFailure?.("config-reread");
+		throw error;
+	}
+	const env = applyMemoryMode(copied, mode);
+	if (!agentHome || env.GENTLE_DOT_ENGRAM !== "private") {
+		options.onFailure?.("preview-prerequisites");
+		throw new Error("Cannot start preview memory: private mode and engine home are required");
+	}
+	return { env, memory: await privateMemory(env, dataDir, log, resolveAccess(), options) };
+}
+
+type CommandFailure = "query-spawn" | "query-timeout";
+type QueryFailure = CommandFailure | "query-nonzero" | "query-stderr" | "query-parse";
+type Listener = { kind: "empty" | "ambiguous" } | { kind: "failed"; reason: QueryFailure } | { kind: "one"; pid: number };
+type ListenerCommandResult = { code: number; stdout: string; stderr: string; failure?: CommandFailure };
 
 interface PrivateMemoryOptions {
 	platform?: NodeJS.Platform;
@@ -255,16 +300,19 @@ interface PrivateMemoryOptions {
 	runListenerCommand?: (
 		command: string,
 		args: readonly string[],
-	) => Promise<{ code: number; stdout: string; stderr: string }>;
+	) => Promise<ListenerCommandResult>;
+	/** Internal staged diagnostic; only called at a rejection, never during cleanup. */
+	onFailure?: (reason: PrivateMemoryFailure) => void;
 	kill?: (pid: number, signal: "SIGTERM") => void;
 	health?: (port: string) => Promise<{ instance_id?: unknown } | undefined>;
 }
 
 /**
  * Owns cleanup only after confirming an empty private port before startup.
- * A failed or ambiguous lookup refuses ownership, not startup: the daemon starts,
- * logs it, and leaves that memory server running when it closes. An invalid port
- * is a configuration error and does stop startup. Before termination, both the
+ * Only the internal preview marker makes uncertain/unowned listeners refuse startup;
+ * private mode alone retains the production log-and-decline-cleanup behavior.
+ * Preview admission of an existing owned listener never grants cleanup ownership.
+ * An invalid port always stops startup. Before termination, both the
  * private data identity and a repeated stable listener PID must match.
  * PID reuse after the final check remains possible; nothing is killed by name.
  */
@@ -283,11 +331,34 @@ export async function privateMemory(
 		Number(port) < 1 ||
 		Number(port) > 65535
 	) {
+		options.onFailure?.("invalid-port");
 		throw new Error("Cannot start private memory: port must be an integer from 1 to 65535");
 	}
 	const before = await listeningPid(port, options);
-	if (before.kind === "one") return undefined;
+	const preview = base.GENTLE_DOT_PREVIEW_MEMORY_ADMISSION === "1";
+	const refusal = "Cannot start preview memory: listener ownership is unverified";
+	if (before.kind === "one") {
+		if (preview) {
+			const expected = memoryInstanceId(dataDir, access);
+			const health = expected ? await (options.health ?? memoryHealth)(port).catch(() => undefined) : undefined;
+			const actual = health?.instance_id;
+			if (!expected || actual !== expected) {
+				options.onFailure?.(!expected || actual == null || actual === "" ? "identity-missing" : "identity-mismatch");
+				throw new Error(refusal);
+			}
+			const again = await listeningPid(port, options);
+			if (again.kind !== "one" || again.pid !== before.pid) {
+				options.onFailure?.(again.kind === "failed" || again.kind === "ambiguous" ? "recheck-unverified" : "recheck-changed");
+				throw new Error(refusal);
+			}
+		}
+		return undefined;
+	}
 	if (before.kind !== "empty") {
+		if (preview) {
+			options.onFailure?.(before.kind === "failed" ? before.reason : "multiple-listeners");
+			throw new Error(refusal);
+		}
 		// Not knowing is no reason to keep the assistant from starting, nor to claim the server.
 		log(`cannot verify private memory listener on port ${port} (${before.kind} lookup); will not stop it`);
 		return undefined;
@@ -300,13 +371,8 @@ export async function privateMemory(
 					log(`cannot verify private memory listener on port ${port}; left running`);
 				return;
 			}
-			let expected: string;
-			try {
-				const file = join(dataDir, "home", ".engram", ".instance-id");
-				expected = access(() => readFileSync(file, "utf8")).trim();
-			} catch {
-				return;
-			}
+			const expected = memoryInstanceId(dataDir, access);
+			if (expected === undefined) return;
 			const health = await (options.health ?? memoryHealth)(port).catch(() => undefined);
 			if (!expected || health?.instance_id !== expected) {
 				log(`the memory server on port ${port} serves other data; left running`);
@@ -327,6 +393,15 @@ export async function privateMemory(
 	};
 }
 
+function memoryInstanceId(dataDir: string, access: EngineAccess): string | undefined {
+	try {
+		const file = join(dataDir, "home", ".engram", ".instance-id");
+		return access(() => readFileSync(file, "utf8")).trim();
+	} catch {
+		return undefined;
+	}
+}
+
 function memoryHealth(port: string): Promise<{ instance_id?: unknown } | undefined> {
 	return fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) })
 		.then((response) => response.json() as Promise<{ instance_id?: unknown }>)
@@ -345,38 +420,50 @@ export function listenerLookupTimeoutMs(platform: NodeJS.Platform): number {
 function runListenerCommand(
 	command: string,
 	args: readonly string[],
-): Promise<{ code: number; stdout: string; stderr: string }> {
+): Promise<ListenerCommandResult> {
 	return new Promise((resolve) => {
 		execFile(
 			command,
 			[...args],
 			{
 				encoding: "utf8",
-				timeout: listenerLookupTimeoutMs(command === "powershell.exe" ? "win32" : process.platform),
+				timeout: listenerLookupTimeoutMs(
+					win32.basename(command).toLowerCase() === "powershell.exe" ? "win32" : process.platform,
+				),
 				windowsHide: true,
 			},
 			(error, stdout, stderr) => {
-				resolve({
-					code: error ? (typeof error.code === "number" ? error.code : -1) : 0,
-					stdout: String(stdout),
-					stderr: String(stderr),
-				});
+				const code = error ? (typeof error.code === "number" ? error.code : -1) : 0;
+				// execFile marks its timeout kill; buffer-limit and spawn errors instead carry string codes.
+				const failure = error && typeof error.code !== "number"
+					? (error.killed && error.code == null && error.signal === "SIGTERM" ? "query-timeout" : "query-spawn")
+					: undefined;
+				resolve({ code, stdout: String(stdout), stderr: String(stderr), ...(failure ? { failure } : {}) });
 			},
 		);
 	});
 }
 
-/** Enumerate Windows listeners before filtering, so an unused port is not a query error. */
+/** Query the Windows provider for the validated port in Listen state (2), across all local addresses. */
 async function listeningPid(port: string, options: PrivateMemoryOptions): Promise<Listener> {
 	const windows = (options.platform ?? process.platform) === "win32";
-	const command = windows ? "powershell.exe" : "lsof";
+	// Source builds can capture a PATH without WindowsPowerShell; use the existing OS image.
+	const command = windows
+		? win32.join(
+				process.env.SystemRoot || "C:\\Windows",
+				"System32",
+				"WindowsPowerShell",
+				"v1.0",
+				"powershell.exe",
+			)
+		: "lsof";
 	const args = windows
 		? [
 				"-NoLogo",
 				"-NoProfile",
 				"-NonInteractive",
 				"-Command",
-				`$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; try { Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { $_.LocalPort -eq ${Number(port)} } | Select-Object -ExpandProperty OwningProcess } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }`,
+				`$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; try { Get-CimInstance -Namespace root/StandardCimv2 -Query 'SELECT OwningProcess FROM MSFT_NetTCPConnection WHERE LocalPort = ${Number(port)} AND State = 2' -ErrorAction Stop | Select-Object -ExpandProperty OwningProcess } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }`,
 			]
 		: ["-w", "-t", "-n", "-P", `-iTCP:${port}`, "-sTCP:LISTEN"];
 	try {
@@ -384,14 +471,15 @@ async function listeningPid(port: string, options: PrivateMemoryOptions): Promis
 		const text = result.stdout.trim();
 		// lsof exits 1 for no matches. Missing commands, diagnostics and timeouts are failures.
 		if (!windows && result.code === 1 && !text && !result.stderr.trim()) return { kind: "empty" };
-		if (result.code !== 0 || result.stderr.trim()) return { kind: "failed" };
+		if (result.code !== 0) return { kind: "failed", reason: result.failure ?? "query-nonzero" };
+		if (result.stderr.trim()) return { kind: "failed", reason: "query-stderr" };
 		if (!text) return { kind: "empty" };
 		const values = text.split(/\r?\n/).map((value) => value.trim());
 		if (values.some((value) => !/^[1-9]\d*$/.test(value) || !Number.isSafeInteger(Number(value))))
-			return { kind: "failed" };
+			return { kind: "failed", reason: "query-parse" };
 		const pids = [...new Set(values.map(Number))];
 		return pids.length === 1 ? { kind: "one", pid: pids[0] as number } : { kind: "ambiguous" };
 	} catch {
-		return { kind: "failed" };
+		return { kind: "failed", reason: "query-spawn" };
 	}
 }

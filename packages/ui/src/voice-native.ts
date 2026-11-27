@@ -1,4 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { NativeOutput } from "./voice-output.ts";
+
+/** Output capability is independent of recognizer/model availability; IPC failures must propagate. */
+export const nativeVoiceOutput: NativeOutput = {
+	status: (args) => invoke<{ supported: boolean }>("voice_synthesis_status", args),
+	synthesize: (args) => invoke<number[]>("voice_synthesize", args),
+	cancel: (args) => invoke<void>("voice_synthesize_cancel", args),
+};
 
 /**
  * The desktop app's speech recognizer (S30.1, contract in L88): the commands

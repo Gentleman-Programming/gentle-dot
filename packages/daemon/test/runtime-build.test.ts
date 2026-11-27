@@ -10,13 +10,13 @@ import {
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { createRequire } from "node:module";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
-import { lockedEnginePackages, piCmdWrapper, piWrapper } from "../src/runtime-build.ts";
+import { lockedDependencies, lockedEnginePackages, piCmdWrapper, piWrapper } from "../src/runtime-build.ts";
 import { tempDir } from "./helpers.ts";
 import { directoryLinkType, symlinkDirectory } from "./support/fixture-capabilities.ts";
-import { expectPosixExecutable } from "./support/posix-modes.ts";
 import { WINDOWS_STOP_ADDON } from "./support/windows.ts";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
@@ -36,9 +36,15 @@ if (skipBuild) console.info(`Windows-only test skip: ${WINDOWS_STOP_ADDON}`);
 
 beforeAll(() => {
 	if (skipBuild) return;
-	out = tempDir();
+	const root = tempDir();
+	out = process.platform === "win32" ? join(root, "runtime Ω &") : root;
 	const build = spawnSync(process.execPath, [BUILD, "--out", out], { encoding: "utf8" });
-	expect(build.stderr).toBe("");
+	// Go's explicit retention mode reports its scratch paths, not build diagnostics.
+	const stderr = process.env.GOFLAGS?.split(/\s+/).includes("-work")
+		? build.stderr.replace(/^WORK=[^\r\n]+\r?\n/gm, "")
+		: build.stderr;
+	expect(stderr).toBe("");
+	expect(build.stdout).toBe("");
 	expect(build.status).toBe(0);
 }, 60_000);
 
@@ -100,17 +106,12 @@ describe("piWrapper", () => {
 describe.skipIf(skipBuild)("build:runtime", () => {
 	it("emits the daemon part of the runtime layout, without node_modules", () => {
 		const windows = process.platform === "win32";
-		expect(listFiles(out).sort()).toEqual(
-			[
-				windows ? "bin/pi.cmd" : "bin/pi",
-				"daemon/cli.mjs",
-				"daemon/extensions/approval-guard.ts",
-				"daemon/extensions/screenshot-context.ts",
-				"daemon/identity.md",
-				...(windows ? ["daemon/native/windows-stop.node"] : []),
-				"daemon/package.json",
-			].sort(),
-		);
+		expect(listFiles(out).sort()).toEqual([
+			...(windows ? ["bin/pi.exe", "bin/private-storage.exe"] : ["bin/pi"]),
+			"daemon/cli.mjs", "daemon/extensions/approval-guard.ts",
+			"daemon/extensions/screenshot-context.ts", "daemon/identity.md",
+			...(windows ? ["daemon/native/windows-stop.node"] : []), "daemon/package.json",
+		].sort());
 		expect(readFileSync(join(out, "daemon", "identity.md"), "utf8")).toBe(
 			readFileSync(join(PACKAGE, "src", "identity.md"), "utf8"),
 		);
@@ -135,14 +136,59 @@ describe.skipIf(skipBuild)("build:runtime", () => {
 		const manifest = JSON.parse(readFileSync(join(out, "daemon", "package.json"), "utf8"));
 		expect(manifest).toMatchObject({ private: true, type: "module" });
 		expect(manifest.dependencies).toEqual({
-			"@earendil-works/pi-ai": "1.5.0",
-			"@earendil-works/pi-coding-agent": "1.5.0",
-			"@earendil-works/pi-mcp": "1.5.0",
-			"@earendil-works/pi-tui": "1.5.0",
-			"gentle-pi": "4.7.0",
+			"@earendil-works/pi-ai": "1.6.0",
+			"@earendil-works/pi-coding-agent": "1.6.0",
+			"@earendil-works/pi-mcp": "1.6.0",
+			"@earendil-works/pi-tui": "1.6.0",
+			"gentle-pi": "5.0.0",
 			jiti: "2.7.0",
 			ws: "8.22.0",
 		});
+	});
+
+	it("pins SDK-compatible transitive codemode through npm overrides", () => {
+		const manifest = JSON.parse(readFileSync(join(out, "daemon", "package.json"), "utf8"));
+		const source = JSON.parse(readFileSync(join(PACKAGE, "package.json"), "utf8"));
+		const codemode = "@earendil-works/pi-codemode";
+		expect(manifest.dependencies[codemode]).toBeUndefined();
+		expect(source.dependencies[codemode]).toBeUndefined();
+		expect(lockedDependencies()[codemode]).toBeUndefined();
+		expect(manifest.overrides[codemode]).toBe("1.6.0");
+	});
+
+	it("selects workspace codemode matching the upgraded SDK's locked sibling", () => {
+		// The old 1.0 declarations-subpath assertion belongs to the superseded SDK.
+		// Resolve the upgraded package's public entry without executing SDK/providers.
+		const sdk = realpathSync(join(PACKAGE, "node_modules", "@earendil-works", "pi-coding-agent"));
+		const require = createRequire(join(sdk, "package.json"));
+		const name = "@earendil-works/pi-codemode";
+		const file = require.resolve.paths(name)?.map(base => join(base, name, "package.json")).find(existsSync);
+		if (!file) throw new Error("codemode package manifest unavailable");
+		const manifest = JSON.parse(readFileSync(file, "utf8"));
+		expect(existsSync(join(dirname(file), manifest.exports["."].import))).toBe(true);
+		expect(manifest.name).toBe("@earendil-works/pi-codemode");
+		expect(manifest.version).toBe(lockedEnginePackages(lockedDependencies())[manifest.name]);
+	});
+
+	it("keeps lockedDependencies compatible with direct-only fixtures and peer suffixes", () => {
+		expect(lockedDependencies([
+			"importers:",
+			"  packages/daemon:",
+			"    dependencies:",
+			"      'old-engine':",
+			"        specifier: ^2.0.0",
+			"        version: 2.1.0(peer@3.0.0)",
+			"      '@gentle-dot/protocol':",
+			"        specifier: workspace:*",
+			"        version: link:../protocol",
+			"    devDependencies:",
+			"      test-only:",
+			"        version: 4.0.0",
+			"  packages/other:",
+			"    dependencies:",
+			"      unrelated:",
+			"        version: 5.0.0",
+		].join("\n"))).toEqual({ "old-engine": "2.1.0" });
 	});
 
 	// The engine asks for its siblings with `^` ranges; a fresh install would take newer ones
@@ -153,10 +199,10 @@ describe.skipIf(skipBuild)("build:runtime", () => {
 	it("pins the engine's own packages to the lockfile's versions", () => {
 		const manifest = JSON.parse(readFileSync(join(out, "daemon", "package.json"), "utf8"));
 		expect(manifest.overrides).toEqual({
-			"@earendil-works/pi-agent-core": "1.5.0",
-			"@earendil-works/pi-codemode": "1.5.0",
-			"@earendil-works/pi-schema": "1.5.0",
-			"@earendil-works/pi-telemetry": "1.5.0",
+			"@earendil-works/pi-agent-core": "1.6.0",
+			"@earendil-works/pi-codemode": "1.6.0",
+			"@earendil-works/pi-schema": "1.6.0",
+			"@earendil-works/pi-telemetry": "1.6.0",
 		});
 	});
 
@@ -196,14 +242,16 @@ describe.skipIf(skipBuild)("build:runtime", () => {
 
 	it("runs its self-check from the output with the engine resolved inside it", () => {
 		linkNodeModules(out);
+		const engramBin = join(tempDir(), process.platform === "win32" ? "engram.exe" : "engram");
+		writeFileSync(engramBin, "fixture executable");
 		const check = spawnSync(process.execPath, [join(out, "daemon", "cli.mjs"), "--self-check"], {
 			encoding: "utf8",
 			env: {
-				PATH: "/usr/bin:/bin",
+				PATH: [join(tempDir(), "bin"), join(tempDir(), "system")].join(delimiter),
 				HOME: tempDir(),
 				GENTLE_DOT_DATA_DIR: tempDir(),
 				GENTLE_DOT_RUNTIME: out,
-				ENGRAM_BIN: "/x/engram",
+				ENGRAM_BIN: engramBin,
 			},
 		});
 		expect(check.stderr).toBe("");
@@ -216,37 +264,94 @@ describe.skipIf(skipBuild)("build:runtime", () => {
 			uiDir: join(out, "ui"),
 			gentleShell: join(out, "daemon", "node_modules", "gentle-pi", "bin", "gentle-shell.mjs"),
 			engineCli: join(out, "daemon", "node_modules", ENGINE_CLI),
-			engramBin: "/x/engram",
+			engramBin,
 		});
 		expect(realpathSync(report.approvalGuard)).toBe(join(real, "daemon", "extensions", "approval-guard.ts"));
 		expect(realpathSync(report.identity)).toBe(join(real, "daemon", "identity.md"));
 	});
 
-	it("emits a `pi` wrapper that runs the runtime's node and engine wherever the runtime is", () => {
-		const moved = tempDir();
-		mkdirSync(join(moved, "bin"));
-		const real = realpathSync(moved);
-		if (process.platform === "win32") {
-			// The Windows wrapper is `bin/pi.cmd`, which `cmd.exe` only runs as a batch file.
-			copyFileSync(join(out, "bin", "pi.cmd"), join(moved, "bin", "pi.cmd"));
-			mkdirSync(join(moved, "node", "bin"), { recursive: true });
-			copyFileSync(process.execPath, join(moved, "node", "bin", "node.exe"));
+	if (process.platform === "win32") {
+		it("runs the native launcher with literal argv and stdio from a relocated runtime", () => {
+			const moved = join(tempDir(), "runtime Ω &");
+			const movedBin = join(moved, "bin", "pi.exe");
+			const movedNode = join(moved, "node", "node.exe");
 			const engine = join(moved, "daemon", "node_modules", ENGINE_CLI);
+			mkdirSync(dirname(movedBin), { recursive: true });
+			mkdirSync(dirname(movedNode), { recursive: true });
 			mkdirSync(dirname(engine), { recursive: true });
-			writeFileSync(engine, 'console.log(process.argv.slice(1).join("\\n"));\n');
-			// `/s` strips only the outer quotes, so the quoted path and arguments stay as written;
-			// the `!` in `wow!` must reach the engine literally (delayed expansion off).
-			const run = spawnSync(
-				"cmd.exe",
-				["/d", "/s", "/c", `""${join(real, "bin", "pi.cmd")}" --version "a b" "wow!""`],
-				{ encoding: "utf8", windowsVerbatimArguments: true },
+			copyFileSync(join(out, "bin", "pi.exe"), movedBin);
+			copyFileSync(process.execPath, movedNode);
+			writeFileSync(
+				engine,
+				[
+					"let input = '';",
+					"process.stdin.setEncoding('utf8');",
+					"for await (const chunk of process.stdin) input += chunk;",
+					"process.stdout.write(JSON.stringify({ engine: process.argv[1], args: process.argv.slice(2), input }));",
+					"process.stderr.write('fixture stderr');",
+					"process.exitCode = Number(process.argv.find((arg) => arg.startsWith('--fixture-exit='))?.split('=')[1] ?? 0);",
+				].join("\n"),
 			);
-			expect(run.status).toBe(0);
-			const lines = run.stdout.trim().split("\n");
-			expect(lines.slice(-3)).toEqual(["--version", "a b", "wow!"]);
-			expect(lines[0]).toContain("cli.js");
-		} else {
-			expectPosixExecutable(join(out, "bin", "pi"));
+			const marker = join(tempDir(), "launcher-must-not-create.txt");
+			const args = [
+				"",
+				"two words Ω 世界",
+				'quote " inside',
+				"%PATH%",
+				"!TEMP!",
+				"&",
+				"|",
+				"^",
+				"(parentheses)",
+				"<",
+				">",
+				`& echo injected > ${marker}`,
+				"--fixture-exit=23",
+			];
+			const input = "stdin Ω fixture";
+			const run = spawnSync(movedBin, args, {
+				encoding: "utf8",
+				input,
+				timeout: 15_000,
+				windowsHide: true,
+			});
+			expect(run.error).toBeUndefined();
+			expect(run.status).toBe(23);
+			expect(run.stdout).toBe(JSON.stringify({ engine, args, input }));
+			expect(run.stderr).toBe("fixture stderr");
+			expect(existsSync(marker)).toBe(false);
+
+			const successArgs = args.map((arg) => (arg === "--fixture-exit=23" ? "--fixture-exit=0" : arg));
+			const success = spawnSync(movedBin, successArgs, {
+				encoding: "utf8",
+				input,
+				timeout: 15_000,
+				windowsHide: true,
+			});
+			expect(success.error).toBeUndefined();
+			expect(success.status).toBe(0);
+			expect(success.stdout).toBe(JSON.stringify({ engine, args: successArgs, input }));
+			expect(success.stderr).toBe("fixture stderr");
+
+			const missingNodeBin = join(tempDir(), "missing-node-runtime Ω &", "bin", "pi.exe");
+			mkdirSync(dirname(missingNodeBin), { recursive: true });
+			copyFileSync(join(out, "bin", "pi.exe"), missingNodeBin);
+			const failed = spawnSync(missingNodeBin, [], {
+				encoding: "utf8",
+				timeout: 15_000,
+				windowsHide: true,
+			});
+			expect(failed.error).toBeUndefined();
+			expect(failed.status).toBe(1);
+			expect(failed.stdout).toBe("");
+			expect(failed.stderr).toMatch(/^pi launcher: start runtime Node:/);
+		});
+	} else {
+		it("emits a `pi` wrapper that runs the runtime's node and engine wherever the runtime is", () => {
+			expect(statSync(join(out, "bin", "pi")).mode & 0o111).toBe(0o111);
+			const moved = tempDir();
+			mkdirSync(join(moved, "bin"));
+
 			mkdirSync(join(moved, "node", "bin"), { recursive: true });
 			copyFileSync(join(out, "bin", "pi"), join(moved, "bin", "pi"));
 			writeFileSync(join(moved, "node", "bin", "node"), '#!/bin/sh\nprintf "%s\\n" "$0" "$@"\n', {
@@ -254,6 +359,7 @@ describe.skipIf(skipBuild)("build:runtime", () => {
 			});
 			const linked = join(tempDir(), "pi");
 			symlinkSync(join(moved, "bin", "pi"), linked);
+			const real = realpathSync(moved);
 			for (const entry of [join(moved, "bin", "pi"), linked]) {
 				const run = spawnSync(entry, ["--version", "a b"], { encoding: "utf8" });
 				expect(run.status).toBe(0);
@@ -265,7 +371,7 @@ describe.skipIf(skipBuild)("build:runtime", () => {
 					"",
 				]);
 			}
-		}
-		expect(existsSync(join(PACKAGE, "node_modules", ENGINE_CLI))).toBe(true);
-	});
+			expect(existsSync(join(PACKAGE, "node_modules", ENGINE_CLI))).toBe(true);
+		});
+	}
 });

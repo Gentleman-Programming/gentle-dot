@@ -80,13 +80,12 @@ impl Os {
 
 /// The user's home folder, from the variables this OS actually sets.
 ///
-/// **`HOME` wins on every OS**, as it always has: a Windows user who has it set (Git Bash, MSYS)
-/// keeps the data dir, token, config and memory store they already have. **Windows does not define
-/// `HOME`** by itself, though — only MSYS and similar shells do — so an app started the way a user
-/// starts it (Explorer, the Start menu, autostart) has none. Reading `HOME` alone therefore left
-/// the data dir as a bare relative `.gentle-dot`, resolved against the working directory, and the
-/// app never found its own token (W22). On Windows `USERPROFILE` is the fallback, with
-/// `HOMEDRIVE` + `HOMEPATH` as the older pair; macOS and Linux read `HOME` only.
+/// Windows keeps the feature's native `USERPROFILE` precedence, so importing the
+/// upstream home fallback cannot silently move an existing installation's data to
+/// a Git Bash/MSYS `HOME`. `HOMEDRIVE` + `HOMEPATH` is the older native pair;
+/// `HOME` is used only when neither native source exists. macOS and Linux use `HOME`.
+/// A GUI launch with none of these fails instead of resolving `.gentle-dot`
+/// against its working directory (W22).
 ///
 /// The values are `OsString`, so a non-UTF-8 `HOME` on POSIX still resolves.
 ///
@@ -98,13 +97,13 @@ pub fn home_dir(os: Os, env: impl Fn(&str) -> Option<OsString>) -> Option<PathBu
     let value = |key: &str| env(key).filter(|value| value.to_str().map_or(true, |text| !text.trim().is_empty()));
     let home = value("HOME").map(PathBuf::from);
     match os {
-        Os::Windows => home
-            .or_else(|| value("USERPROFILE").map(PathBuf::from))
+        Os::Windows => value("USERPROFILE").map(PathBuf::from)
             .or_else(|| {
                 let mut path = value("HOMEDRIVE")?;
                 path.push(value("HOMEPATH")?);
                 Some(PathBuf::from(path))
-            }),
+            })
+            .or(home),
         Os::MacOs | Os::Linux => home,
     }
 }
@@ -277,10 +276,8 @@ fn is_wayland(env: &impl Fn(&str) -> Option<String>) -> bool {
 /// chosen by the user. Under X11 the app can place its windows, keep the Dot on top,
 /// and snap it to an edge; native Wayland allows none of that.
 pub fn forced_gdk_backend(env: impl Fn(&str) -> Option<String>) -> Option<&'static str> {
-    let wanted = is_wayland(&env)
-        && !is_hyprland(&env)
-        && set(&env, "DISPLAY").is_some()
-        && set(&env, "GDK_BACKEND").is_none();
+    let wanted =
+        is_wayland(&env) && !is_hyprland(&env) && set(&env, "DISPLAY").is_some() && set(&env, "GDK_BACKEND").is_none();
     wanted.then_some("x11")
 }
 
@@ -568,10 +565,10 @@ mod tests {
     }
 
     #[test]
-    fn home_keeps_home_precedence_and_limits_userprofile_to_windows() {
-        // Git Bash and MSYS set both; `HOME` wins so the existing data dir keeps being found.
+    fn home_keeps_native_windows_precedence_and_posix_home() {
+        // Importing the upstream fallback must not move the feature's Windows data.
         let both = || os_env_of(&[("HOME", "/home/me"), ("USERPROFILE", r"C:\Users\me")]);
-        assert_eq!(home_dir(Os::Windows, both()), Some(PathBuf::from("/home/me")));
+        assert_eq!(home_dir(Os::Windows, both()), Some(PathBuf::from(r"C:\Users\me")));
         assert_eq!(home_dir(Os::Linux, both()), Some(PathBuf::from("/home/me")));
         assert_eq!(home_dir(Os::MacOs, both()), Some(PathBuf::from("/home/me")));
         // `HOME` alone is a home on Windows too.

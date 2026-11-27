@@ -1,5 +1,5 @@
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
-import { delimiter, dirname, join } from "node:path";
+import { chmodSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { delimiter, dirname, join, toNamespacedPath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.ts";
@@ -8,9 +8,10 @@ import { isolatedAgentEnv } from "../src/isolation.ts";
 import { engramBinaryName, refusalGuard, resolveEngramBin, runtimeDir } from "../src/runtime.ts";
 import { tempDir } from "./helpers.ts";
 import { hasPosixModes } from "./support/posix-modes.ts";
-import { itWithPosixShell } from "./support/windows.ts";
 
 const PACKAGE = fileURLToPath(new URL("..", import.meta.url));
+const WINDOWS = process.platform === "win32";
+const ENGRAM = WINDOWS ? "engram.exe" : "engram";
 const ENGINE_CLI = join("@earendil-works", "pi-coding-agent", "dist", "bundle", "cli.js");
 
 function touch(path: string, content = "", mode = 0o644): string {
@@ -27,6 +28,7 @@ function fakeRuntime(): string {
 	touch(join(modules, "gentle-pi", "bin", "gentle-shell.mjs"));
 	touch(join(modules, ENGINE_CLI));
 	mkdirSync(join(runtime, "bin"), { recursive: true });
+	touch(join(runtime, "bin", ENGRAM), "", 0o755);
 	return runtime;
 }
 
@@ -62,6 +64,19 @@ describe("installed runtime (GENTLE_DOT_RUNTIME)", () => {
 		});
 	});
 
+	it.skipIf(process.platform !== "win32")("bridges both bundled Node entries without changing the native runtime root", () => {
+		const runtime = toNamespacedPath(fakeRuntime());
+		const env = { GENTLE_DOT_DATA_DIR: tempDir(), GENTLE_DOT_RUNTIME: runtime };
+		const engine = loadConfig(env).agentArgs[0]!;
+		const mcp = bundledMcpCli(env);
+		expect(runtimeDir(env)).toBe(runtime);
+		expect(engine.startsWith("\\\\?\\")).toBe(false);
+		expect(mcp.command).toBe(process.execPath);
+		expect(mcp.args).toHaveLength(1);
+		expect(mcp.args[0]!.startsWith("\\\\?\\")).toBe(false);
+		expect(realpathSync.native(mcp.args[0]!)).toBe(realpathSync.native(join(runtime, "daemon", "node_modules", ENGINE_CLI)));
+	});
+
 	it("never falls back to the build machine's engine when the runtime lacks it", () => {
 		const runtime = tempDir();
 		expect(() => loadConfig({ GENTLE_DOT_DATA_DIR: tempDir(), GENTLE_DOT_RUNTIME: runtime })).toThrow(
@@ -73,39 +88,45 @@ describe("installed runtime (GENTLE_DOT_RUNTIME)", () => {
 	it("puts the runtime's `pi` first on the engine's PATH, never the pnpm one", () => {
 		const runtime = fakeRuntime();
 		const base = {
-			PATH: ["/usr/bin", "/bin"].join(delimiter),
+			PATH: [join(tempDir(), "one"), join(tempDir(), "two")].join(delimiter),
 			HOME: tempDir(),
 			GENTLE_DOT_RUNTIME: runtime,
-			ENGRAM_BIN: "/x/engram",
+			ENGRAM_BIN: touch(join(tempDir(), ENGRAM), "", 0o755),
 		};
 		const env = isolatedAgentEnv(base, tempDir());
-		expect(env.PATH).toBe([join(runtime, "bin"), "/usr/bin", "/bin"].join(delimiter));
+		expect(env.PATH).toBe([join(runtime, "bin"), base.PATH].join(delimiter));
 		const again = isolatedAgentEnv({ ...base, PATH: env.PATH }, tempDir());
 		expect(again.PATH).toBe(env.PATH);
 	});
 
 	it("passes the user's ENGRAM_BIN to the engine and keeps the global memory", () => {
 		const realHome = tempDir();
+		const engram = touch(join(tempDir(), ENGRAM), "", 0o755);
 		const env = isolatedAgentEnv(
-			{ PATH: "/bin", HOME: realHome, GENTLE_DOT_RUNTIME: fakeRuntime(), ENGRAM_BIN: "/x/engram" },
+			{
+				PATH: "",
+				HOME: realHome,
+				USERPROFILE: realHome,
+				GENTLE_DOT_RUNTIME: fakeRuntime(),
+				ENGRAM_BIN: engram,
+			},
 			tempDir(),
 		);
-		expect(env).toMatchObject({ ENGRAM_BIN: "/x/engram", ENGRAM_DATA_DIR: join(realHome, ".engram") });
+		expect(env).toMatchObject({ ENGRAM_BIN: engram, ENGRAM_DATA_DIR: join(realHome, ".engram") });
 	});
 
-	itWithPosixShell("finds the user's Engram through the login shell before the bundled one", () => {
+	it("finds the user's Engram through native discovery before the bundled one", () => {
 		const runtime = fakeRuntime();
-		const userEngram = touch(join(tempDir(), "engram"), "", 0o755);
+		const userEngram = touch(join(tempDir(), ENGRAM), "", 0o755);
 		const env = isolatedAgentEnv(
-			{ PATH: "/bin", HOME: tempDir(), GENTLE_DOT_RUNTIME: runtime, SHELL: fakeShell(userEngram) },
+			{
+				PATH: WINDOWS ? dirname(userEngram) : "/bin",
+				HOME: tempDir(),
+				GENTLE_DOT_RUNTIME: runtime,
+				SHELL: fakeShell(userEngram),
+			},
 			tempDir(),
 		);
-		// Windows has no login shell and no `command -v`, so there is no probe to consult and the
-		// runtime's own copy is used (L22, option (a)); the injected-platform test below pins that.
-		if (process.platform === "win32") {
-			expect(env.ENGRAM_BIN).toBe(join(runtime, "bin", "engram.exe"));
-			return;
-		}
 		expect(env.ENGRAM_BIN).toBe(userEngram);
 	});
 });
@@ -115,15 +136,15 @@ describe("runtimeDir", () => {
 	// (`\\?\C:\…`). Node's module resolver cannot take it: handed to `spawn` as the engine's
 	// entry it collapses to a bare drive (`C:`) and dies with EISDIR, which is what an installed
 	// copy did (W30). Win32 needs the prefix; Node does not.
-	it.runIf(process.platform === "win32")("drops the verbatim prefix Windows canonical paths carry", () => {
+	it.runIf(process.platform === "win32")("preserves the verbatim Windows runtime identity", () => {
 		expect(runtimeDir({ GENTLE_DOT_RUNTIME: "\\\\?\\C:\\Users\\me\\Gentle Dot\\runtime" })).toBe(
-			"C:\\Users\\me\\Gentle Dot\\runtime",
+			"\\\\?\\C:\\Users\\me\\Gentle Dot\\runtime",
 		);
 	});
 
-	it.runIf(process.platform === "win32")("turns a verbatim UNC root back into a UNC path", () => {
+	it.runIf(process.platform === "win32")("preserves a verbatim UNC runtime identity", () => {
 		expect(runtimeDir({ GENTLE_DOT_RUNTIME: "\\\\?\\UNC\\server\\share\\runtime" })).toBe(
-			"\\\\server\\share\\runtime",
+			"\\\\?\\UNC\\server\\share\\runtime",
 		);
 	});
 
@@ -141,14 +162,27 @@ describe("resolveEngramBin", () => {
 		const runtime = fakeRuntime();
 		const home = tempDir();
 		const known = tempDir();
+		const loginEngram = touch(join(tempDir(), ENGRAM), "", 0o755);
 		const failing = fakeShell(undefined);
 		const options = { home, knownDirs: [join(home, "missing"), known] };
-		expect(resolveEngramBin({ ENGRAM_BIN: "/x/engram", SHELL: failing }, runtime, options)).toBe("/x/engram");
-		expect(resolveEngramBin({ SHELL: failing }, runtime, options)).toBe(join(runtime, "bin", hostBinary));
-		const knownEngram = touch(join(known, hostBinary), "", 0o755);
+		const override = touch(join(tempDir(), ENGRAM), "", 0o755);
+		expect(resolveEngramBin({ ENGRAM_BIN: override, SHELL: failing }, runtime, options)).toBe(override);
+		expect(
+			resolveEngramBin(
+				{ PATH: WINDOWS ? dirname(loginEngram) : "", SHELL: fakeShell(loginEngram) },
+				runtime,
+				options,
+			),
+		).toBe(loginEngram);
+		expect(resolveEngramBin({ SHELL: failing }, runtime, options)).toBe(join(runtime, "bin", ENGRAM));
+		const knownEngram = touch(join(known, ENGRAM), "", 0o755);
 		expect(resolveEngramBin({ SHELL: failing }, runtime, options)).toBe(knownEngram);
-		// A login shell answer that is not an executable file is ignored.
+		// A shell answer does not bypass executable discovery on either host.
 		expect(resolveEngramBin({ SHELL: fakeShell("/nowhere/engram") }, runtime, options)).toBe(knownEngram);
+		if (WINDOWS)
+			expect(() => resolveEngramBin({ ENGRAM_BIN: "/x/engram" }, runtime, options)).toThrow(
+				"absolute Windows .exe",
+			);
 	});
 
 	// This one spawns a real login shell, so it can only run where one exists. The Windows
@@ -204,9 +238,8 @@ describe("resolveEngramBin", () => {
 		const runtime = fakeRuntime();
 		const options = { home, platform: "win32" as const };
 		expect(resolveEngramBin({}, runtime, options)).toBe(windowsEngram);
-		expect(resolveEngramBin({ ENGRAM_BIN: "/explicit/engram.exe" }, runtime, options)).toBe(
-			"/explicit/engram.exe",
-		);
+		const explicit = touch(join(tempDir(), "engram.exe"));
+		expect(resolveEngramBin({ ENGRAM_BIN: explicit }, runtime, options)).toBe(explicit);
 	});
 
 	it("falls back to bundled engram.exe on Windows, ignoring a login shell and non-file candidates", () => {
@@ -305,8 +338,9 @@ describe("source checkout (no GENTLE_DOT_RUNTIME)", () => {
 		expect(config.uiDir).toBe(join(PACKAGE, "..", "ui", "dist", "app"));
 		expect(config.agentArgs).toEqual([join(PACKAGE, "node_modules", "gentle-pi", "bin", "gentle-shell.mjs")]);
 		expect(bundledMcpCli({}).args).toEqual([join(PACKAGE, "node_modules", ENGINE_CLI)]);
-		const env = isolatedAgentEnv({ PATH: ["/usr/bin", "/bin"].join(delimiter), HOME: tempDir() }, tempDir());
-		expect(env.PATH).toBe([join(PACKAGE, "node_modules", ".bin"), "/usr/bin", "/bin"].join(delimiter));
+		const path = [join(tempDir(), "one"), join(tempDir(), "two")].join(delimiter);
+		const env = isolatedAgentEnv({ PATH: path, HOME: tempDir() }, tempDir());
+		expect(env.PATH).toBe([join(PACKAGE, "node_modules", ".bin"), path].join(delimiter));
 		expect(env.ENGRAM_BIN).toBeUndefined();
 	});
 });

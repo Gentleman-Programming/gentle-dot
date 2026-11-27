@@ -19,10 +19,24 @@ const platformDescriptor: PropertyDescriptor = descriptor;
 afterEach(() => {
 	Object.defineProperty(process, "platform", platformDescriptor);
 	vi.clearAllMocks();
+	vi.unstubAllEnvs();
 });
 
 // Dispatch tests only: changing this property does not emulate native Windows handles.
 describe("app channel acquisition on Windows", () => {
+	it("does not grant a channel to the retired anonymous-stdio selector", () => {
+		Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
+		vi.stubEnv("GENTLE_DOT_APP_STDIO", "v1");
+		const probe = vi.fn();
+		expect(inheritedAppSocket({ probe })).toBeUndefined();
+		expect(openInheritedChannel({ probe })).toBeUndefined();
+		expect(process.env.GENTLE_DOT_APP_STDIO).toBe("v1");
+		expect(fstatSync).not.toHaveBeenCalled();
+		expect(probe).not.toHaveBeenCalled();
+		expect(Socket).not.toHaveBeenCalled();
+		expect(spawnSync).not.toHaveBeenCalled();
+	});
+
 	it("refuses socket acquisition before any Unix descriptor inspection or wrapping", () => {
 		Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
 		const probe = vi.fn();

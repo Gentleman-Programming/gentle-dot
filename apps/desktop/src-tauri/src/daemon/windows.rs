@@ -77,11 +77,23 @@ pub(super) fn command_line(program: &str, args: &[String]) -> io::Result<Vec<u16
 
 #[cfg(windows)]
 pub(super) use native::{acquire_recovered_launch, ensure_record_directory, open_private_log, retire_if_owner_exited, spawn, RecoveredLaunch, SpawnFailure, WindowsChild};
+#[cfg(all(windows, target_arch = "x86_64"))]
+#[allow(unused_imports)] // No production selector.
+pub(super) use native::spawn_explicit;
+#[cfg(all(windows, target_arch = "x86_64"))]
+pub(super) use native::startup_profile;
+#[cfg(all(windows, feature = "local-preview"))]
+pub(super) use native::{create_private_preview_config, create_private_preview_directory};
 
 #[cfg(windows)]
 mod native {
     use super::{command_line, fd3_bootstrap};
     use super::super::{ChildEndpoint, ChildProcess, LaunchSpec};
+    #[cfg(target_arch = "x86_64")]
+    use super::super::windows_split_launch_plan::LaunchPlan;
+    use std::borrow::Cow;
+    #[cfg(windows_owner_observation)]
+    use super::super::windows_owner_trace::{self, Event, Trace};
     use std::ffi::OsString;
     use std::fs::File;
     use std::io;
@@ -104,6 +116,11 @@ mod native {
     use windows_sys::Win32::System::JobObjects::*;
     use windows_sys::Win32::System::Pipes::*;
     use windows_sys::Win32::System::Threading::*;
+
+    #[cfg(test)]
+    mod admission_fixture {
+        include!("windows_admission_fixture.rs");
+    }
 
     // SDK winnt.h definitions, scoped here because the enabled windows-sys
     // namespaces do not expose them: ACE_HEADER.AceType and SID count are BYTEs.
@@ -195,21 +212,61 @@ mod native {
             3 => Ok(std::cmp::Ordering::Greater), _ => Err(io::Error::last_os_error()),
         }
     }
-    fn environment(spec: &LaunchSpec) -> io::Result<Vec<u16>> {
-        let mut entries: Vec<(Vec<u16>, Vec<u16>)> = std::env::vars_os()
-            .map(|(key, value)| (key.encode_wide().collect(), value.encode_wide().collect())).collect();
-        for (key, value) in &spec.envs {
-            if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0') {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid launch environment"));
-            }
-            let key: Vec<u16> = key.encode_utf16().collect();
-            let value: Vec<u16> = value.encode_utf16().collect();
-            let mut found = None;
-            for (index, (existing, _)) in entries.iter().enumerate() {
-                if compare_names(existing, &key)? == std::cmp::Ordering::Equal { found = Some(index); break; }
-            }
-            if let Some(index) = found { entries[index] = (key, value); } else { entries.push((key, value)); }
+    const DATA_DIR_KEY: &str = "GENTLE_DOT_DATA_DIR";
+    type EnvEntry = (Vec<u16>, Vec<u16>);
+
+    fn encode_entry(key: &str, value: &str) -> io::Result<EnvEntry> {
+        if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0') {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid launch environment"));
         }
+        Ok((key.encode_utf16().collect(), value.encode_utf16().collect()))
+    }
+
+    fn bundled_environment(spec: &LaunchSpec, directory: &str,
+        inherited: impl IntoIterator<Item = (OsString, OsString)>) -> io::Result<Vec<u16>> {
+        let inherited = inherited.into_iter();
+        #[cfg(windows_owner_observation)]
+        let inherited = inherited.filter(|(key, _)| !key.to_str().is_some_and(windows_owner_trace::is_selector));
+        let mut entries: Vec<EnvEntry> = inherited
+            .map(|(key, value)| (key.encode_wide().collect(), value.encode_wide().collect())).collect();
+        // Bundled mode overlays the actual stop record directory last. Only the
+        // non-secret path is passed; nonce/capability remain file-only.
+        let overrides = spec.envs.iter().map(|(key, value)| (key.as_str(), value.as_str()))
+            .chain(std::iter::once((DATA_DIR_KEY, directory)));
+        for (key, value) in overrides {
+            #[cfg(windows_owner_observation)]
+            if windows_owner_trace::is_selector(key) { continue; }
+            let entry = encode_entry(key, value)?;
+            if let Some(index) = find_env_key(&entries, &entry.0)? { entries[index] = entry; }
+            else { entries.push(entry); }
+        }
+        environment_block(entries)
+    }
+
+    fn explicit_environment(env: &[(String, String)], directory: &str) -> io::Result<Vec<u16>> {
+        let mut entries = Vec::with_capacity(env.len());
+        for (key, value) in env {
+            let entry = encode_entry(key, value)?;
+            if find_env_key(&entries, &entry.0)?.is_some() {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "duplicate explicit launch environment key"));
+            }
+            entries.push(entry);
+        }
+        let key: Vec<u16> = DATA_DIR_KEY.encode_utf16().collect();
+        if !find_env_key(&entries, &key)?.is_some_and(|index| env[index].1 == directory) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "explicit launch data directory does not match stop record root"));
+        }
+        environment_block(entries)
+    }
+
+    fn find_env_key(entries: &[EnvEntry], key: &[u16]) -> io::Result<Option<usize>> {
+        for (index, (existing, _)) in entries.iter().enumerate() {
+            if compare_names(existing, key)? == std::cmp::Ordering::Equal { return Ok(Some(index)); }
+        }
+        Ok(None)
+    }
+
+    fn environment_block(mut entries: Vec<EnvEntry>) -> io::Result<Vec<u16>> {
         // Fallible insertion sort keeps an API failure observable instead of inventing an order.
         for index in 1..entries.len() {
             let mut at = index;
@@ -245,6 +302,184 @@ mod native {
         wide(absolute.as_os_str())
     }
 
+    /// Inputs from a trusted, validated private launch plan. The caller must establish
+    /// path identity, ancestry, directory ownership and handle retention through use,
+    /// including the matching stop record root. The launcher checks spelling and encoding
+    /// only; it does not discover, provision or admit the runtime or private state.
+    struct ExplicitChildContext<'a> {
+        program: &'a str,
+        args: &'a [String],
+        cwd: &'a Path,
+        env: &'a [(String, String)],
+    }
+
+    enum ChildContext<'a> {
+        Bundled(&'a LaunchSpec),
+        Explicit(ExplicitChildContext<'a>),
+    }
+
+    enum SpawnInput<'a> {
+        Bundled(&'a LaunchSpec, &'a Path),
+        #[cfg(target_arch = "x86_64")]
+        Split(LaunchPlan, &'static SplitSlot),
+    }
+
+    #[derive(Debug)]
+    struct PreparedChild {
+        application: Vec<u16>,
+        command: Vec<u16>,
+        cwd: Option<Vec<u16>>,
+        env: Vec<u16>,
+    }
+
+    impl ChildContext<'_> {
+        fn prepare<I>(self, data_dir: &Path, inherited: impl FnOnce() -> I) -> io::Result<PreparedChild>
+        where I: IntoIterator<Item = (OsString, OsString)> {
+            let directory = || data_dir.to_str().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput,
+                "Windows stop record directory must be Unicode"));
+            match self {
+                Self::Bundled(spec) => Ok(PreparedChild {
+                    application: application(spec)?,
+                    command: command_line(&spec.program, &spec.args)?,
+                    cwd: None,
+                    env: bundled_environment(spec, directory()?, inherited())?,
+                }),
+                Self::Explicit(context) => Ok(PreparedChild {
+                    application: wide(explicit_path(Path::new(context.program))?.as_ref())?,
+                    command: command_line(context.program, context.args)?,
+                    cwd: Some(wide(explicit_path(context.cwd)?.as_ref())?),
+                    env: explicit_environment(context.env, explicit_path(data_dir)?)?,
+                }),
+            }
+        }
+    }
+
+    fn explicit_path(path: &Path) -> io::Result<&str> {
+        let invalid = || io::Error::new(io::ErrorKind::InvalidInput,
+            "explicit launch path must be an ordinary absolute DOS path");
+        // Keep the supplied drive-letter spelling verbatim. In particular, do not
+        // call absolute() or normalize dot components or Win32 alias spellings.
+        let text = path.to_str().ok_or_else(invalid)?;
+        let bytes = text.as_bytes();
+        if bytes.len() < 4 || !bytes[0].is_ascii_alphabetic() || &bytes[1..3] != b":\\"
+            || !text[3..].split('\\').all(|component| {
+                if component.is_empty() || component.ends_with([' ', '.'])
+                    || component.chars().any(|ch| ch < ' ' || "/:*?\"<>|".contains(ch)) {
+                    return false;
+                }
+                let stem = component.split('.').next().unwrap_or_default().trim_end_matches(' ').to_ascii_uppercase();
+                !matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+                    && !stem.strip_prefix("COM").or_else(|| stem.strip_prefix("LPT"))
+                        .is_some_and(|suffix| matches!(suffix, "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"))
+            }) {
+            return Err(invalid());
+        }
+        Ok(text)
+    }
+
+    #[cfg(test)]
+    mod child_input_tests {
+        use super::*;
+
+        const PROGRAM: &str = r"C:\fixture runtime\node.exe";
+        const CWD: &str = r"C:\fixture runtime";
+        const DATA: &str = r"D:\fixture data";
+        const DATA_KEY: &str = "GENTLE_DOT_DATA_DIR";
+
+        fn entries(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+            pairs.iter().map(|&(key, value)| (key.into(), value.into())).collect()
+        }
+
+        fn explicit(program: &str, cwd: &str, pairs: &[(&str, &str)]) -> io::Result<PreparedChild> {
+            ChildContext::Explicit(ExplicitChildContext {
+                program, cwd: Path::new(cwd), args: &["inert argument".into()], env: &entries(pairs),
+            }).prepare(Path::new(DATA), || -> std::iter::Empty<(OsString, OsString)> {
+                panic!("explicit input must not consult inherited environment")
+            })
+        }
+
+        fn invalid(result: io::Result<PreparedChild>, message: &str) {
+            let error = result.unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(error.to_string(), message);
+        }
+
+        #[test]
+        fn exact_explicit_child_input_has_only_supplied_sorted_utf16_entries() {
+            let prepared = explicit(PROGRAM, CWD, &[
+                ("z", "🚀=é"), ("gentle_dot_data_dir", DATA), ("B", ""), ("a", "1"),
+            ]).unwrap();
+            assert_eq!(prepared.application, format!("{PROGRAM}\0").encode_utf16().collect::<Vec<_>>());
+            assert_eq!(prepared.cwd.unwrap(), format!("{CWD}\0").encode_utf16().collect::<Vec<_>>());
+            assert_eq!(prepared.command, format!("\"{PROGRAM}\" \"inert argument\"\0").encode_utf16().collect::<Vec<_>>());
+            assert_eq!(prepared.env, format!("a=1\0B=\0gentle_dot_data_dir={DATA}\0z=🚀=é\0\0")
+                .encode_utf16().collect::<Vec<_>>());
+        }
+
+        #[test]
+        fn exact_explicit_child_input_rejects_invalid_or_duplicate_environment_entries() {
+            for pair in [("", "x"), ("=C:", "x"), ("bad=key", "x"), ("bad\0key", "x"), ("ok", "bad\0value")] {
+                invalid(explicit(PROGRAM, CWD, &[(DATA_KEY, DATA), pair]), "invalid launch environment");
+            }
+            for (left, right) in [("Example", "example"), ("É", "é"), (DATA_KEY, "gentle_dot_data_dir")] {
+                let mut pairs = vec![(left, DATA), (right, DATA)];
+                if left != DATA_KEY { pairs.push((DATA_KEY, DATA)); }
+                invalid(explicit(PROGRAM, CWD, &pairs), "duplicate explicit launch environment key");
+            }
+        }
+
+        #[test]
+        fn exact_explicit_child_input_requires_the_record_root_verbatim() {
+            invalid(explicit(PROGRAM, CWD, &[]), "explicit launch data directory does not match stop record root");
+            for value in ["", r"d:\fixture data", "D:/fixture data", r"D:\fixture data\other"] {
+                invalid(explicit(PROGRAM, CWD, &[(DATA_KEY, value)]), "explicit launch data directory does not match stop record root");
+            }
+        }
+
+        #[test]
+        fn exact_explicit_child_input_rejects_a_matching_drive_relative_record_root() {
+            let data_dir = r"D:fixture data";
+            let env = entries(&[(DATA_KEY, data_dir)]);
+            let context = ChildContext::Explicit(ExplicitChildContext {
+                program: PROGRAM, cwd: Path::new(CWD), args: &[], env: &env,
+            });
+            let prepared = context.prepare(Path::new(data_dir), || -> std::iter::Empty<(OsString, OsString)> {
+                panic!("explicit input must not consult inherited environment")
+            });
+            invalid(prepared, "explicit launch path must be an ordinary absolute DOS path");
+        }
+
+        #[test]
+        fn exact_explicit_child_input_rejects_nonordinary_paths_without_search_or_inheritance() {
+            for path in ["node.exe", "", r"C:node.exe", r"\node.exe", r"\\server\share\node.exe",
+                r"\\?\C:\node.exe", r"C:\x\..\node.exe", r"C:\x\.\node.exe", r"C:\x\\node.exe",
+                r"C:\node.exe:alt", r"C:\node.exe ", r"C:\NUL.exe", "C:\\node\0.exe"] {
+                invalid(explicit(path, CWD, &[(DATA_KEY, DATA), ("PATH", CWD)]), "explicit launch path must be an ordinary absolute DOS path");
+                invalid(explicit(PROGRAM, path, &[(DATA_KEY, DATA)]), "explicit launch path must be an ordinary absolute DOS path");
+            }
+        }
+
+        #[test]
+        fn exact_explicit_child_input_preserves_bundled_overlay_and_inherited_cwd() {
+            let spec = LaunchSpec { program: PROGRAM.into(), args: vec![], envs: entries(&[
+                ("OVERLAY", "old"), ("Overlay", "new"), (DATA_KEY, "override"),
+                ("GENTLE_DOT_CI_OWNER_PORT", "synthetic override"),
+            ]) };
+            let prepared = ChildContext::Bundled(&spec).prepare(Path::new(DATA), || [
+                (OsString::from("inherited"), OsString::from("retained")),
+                (OsString::from("overlay"), OsString::from("inherited value")),
+                (OsString::from("gentle_dot_ci_owner_id"), OsString::from("synthetic inherited")),
+            ]).unwrap();
+            assert!(prepared.cwd.is_none());
+            let expected = if cfg!(windows_owner_observation) {
+                format!("{DATA_KEY}={DATA}\0inherited=retained\0Overlay=new\0\0")
+            } else {
+                format!("gentle_dot_ci_owner_id=synthetic inherited\0GENTLE_DOT_CI_OWNER_PORT=synthetic override\0{DATA_KEY}={DATA}\0inherited=retained\0Overlay=new\0\0")
+            };
+            assert_eq!(prepared.env, expected.encode_utf16().collect::<Vec<_>>());
+        }
+    }
+
     fn new_job() -> io::Result<OwnedHandle> {
         let job = owned(unsafe { CreateJobObjectW(null(), null()) })?;
         let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
@@ -270,10 +505,53 @@ mod native {
         Ok(accounting.ActiveProcesses)
     }
 
+    // Reserve before CreateProcess so terminal uncertainty cannot exceed one guard.
+    // Quarantine is process-local; exiting the app is not proof the child exited.
+    #[cfg(target_arch = "x86_64")]
+    enum SplitState { Available, Reserved, Quarantined { _plan: LaunchPlan } }
+    #[cfg(target_arch = "x86_64")]
+    struct SplitSlot(std::sync::Mutex<SplitState>);
+    #[cfg(target_arch = "x86_64")]
+    static SPLIT_SLOT: SplitSlot = SplitSlot::new();
+
+    #[cfg(target_arch = "x86_64")]
+    impl SplitSlot {
+        const fn new() -> Self { Self(std::sync::Mutex::new(SplitState::Available)) }
+        fn reserve(&'static self, plan: LaunchPlan) -> io::Result<SplitGuard> {
+            let mut state = self.0.lock().unwrap_or_else(|error| error.into_inner());
+            if !matches!(*state, SplitState::Available) {
+                return Err(io::Error::other("Windows split launch guard is already held"));
+            }
+            *state = SplitState::Reserved;
+            Ok(SplitGuard { slot: self, plan: Some(plan), uncertain: false })
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    struct SplitGuard {
+        slot: &'static SplitSlot,
+        plan: Option<LaunchPlan>,
+        uncertain: bool,
+    }
+    #[cfg(target_arch = "x86_64")]
+    impl Drop for SplitGuard {
+        fn drop(&mut self) {
+            let next = if self.uncertain {
+                SplitState::Quarantined { _plan: self.plan.take().unwrap() }
+            } else {
+                drop(self.plan.take());
+                SplitState::Available
+            };
+            *self.slot.0.lock().unwrap_or_else(|error| error.into_inner()) = next;
+        }
+    }
+
     #[cfg(test)]
     #[derive(Default, Debug)]
     struct Faults { assignment: bool, verification: bool, terminate: bool, wait: bool, query: bool }
     pub(crate) struct WindowsChild {
+        #[cfg(target_arch = "x86_64")]
+        split: Option<SplitGuard>,
         process: OwnedHandle,
         thread: Option<OwnedHandle>,
         job: OwnedHandle,
@@ -292,6 +570,8 @@ mod native {
         force_requested: bool,
         // Completion survives record/channel-close failures and checked retries.
         completed: bool,
+        #[cfg(windows_owner_observation)]
+        trace: Option<Trace>,
         #[cfg(test)]
         faults: Faults,
     }
@@ -376,13 +656,20 @@ mod native {
         }
     }
     impl ChildProcess for WindowsChild {
+        #[cfg(target_arch = "x86_64")]
+        fn readiness_alive(&self) -> bool {
+            !self.launch_failed() && matches!(self.status(), Ok(None))
+        }
         fn id(&self) -> u32 { self.pid }
         fn launch_failed(&self) -> bool { self.failed || self.stopping }
         fn shutdown_requires_channel(&self) -> bool { !self.failed || self.stopping || self.established }
         fn retain_failure(&mut self) { self.failed = true; }
         fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
             if self.launch_failed() { return Err(io::Error::other("retained failed launch requires checked shutdown")); }
-            self.status()
+            let result = self.status();
+            #[cfg(windows_owner_observation)]
+            if let Some(trace) = self.trace.as_mut() { trace.status(&result); }
+            result
         }
         fn kill(&mut self) -> io::Result<()> { self.terminate() }
         fn wait(&mut self) -> io::Result<ExitStatus> {
@@ -474,11 +761,135 @@ mod native {
             // configured kill-on-last-Job-close through RAII even if explicit cleanup fails.
             // An unassigned failed child may remain suspended on persistent OS failure;
             // neither error nor closing a process handle is claimed to prove termination.
-            if let Err(error) = self.complete(Duration::ZERO) {
+            #[cfg(target_arch = "x86_64")]
+            if self.completed {
+                if let Some(split) = self.split.as_mut() {
+                    // Checked shutdown already proved root exit and Job drain.
+                    split.uncertain = false;
+                    return;
+                }
+            }
+            let completion = self.complete(Duration::ZERO);
+            #[cfg(target_arch = "x86_64")]
+            if let Some(split) = self.split.as_mut() { split.uncertain = completion.is_err(); }
+            if let Err(error) = completion {
+                #[cfg(test)]
+                if admission_fixture::quiet_drop() { return; }
                 eprintln!("gentle-dot: owned Windows daemon cleanup was not confirmed: {error}");
             }
         }
     }
+    #[cfg(all(test, target_arch = "x86_64"))]
+    #[allow(unexpected_cfgs)] // windows_split_bridge_fixture exists only in the isolated QA build.
+    mod split_bridge_tests {
+        use super::*;
+        use crate::daemon::windows_split_tree::PinnedTree;
+        use sha2::{Digest, Sha256};
+        use std::num::NonZeroU16;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        // Only the restricted harness generates this exact file, in its source snapshot.
+        const QA_INPUT: Option<(&str, &[u8])> = {
+            #[cfg(windows_split_bridge_fixture)]
+            { Some((env!("DOT_SPLIT_BRIDGE_QA_ROOT"), include_bytes!("../../tests/fixtures/split_bridge_child.exe"))) }
+            #[cfg(not(windows_split_bridge_fixture))]
+            { None }
+        };
+
+        fn qa_input() -> io::Result<(&'static Path, &'static [u8])> {
+            QA_INPUT.map(|(root, bytes)| (Path::new(root), bytes)).ok_or_else(||
+                io::Error::new(io::ErrorKind::NotFound, "run the restricted Windows bridge QA harness"))
+        }
+
+        #[cfg(not(windows_split_bridge_fixture))]
+        #[test]
+        fn exact_split_bridge_without_fixture_build_has_no_launch_input() {
+            let error = qa_input().unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::NotFound);
+            assert_eq!(error.to_string(), "run the restricted Windows bridge QA harness");
+        }
+
+        fn fixture() -> (LaunchPlan, PathBuf, PathBuf) {
+            use std::io::Write;
+            let (scratch, helper) = qa_input().expect("explicit native bridge QA only");
+            let run = scratch.join(format!("bridge-{}-{}", std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            std::fs::create_dir(&run).unwrap();
+            let root = run.join("runtime");
+            let state = run.join("state");
+            std::fs::create_dir_all(&state).unwrap();
+            let member = root.join(r"bin\pi.exe");
+            let files = ["bin/engram.exe", "bin/pi.exe", "bin/private-storage.exe", "daemon/cli.mjs",
+                "daemon/node_modules/gentle-pi/bin/gentle-shell.mjs", "node/node.exe", "ui/index.html"];
+            let entries = files.map(|name| {
+                let bytes = if name == "node/node.exe" { helper } else { b"inert" };
+                let path = root.join(name);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                File::options().create_new(true).write(true).open(&path).unwrap()
+                    .write_all(bytes).unwrap();
+                format!(r#"{{"path":"{name}","type":"file","size":{},"sha256":"{:x}"}}"#,
+                    bytes.len(), Sha256::digest(&bytes))
+            });
+            let raw = format!(r#"{{"schema":1,"target":"windows-x64","shell":"5.0.0","pi":"1.6.0","files":[{}]}}"#,
+                entries.join(","));
+            let tree = PinnedTree::admit(&root, raw.as_bytes(), Sha256::digest(&raw).into()).unwrap();
+            let plan = LaunchPlan::new(tree, state.clone(), NonZeroU16::new(4317).unwrap()).unwrap();
+            (plan, state, member)
+        }
+
+        fn write_open(path: &Path) -> io::Result<File> {
+            std::fs::OpenOptions::new().access_mode(FILE_WRITE_DATA).share_mode(7).open(path)
+        }
+
+        #[test]
+        #[ignore = "requires restricted Windows bridge QA build; launches embedded inert fixture"]
+        fn exact_split_bridge_publishes_in_plan_state_and_owns_tree_until_confirmed_exit() {
+            let (plan, state, member) = fixture();
+            assert!(!state.join("daemon.pid").exists());
+            let (_parent, endpoint) = crate::app_channel::windows::channel_pair().unwrap();
+            let mut child = (crate::daemon::windows::spawn_explicit)(plan,
+                open_private_log(&state).unwrap(), &endpoint).unwrap();
+            assert!(state.join("daemon.pid").is_file());
+            assert_eq!(write_open(&member).unwrap_err().raw_os_error(), Some(32));
+            assert_eq!(unsafe { WaitForSingleObject(child.process.as_raw_handle(), 5000) }, WAIT_OBJECT_0);
+            assert!(child.wait().unwrap().success());
+            drop(child);
+            drop(write_open(&member).unwrap());
+            // Leave the isolated test record and tree intact.
+            assert!(state.join("daemon.pid").is_file());
+        }
+
+        #[test]
+        #[ignore = "requires restricted Windows bridge QA build; launches embedded inert fixture"]
+        fn exact_split_bridge_quarantine_retains_tree_and_refuses_another_reservation() {
+            static SLOT: SplitSlot = SplitSlot::new();
+            use std::io::{Read, Seek, Write};
+            let (plan, state, member) = fixture();
+            let mut record = File::options().create_new(true).read(true).write(true)
+                .open(state.join("daemon.pid")).unwrap();
+            record.write_all(b"existing inert record").unwrap();
+            let (_parent, endpoint) = crate::app_channel::windows::channel_pair().unwrap();
+            let failure = spawn_inner(SpawnInput::Split(plan, &SLOT), open_private_log(&state).unwrap(),
+                &endpoint, Faults { query: true, ..Faults::default() }).unwrap_err();
+            assert_eq!(failure.primary.raw_os_error(), Some(ERROR_FILE_EXISTS as i32));
+            assert!(failure.cleanup.unwrap().to_string().contains("injected job query failure"));
+            let child = failure.unfinished.expect("publish failure must return the unfinished owner");
+            assert_eq!(write_open(&member).unwrap_err().raw_os_error(), Some(32));
+            assert!(child.status().unwrap().is_some()); // Root exited, but the Job query is unconfirmed.
+            drop(child);
+            assert_eq!(write_open(&member).unwrap_err().raw_os_error(), Some(32));
+            // The private-log helper reprotected the directory. Use the original
+            // fixture handle to read its inert bytes, rather than reopening by path.
+            record.rewind().unwrap();
+            let mut bytes = Vec::new();
+            record.read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, b"existing inert record");
+            let (other, _, other_member) = fixture();
+            assert!(SLOT.reserve(other).is_err());
+            drop(write_open(&other_member).unwrap());
+        }
+    }
+
     #[derive(Debug)]
     pub(crate) struct SpawnFailure {
         pub(crate) primary: io::Error,
@@ -490,25 +901,50 @@ mod native {
     }
     pub(crate) fn spawn(spec: &LaunchSpec, log: File, channel: &ChildEndpoint, data_dir: &Path) -> Result<WindowsChild, SpawnFailure> {
         #[cfg(test)]
-        { spawn_inner(spec, log, channel, data_dir, Faults::default()) }
+        #[cfg(test)]
+        { spawn_inner(SpawnInput::Bundled(spec, data_dir), log, channel, Faults::default()) }
         #[cfg(not(test))]
-        { spawn_inner(spec, log, channel, data_dir) }
+        { spawn_inner(SpawnInput::Bundled(spec, data_dir), log, channel) }
+    }
+    /// Consumes the sealed plan, using its private data root for both cwd and the record.
+    #[cfg(target_arch = "x86_64")]
+    #[allow(dead_code)] // No production selector.
+    pub(in crate::daemon) fn spawn_explicit(plan: LaunchPlan, log: File,
+        channel: &ChildEndpoint) -> Result<WindowsChild, SpawnFailure> {
+        #[cfg(test)]
+        { spawn_inner(SpawnInput::Split(plan, &SPLIT_SLOT), log, channel, Faults::default()) }
+        #[cfg(not(test))]
+        { spawn_inner(SpawnInput::Split(plan, &SPLIT_SLOT), log, channel) }
     }
     #[cfg(test)]
     fn spawn_with_faults(spec: &LaunchSpec, log: File, channel: &ChildEndpoint, faults: Faults) -> Result<WindowsChild, SpawnFailure> {
         // Existing fault cases fail before publication; no fixture record is created.
-        spawn_inner(spec, log, channel, Path::new(""), faults)
+        spawn_inner(SpawnInput::Bundled(spec, Path::new("")), log, channel, faults)
     }
-    fn spawn_inner(spec: &LaunchSpec, log: File, channel: &ChildEndpoint, data_dir: &Path, #[cfg(test)] faults: Faults) -> Result<WindowsChild, SpawnFailure> {
-        let application = application(spec)?;
-        let mut command = command_line(&spec.program, &spec.args)?;
-        // The CLI must read this exact record directory, not infer another profile.
-        // Only the non-secret path is passed; nonce/capability remain file-only.
-        let mut launch = spec.clone();
-        let directory = data_dir.to_str().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput,
-            "Windows stop record directory must be Unicode"))?;
-        launch.envs.push(("GENTLE_DOT_DATA_DIR".into(), directory.into()));
-        let mut env = environment(&launch)?;
+    fn spawn_inner(input: SpawnInput<'_>, log: File, channel: &ChildEndpoint, #[cfg(test)] faults: Faults) -> Result<WindowsChild, SpawnFailure> {
+        #[cfg(windows_owner_observation)]
+        let mut trace = match &input {
+            SpawnInput::Bundled(..) => Trace::open(),
+            #[cfg(target_arch = "x86_64")]
+            SpawnInput::Split(..) => None,
+        };
+        #[cfg(target_arch = "x86_64")]
+        let mut split = None;
+        let (prepared, data_dir) = match input {
+            SpawnInput::Bundled(spec, data_dir) => (ChildContext::Bundled(spec)
+                .prepare(data_dir, std::env::vars_os)?, Cow::Borrowed(data_dir)),
+            #[cfg(target_arch = "x86_64")]
+            SpawnInput::Split(plan, slot) => {
+                let data_dir = plan.data_dir();
+                let prepared = ChildContext::Explicit(ExplicitChildContext {
+                    program: plan.program(), args: plan.args(), cwd: data_dir, env: plan.env(),
+                }).prepare(data_dir, std::iter::empty)?;
+                let data_dir = Cow::Owned(data_dir.to_owned());
+                split = Some(slot.reserve(plan)?);
+                (prepared, data_dir)
+            }
+        };
+        let PreparedChild { application, mut command, cwd, mut env } = prepared;
         let transfers = Transfers::new(&log, channel)?;
         let mut handles = transfers.handles();
         let mut reserved = transfers.bootstrap()?;
@@ -526,25 +962,37 @@ mod native {
         let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
         // SAFETY: all UTF-16, packed descriptor, exact handle-list and attribute buffers
         // remain stable through this call. Null cwd preserves the existing inherited cwd.
-        unsafe {
+        let creation = unsafe {
             checked(CreateProcessW(application.as_ptr(), command.as_mut_ptr(), null(), null(), 1,
-                DAEMON_CREATION_FLAGS,
-                env.as_mut_ptr().cast(), null(), &startup.StartupInfo, &mut process))?;
+                DAEMON_CREATION_FLAGS, env.as_mut_ptr().cast(),
+                cwd.as_ref().map_or(null(), |path| path.as_ptr()), &startup.StartupInfo, &mut process))
+        };
+        #[cfg(windows_owner_observation)]
+        if let Some(trace) = trace.as_mut() {
+            trace.preparation_failure = creation.as_ref().err().map(|_| Event::CreateFailed);
         }
+        creation?;
         // CreateProcessW success guarantees these two handles. Acquire both immediately:
         // no fallible operation may strand the created process before its owner exists.
         let mut child = WindowsChild {
             process: unsafe { OwnedHandle::from_raw_handle(process.hProcess) },
             thread: Some(unsafe { OwnedHandle::from_raw_handle(process.hThread) }), job,
+            #[cfg(target_arch = "x86_64")]
+            split: split.map(|mut guard| { guard.uncertain = true; guard }),
             pid: process.dwProcessId, assigned: false, failed: false, established: false, record: None, stop: None, stopping: false,
             force_requested: false, completed: false,
+            #[cfg(windows_owner_observation)] trace,
             #[cfg(test)] faults,
         };
+        #[cfg(windows_owner_observation)]
+        let mut failure_event = Event::AssignFailed;
         let setup = (|| -> io::Result<()> {
             #[cfg(test)]
             if child.faults.assignment { return Err(io::Error::other("injected assignment failure")); }
             unsafe { checked(AssignProcessToJobObject(child.job.as_raw_handle(), child.process.as_raw_handle()))?; }
             child.assigned = true;
+            #[cfg(windows_owner_observation)]
+            { failure_event = Event::VerifyFailed; }
             #[cfg(test)]
             if child.faults.verification { return Err(io::Error::other("injected verification failure")); }
             let mut belongs = 0;
@@ -554,9 +1002,15 @@ mod native {
             }
             // No execution until the exact suspended launch has a protected v1 record.
             // The publication helper installs ownership immediately after CREATE_NEW.
-            child.publish_record(data_dir)?;
+            #[cfg(windows_owner_observation)]
+            { failure_event = Event::RecordFailed; }
+            child.publish_record(&data_dir)?;
             // Name this app as the Job's only handle holder before the daemon can run.
-            publish_owner(data_dir, &child.record.as_ref().unwrap().expected)?;
+            #[cfg(windows_owner_observation)]
+            { failure_event = Event::PublishFailed; }
+            publish_owner(&data_dir, &child.record.as_ref().unwrap().expected)?;
+            #[cfg(windows_owner_observation)]
+            { failure_event = Event::ResumeFailed; }
             let previous = unsafe { ResumeThread(child.thread.as_ref().unwrap().as_raw_handle()) };
             if previous == u32::MAX { return Err(io::Error::last_os_error()); }
             if previous != 1 { return Err(io::Error::other("unexpected daemon suspension state")); }
@@ -564,6 +1018,10 @@ mod native {
             drop(child.thread.take());
             Ok(())
         })();
+        #[cfg(windows_owner_observation)]
+        if let Some(trace) = child.trace.as_ref() {
+            trace.launch(if setup.is_ok() { Event::Resumed } else { failure_event });
+        }
         if let Err(primary) = setup {
             child.failed = true;
             return match child.shutdown_owned(Duration::ZERO) {
@@ -786,6 +1244,126 @@ mod native {
     /// repairs an existing object. Every missing component gets a literal-user DACL.
     pub(crate) fn ensure_record_directory(data_dir: &Path) -> io::Result<()> {
         record_ancestry(&data_dir.join(super::super::PID_FILE), true).map(drop)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    use super::super::startup_readiness::Profile;
+
+    #[cfg(target_arch = "x86_64")]
+    fn startup_metadata(path: &Path, directory: bool) -> io::Result<OwnedHandle> {
+        let name = wide(path.as_os_str())?;
+        let handle = owned(unsafe { CreateFileW(name.as_ptr(), FILE_READ_ATTRIBUTES | READ_CONTROL,
+            FILE_SHARE_READ, null(), OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, null_mut()) })?;
+        let info = file_info(handle.as_raw_handle())?;
+        if (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0) != directory
+            || (!directory && info.nNumberOfLinks != 1) {
+            return Err(unsafe_record());
+        }
+        Ok(handle)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn startup_owner(handle: &OwnedHandle, expected: PSID) -> io::Result<bool> {
+        let mut owner = null_mut();
+        let mut descriptor = null_mut();
+        let result = unsafe { GetSecurityInfo(handle.as_raw_handle(), SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION, &mut owner, null_mut(), null_mut(), null_mut(), &mut descriptor) };
+        if result != ERROR_SUCCESS { return Err(io::Error::from_raw_os_error(result as i32)); }
+        let _snapshot = SecuritySnapshot(descriptor);
+        if descriptor.is_null() || owner.is_null() || unsafe { IsValidSid(owner) } == 0 {
+            return Err(unsafe_record());
+        }
+        Ok(unsafe { EqualSid(owner, expected) } != 0)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub(in crate::daemon) fn startup_profile(data_dir: &Path) -> Profile {
+        let Ok(sid) = current_user_sid() else { return Profile::Unknown };
+        startup_profile_for(data_dir, sid.as_ptr() as PSID)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn startup_profile_for(data_dir: &Path, expected: PSID) -> Profile {
+        let uncertain = |error: io::Error| match error.kind() {
+            io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput => Profile::Unsafe,
+            _ => Profile::Unknown,
+        };
+        // Pin the existing parents using the launch guard without mkdir. Only
+        // absence of the final directory beneath verified parents means `new`.
+        let _parents = match record_ancestry(data_dir, false) {
+            Ok(parents) => parents,
+            Err(error) => return uncertain(error),
+        };
+        let root = match startup_metadata(data_dir, true) {
+            Ok(root) => root,
+            Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => return Profile::New,
+            Err(error) => return uncertain(error),
+        };
+        match startup_owner(&root, expected) {
+            Ok(true) => {},
+            Ok(false) => return Profile::OwnerMismatch,
+            Err(error) => return uncertain(error),
+        }
+        let mut outcome = Profile::NoConflictFound;
+        // Retain verified handles until the sample ends; never open for data access.
+        let mut sample = Vec::new();
+        for name in ["token", "connectors.json", "state.json"] {
+            match startup_metadata(&data_dir.join(name), false).and_then(|file| {
+                startup_owner(&file, expected).map(|owned| (file, owned))
+            }) {
+                Ok((file, true)) => sample.push(file),
+                Ok((_, false)) => return Profile::OwnerMismatch,
+                Err(error) => match uncertain(error) {
+                    Profile::Unsafe => return Profile::Unsafe,
+                    _ => outcome = Profile::Unknown,
+                },
+            }
+        }
+        outcome
+    }
+
+    #[cfg(all(test, target_arch = "x86_64"))]
+    #[test]
+    fn startup_readiness_checks_only_owned_fixture_metadata() {
+        let sample = std::env::temp_dir().join(format!("dot-readiness-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let sid = current_user_sid().unwrap();
+        let user = sid.as_ptr() as PSID;
+        let descriptor = Descriptor::for_user(user).unwrap();
+        let make_dir = |path: &Path| {
+            let name = wide(path.as_os_str()).unwrap();
+            unsafe { checked(CreateDirectoryW(name.as_ptr(), &descriptor.attributes())).unwrap(); }
+        };
+        make_dir(&sample);
+        let root = sample.join("profile");
+        assert_eq!(startup_profile(&root), Profile::New);
+        assert!(!root.exists());
+        make_dir(&root);
+        assert_eq!(startup_profile(&root), Profile::Unknown);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        let mut foreign = null_mut();
+        let world = wide(std::ffi::OsStr::new("S-1-1-0")).unwrap(); // Everyone
+        unsafe { checked(ConvertStringSidToSidW(world.as_ptr(), &mut foreign)).unwrap(); }
+        let _foreign_owner = SecuritySnapshot(foreign);
+        assert_eq!(startup_profile_for(&root, foreign), Profile::OwnerMismatch);
+        let names = ["token", "connectors.json", "state.json"];
+        for name in names {
+            let mut file = private_file(&root.join(name), GENERIC_WRITE, CREATE_NEW, &descriptor).unwrap();
+            std::io::Write::write_all(&mut file, b"inert").unwrap();
+        }
+        assert_eq!(startup_profile(&root), Profile::NoConflictFound);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), names.len());
+        for name in names { assert_eq!(std::fs::read(root.join(name)).unwrap(), b"inert"); }
+        std::fs::hard_link(root.join("token"), sample.join("linked-token")).unwrap();
+        assert_eq!(startup_profile(&root), Profile::Unsafe);
+        assert_eq!(std::fs::read(root.join("token")).unwrap(), b"inert");
+        let unsafe_root = sample.join("unsafe");
+        make_dir(&unsafe_root);
+        make_dir(&unsafe_root.join("state.json"));
+        assert_eq!(startup_profile(&unsafe_root), Profile::Unsafe);
+        assert_eq!(std::fs::read_dir(&unsafe_root).unwrap().count(), 1);
+        // Retain only the inert, current-user-owned fixture under the test app's temp root.
     }
 
     fn read_protected(file: &mut File, max: usize) -> io::Result<(Vec<u8>, FileIdentity)> {
@@ -1488,6 +2066,173 @@ mod native {
         fn only_a_complete_single_frame_is_accepted() {
             assert!(require_frame_size(36).is_ok());
             for count in [0, 1, 35, 37, u32::MAX] { assert!(require_frame_size(count).is_err()); }
+        }
+    }
+
+    /// Only for an exclusively new preview directory, never adoption or repair.
+    #[cfg(feature = "local-preview")]
+    pub(crate) fn create_private_preview_directory(path: &Path) -> io::Result<()> {
+        let sid = current_user_sid()?;
+        let descriptor = Descriptor::for_user(sid.as_ptr() as PSID)?;
+        let name = wide(path.as_os_str())?;
+        let attributes = descriptor.attributes();
+        unsafe { checked(CreateDirectoryW(name.as_ptr(), &attributes)) }
+    }
+
+    /// Give only a newly created preview config explicit, protected TokenUser permissions.
+    #[cfg(feature = "local-preview")]
+    pub(crate) fn create_private_preview_config(path: &Path) -> io::Result<File> {
+        let sid = current_user_sid()?;
+        let descriptor = Descriptor::for_user(sid.as_ptr() as PSID)?;
+        private_file(path, GENERIC_WRITE, CREATE_NEW, &descriptor)
+    }
+
+    #[cfg(all(test, feature = "local-preview"))]
+    mod preview_directory_tests {
+        use super::*;
+        use std::cell::Cell;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        fn user_owns(path: &Path, expected: PSID) -> io::Result<bool> {
+            let name = wide(path.as_os_str())?;
+            let handle = owned(unsafe { CreateFileW(name.as_ptr(), READ_CONTROL,
+                FILE_SHARE_READ | FILE_SHARE_WRITE, null(), OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, null_mut()) })?;
+            let mut owner = null_mut();
+            let mut descriptor = null_mut();
+            let result = unsafe { GetSecurityInfo(handle.as_raw_handle(), SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION, &mut owner, null_mut(), null_mut(), null_mut(), &mut descriptor) };
+            if result != ERROR_SUCCESS { return Err(io::Error::from_raw_os_error(result as i32)); }
+            let _snapshot = SecuritySnapshot(descriptor);
+            Ok(!owner.is_null() && unsafe { EqualSid(owner, expected) } != 0)
+        }
+
+        fn config_fixture(label: &str) -> (crate::preview::OwnedRoot, PathBuf) {
+            let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let parent = std::env::temp_dir().join(format!("dot-preview-config-{label}-{}-{nonce}", std::process::id()));
+            std::fs::create_dir(&parent).unwrap();
+            let root = parent.join("gentle-dot-preview-config");
+            let preview = crate::preview::prepare(crate::preview::IDENTIFIER,
+                Some(crate::preview::PRODUCT_NAME), false, 0, Some(&root),
+                |path| create_private_preview_directory(path).map_err(|error| error.to_string()),
+                |path| crate::windows_process::private_directory(path).map_err(|error| error.to_string()),
+            ).unwrap();
+            (preview, parent)
+        }
+
+        fn config_access_masks(path: &Path) -> Vec<u32> {
+            let file = File::open(path).unwrap();
+            let sid = current_user_sid().unwrap();
+            validate_record_security(file.as_raw_handle(), sid.as_ptr() as PSID).unwrap();
+            let mut acl = null_mut();
+            let mut descriptor = null_mut();
+            let result = unsafe { GetSecurityInfo(file.as_raw_handle(), SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION, null_mut(), null_mut(), &mut acl, null_mut(), &mut descriptor) };
+            assert_eq!(result, ERROR_SUCCESS);
+            let _snapshot = SecuritySnapshot(descriptor);
+            assert!(!acl.is_null());
+            (0..unsafe { (*acl).AceCount }).map(|index| {
+                let mut raw = null_mut();
+                unsafe {
+                    checked(GetAce(acl, index as u32, &mut raw)).unwrap();
+                    (*raw.cast::<ACCESS_ALLOWED_ACE>()).Mask
+                }
+            }).collect()
+        }
+
+        #[test]
+        fn preview_config_remains_private_and_readable_after_log_open() {
+            let (preview, parent) = config_fixture("read");
+            let config = crate::config::load_preview_config(&preview).unwrap();
+            assert_eq!(config.port, 17417);
+            let path = preview.data_dir().join("config.json");
+            let before = std::fs::read(&path).unwrap();
+            assert_eq!(before, b"{\n  \"memory\": \"private\"\n}\n");
+            drop(crate::daemon::open_private_log(preview.data_dir()).unwrap());
+            assert_eq!(std::fs::read(&path).unwrap(), before,
+                "log setup must leave the preview config readable and unchanged");
+            assert_eq!(config_access_masks(&path), vec![0x001f01ff],
+                "config must retain one explicit, protected full-access ACE for TokenUser only");
+            std::fs::remove_dir_all(parent).unwrap();
+        }
+
+        #[test]
+        fn preview_config_refuses_existing_file_without_changing_it() {
+            use std::io::Write as _;
+            let (preview, parent) = config_fixture("existing");
+            let path = preview.data_dir().join("config.json");
+            let sid = current_user_sid().unwrap();
+            let descriptor = Descriptor::for_user(sid.as_ptr() as PSID).unwrap();
+            let mut file = private_file(&path, GENERIC_WRITE, CREATE_NEW, &descriptor).unwrap();
+            let before = b"{\"sentinel\":true,\"memory\":\"private\"}\n";
+            file.write_all(before).unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+            let security = config_access_masks(&path);
+            let count = std::fs::read_dir(preview.data_dir()).unwrap().count();
+            assert!(crate::config::load_preview_config(&preview).is_err(),
+                "fresh preview initialization must not adopt or rewrite an existing file");
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(config_access_masks(&path), security);
+            assert_eq!(std::fs::read_dir(preview.data_dir()).unwrap().count(), count);
+            std::fs::remove_dir_all(parent).unwrap();
+        }
+
+        #[test]
+        fn preview_prepares_windows_and_webview_directories_before_first_use() {
+            let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let parent = std::env::temp_dir().join(format!("dot-preview-profile-{}-{nonce}", std::process::id()));
+            std::fs::create_dir(&parent).unwrap();
+            let root = parent.join("gentle-dot-preview-profile");
+            let preview = crate::preview::prepare(crate::preview::IDENTIFIER,
+                Some(crate::preview::PRODUCT_NAME), false, 0, Some(&root),
+                |path| create_private_preview_directory(path).map_err(|error| error.to_string()),
+                |path| crate::windows_process::private_directory(path).map_err(|error| error.to_string()),
+            ).unwrap();
+            preview.prepare_environment(
+                |path| create_private_preview_directory(path).map_err(|error| error.to_string()),
+                |path| crate::windows_process::private_directory(path).map_err(|error| error.to_string()),
+            ).unwrap();
+            let sid = current_user_sid().unwrap();
+            for path in [root.join("home").join("AppData").join("Roaming"),
+                root.join("home").join("AppData").join("Local"), preview.webview_dir().join("EBWebView")] {
+                // Model a Windows consumer's ordinary first-use mkdir, without repairing ownership.
+                std::fs::create_dir_all(&path).unwrap();
+                assert!(user_owns(&path, sid.as_ptr() as PSID).unwrap(),
+                    "runtime profile directory must already belong to TokenUser");
+            }
+        }
+
+        #[test]
+        fn preview_directories_use_token_user_and_reject_existing_root() {
+            let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let parent = std::env::temp_dir().join(format!("dot-preview-owner-{}-{nonce}", std::process::id()));
+            std::fs::create_dir(&parent).unwrap();
+            let root = parent.join("gentle-dot-preview-owner");
+            let calls = Cell::new(0);
+            let admit = || crate::preview::prepare(crate::preview::IDENTIFIER,
+                Some(crate::preview::PRODUCT_NAME), false, 0, Some(&root),
+                |path| create_private_preview_directory(path).map_err(|error| error.to_string()), |path| {
+                    calls.set(calls.get() + 1);
+                    crate::windows_process::private_directory(path).map_err(|error| error.to_string())
+                });
+            let preview = admit().unwrap();
+            preview.prepare_environment(
+                |path| create_private_preview_directory(path).map_err(|error| error.to_string()),
+                |path| crate::windows_process::private_directory(path).map_err(|error| error.to_string()),
+            ).unwrap();
+            let sid = current_user_sid().unwrap();
+            assert!(user_owns(&root, sid.as_ptr() as PSID).unwrap(), "fresh preview root must belong to TokenUser");
+            assert!(user_owns(&root.join("home"), sid.as_ptr() as PSID).unwrap(), "fresh preview home must belong to TokenUser");
+            let sentinel = root.join("sentinel");
+            std::fs::write(&sentinel, b"unchanged").unwrap();
+            let entries = std::fs::read_dir(&root).unwrap().count();
+            let before = calls.get();
+            assert!(admit().is_err());
+            assert_eq!(calls.get(), before, "existing root must not reach the protection callback");
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"unchanged");
+            assert_eq!(std::fs::read_dir(&root).unwrap().count(), entries);
+            assert!(user_owns(&root, sid.as_ptr() as PSID).unwrap());
         }
     }
 

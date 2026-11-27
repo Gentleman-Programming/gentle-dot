@@ -1,8 +1,8 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { runtimeDir, runtimeModules } from "./runtime.ts";
 
 export interface DotConfig {
@@ -25,6 +25,25 @@ export interface DotConfig {
 
 const DEFAULT_UI_DIR = fileURLToPath(new URL("../../ui/dist/app", import.meta.url));
 
+/** Node's CLI uses JS realpath, which cannot resolve a Windows verbatim entry. */
+export function engineEntryPath(path: string): string {
+	if (process.platform !== "win32" || !path.startsWith("\\\\?\\")) return path;
+	try {
+		const ordinary = fileURLToPath(pathToFileURL(path));
+		// Namespace-only trailing dots/spaces have ambiguous ordinary Win32 aliases.
+		// Even where Node preserves them, do not export that spelling as ordinary.
+		// Also check JS realpath (the CLI resolver), not just two native spellings.
+		if (
+			!ordinary.startsWith("\\\\?\\") &&
+			!ordinary.split("\\").some((component) => /[. ]$/.test(component)) &&
+			realpathSync.native(realpathSync(ordinary)) === realpathSync.native(path)
+		) return ordinary;
+	} catch {
+		// Conversion, missing targets, and unrepresentable aliases all fail closed.
+	}
+	throw new Error(`The bundled assistant engine has no equivalent Node entry path: ${path}`);
+}
+
 /**
  * The memory mode (SW9): `shared` talks to the user's **global** Engram (the default), and
  * `private` runs a memory of the assistant's own under `<dataDir>/home/.engram` (W25).
@@ -39,7 +58,7 @@ export function bundledGentleShell(env: NodeJS.ProcessEnv = process.env): string
 	const runtime = runtimeDir(env);
 	if (runtime) {
 		const bin = join(runtimeModules(runtime), "gentle-pi", "bin", "gentle-shell.mjs");
-		if (existsSync(bin)) return bin;
+		if (existsSync(bin)) return engineEntryPath(bin);
 		throw new Error(`The bundled assistant engine is missing from ${runtimeModules(runtime)}.`);
 	}
 	const require = createRequire(import.meta.url);
@@ -51,9 +70,9 @@ export function bundledGentleShell(env: NodeJS.ProcessEnv = process.env): string
 }
 
 /**
- * Disable launch-time provisioning only for the installed Windows default engine.
- * GENTLE_DOT_RUNTIME is supplied by the desktop runtime launcher; matching the
- * executable and bundled script also leaves programmatic custom agents alone.
+ * Keep Dot's bundled RPC engine headless, without changing explicit custom agents.
+ * Installed Windows defaults also retain both launch-time provisioning gates;
+ * source and Unix launches keep their existing provisioning behavior.
  */
 export function agentSpawnEnv(
 	command: string,
@@ -63,22 +82,36 @@ export function agentSpawnEnv(
 ): NodeJS.ProcessEnv {
 	const runtime = runtimeDir(env);
 	if (
-		platform !== "win32" ||
-		!runtime ||
 		command !== process.execPath ||
 		env.GENTLE_DOT_AGENT_BIN ||
 		env.GENTLE_DOT_AGENT_SCRIPT ||
-		env.GENTLE_DOT_AGENT_ARGS ||
-		args[0] !== join(runtimeModules(runtime), "gentle-pi", "bin", "gentle-shell.mjs")
+		env.GENTLE_DOT_AGENT_ARGS
 	)
 		return env;
-	return {
-		...env,
-		// gentle-shell's first-run companion provisioning gate.
-		GENTLE_SHELL_NO_AUTO_SETUP: "1",
-		// Its missing package-local gentle-ai self-heal and installer gate.
-		GENTLE_PI_SKIP_GENTLE_AI_INSTALL: "1",
-	};
+	const windowsRuntime = platform === "win32" && runtime !== undefined;
+	if (!windowsRuntime && env.GENTLE_SHELL_INTERACTIVE_HOST === undefined) return env;
+
+	let bundled: string;
+	if (runtime) {
+		bundled = engineEntryPath(join(runtimeModules(runtime), "gentle-pi", "bin", "gentle-shell.mjs"));
+	} else {
+		try {
+			bundled = bundledGentleShell(env);
+		} catch {
+			// A programmatic custom launch does not require a bundled engine to be installed.
+			return env;
+		}
+	}
+	if (args[0] !== bundled) return env;
+
+	const child = { ...env };
+	delete child.GENTLE_SHELL_INTERACTIVE_HOST;
+	if (windowsRuntime) {
+		// Retain both independent provisioning gates on installed Windows runtimes only.
+		child.GENTLE_SHELL_NO_AUTO_SETUP = "1";
+		child.GENTLE_PI_SKIP_GENTLE_AI_INSTALL = "1";
+	}
+	return child;
 }
 
 /** The web UI: the runtime's `ui/` in an installed app, the UI package's build otherwise. */

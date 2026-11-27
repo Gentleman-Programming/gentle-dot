@@ -269,8 +269,9 @@ export interface InheritedChannelOptions extends AppChannelOptions {
  * holding it could act as the app.
  */
 export function inheritedAppSocket(options: InheritedChannelOptions = {}): Socket | undefined {
-	// No equivalent Windows transport/exclusion is established yet. Do not inspect or wrap a
-	// Windows handle as a Unix socket; acquisition stays unavailable, independently of the protocol.
+	// Windows acquisition belongs exclusively to WindowsAppChannel's native ownership
+	// transfer in the CLI. Neither Unix socket wrapping nor the legacy stdio selector
+	// can establish that admission.
 	if (process.platform === "win32") return undefined;
 	const fd = options.fd ?? APP_FD;
 	if (process.env.NODE_CHANNEL_FD === String(fd)) return undefined;

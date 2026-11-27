@@ -1,18 +1,21 @@
 // Connector secrets on a server (S25.8): no desktop app, so the daemon keeps them in a file of its
 // own, each one encrypted with AES-256-GCM under a key that only the daemon's environment holds.
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { FileSecretSource, NO_SECRETS_KEY, parseSecretsKey } from "../src/secret-file.ts";
 import { SecretsUnavailableError } from "../src/secret-source.ts";
+import { ensurePrivateDir } from "../src/isolation.ts";
 import { tempDir } from "./helpers.ts";
-import { expectPosixMode } from "./support/posix-modes.ts";
+import { inspectWindowsAcl } from "./windows-acl-oracle.ts";
 
 const SECRET = "xoxb-plain-bot-token-0123456789";
 
 function store(key: Buffer | undefined) {
-	const file = join(tempDir(), "secrets.enc.json");
+	const directory = tempDir();
+	ensurePrivateDir(directory);
+	const file = join(directory, "secrets.enc.json");
 	return { file, key, source: new FileSecretSource({ file, key }) };
 }
 
@@ -26,7 +29,17 @@ describe("encrypted secrets file", () => {
 		expect(text).not.toContain(SECRET);
 		expect(text).not.toContain(Buffer.from(SECRET).toString("base64"));
 		expect(text).not.toContain("a".repeat(64));
-		expectPosixMode(file, 0o600);
+		if (process.platform === "win32") {
+			const acl = inspectWindowsAcl(file);
+			expect(acl.owner).toBe(acl.currentSid);
+			expect(acl.protected).toBe(true);
+			expect(acl.rules.map((rule) => rule.sid)).toEqual(expect.arrayContaining([acl.currentSid, "S-1-5-18"]));
+			expect(acl.rules).toHaveLength(2);
+			expect(acl.rules.every((rule) => rule.type === "Allow" && !rule.inherited)).toBe(true);
+			expect(acl.rules.map((rule) => rule.sid)).not.toContain("S-1-1-0");
+		} else {
+			expect(statSync(file).mode & 0o777).toBe(0o600);
+		}
 		// Every record has its own nonce: the same secret twice is two different ciphertexts.
 		await source.put("connector/discord/bot", SECRET);
 		const records = JSON.parse(readFileSync(file, "utf8")).records as Record<

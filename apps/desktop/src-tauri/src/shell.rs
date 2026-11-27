@@ -18,6 +18,7 @@ use crate::secure_store::{self, SecretStore};
 use crate::shortcut;
 use crate::status::{is_template, tray_status, TrayGlyph};
 use crate::voice::app as voice;
+use crate::voice::speech_bridge as speech;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -136,6 +137,9 @@ struct RoseMenuItem(MenuItem<tauri::Wry>);
 /// The tray's "Open" item, whose accelerator label follows the shortcut (S33.3).
 struct OpenMenuItem(MenuItem<tauri::Wry>);
 
+/// Always present, disabled until the Dot reports connected daemon features.
+struct NewConversationMenuItem(MenuItem<tauri::Wry>);
+
 /// On native Wayland the desktop binds `gentle-dot --toggle` itself.
 const DESKTOP_OWNS_SHORTCUTS: &str =
     "On this desktop, global shortcuts are set in the system keyboard settings: bind `gentle-dot --toggle` there.";
@@ -235,6 +239,16 @@ async fn connector_command(app: AppHandle, client_id: String, message: serde_jso
     })
     .await
     .map_err(err)?
+}
+
+#[tauri::command]
+async fn startup_readiness(caller: WebviewWindow) -> CommandResult<Option<daemon::StartupReadiness>> {
+    if caller.label() != PANEL {
+        return Err("Startup readiness is available only in the panel.".into());
+    }
+    let daemon = caller.state::<Shell>().daemon.clone();
+    tauri::async_runtime::spawn_blocking(move || daemon.startup_readiness()).await
+        .map_err(|_| "Startup readiness is unavailable.".into())
 }
 
 /// Waits until the daemon this app launched answers `/health`, then returns its URLs and token.
@@ -367,6 +381,8 @@ fn shortcut_get(app: AppHandle) -> ShortcutInfo {
 /// Binds, saves, and shows a new panel shortcut at once (S33.3), or says why it cannot.
 #[tauri::command]
 async fn shortcut_set(app: AppHandle, shortcut: String) -> CommandResult<ShortcutChoice> {
+    #[cfg(feature = "local-preview")]
+    return Err(crate::preview::DISABLED.into());
     tauri::async_runtime::spawn_blocking(move || {
         let shell = app.state::<Shell>();
         if !shell.places_windows {
@@ -410,6 +426,10 @@ fn memory_get(app: AppHandle) -> MemoryInfo {
 /// error the panel shows; the mode stays saved, so the next start of the assistant uses it.
 #[tauri::command]
 async fn memory_set(app: AppHandle, memory: String) -> CommandResult<MemoryInfo> {
+    #[cfg(feature = "local-preview")]
+    if memory == "shared" {
+        return Err(crate::preview::DISABLED.into());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let mode = config::MemoryMode::parse(&memory)?;
         let shell = app.state::<Shell>();
@@ -466,16 +486,22 @@ struct ShortcutHost<'a> {
 
 impl shortcut::Host for ShortcutHost<'_> {
     fn bind_toggle(&self, shortcut: &str) -> Result<(), String> {
+        #[cfg(feature = "local-preview")]
+        return Err(crate::preview::DISABLED.into());
         self.app.global_shortcut().on_shortcut(shortcut, toggle_on_press).map_err(err)
     }
 
     fn unbind(&self, shortcut: &str) {
+        #[cfg(feature = "local-preview")]
+        return;
         if let Err(error) = self.app.global_shortcut().unregister(shortcut) {
             eprintln!("gentle-dot: cannot release shortcut `{shortcut}`: {error}");
         }
     }
 
     fn save(&self, shortcut: &str) -> Result<(), String> {
+        #[cfg(feature = "local-preview")]
+        return Err(crate::preview::DISABLED.into());
         config::save_shortcut(&self.config_file, shortcut)
     }
 
@@ -500,12 +526,26 @@ fn label_tray_open(app: &AppHandle, shortcut: &str) {
 }
 
 #[tauri::command]
-fn set_dot_state(app: AppHandle, state: String) -> CommandResult {
+fn set_dot_state(
+    app: AppHandle,
+    state: String,
+    conversations_enabled: Option<bool>,
+) -> CommandResult {
     let status = tray_status(&state).ok_or_else(|| format!("unknown state `{state}`"))?;
     let tray = app.tray_by_id(TRAY).ok_or("tray icon is missing")?;
-    tray.set_tooltip(Some(&status.tooltip)).map_err(err)?;
+    #[cfg(feature = "local-preview")]
+    let tooltip = format!("{} — {}", crate::preview::PRODUCT_NAME, status.tooltip);
+    #[cfg(not(feature = "local-preview"))]
+    let tooltip = status.tooltip;
+    tray.set_tooltip(Some(&tooltip)).map_err(err)?;
     tray.set_icon(Some(Image::from_bytes(status.glyph.image(Os::CURRENT)).map_err(err)?)).map_err(err)?;
-    tray.set_icon_as_template(is_template(Os::CURRENT)).map_err(err)
+    tray.set_icon_as_template(is_template(Os::CURRENT)).map_err(err)?;
+    if let Some(enabled) = conversations_enabled {
+        if let Some(item) = app.try_state::<NewConversationMenuItem>() {
+            item.0.set_enabled(enabled).map_err(err)?;
+        }
+    }
+    Ok(())
 }
 
 /// The window frame in points. Tao reports it in pixels of the window's current scale factor.
@@ -703,6 +743,9 @@ fn build_windows(
         .visible_on_all_workspaces(true)
         .shadow(false)
         .visible(false);
+    #[cfg(feature = "local-preview")]
+    let dot = dot.title(crate::preview::PRODUCT_NAME).decorations(true).skip_taskbar(false)
+        .data_directory(app.state::<crate::preview::OwnedRoot>().webview_dir());
     #[cfg(target_os = "macos")]
     let dot = dot.accept_first_mouse(true);
     // GTK sizes a non-resizable window to its content (200 × 200 in an X11 test), so on Linux
@@ -728,6 +771,9 @@ fn build_windows(
         // Lets the chat receive HTML5 drops of attachments (S31); Tauri's own handler would take them.
         .disable_drag_drop_handler()
         .visible(false);
+    #[cfg(feature = "local-preview")]
+    let panel = panel.title(crate::preview::PRODUCT_NAME).decorations(true).skip_taskbar(false)
+        .data_directory(app.state::<crate::preview::OwnedRoot>().webview_dir());
     #[cfg(windows)]
     let panel = panel.minimizable(false);
     let panel = with_panel_effects(panel, effect);
@@ -767,40 +813,41 @@ fn build_windows(
     Ok(())
 }
 
-/// Whether the conversations list is on, read like the daemon reads it (`GENTLE_DOT_CONVERSATIONS=1`).
-fn conversations_on(value: Option<&str>) -> bool {
-    value == Some("1")
-}
-
-/// The tray menu, top to bottom (`-` is a separator). "New conversation" only exists with the
-/// conversations list on; in the single continuous chat there is nothing new to start.
+/// The tray menu, top to bottom (`-` is a separator). "New conversation" always exists,
+/// initially disabled; only the Dot's live daemon features enable it.
 /// "Stop computer control" and "Yolo mode" exist where computer control does (macOS, S24.3, S24.9).
 /// "rose" hides or shows the floating Dot (S26.1).
-fn tray_menu_ids(conversations: bool, computer_control: bool) -> Vec<&'static str> {
-    let mut ids = vec!["open"];
-    if conversations {
-        ids.push("new");
-    }
-    ids.extend(["browser", "rose"]);
+fn tray_menu_ids(computer_control: bool) -> Vec<&'static str> {
+    let mut ids = vec!["open", "new", "browser", "rose"];
     if computer_control {
         ids.extend(["computer-stop", "computer-yolo"]);
     }
-    ids.extend(["-", "restart", "autostart", "-", "quit"]);
+    ids.extend(["-", "restart"]);
+    if !cfg!(feature = "local-preview") { ids.push("autostart"); }
+    ids.extend(["-", "quit"]);
     ids
 }
 
 fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tauri::Result<TrayIcon> {
+    #[cfg(not(feature = "local-preview"))]
     let autostart = app.autolaunch().is_enabled().unwrap_or(false);
+    #[cfg(feature = "local-preview")]
+    let accelerator: Option<&str> = None;
+    #[cfg(not(feature = "local-preview"))]
+    let accelerator = Some(config.shortcut.as_str());
     // The accelerator is only a label here; an unparsable one must not break the menu.
-    let open = MenuItem::with_id(app, "open", "Open", true, Some(config.shortcut.as_str()))
+    let open = MenuItem::with_id(app, "open", "Open", true, accelerator)
         .or_else(|_| MenuItem::with_id(app, "open", "Open", true, None::<&str>))?;
     app.manage(OpenMenuItem(open.clone()));
     let menu = Menu::new(app)?;
-    let conversations = conversations_on(std::env::var("GENTLE_DOT_CONVERSATIONS").ok().as_deref());
-    for id in tray_menu_ids(conversations, cfg!(any(target_os = "macos", windows))) {
+    for id in tray_menu_ids(cfg!(any(target_os = "macos", windows)) && !cfg!(feature = "local-preview")) {
         match id {
             "open" => menu.append(&open)?,
-            "new" => menu.append(&MenuItem::with_id(app, "new", "New conversation", true, None::<&str>)?)?,
+            "new" => {
+                let item = MenuItem::with_id(app, "new", "New conversation", false, None::<&str>)?;
+                menu.append(&item)?;
+                app.manage(NewConversationMenuItem(item));
+            }
             "browser" => menu.append(&MenuItem::with_id(app, "browser", "Open in browser", true, None::<&str>)?)?,
             "rose" => {
                 let item = MenuItem::with_id(app, "rose", rose_menu_label(rose_hidden), true, None::<&str>)?;
@@ -823,6 +870,7 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tau
             "restart" => {
                 menu.append(&MenuItem::with_id(app, "restart", "Restart assistant", true, None::<&str>)?)?;
             }
+            #[cfg(not(feature = "local-preview"))]
             "autostart" => menu.append(&CheckMenuItem::with_id(
                 app,
                 "autostart",
@@ -838,7 +886,7 @@ fn build_tray(app: &AppHandle, config: &DesktopConfig, rose_hidden: bool) -> tau
     TrayIconBuilder::with_id(TRAY)
         .icon(Image::from_bytes(TrayGlyph::Unavailable.image(Os::CURRENT))?)
         .icon_as_template(is_template(Os::CURRENT))
-        .tooltip("Gentle Dot")
+        .tooltip(if cfg!(feature = "local-preview") { "Gentle Dot Preview" } else { "Gentle Dot" })
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(move |app, event| {
@@ -896,6 +944,8 @@ fn open_in_browser(app: &AppHandle) -> CommandResult {
 }
 
 fn toggle_autostart(app: &AppHandle, menu: &Menu<tauri::Wry>) -> CommandResult {
+    #[cfg(feature = "local-preview")]
+    return Err(crate::preview::DISABLED.into());
     let autolaunch = app.autolaunch();
     if autolaunch.is_enabled().map_err(err)? {
         autolaunch.disable().map_err(err)?;
@@ -926,6 +976,8 @@ fn restart_daemon(app: AppHandle) {
 /// the user is told once and the yolo dialog stops promising it; Stop keeps working.
 #[cfg(any(target_os = "macos", windows))]
 fn register_panic_shortcut(app: &AppHandle) {
+    #[cfg(feature = "local-preview")]
+    return;
     let handler = |app: &AppHandle, _: &_, event: tauri_plugin_global_shortcut::ShortcutEvent| {
         if event.state() == ShortcutState::Pressed {
             computer::stop(app, Reason::Panic);
@@ -941,6 +993,8 @@ fn register_panic_shortcut(app: &AppHandle) {
 
 /// What the panel shortcut does, at launch and after a change in Settings.
 fn toggle_on_press(app: &AppHandle, _: &Shortcut, event: ShortcutEvent) {
+    #[cfg(feature = "local-preview")]
+    return;
     if event.state() == ShortcutState::Pressed {
         if let Err(error) = toggle_panel(app.clone()) {
             eprintln!("gentle-dot: cannot toggle the panel: {error}");
@@ -950,6 +1004,8 @@ fn toggle_on_press(app: &AppHandle, _: &Shortcut, event: ShortcutEvent) {
 
 /// Binds the configured shortcut, or the default one when it is unavailable. Returns the bound one.
 fn register_shortcut(app: &AppHandle, shortcut: &str) -> Option<String> {
+    #[cfg(feature = "local-preview")]
+    return None;
     let default = config::default_shortcut();
     match app.global_shortcut().on_shortcut(shortcut, toggle_on_press) {
         Ok(()) => return Some(shortcut.to_string()),
@@ -973,6 +1029,61 @@ fn handle_launch(app: &AppHandle, args: &[String]) {
 }
 
 pub fn run() {
+    let context = tauri::generate_context!();
+    #[cfg(not(feature = "local-preview"))]
+    if context.config().identifier == "dev.gentleman.gentle-dot.preview" {
+        eprintln!("gentle-dot: the preview identity requires the local-preview feature");
+        std::process::exit(1);
+    }
+    #[cfg(feature = "local-preview")]
+    let preview = (|| -> Result<crate::preview::OwnedRoot, String> {
+        // Reject every input before creating a root or initializing any plugin.
+        crate::preview::port(std::env::var("GENTLE_DOT_PORT").ok().as_deref())?;
+        let root = std::env::var_os("GENTLE_DOT_DATA_DIR").map(PathBuf::from);
+        crate::preview::prepare(
+            &context.config().identifier, context.config().product_name.as_deref(),
+            context.config().bundle.active, context.config().app.windows.len(), root.as_deref(),
+            |root| {
+                #[cfg(windows)]
+                return daemon::create_private_preview_directory(root).map_err(err);
+                #[cfg(not(windows))]
+                { let _ = root; Err("local-preview requires Windows".into()) }
+            },
+            |root| {
+                #[cfg(windows)]
+                return crate::windows_process::private_directory(root).map_err(err);
+                #[cfg(not(windows))]
+                { let _ = root; Err("local-preview requires Windows".into()) }
+            },
+        )
+    })().unwrap_or_else(|error| {
+        eprintln!("gentle-dot preview: {error}");
+        std::process::exit(1);
+    });
+    #[cfg(feature = "local-preview")]
+    {
+        // Before Tauri/plugins/threads. Production builds never change profile locations.
+        let environment = preview.prepare_environment(
+            |path| {
+                #[cfg(windows)]
+                return daemon::create_private_preview_directory(path).map_err(err);
+                #[cfg(not(windows))]
+                { let _ = path; Err("local-preview requires Windows".into()) }
+            },
+            |path| {
+                #[cfg(windows)]
+                return crate::windows_process::private_directory(path).map_err(err);
+                #[cfg(not(windows))]
+                { let _ = path; Err("local-preview requires Windows".into()) }
+            },
+        ).unwrap_or_else(|error| {
+            eprintln!("gentle-dot preview: cannot protect synthetic profile directory: {error}");
+            std::process::exit(1);
+        });
+        for (key, path) in environment { std::env::set_var(key, path); }
+        std::env::set_var("GENTLE_DOT_ENGRAM", "private");
+        std::env::set_var("GENTLE_DOT_PREVIEW_MEMORY_ADMISSION", "1");
+    }
     // GNOME on Wayland: run under XWayland so the Dot can place itself, stay on top, and snap.
     // This must happen before GTK starts.
     #[cfg(target_os = "linux")]
@@ -982,22 +1093,33 @@ pub fn run() {
     let places_windows = !platform::compositor_places_windows(|key| std::env::var(key).ok());
     // No home folder and no `GENTLE_DOT_DATA_DIR`: there is nowhere to keep anything, and
     // guessing a relative folder is the W22 bug. Fail before a window exists rather than after.
-    let config = match config::load_config() {
+    #[cfg(feature = "local-preview")]
+    let loaded = config::load_preview_config(&preview);
+    #[cfg(not(feature = "local-preview"))]
+    let loaded = config::load_config();
+    let config = match loaded {
         Ok(config) => config,
         Err(error) => {
             eprintln!("gentle-dot: {error}");
             std::process::exit(1);
         }
     };
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(feature = "local-preview")]
+    let builder = builder.manage(preview);
+    #[cfg(not(feature = "local-preview"))]
+    let builder = builder
         // First, so a second launch forwards its arguments and exits before anything else starts.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| handle_launch(app, &args)))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None));
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler({
+            let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
             connection_info,
+            startup_readiness,
             toggle_panel,
             hide_panel,
             set_dot_state,
@@ -1023,20 +1145,41 @@ pub fn run() {
             voice::voice_model_status,
             voice::voice_model_download,
             voice::voice_model_cancel,
-            voice::voice_model_remove
-        ])
+            voice::voice_model_remove,
+            speech::voice_synthesis_status,
+            speech::voice_synthesize,
+            speech::voice_synthesize_cancel,
+            ];
+            move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
+                #[cfg(feature = "local-preview")]
+                if crate::preview::blocked_command(invoke.message.command()) {
+                    invoke.resolver.reject(crate::preview::DISABLED);
+                    return true;
+                }
+                handler(invoke)
+            }
+        })
         .setup(move |app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let handle = app.handle().clone();
 
             // Computer control first: a daemon this app spawns gets the helper over its channel.
+            #[cfg(not(feature = "local-preview"))]
             let computer = computer::start(&handle, Arc::new(ShellWindows(handle.clone())));
+            #[cfg(feature = "local-preview")]
+            let secrets: Box<dyn SecretStore> = Box::new(secure_store::MemoryStore::new());
+            #[cfg(not(feature = "local-preview"))]
+            let secrets = secure_store::connector_store();
             let service = ChannelService {
                 approvals: Approvals::new(Arc::new(NativePrompt::new(handle.clone())), APPROVAL_TIMEOUT),
+                #[cfg(not(feature = "local-preview"))]
                 computer: computer.endpoint(),
-                secrets: secure_store::connector_store(),
+                #[cfg(feature = "local-preview")]
+                computer: None,
+                secrets,
             };
+            #[cfg(not(feature = "local-preview"))]
             app.manage(computer);
             let runtime_dir = daemon::runtime_dir(|key| std::env::var(key).ok(), app.path().resource_dir().ok());
             let announcer = handle.clone();
@@ -1071,9 +1214,13 @@ pub fn run() {
                 shortcut: Mutex::new(None),
                 memory: Mutex::new(config.memory.clone()),
             });
-            let (voice_input, voice_model) = voice::start(&handle);
-            app.manage(voice_input);
-            app.manage(voice_model);
+            #[cfg(not(feature = "local-preview"))]
+            {
+                let (voice_input, voice_model) = voice::start(&handle);
+                app.manage(voice_input);
+                app.manage(voice_model);
+                app.manage(speech::SpeechSynthesis::default());
+            }
             #[cfg(any(target_os = "macos", windows))]
             register_panic_shortcut(&handle);
 
@@ -1109,7 +1256,7 @@ pub fn run() {
             }
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("failed to build Gentle Dot")
         .run(|app, event| {
             if let RunEvent::Exit = event {
@@ -1128,27 +1275,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tray_hides_new_conversation_in_the_single_chat() {
+    #[cfg(not(feature = "local-preview"))]
+    fn tray_keeps_new_conversation_present_before_features_arrive() {
         assert_eq!(
-            tray_menu_ids(false, false),
-            vec!["open", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
-        );
-    }
-
-    #[test]
-    fn tray_shows_new_conversation_with_the_conversations_list() {
-        assert_eq!(
-            tray_menu_ids(true, false),
+            tray_menu_ids(false),
             vec!["open", "new", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
         );
     }
 
     #[test]
+    #[cfg(not(feature = "local-preview"))]
+    fn tray_shows_new_conversation_with_the_conversations_list() {
+        assert_eq!(
+            tray_menu_ids(false),
+            vec!["open", "new", "browser", "rose", "-", "restart", "autostart", "-", "quit"]
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "local-preview"))]
     fn tray_offers_stop_computer_control_where_it_exists() {
         assert_eq!(
-            tray_menu_ids(false, true),
-            vec!["open", "browser", "rose", "computer-stop", "computer-yolo", "-", "restart", "autostart", "-", "quit"]
+            tray_menu_ids(true),
+            vec!["open", "new", "browser", "rose", "computer-stop", "computer-yolo", "-", "restart", "autostart", "-", "quit"]
         );
+    }
+
+    #[test]
+    #[cfg(feature = "local-preview")]
+    fn preview_tray_has_no_autostart_or_accelerator_integration() {
+        assert_eq!(tray_menu_ids(false), vec!["open", "new", "browser", "rose", "-", "restart", "-", "quit"]);
     }
 
     #[test]
@@ -1221,11 +1377,29 @@ mod tests {
     }
 
     #[test]
-    fn conversations_flag_reads_like_the_daemon() {
-        assert!(conversations_on(Some("1")));
-        assert!(!conversations_on(None));
-        assert!(!conversations_on(Some("0")));
-        assert!(!conversations_on(Some("true")));
+    fn tray_new_is_initially_disabled_and_updates_from_optional_live_features() {
+        // Structural contract: no display server or user desktop is opened by this test.
+        let source = include_str!("shell.rs");
+        let build = source
+            .split("fn build_tray(")
+            .nth(1)
+            .unwrap()
+            .split("fn rose_hidden_state")
+            .next()
+            .unwrap();
+        assert!(build.contains("\"New conversation\", false"));
+        assert!(build.contains("app.manage(NewConversationMenuItem(item))"));
+        assert!(!build.contains("GENTLE_DOT_CONVERSATIONS"));
+        let command = source
+            .split("fn set_dot_state(")
+            .nth(1)
+            .unwrap()
+            .split("fn rect_of")
+            .next()
+            .unwrap();
+        assert!(command.contains("conversations_enabled: Option<bool>"));
+        assert!(command.contains("if let Some(enabled) = conversations_enabled"));
+        assert!(command.contains("item.0.set_enabled(enabled)"));
     }
 
     #[test]

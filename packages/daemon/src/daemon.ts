@@ -14,10 +14,10 @@ import {
 } from "@gentle-dot/protocol";
 import { type WebSocket, WebSocketServer } from "ws";
 import { AppChannel } from "./app-channel.ts";
-import { AuthManager, type AuthRuntime, createModelAuthRuntime, resolveAgentHome } from "./auth.ts";
+import { AuthManager, type AuthRuntime, createModelAuthRuntime, providerAuthPath, resolveAgentHome } from "./auth.ts";
 import { AuthHelper } from "./auth-helper.ts";
 import { type BridgeClient, DotBridge } from "./bridge.ts";
-import { type MemoryMode, memoryMode } from "./config.ts";
+import { memoryMode } from "./config.ts";
 import {
 	APPROVAL_GUARD,
 	ConnectorManager,
@@ -25,12 +25,20 @@ import {
 	ConnectorStore,
 	policyEnv,
 } from "./connectors.ts";
+import { discoverComputerComponents } from "./computer-components.ts";
 import { claimDaemonDirs, daemonClaimDirs, daemonClaimMessage, releaseDaemonClaims } from "./daemon-claim.ts";
 import { DiscordPackage } from "./discord-package.ts";
 import { discordProxyView } from "./discord-proxy-view.ts";
 import { directAccess, type EngineAccess, engineAccess } from "./engine-access.ts";
+import {
+	type AcquiredComponent,
+	type ComputerProviderStatus,
+	resolveComputerProviders,
+} from "./computer-providers.ts";
 import { approvalRequest } from "./extensions/approval-guard.ts";
 import {
+	admitPreviewMemory,
+	applyMemoryMode,
 	claimEngineHome,
 	ensureMemoryProject,
 	ensurePrivateDir,
@@ -38,13 +46,15 @@ import {
 	privateMemory,
 } from "./isolation.ts";
 import { MCP_PREFIX, McpProxy, type ProxiedConnector, type UpstreamCredentials } from "./mcp-proxy.ts";
-import { writePrivateFile } from "./private-file.ts";
+import { initializeWindowsProviderFile, ProviderStorageInitializationError, readPrivateFileSync, writePrivateFile } from "./private-file.ts";
 import { defaultImportPath, ProfileStore } from "./profiles.ts";
 import { type RotationLimits, rotationLimits } from "./rotation.ts";
 import { FileSecretSource, SECRETS_FILE, SECRETS_KEY_VAR } from "./secret-file.ts";
 import { AppSecretSource } from "./secret-source.ts";
+import type { PrivateMemoryFailure, StartupStageObserver } from "./startup-stage-observer.ts";
 import { AgentSupervisor } from "./supervisor.ts";
 import { UploadStore } from "./uploads.ts";
+import { UserSettings } from "./user-settings.ts";
 import { VoiceService } from "./voice.ts";
 import { CONNECTOR_HOME, chownHandOver, prepareVpsLayout, type VpsOptions } from "./vps.ts";
 import { PIN_FILE, PinGate } from "./web-pin.ts";
@@ -52,6 +62,12 @@ import { identityArgs } from "./white-label.ts";
 import { isProductionWindowsAppChannel } from "./windows-app-channel.ts";
 
 export interface DaemonOptions {
+	observeStartup?: StartupStageObserver;
+	/** Trusted host-acquired local files only; never read from env, engine or app messages.
+	 * When absent, discover the verified cache; explicit records (even {}) never fall back.
+	 * Preparation does not activate providers or grant a desktop session.
+	 */
+	computerComponents?: Partial<Record<"eyes" | "hands", AcquiredComponent>>;
 	port: number;
 	host: string;
 	dataDir: string;
@@ -95,7 +111,7 @@ export interface DaemonOptions {
 	/** Origins allowed to open the WebSocket, besides the daemon's own and the desktop app's. */
 	allowedOrigins?: string[];
 	backoffMs?: number[];
-	/** Several conversations instead of one continuous chat; default `GENTLE_DOT_CONVERSATIONS=1`. */
+	/** Explicit startup override; otherwise saved preference, then legacy environment fallback. */
 	conversations?: boolean;
 	/** When the chat's session is rotated; default from `GENTLE_DOT_ROTATE_BYTES` and `GENTLE_DOT_ROTATE_COMPACTIONS`. */
 	rotation?: RotationLimits;
@@ -107,6 +123,8 @@ export interface DaemonOptions {
 }
 
 export interface DotDaemon {
+	/** Artifact readiness only, not native-session authorization; no paths or launch handles. */
+	readonly computerProviders: Readonly<ComputerProviderStatus>;
 	port: number;
 	token: string;
 	url: string;
@@ -132,14 +150,15 @@ const CONTENT_TYPES: Record<string, string> = {
 
 /**
  * Reads the access token from `<dataDir>/token`, creating a random one when
- * absent. The data folder is kept at 0700 (0711 in server mode, so the engine reaches its own folders by name) and the token at 0600.
+ * absent. POSIX permissions remain 0700 (0711 in server mode) and 0600; Windows uses a protected
+ * current-user/SYSTEM DACL for the data directory and token file.
  */
 export function ensureToken(dataDir: string): string {
 	ensurePrivateDir(dataDir);
 	const file = join(dataDir, "token");
 	if (existsSync(file)) {
-		chmodSync(file, 0o600);
-		const existing = readFileSync(file, "utf8").trim();
+		if (process.platform !== "win32") chmodSync(file, 0o600);
+		const existing = readPrivateFileSync(file).trim();
 		if (existing.length >= 32) return existing;
 	}
 	const token = randomBytes(32).toString("base64url");
@@ -156,16 +175,7 @@ export function startupMessage(url: string, dataDir: string, interactive: boolea
 	return `Gentle Dot is running at ${url.split("#")[0]} (the access key is in ${join(dataDir, "token")})`;
 }
 
-/**
- * Applies the memory mode (SW9, W26) to the environment the engine starts with. The mode is
- * written back as `GENTLE_DOT_ENGRAM` — the documented override, and what `isolatedAgentEnv` and
- * `privateMemory` read — so `config.json`'s `memory` behaves exactly like exporting the variable
- * does. `shared` leaves the environment as it is: only `private` selects private mode.
- */
-export function applyMemoryMode(base: NodeJS.ProcessEnv, memory: MemoryMode): NodeJS.ProcessEnv {
-	if (memory !== "private") return base;
-	return { ...base, GENTLE_DOT_ENGRAM: "private" };
-}
+export { applyMemoryMode } from "./isolation.ts";
 
 export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	// A generic Duplex or fd number is not Windows descendant-exclusion admission.
@@ -178,12 +188,33 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	)
 		throw new Error("Windows app channel requires validated production ownership before startup");
 	const log = options.log ?? (() => {});
+	let preview: Awaited<ReturnType<typeof admitPreviewMemory>> | undefined;
+	const base = options.agentEnv ?? process.env;
+	// Only the compile-time preview shell emits this marker. Private mode alone is
+	// not preview; keep all unmarked preparation and memory bootstrap in their old order.
+	if (base.GENTLE_DOT_PREVIEW_MEMORY_ADMISSION === "1") {
+		let reason: PrivateMemoryFailure | undefined;
+		try {
+			preview = await admitPreviewMemory(base, options.dataDir, options.agentHome, log,
+				() => options.vps ? (options.vps.access ?? engineAccess(options.vps.engine)) : directAccess,
+				options.observeStartup ? { onFailure: value => { reason = value; } } : undefined);
+		} catch (error) {
+			options.observeStartup?.(4, false, reason);
+			throw error;
+		}
+		options.observeStartup?.(4, true);
+	}
 	// One daemon per data folder (W24): the port bind only stops a second daemon on the same port, so
 	// the folders the daemon owns are claimed here, before anything is written into them.
-	const claim = claimDaemonDirs(daemonClaimDirs(options.dataDir, options.agentHome));
+	const claimDirs = daemonClaimDirs(options.dataDir, options.agentHome);
+	// The inherited claim creates its exclusive record before ensureToken runs.
+	// Protect Windows ancestry first, using the feature's native storage boundary,
+	// so neither a raw mode-bit mkdir nor a reparse path can precede admission.
+	if (process.platform === "win32") for (const dir of claimDirs) ensurePrivateDir(dir);
+	const claim = claimDaemonDirs(claimDirs);
 	if (claim.status !== "claimed") throw new Error(daemonClaimMessage(claim));
 	try {
-		return await startClaimedDaemon(options, log, claim.files);
+		return await startClaimedDaemon(options, log, claim.files, preview);
 	} catch (error) {
 		// A daemon that did not start must not leave its claim behind either.
 		releaseDaemonClaims(claim.files);
@@ -195,6 +226,7 @@ async function startClaimedDaemon(
 	options: DaemonOptions,
 	log: (line: string) => void,
 	claims: string[],
+	preview?: Awaited<ReturnType<typeof admitPreviewMemory>>,
 ): Promise<DotDaemon> {
 	const openApp = () =>
 		options.appChannel
@@ -206,6 +238,13 @@ async function startClaimedDaemon(
 	// Observe Windows transport errors during asynchronous memory bootstrap.
 	// Unix retains its original channel-construction timing below.
 	const earlyWindowsApp = process.platform === "win32" ? openApp() : undefined;
+	const components = options.computerComponents === undefined
+		? discoverComputerComponents(options.dataDir)
+		: options.computerComponents;
+	const preparedComputer = await resolveComputerProviders({ components });
+	// Artifact readiness is not a native session grant. Keep preparation disconnected
+	// from McpProxy and engine configuration until the owned session gate admits it.
+	const computerProviders = Object.freeze({ status: preparedComputer.status, kind: preparedComputer.kind });
 	const token = ensureToken(options.dataDir);
 	const vps = options.vps;
 	// Server mode (S25.8): the daemon's files stay its own, the engine's folders become the engine's,
@@ -216,6 +255,7 @@ async function startClaimedDaemon(
 	// create (S35.3). Only the assistant's default home; a home the user chose is never marked.
 	if (options.agentHome && resolve(options.agentHome) === resolve(options.dataDir, "agent"))
 		claimEngineHome(options.agentHome, log, access);
+	// A workspace may be intentionally shared; unlike daemon-private storage, it keeps inherited Windows ACLs.
 	access(() => mkdirSync(options.workspace, { recursive: true, mode: 0o700 }));
 	ensureMemoryProject(options.workspace, access);
 	const folderArgs = options.preferredFolder
@@ -224,7 +264,7 @@ async function startClaimedDaemon(
 				`The user's preferred working folder is ${options.preferredFolder}. Use absolute paths there unless told otherwise.`,
 			]
 		: [];
-	let agentEnv = { ...(options.agentEnv ?? process.env) };
+	let agentEnv = { ...(preview?.env ?? options.agentEnv ?? process.env) };
 	// The server's secrets key is the daemon's only, whatever the engine is (S25.8).
 	delete agentEnv[SECRETS_KEY_VAR];
 	// Memory is a setting, not an environment variable (SW9, W26): the mode `config.json` names is
@@ -232,9 +272,13 @@ async function startClaimedDaemon(
 	// isolation, so the engine, its subagents and the private memory server all see one switch.
 	// `GENTLE_DOT_ENGRAM` stays the documented override — `memoryMode` lets it win over the file, as
 	// `GENTLE_DOT_PORT` does for `port` — and it is what `isolatedAgentEnv` and `privateMemory` read.
-	agentEnv = applyMemoryMode(agentEnv, memoryMode(agentEnv, options.dataDir));
+	if (!preview) agentEnv = applyMemoryMode(agentEnv, memoryMode(agentEnv, options.dataDir));
 	const homeArgs: string[] = [];
-	const memory = options.agentHome ? await privateMemory(agentEnv, options.dataDir, log, access) : undefined;
+	// An admitted existing listener has undefined cleanup. Test the admission wrapper,
+	// never its handle with ??, or startup could repeat the permissive legacy lookup.
+	const memory = preview
+		? preview.memory
+		: options.agentHome ? await privateMemory(agentEnv, options.dataDir, log, access) : undefined;
 	if (options.agentHome) {
 		homeArgs.push("--home", options.agentHome);
 		// The engine also writes under the home folder; it gets one of its own.
@@ -315,6 +359,18 @@ async function startClaimedDaemon(
 		// The proxy's key changes with every launch (after the check, so a change is still reported).
 		// Subagents start only with the guard in place for them; otherwise this launch has none.
 		prepareSpawn: () => {
+			// Run after HTTP listen, on every managed start, before Shell can open the store.
+			if (process.platform === "win32" && options.agentHome) {
+				const authPath = providerAuthPath(options.agentHome);
+				try {
+					// Reuse the native directory guard; it refuses a different owner.
+					// Unlike claimEngineHome, this does not stamp a selected home.
+					ensurePrivateDir(options.agentHome);
+				} catch (cause) {
+					throw new ProviderStorageInitializationError(authPath, cause);
+				}
+				initializeWindowsProviderFile(authPath);
+			}
 			connectors.enforce();
 			connectorStore.setProxy({ url: `http://127.0.0.1:${port}/mcp`, key: proxy.rotateKey() });
 			const env = policyEnv(connectorStore);
@@ -381,6 +437,7 @@ async function startClaimedDaemon(
 		...(vps ? { access } : {}),
 		...(options.uploadLimits ? { limits: options.uploadLimits } : {}),
 	});
+	const userSettings = new UserSettings(options.dataDir);
 	const historyPage = options.historyPage ?? Number(process.env.GENTLE_DOT_HISTORY_PAGE);
 	const bridge = new DotBridge(supervisor, {
 		dataDir: options.dataDir,
@@ -394,7 +451,11 @@ async function startClaimedDaemon(
 		...(vps && !app ? { pin: new PinGate({ file: join(options.dataDir, PIN_FILE) }) } : {}),
 		...(options.approvalWaitMs ? { approvalWaitMs: options.approvalWaitMs } : {}),
 		...(vps ? { engineAccess: access } : {}),
-		features: { conversations: options.conversations ?? process.env.GENTLE_DOT_CONVERSATIONS === "1" },
+		features: {
+			conversations:
+				options.conversations ?? userSettings.conversations(process.env.GENTLE_DOT_CONVERSATIONS),
+		},
+		userSettings,
 		rotation: options.rotation ?? rotationLimits(process.env),
 		...(Number.isInteger(historyPage) && historyPage > 0 ? { historyPage } : {}),
 	});
@@ -536,10 +597,14 @@ async function startClaimedDaemon(
 		connectorStore.watch();
 		await supervisor
 			.start()
-			.catch((error: Error) => log(`agent failed to start: ${error.message}; retrying`));
+			.catch((error: Error) => {
+				const retry = error instanceof ProviderStorageInitializationError ? "" : "; retrying";
+				log(`agent failed to start: ${error.message}${retry}`);
+			});
 	}
 
 	return {
+		computerProviders,
 		port,
 		token,
 		url: `http://${options.host === "0.0.0.0" ? "127.0.0.1" : options.host}:${port}/#token=${token}`,

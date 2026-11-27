@@ -33,9 +33,19 @@ jobs:
           path: build/linux/
           if-no-files-found: error
   macos:
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-15
+            bundle: target/release/bundle/dmg
+          - target: darwin-x64
+            runner: macos-15-intel
+            bundle: target/x86_64-apple-darwin/release/bundle/dmg
+    runs-on: ${{ matrix.runner }}
     env:
-      PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: '["gentle-pi@4.7.0"]'
+      PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: '["gentle-pi@5.0.0"]'
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v4
@@ -43,13 +53,13 @@ jobs:
         with:
           node-version: 24
       - run: pnpm install --frozen-lockfile
-      - run: node scripts/package/package-mac.mjs --check
-      - working-directory: apps/desktop/src-tauri/target/release/bundle/dmg
+      - run: node scripts/package/package-mac.mjs --target "${{ matrix.target }}" --check
+      - working-directory: apps/desktop/src-tauri/${{ matrix.bundle }}
         run: shasum -a 256 *.dmg > SHA256SUMS
       - uses: actions/upload-artifact@v7
         with:
-          name: macos-arm64-qa
+          name: ${{ matrix.target }}-qa
           path: |
-            apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
-            apps/desktop/src-tauri/target/release/bundle/dmg/SHA256SUMS
+            apps/desktop/src-tauri/${{ matrix.bundle }}/*.dmg
+            apps/desktop/src-tauri/${{ matrix.bundle }}/SHA256SUMS
           if-no-files-found: error

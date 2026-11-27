@@ -10,4 +10,4 @@ allowBuilds:
   '@google/genai': false
   protobufjs: false
 minimumReleaseAgeExclude:
-  - gentle-pi@4.7.0
+  - gentle-pi@5.0.0

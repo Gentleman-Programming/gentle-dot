@@ -1,12 +1,19 @@
+import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ensurePrivateDir } from "../src/isolation.ts";
 import { AgentSupervisor, type SupervisorEvent, type SupervisorOptions } from "../src/supervisor.ts";
 
 export const FAKE_AGENT = fileURLToPath(new URL("./fixtures/fake-agent.ts", import.meta.url));
 
 export function tempDir(): string {
+	if (process.platform === "win32") {
+		const directory = join(tmpdir(), `gentle-dot-test-${randomUUID()}`);
+		ensurePrivateDir(directory);
+		return directory;
+	}
 	return mkdtempSync(join(tmpdir(), "gentle-dot-test-"));
 }
 

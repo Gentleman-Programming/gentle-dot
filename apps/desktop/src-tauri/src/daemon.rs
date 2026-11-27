@@ -14,13 +14,31 @@ mod windows_record;
 
 mod launch;
 pub use launch::*;
+mod startup_readiness;
+pub(crate) use startup_readiness::StartupReadiness;
+#[cfg(all(windows, target_arch = "x86_64"))]
+use startup_readiness::{Attempt, Service};
 #[cfg(any(windows, test))]
 mod windows;
+#[cfg(all(windows, target_arch = "x86_64"))]
+#[path = "daemon/windows_pinned_file.rs"]
+mod windows_pinned_file;
+#[cfg(all(windows, target_arch = "x86_64"))]
+#[path = "windows_split_launch_plan.rs"]
+mod windows_split_launch_plan;
+#[cfg(all(windows, target_arch = "x86_64"))]
+#[path = "daemon/windows_split_manifest.rs"]
+mod windows_split_manifest;
+#[cfg(all(windows, target_arch = "x86_64"))]
+#[path = "daemon/windows_split_tree.rs"]
+mod windows_split_tree;
+#[cfg(all(windows, windows_owner_observation))]
+mod windows_owner_trace;
 
 pub use crate::app_channel::APP_FD;
 use crate::app_channel::{AppChannel, Handler};
 use crate::health::check_health;
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 use std::fs;
 use std::fs::File;
 #[cfg(unix)]
@@ -70,7 +88,9 @@ pub fn process_started(pid: u32) -> Option<u64> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
     // SAFETY: the buffer is a proc_bsdinfo of `size` bytes, as PROC_PIDTBSDINFO expects.
-    let written = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&mut info as *mut libc::proc_bsdinfo).cast(), size) };
+    let written = unsafe {
+        libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&mut info as *mut libc::proc_bsdinfo).cast(), size)
+    };
     if written != size || info.pbi_status == libc::SZOMB {
         return None;
     }
@@ -220,6 +240,16 @@ pub fn start_plan(healthy: bool, owns_child: bool, wants_channel: bool, orphan: 
     }
 }
 
+#[cfg(all(windows, feature = "local-preview"))]
+pub(crate) fn create_private_preview_directory(path: &Path) -> io::Result<()> {
+    windows::create_private_preview_directory(path)
+}
+
+#[cfg(all(windows, feature = "local-preview"))]
+pub(crate) fn create_private_preview_config(path: &Path) -> io::Result<File> {
+    windows::create_private_preview_config(path)
+}
+
 #[cfg(windows)]
 pub fn open_private_log(data_dir: &Path) -> io::Result<File> {
     windows::open_private_log(data_dir)
@@ -229,11 +259,14 @@ pub fn open_private_log(data_dir: &Path) -> io::Result<File> {
 /// 0600 (looser modes are repaired) because the daemon's output is private.
 #[cfg(unix)]
 pub fn open_private_log(data_dir: &Path) -> io::Result<File> {
-    fs::DirBuilder::new().recursive(true).mode(0o700).create(data_dir)?;
-    fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))?;
-    let log = OpenOptions::new().create(true).append(true).mode(0o600).open(data_dir.join("daemon.log"))?;
-    log.set_permissions(fs::Permissions::from_mode(0o600))?;
-    Ok(log)
+    #[cfg(unix)]
+    {
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(data_dir)?;
+        fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))?;
+        let log = OpenOptions::new().create(true).append(true).mode(0o600).open(data_dir.join("daemon.log"))?;
+        log.set_permissions(fs::Permissions::from_mode(0o600))?;
+        Ok(log)
+    }
 }
 
 #[cfg(windows)]
@@ -406,6 +439,8 @@ pub struct Daemon {
     port: u16,
     data_dir: PathBuf,
     runtime_dir: Option<PathBuf>,
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    startup_attempt: Mutex<Attempt>,
     child: Mutex<Option<Box<dyn ChildProcess>>>,
     /// Every access is serialized by child first, including partial recovery owners.
     #[cfg(windows)]
@@ -431,6 +466,8 @@ impl Daemon {
             port,
             data_dir,
             runtime_dir,
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            startup_attempt: Mutex::default(),
             child: Mutex::new(None),
             #[cfg(windows)]
             recovered: Mutex::new(None),
@@ -441,6 +478,25 @@ impl Daemon {
             launch: None,
             #[cfg(test)]
             health: None,
+        }
+    }
+
+    pub(crate) fn startup_readiness(&self) -> Option<StartupReadiness> {
+        #[cfg(not(all(windows, target_arch = "x86_64")))]
+        return None;
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        {
+            let runtime = startup_readiness::packaged_runtime(self.runtime_dir.as_deref());
+            let profile = windows::startup_profile(&self.data_dir);
+            let attempt = self.startup_attempt.lock().unwrap();
+            let service = match attempt.service() {
+                Service::Ready if !self.child.try_lock().is_ok_and(|child|
+                    child.as_ref().is_some_and(|child| child.readiness_alive())
+                        && self.channel.try_lock().is_ok_and(|channel|
+                            channel.as_ref().is_some_and(|channel| channel.is_open()))) => Service::Unknown,
+                service => service,
+            };
+            Some(StartupReadiness { runtime, profile, service })
         }
     }
 
@@ -525,7 +581,16 @@ impl Daemon {
     /// Spawns the daemon, or waits for the one this app spawned; see [`start_plan`] for a daemon
     /// already on the port. Tells [`Daemon::on_ready`] once it answers. Blocking: call off the main thread.
     pub fn ensure_running(&self, timeout: Duration) -> Result<(), String> {
-        self.start(timeout)?;
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        self.startup_attempt.lock().unwrap().begin();
+        let result = self.start(timeout);
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        self.startup_attempt.lock().unwrap().finish(match &result {
+            Ok(()) => Service::Ready,
+            Err(reason) if *reason == foreign_daemon_message(self.port) => Service::Blocked,
+            Err(_) => Service::Failed,
+        });
+        result?;
         if let Some(ready) = &self.ready {
             ready();
         }
@@ -682,7 +747,10 @@ impl Daemon {
             }
             StartPlan::ReplaceOrphan => {
                 if let Some(orphan) = orphan {
-                    eprintln!("gentle-dot: stopping the assistant an earlier Gentle Dot left running (pid {})", orphan.pid);
+                    eprintln!(
+                        "gentle-dot: stopping the assistant an earlier Gentle Dot left running (pid {})",
+                        orphan.pid
+                    );
                     stop_orphan(orphan, ORPHAN_GRACE);
                     forget_launch(&self.data_dir, orphan.pid);
                 }
@@ -890,6 +958,19 @@ impl Daemon {
 
     #[cfg(windows)]
     fn windows_stop(&self) -> Result<WindowsStop, String> {
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        self.startup_attempt.lock().unwrap().begin();
+        let result = self.windows_stop_inner();
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        self.startup_attempt.lock().unwrap().finish(match &result {
+            Ok(WindowsStop::Released) => Service::Unknown,
+            Ok(WindowsStop::PortHeld(_)) | Err(_) => Service::Blocked,
+        });
+        result
+    }
+
+    #[cfg(windows)]
+    fn windows_stop_inner(&self) -> Result<WindowsStop, String> {
         let mut child_slot = self.child.lock().unwrap();
         let mut channel_slot = self.channel.lock().unwrap();
         // Only failed-launch cleanup may close first: its listener may not exist.
@@ -966,6 +1047,150 @@ impl Daemon {
             Ok(()) => RestartOutcome::Restarted,
             Err(_) if self.refusal().is_some() => RestartOutcome::External,
             Err(message) => RestartOutcome::Failed(message),
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_launch_tests {
+    use super::*;
+
+    pub(super) struct Fixture(pub(super) PathBuf);
+
+    impl Fixture {
+        pub(super) fn new() -> Self {
+            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+            let dir = std::env::temp_dir().join(format!("gentle-dot-launch-{}-{nanos}", std::process::id()));
+            fs::create_dir_all(dir.join("runtime/daemon")).unwrap();
+            fs::create_dir_all(dir.join("runtime/node")).unwrap();
+            fs::write(dir.join("runtime/node/node.exe"), "fixture, never executed").unwrap();
+            fs::write(dir.join("runtime/daemon/cli.mjs"), "").unwrap();
+            Self(dir)
+        }
+
+        pub(super) fn git(&self, name: &str) -> PathBuf {
+            let dir = self.0.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("git.exe"), "fixture, never executed").unwrap();
+            // An ambient Node must never take priority over bundled Node.
+            fs::write(dir.join("node.exe"), "fixture, never executed").unwrap();
+            dir
+        }
+
+        pub(super) fn bundled(&self, git: Option<&Path>, dev: bool) -> LaunchSpec {
+            let runtime = self.0.join("runtime");
+            let root = runtime.display().to_string();
+            let mut path = format!(
+                "{};{};C:\\Windows\\System32;C:\\Windows",
+                runtime.join("bin").display(),
+                runtime.join("node").display(),
+            );
+            if let Some(git) = git {
+                path.push(';');
+                path.push_str(&git.display().to_string());
+            }
+            let mut envs = vec![("PATH".into(), path), ("GENTLE_DOT_RUNTIME".into(), root.clone())];
+            if dev {
+                envs.push(("GENTLE_DOT_ALLOWED_ORIGINS".into(), DEV_ALLOWED_ORIGINS.into()));
+            }
+            LaunchSpec {
+                program: runtime.join("node").join("node.exe").display().to_string(),
+                args: vec![runtime.join("daemon").join("cli.mjs").display().to_string()],
+                envs,
+            }
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    // Windows environment names are case-insensitive, as is std::env::var on Windows.
+    pub(super) fn environment<'a>(pairs: &'a [(&'a str, String)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |key| pairs.iter().find(|(name, _)| name.eq_ignore_ascii_case(key)).map(|(_, value)| value.clone())
+    }
+
+    #[test]
+    fn launch_spec_windows_executes_verbatim_runtime_with_spaces() {
+        let fixture = Fixture::new();
+        let ordinary = fixture.0.join("Installed; Gentle Dot").join("runtime");
+        fs::create_dir_all(ordinary.join("node")).unwrap();
+        fs::create_dir_all(ordinary.join("daemon")).unwrap();
+        fs::copy(env!("GENTLE_DOT_BUILD_NODE"), ordinary.join("node").join("node.exe")).unwrap();
+        fs::write(
+            ordinary.join("daemon").join("cli.mjs"),
+            "process.stdout.write('launch fixture ok\\n'); process.exitCode = 0;",
+        )
+        .unwrap();
+        let runtime = fs::canonicalize(&ordinary).unwrap();
+        assert!(runtime.to_str().unwrap().starts_with(r"\\?\"));
+        let spec = launch_spec(|_| None, false, Some(&runtime));
+        let output = std::process::Command::new(&spec.program)
+            .args(&spec.args)
+            .envs(spec.envs.iter().map(|(key, value)| (key, value)))
+            .env_remove("NODE_OPTIONS")
+            .env_remove("NODE_PATH")
+            .output()
+            .unwrap_or_else(|error| panic!("LaunchSpec program {:?}: {error:?}", spec.program));
+        assert_eq!(
+            output.status.code(), Some(0),
+            "stdout={:?}, stderr={:?}", output.stdout, String::from_utf8_lossy(&output.stderr),
+        );
+        assert_eq!(output.stdout, b"launch fixture ok\n");
+        assert_eq!(output.stderr, b"");
+        assert_eq!(spec.program, runtime.join("node").join("node.exe").display().to_string());
+        assert_eq!(spec.args.len(), 1);
+        assert_eq!(fs::canonicalize(&spec.args[0]).unwrap(), runtime.join("daemon").join("cli.mjs"));
+        assert_eq!(spec.args[0], ordinary.join("daemon").join("cli.mjs").display().to_string());
+        let entries: Vec<_> = std::env::split_paths(&spec.envs[0].1).collect();
+        assert_eq!(
+            entries,
+            [runtime.join("bin"), runtime.join("node"), PathBuf::from(r"C:\Windows\System32"), PathBuf::from(r"C:\Windows")],
+        );
+        assert_eq!(spec.envs[1], ("GENTLE_DOT_RUNTIME".into(), runtime.display().to_string()));
+    }
+
+    #[test]
+    fn launch_spec_windows_does_not_bridge_to_a_different_trailing_dot_directory() {
+        let fixture = Fixture::new();
+        let root = fs::canonicalize(&fixture.0).unwrap();
+        let intended = root.join("runtime.");
+        fs::create_dir_all(intended.join("daemon")).unwrap();
+        fs::write(intended.join("daemon").join("cli.mjs"), "process.stdout.write('intended');").unwrap();
+        fs::write(root.join("runtime").join("daemon").join("cli.mjs"), "process.stdout.write('WRONG FILE');").unwrap();
+        let script = intended.join("daemon").join("cli.mjs");
+        let candidate = tauri::Url::from_file_path(&script).unwrap().to_file_path().unwrap();
+        assert_ne!(fs::canonicalize(&candidate).unwrap(), fs::canonicalize(&script).unwrap());
+        let spec = launch_spec(|_| None, false, Some(&intended));
+        assert_eq!(spec.args, [script.display().to_string()], "never select the ordinary-path alias");
+        // Only the harmless Node fixture is run; a rejected bridge must not run either script.
+        let output = std::process::Command::new(env!("GENTLE_DOT_BUILD_NODE"))
+            .args(&spec.args)
+            .env_remove("NODE_OPTIONS")
+            .env_remove("NODE_PATH")
+            .output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(output.stdout, b"");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("EISDIR"));
+    }
+
+    #[test]
+    fn launch_spec_windows_discovers_only_first_git_directory_after_runtime_and_system() {
+        let fixture = Fixture::new();
+        let first = fixture.git("custom tools/Git cmd");
+        let second = fixture.git("other Git/bin");
+        let unrelated = fixture.0.join("unrelated");
+        fs::create_dir_all(unrelated.join("git.exe")).unwrap(); // A directory is not an executable file.
+        let path = format!(";relative;{};\"{}\";{};", unrelated.display(), first.display(), second.display());
+        for name in ["PATH", "Path", "pAtH"] {
+            let pairs = [(name, path.clone())];
+            assert_eq!(
+                launch_spec(environment(&pairs), false, Some(&fixture.0.join("runtime"))),
+                fixture.bundled(Some(&first), false)
+            );
+            assert_eq!(pairs[0].1, path); // Discovery does not rewrite the supplied environment.
         }
     }
 }
@@ -1167,6 +1392,34 @@ mod windows_ownership_tests {
         }
     }
 
+    mod feature_quoted_path_tests {
+    use super::super::*;
+    use super::super::windows_launch_tests::{Fixture, environment};
+
+    #[test]
+    fn launch_spec_windows_preserves_quoted_git_path_entry_boundaries() {
+        let fixture = Fixture::new();
+        for name in ["custom;Git cmd", "工具 Git", "custom;工具 Git cmd"] {
+            let git = fixture.git(name);
+            let ambient = format!("\"{}\"", git.display());
+            let pairs = [("Path", ambient.clone())];
+            let spec = launch_spec(environment(&pairs), false, Some(&fixture.0.join("runtime")));
+            let mut expected = fixture.bundled(None, false);
+            let mut entries: Vec<_> = std::env::split_paths(&expected.envs[0].1).collect();
+            entries.push(git.clone());
+            let emitted: Vec<_> = std::env::split_paths(&spec.envs[0].1).collect();
+            assert_eq!(emitted, entries, "Git directory must remain one PATH entry");
+            assert_eq!(emitted.iter().filter(|entry| *entry == &git).count(), 1);
+            assert!(emitted.iter().all(|entry| entry.is_absolute()), "no relative entries may be introduced");
+            let serialized = if name.contains(';') { ambient.clone() } else { git.display().to_string() };
+            expected.envs[0].1.push(';');
+            expected.envs[0].1.push_str(&serialized);
+            assert_eq!(spec, expected);
+            assert_eq!(pairs[0].1, ambient);
+        }
+    }
+    }
+
     #[test]
     fn completed_child_close_failure_blocks_restart_until_checked_retry() {
         let mut daemon = Daemon::new(1, PathBuf::new(), None).with_channel(Arc::new(RefusingHandler));
@@ -1206,6 +1459,75 @@ mod windows_ownership_tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    mod feature_launch_override_tests {
+    use super::super::*;
+    use super::super::windows_launch_tests::{Fixture, environment};
+
+    #[test]
+    fn launch_spec_windows_missing_git_is_nonfatal_and_keeps_restricted_path() {
+        let fixture = Fixture::new();
+        for path in [None, Some(String::new()), Some(fixture.0.join("missing").display().to_string())] {
+            let pairs: Vec<_> = path.into_iter().map(|value| ("PATH", value)).collect();
+            for dev in [false, true] {
+                assert_eq!(
+                    launch_spec(environment(&pairs), dev, Some(&fixture.0.join("runtime"))),
+                    fixture.bundled(None, dev)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn launch_spec_windows_preserves_source_and_incomplete_runtime_with_git_on_path() {
+        let fixture = Fixture::new();
+        let git = fixture.git("source Git");
+        let pairs = [("Path", git.display().to_string())];
+        let expected = LaunchSpec {
+            program: env!("GENTLE_DOT_BUILD_NODE").into(),
+            args: vec![env!("GENTLE_DOT_BUILD_DAEMON_SCRIPT").into()],
+            envs: vec![("PATH".into(), env!("GENTLE_DOT_BUILD_PATH").into())],
+        };
+        for runtime in [None, Some(fixture.0.as_path())] {
+            assert_eq!(launch_spec(environment(&pairs), false, runtime), expected);
+            let overrides = [
+                ("PATH", git.display().to_string()),
+                ("GENTLE_DOT_NODE", "D:\\custom node\\node.exe".into()),
+                ("GENTLE_DOT_DAEMON_SCRIPT", "D:\\source\\cli.ts".into()),
+            ];
+            let mut explicit = expected.clone();
+            explicit.program = overrides[1].1.clone();
+            explicit.args = vec![overrides[2].1.clone()];
+            assert_eq!(launch_spec(environment(&overrides), false, runtime), explicit);
+        }
+    }
+
+    #[test]
+    fn launch_spec_windows_preserves_bundled_overrides_and_custom_system_root() {
+        let fixture = Fixture::new();
+        let git = fixture.git("installed Git");
+        let pairs = [
+            ("Path", git.display().to_string()),
+            ("SystemRoot", "D:\\Windows".into()),
+            ("GENTLE_DOT_NODE", "D:\\override\\node.exe".into()),
+            ("GENTLE_DOT_DAEMON_SCRIPT", "D:\\override\\cli.mjs".into()),
+        ];
+        let mut expected = fixture.bundled(Some(&git), true);
+        expected.program = pairs[2].1.clone();
+        expected.args = vec![pairs[3].1.clone()];
+        expected.envs[0].1 = expected.envs[0].1.replace("C:\\Windows", "D:\\Windows");
+        assert_eq!(launch_spec(environment(&pairs), true, Some(&fixture.0.join("runtime"))), expected);
+        let empty = [
+            ("PATH", git.display().to_string()),
+            ("GENTLE_DOT_NODE", "".into()),
+            ("GENTLE_DOT_DAEMON_SCRIPT", "".into()),
+        ];
+        assert_eq!(
+            launch_spec(environment(&empty), false, Some(&fixture.0.join("runtime"))),
+            fixture.bundled(Some(&git), false)
+        );
+    }
     }
 
     #[test]
@@ -1620,7 +1942,8 @@ mod tests {
         let (app, daemon_end) = channel_pair().unwrap();
         let script = "if [ -S /dev/fd/3 ]; then kind=socket; else kind=other; fi; \
 IFS= read -r line <&3; printf '%s %s\\n' \"$kind\" \"$line\" >&3";
-        let mut child = spawn_daemon(&sh_spec(script), open_private_log(&dir).unwrap(), Some(daemon_end.as_fd())).unwrap();
+        let mut child =
+            spawn_daemon(&sh_spec(script), open_private_log(&dir).unwrap(), Some(daemon_end.as_fd())).unwrap();
         drop(daemon_end);
         (&app).write_all(b"ping\n").unwrap();
         assert_eq!(read_line(&app), "socket ping\n");
@@ -1671,7 +1994,8 @@ IFS= read -r line <&3; printf '%s %s\\n' \"$kind\" \"$line\" >&3";
     fn a_node_daemon_keeps_the_channel_from_its_children() {
         use std::os::unix::fs::MetadataExt;
         let dir = scratch_dir("channel-node");
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packages/daemon/test/fixtures/app-channel-child.ts");
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packages/daemon/test/fixtures/app-channel-child.ts");
         let node = std::env::var("GENTLE_DOT_TEST_NODE").unwrap_or_else(|_| "node".into());
         let path = std::env::var("PATH").unwrap_or_default();
         let spec = LaunchSpec {
@@ -1689,9 +2013,12 @@ IFS= read -r line <&3; printf '%s %s\\n' \"$kind\" \"$line\" >&3";
         let mut line = String::new();
         BufReader::new(&app).read_line(&mut line).unwrap();
         let log = || fs::read_to_string(dir.join("daemon.log")).unwrap_or_default();
-        let frame: serde_json::Value = serde_json::from_str(&line).unwrap_or_else(|_| panic!("no report: {line:?} {}", log()));
+        let frame: serde_json::Value =
+            serde_json::from_str(&line).unwrap_or_else(|_| panic!("no report: {line:?} {}", log()));
         assert_eq!(frame["method"], "report", "{frame} {}", log());
-        (&app).write_all(format!("{{\"kind\":\"response\",\"id\":{},\"result\":{{}}}}\n", frame["id"]).as_bytes()).unwrap();
+        (&app)
+            .write_all(format!("{{\"kind\":\"response\",\"id\":{},\"result\":{{}}}}\n", frame["id"]).as_bytes())
+            .unwrap();
         assert!(child.wait().unwrap().success(), "{}", log());
         let report = &frame["params"];
         // The daemon holds the socket this app handed over; none of its children does.
@@ -1725,9 +2052,8 @@ done"#;
     #[test]
     fn a_daemon_this_app_spawned_gets_a_channel_until_it_stops() {
         let handler = Arc::new(Opened::default());
-        let daemon = Daemon::new(1, scratch_dir("channel-own"), None)
-            .with_channel(handler.clone())
-            .with_launch(sh_spec(ECHO));
+        let daemon =
+            Daemon::new(1, scratch_dir("channel-own"), None).with_channel(handler.clone()).with_launch(sh_spec(ECHO));
         assert!(daemon.channel().is_none());
         daemon.spawn().unwrap();
         let channel = daemon.channel().expect("a channel to the spawned daemon");
@@ -2047,7 +2373,9 @@ while :; do sleep 0.01; done
         // The port answers while the daemon named in the pid file runs.
         let health = {
             let dir = dir.clone();
-            Arc::new(move || recorded_launch(&dir).is_some_and(|launch| process_started(launch.pid) == Some(launch.started)))
+            Arc::new(move || {
+                recorded_launch(&dir).is_some_and(|launch| process_started(launch.pid) == Some(launch.started))
+            })
         };
         // An earlier app launched a daemon that outlived it without its channel (an older daemon).
         let orphan_script = "exec 3<&-; exec /bin/sleep 30";
