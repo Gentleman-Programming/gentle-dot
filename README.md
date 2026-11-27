@@ -21,7 +21,8 @@ https://github.com/user-attachments/assets/0c0f4d2d-7e0e-4c35-961a-8816d95a390c
 
 <p>
 <a href="https://gentlemanprogramming.com/"><strong>Website</strong></a> &bull;
-<a href="docs/install.md"><strong>Install</strong></a> &bull;
+<a href="#downloads"><strong>Downloads</strong></a> &bull;
+<a href="docs/install.md"><strong>Install guide</strong></a> &bull;
 <a href="docs/design.md"><strong>Design</strong></a> &bull;
 <a href="https://github.com/Gentleman-Programming/gentle-ai"><strong>Gentle-AI</strong></a>
 </p>
@@ -104,9 +105,28 @@ Attach files with the paperclip, drag and drop, or paste. Images go straight to 
 
 <div align="center"><img src="docs/assets/brand/rose.png" width="28" alt="" /></div>
 
+## Downloads
+
+**Stable releases.** Open the [official release list](https://github.com/Gentleman-Programming/gentle-dot/releases) to see published versions. Once a stable release is available, the [latest stable release](https://github.com/Gentleman-Programming/gentle-dot/releases/latest) link follows the version marked latest on GitHub. Choose your platform under **Assets**.
+
+### QA preview
+
+On Windows x64, download the portable launcher, **Gentle-Dot-QA.cmd**, from the newest **qa-preview** prerelease in [official Releases](https://github.com/Gentleman-Programming/gentle-dot/releases). Double-click it to check for official QA updates, approve the download, and launch the verified preview. To use a local ZIP instead, download `Gentle-Dot-Preview-x64.zip` from the same prerelease as the launcher and pass its path as the first argument to `Gentle-Dot-QA.cmd`.
+
+Under **Assets** on the same prerelease, look for the packages below. Verify downloads against that release's `SHA256SUMS.txt`.
+
+| Platform | Release asset |
+| --- | --- |
+| macOS Intel x64 | `darwin-x64.zip` (DMG) |
+| macOS Apple Silicon (ARM64) | `darwin-arm64.zip` (DMG) |
+| Debian / Ubuntu x64 and Arch Linux x64 | `linux-amd64.zip` (`.deb` and Arch package) |
+| Debian / Ubuntu ARM64 | `linux-arm64.zip` (`.deb`) |
+
+**For maintainers.** Once the **Publish QA preview** workflow exists on the default branch, push the approved commit to `qa/native-preview` to build it without publishing. Only after official CI passes and acceptance is confirmed for that exact commit, manually run **Publish QA preview** on `refs/heads/qa/native-preview` while it points to that commit. This publishes a prerelease without marking it as latest.
+
 ## Get started
 
-There are no published releases yet: build the installer for your system. You need Node.js 24 and pnpm; the macOS app also needs Rust and the Xcode command line tools, the Linux packages need Docker, and the Windows installers need Rust with the MSVC toolchain, the Visual Studio Build Tools (C++ workload), WebView2, and Go 1.25.10 or newer.
+To build from source, you need Node.js 24 and pnpm; the macOS app also needs Rust and the Xcode command line tools, the Linux packages need Docker, and the Windows installers need Rust with the MSVC toolchain, the Visual Studio Build Tools (C++ workload), WebView2, and Go 1.25.10 or newer.
 
 ```sh
 pnpm install
