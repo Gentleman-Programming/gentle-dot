@@ -150,6 +150,7 @@ Never run `docker compose down -v`: `-v` deletes the volume with your conversati
 | The page loads but never connects | The proxy does not forward WebSockets (enable `mod_proxy_wstunnel`), or `DOT_DOMAIN` does not match the address you opened, so the Origin check refuses it. |
 | You want no usage metrics | The companion packages send anonymous usage metrics by default. Opt out with `docker compose exec gentle-dot gentle-ai telemetry disable`. |
 | "The assistant is restarting" stays on | The agent cannot start; check `docker compose logs gentle-dot` for the reason. |
+| "The AI provider's content filter refused this conversation" | The AI provider rejects something in this conversation's history on every request, so trying again fails the same way. Type `/new` in the chat to start a fresh conversation (the previous one stays saved on the server), or read the provider's message with `docker compose logs gentle-dot`. |
 | "Connect an AI account first" | No account is connected. Open **Accounts** (or type `/login`) and sign in, or add a model key to `.env` and run `docker compose up -d`. |
 | "Connectors that need a secret are off on this server" | `GENTLE_DOT_SECRETS_KEY` is missing or not 32 bytes. Add it to `.env` (step 3) and run `docker compose up -d`. |
 | "The stored connector secrets cannot be opened" | The key changed. Put the old one back in `.env`, or remove the secrets and sign in to the connectors again: `docker compose exec gentle-dot rm /home/dot/.gentle-dot/secrets.enc.json`. |

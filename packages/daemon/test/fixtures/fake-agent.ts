@@ -304,6 +304,13 @@ async function runPrompt(text: string, images?: Rec[]) {
 		endedAnswer("error", "Gentle Shell provider exploded: 500 Internal Server Error");
 		return endRun();
 	}
+	if (text === "refuse") {
+		endedAnswer(
+			"error",
+			'400: {"code":"1301","message":"System detected potentially unsafe or sensitive content in input or generation. Please avoid using prompts that may generate sensitive content. Thank you for your cooperation."}',
+		);
+		return endRun();
+	}
 	if (text === "slow") {
 		await new Promise((resolve) => setTimeout(resolve, 1500));
 		assistantText("Echo: slow");

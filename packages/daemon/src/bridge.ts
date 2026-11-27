@@ -22,6 +22,7 @@ import {
 	type ServerPayload,
 	type VoiceCapability,
 } from "@gentle-dot/protocol";
+import { isContentRejection } from "./answer-errors.ts";
 import { APPROVAL_WAIT_MS, type AppApproval, type AppLink } from "./app-channel.ts";
 import type { AuthManager } from "./auth.ts";
 import type { ConnectorManager, ConnectorRefusal } from "./connectors.ts";
@@ -121,6 +122,9 @@ type PendingAsk = {
 };
 const REMEMBERED_REQUEST_IDS = 500;
 const ANSWER_FAILED = "Something went wrong while answering. Please try again.";
+/** The provider refused the conversation's content; sending it again, history included, fails the same way. */
+const CONTENT_REJECTED =
+	"The AI provider's content filter refused this conversation, so the assistant cannot answer here. Trying again usually fails the same way. Send /new to start a fresh conversation.";
 const HISTORY_PAGE = 100;
 
 /**
@@ -469,10 +473,7 @@ export class DotBridge {
 			}
 			case "new_conversation":
 				if (!this.conversationsOn(client)) return;
-				await this.changeConversation(async () => {
-					await this.switchAfterStop(() => this.supervisor.request({ type: "new_session" }));
-					this.afterConversationChange();
-				});
+				await this.startNewConversation();
 				return;
 			case "list_conversations":
 				this.deliver(client, this.conversationsPayload());
@@ -642,10 +643,17 @@ export class DotBridge {
 		}
 	}
 
-	/** `/login`, `/profiles`, and `/connectors` open their screen instead of reaching the assistant. */
+	/** `/login`, `/profiles`, and `/connectors` open their screen instead of reaching the assistant; `/new` starts another conversation. */
 	private async openScreen(client: BridgeClient, text: string): Promise<boolean> {
 		if (/^\s*\/login\s*$/i.test(text)) {
 			await this.sendProviders(client, true);
+			return true;
+		}
+		// The way out when the provider keeps refusing this conversation: the chat stays one continuous
+		// conversation until the owner types this, whether or not the conversations list is offered.
+		if (/^\s*\/new\s*$/i.test(text)) {
+			await this.startNewConversation();
+			this.broadcast({ type: "toast", level: "info", message: "Started a new conversation." });
 			return true;
 		}
 		if (/^\s*\/profiles\s*$/i.test(text)) {
@@ -683,6 +691,14 @@ export class DotBridge {
 			message: "This assistant keeps one continuous chat.",
 		});
 		return false;
+	}
+
+	/** Starts a fresh conversation; the previous session file stays where the engine keeps it. */
+	private startNewConversation(): Promise<void> {
+		return this.changeConversation(async () => {
+			await this.switchAfterStop(() => this.supervisor.request({ type: "new_session" }));
+			this.afterConversationChange();
+		});
 	}
 
 	/** Runs a conversation switch; a message sent meanwhile goes to the new conversation, after its history. */
@@ -1263,7 +1279,8 @@ export class DotBridge {
 			this.broadcast({ type: "message_done", messageId, text, stopped: true });
 		} else if (message.stopReason === "error") {
 			this.log(`assistant error: ${message.errorMessage ?? "unknown"}`);
-			this.broadcast({ type: "message_done", messageId, text, error: ANSWER_FAILED });
+			const error = isContentRejection(message.errorMessage) ? CONTENT_REJECTED : ANSWER_FAILED;
+			this.broadcast({ type: "message_done", messageId, text, error });
 		} else {
 			this.broadcast({ type: "message_done", messageId, text });
 		}

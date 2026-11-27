@@ -230,8 +230,8 @@ The user changes the main assistant's model from the chat, in the panel and the 
 
 - **Identity**: `--append-system-prompt` with `identity.md`: the assistant is "Gentle Dot", a personal assistant; it must not mention Gentle Shell, Pi, el Gentleman, ODD, or Engram by name, and describes them as "my workflow" and "my memory" when needed. It keeps every behavior.
 - **Event sanitizer** (`packages/daemon/src/white-label.ts`, unit-tested): rewrites internal names in toasts, ask titles, messages, and options (answers are mapped back to the agent's original option strings), final assistant text, and history. Informational `notify` records are harness chatter and are hidden; warnings and errors are shown. `setStatus`, `setWidget`, `setTitle`, and terminal-only requests are dropped. Tool names map to activity kinds and neutral titles (for example `mem_search` -> `memory` "Checking my notes"). Streamed deltas are not rewritten; the UI replaces them with the final text.
-- **Commands**: `gentle:*` slash commands are never exposed, and a message starting with `/gentle:` is refused with `unsupported`; the UI has no command palette in this version.
-- **Errors**: provider or process errors become neutral messages; raw details go to the daemon log only.
+- **Commands**: `gentle:*` slash commands are never exposed, and a message starting with `/gentle:` is refused with `unsupported`; the UI has no command palette in this version. Typed on their own, `/login`, `/profiles` and `/connectors` open their screens, and `/new` starts a fresh conversation even when the conversations list is off; none of them reaches the assistant.
+- **Errors**: provider or process errors become neutral messages; raw details go to the daemon log only. One case has its own text: when the provider refuses the conversation's content (Z.ai answers 400 with code 1301), the same history would be refused again, so the chat says so and points at `/new` instead of asking to try again.
 
 ## 6. User experience
 
